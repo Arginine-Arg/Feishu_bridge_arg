@@ -1,6 +1,6 @@
 {
   "name": "lark-channel-bridge",
-  "version": "0.1.29",
+  "version": "0.1.30",
   "description": "Bridge Feishu/Lark messenger with local CLI coding agents (Claude Code, ...)",
   "type": "module",
   "bin": {
