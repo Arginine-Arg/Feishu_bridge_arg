@@ -685,6 +685,20 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   const agentMsg = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
   const size = pending.push(scope, agentMsg);
   log.info('intake', 'queued', { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
+
+  // A run is already in flight on this scope, so this message won't be picked
+  // up until it finishes (block/unblock in the pending→run handoff). Without a
+  // hint the sender thinks the bot is dead. Ack once per busy window — not per
+  // queued message — and never let the ack block or throw into intake.
+  if (pending.shouldAckBusy(scope)) {
+    void channel
+      .send(
+        msg.chatId,
+        { text: '⏳ 当前任务还在运行，你的消息已排队，会在任务结束后一起处理。想立即打断请发 /stop。' },
+        { replyTo: msg.messageId },
+      )
+      .catch((err) => log.warn('intake', 'busy-ack-failed', { scope, err: String(err) }));
+  }
 }
 
 function rewriteAgentCommandMessage(
@@ -1047,9 +1061,24 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     if (replyMode === 'card') {
       let latestState: RunState = initialState;
       let producerStarted = false;
+      // The streamed message can die mid-run (Feishu 230011 "message withdrawn",
+      // content-length limits). When a patch throws we must NOT let it abort
+      // event draining — we stop patching the dead message, finish the run, and
+      // post the final answer as a brand-new message exactly once.
+      let streamDegraded = false;
+      let freshFinalPosted = false;
       let cardCtrl:
         | { update(next: object | ((current: object) => object)): Promise<void> }
         | undefined;
+      const postFreshFinal = async (state: RunState): Promise<void> => {
+        if (freshFinalPosted) return;
+        freshFinalPosted = true;
+        await channel.send(
+          chatId,
+          { card: renderCard(filterForPrefs(state), cardRenderOptions) },
+          sendOpts,
+        );
+      };
       const renderDone = processAgentStream(
         handle,
         eventStream,
@@ -1058,8 +1087,18 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         recordSession,
         async (state) => {
           latestState = state;
-          if (cardCtrl) {
-            await cardCtrl.update(renderCard(filterForPrefs(state), cardRenderOptions));
+          if (cardCtrl && !streamDegraded) {
+            try {
+              await cardCtrl.update(renderCard(filterForPrefs(state), cardRenderOptions));
+            } catch (err) {
+              streamDegraded = true;
+              cardCtrl = undefined;
+              log.warn('stream', 'patch-degraded', {
+                scope,
+                mode: replyMode,
+                err: err instanceof Error ? err.message : String(err),
+              });
+            }
           }
         },
       );
@@ -1071,7 +1110,18 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
             producer: async (ctrl) => {
               producerStarted = true;
               cardCtrl = ctrl;
-              await ctrl.update(renderCard(filterForPrefs(latestState), cardRenderOptions));
+              try {
+                await ctrl.update(renderCard(filterForPrefs(latestState), cardRenderOptions));
+              } catch (err) {
+                streamDegraded = true;
+                cardCtrl = undefined;
+                log.warn('stream', 'patch-degraded', {
+                  scope,
+                  mode: replyMode,
+                  step: 'initial',
+                  err: err instanceof Error ? err.message : String(err),
+                });
+              }
               await renderDone;
             },
           },
@@ -1083,18 +1133,27 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         streamDone,
         renderDone,
         producerStarted: () => producerStarted,
-        fallback: async (state) => {
-          await channel.send(
-            chatId,
-            { card: renderCard(filterForPrefs(state), cardRenderOptions) },
-            sendOpts,
-          );
-        },
+        fallback: postFreshFinal,
       });
+      if (streamDegraded) {
+        await postFreshFinal(latestState);
+      }
     } else if (replyMode === 'markdown') {
       let latestState: RunState = initialState;
       let producerStarted = false;
+      // See card branch: a withdrawn/failed patch must degrade to a fresh final
+      // message instead of aborting the run and losing the answer.
+      let streamDegraded = false;
+      let freshFinalPosted = false;
       let markdownCtrl: { setContent(markdown: string): Promise<void> } | undefined;
+      const postFreshFinal = async (state: RunState): Promise<void> => {
+        if (freshFinalPosted) return;
+        freshFinalPosted = true;
+        const body = renderText(filterForPrefs(state));
+        if (body.trim()) {
+          await channel.send(chatId, { markdown: body }, sendOpts);
+        }
+      };
       const renderDone = processAgentStream(
         handle,
         eventStream,
@@ -1103,8 +1162,18 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         recordSession,
         async (state) => {
           latestState = state;
-          if (markdownCtrl) {
-            await markdownCtrl.setContent(renderText(filterForPrefs(state)));
+          if (markdownCtrl && !streamDegraded) {
+            try {
+              await markdownCtrl.setContent(renderText(filterForPrefs(state)));
+            } catch (err) {
+              streamDegraded = true;
+              markdownCtrl = undefined;
+              log.warn('stream', 'patch-degraded', {
+                scope,
+                mode: replyMode,
+                err: err instanceof Error ? err.message : String(err),
+              });
+            }
           }
         },
       );
@@ -1114,7 +1183,18 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           markdown: async (ctrl) => {
             producerStarted = true;
             markdownCtrl = ctrl;
-            await ctrl.setContent(renderText(filterForPrefs(latestState)));
+            try {
+              await ctrl.setContent(renderText(filterForPrefs(latestState)));
+            } catch (err) {
+              streamDegraded = true;
+              markdownCtrl = undefined;
+              log.warn('stream', 'patch-degraded', {
+                scope,
+                mode: replyMode,
+                step: 'initial',
+                err: err instanceof Error ? err.message : String(err),
+              });
+            }
             await renderDone;
           },
         },
@@ -1125,13 +1205,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         streamDone,
         renderDone,
         producerStarted: () => producerStarted,
-        fallback: async (state) => {
-          const body = renderText(filterForPrefs(state));
-          if (body.trim()) {
-            await channel.send(chatId, { markdown: body }, sendOpts);
-          }
-        },
+        fallback: postFreshFinal,
       });
+      if (streamDegraded) {
+        await postFreshFinal(latestState);
+      }
     } else {
       // text mode: drain the agent stream without sending anything during
       // the run, then post the final rendered text once as a plain markdown

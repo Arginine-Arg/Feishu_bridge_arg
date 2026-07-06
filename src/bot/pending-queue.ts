@@ -23,6 +23,10 @@ export type FlushHandler = (scope: string, batch: NormalizedMessage[]) => void;
 export class PendingQueue {
   private readonly map = new Map<string, PendingEntry>();
   private readonly blocked = new Set<string>();
+  // Scopes that have already emitted a "run in progress, your message is
+  // queued" ack in the CURRENT blocked window. Cleared on unblock so the next
+  // busy window gets a fresh (single) ack.
+  private readonly ackedBusy = new Set<string>();
   private readonly delayMs: number;
   private readonly onFlush: FlushHandler;
 
@@ -60,6 +64,25 @@ export class PendingQueue {
     }
     this.map.clear();
     this.blocked.clear();
+    this.ackedBusy.clear();
+  }
+
+  /** True while a run is active on this scope (debounce timer paused). */
+  isBlocked(scope: string): boolean {
+    return this.blocked.has(scope);
+  }
+
+  /**
+   * Returns true exactly once per blocked window: when the scope is currently
+   * blocked (a run is in flight) and no busy-ack has been emitted yet. Lets the
+   * caller send a single "queued behind the active run" notice without spamming
+   * one per queued message. Reset by `unblock`.
+   */
+  shouldAckBusy(scope: string): boolean {
+    if (!this.blocked.has(scope)) return false;
+    if (this.ackedBusy.has(scope)) return false;
+    this.ackedBusy.add(scope);
+    return true;
   }
 
   /** Pause the debounce timer; pushed messages keep accumulating. */
@@ -78,6 +101,7 @@ export class PendingQueue {
   unblock(scope: string): void {
     if (!this.blocked.has(scope)) return;
     this.blocked.delete(scope);
+    this.ackedBusy.delete(scope);
     const entry = this.map.get(scope);
     log.info('queue', 'unblocked', { scope, queued: entry?.messages.length ?? 0 });
     if (!entry || entry.messages.length === 0) return;
