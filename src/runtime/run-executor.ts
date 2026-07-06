@@ -95,6 +95,7 @@ export class RunExecutor {
     const queueWaitMs = startedAt - submittedAt;
     const runOptions = {
       runId,
+      scopeId: input.scopeId,
       prompt: input.policy.prompt,
       cwd: input.policy.cwdRealpath,
       sessionId: input.sessionId,

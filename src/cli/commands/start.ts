@@ -432,9 +432,13 @@ export function createRuntimeAgent(
       ignoreRules: codex.ignoreRules !== false,
       sandbox: profileConfig.sandbox.defaultMode,
       larkChannel,
+      sessionMode: profileConfig.preferences?.agentSessionMode === 'live' ? 'live' : 'turn',
     });
   }
-  return new ClaudeAdapter({ larkChannel });
+  return new ClaudeAdapter({
+    larkChannel,
+    sessionMode: profileConfig.preferences?.agentSessionMode === 'live' ? 'live' : 'turn',
+  });
 }
 
 /**

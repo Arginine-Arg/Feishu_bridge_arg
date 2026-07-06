@@ -29,6 +29,7 @@ export const CLAUDE_DEFAULT_PERMISSION_MODE: ClaudePermissionMode = 'bypassPermi
 
 export interface AgentRunOptions {
   runId: string;
+  scopeId?: string;
   prompt: string;
   cwd?: string;
   sessionId?: string;
@@ -88,4 +89,5 @@ export interface AgentAdapter {
    * Adapters that don't bake identity into their prompts may omit it.
    */
   setBotIdentity?(identity: AgentBotIdentity): void;
+  shutdown?(): Promise<void>;
 }

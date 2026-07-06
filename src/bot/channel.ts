@@ -475,6 +475,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       const [disconnectResult, stopAllResult, ...flushResults] = await Promise.allSettled([
         channel.disconnect(),
         activeRuns.stopAll(),
+        agent.shutdown?.(),
         sessions.flush(),
         sessionCatalog?.flush(),
         callbackNonceStore?.flush(),
@@ -681,8 +682,29 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     return;
   }
 
-  const size = pending.push(scope, emsg);
+  const agentMsg = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
+  const size = pending.push(scope, agentMsg);
   log.info('intake', 'queued', { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
+}
+
+function rewriteAgentCommandMessage(
+  msg: NormalizedMessage,
+  agentKind: 'claude' | 'codex',
+): NormalizedMessage {
+  const trimmed = msg.content.trimStart();
+  const match = /^\/([A-Za-z][A-Za-z0-9_-]*)\s+([\s\S]+)$/.exec(trimmed);
+  if (!match) return msg;
+  const target = match[1]?.toLowerCase();
+  const rest = match[2] ?? '';
+  const aliases =
+    agentKind === 'claude'
+      ? new Set(['claude', 'claude-code', 'claudecode'])
+      : new Set(['codex', 'codex-cli', 'codexcli']);
+  if (!target || !aliases.has(target)) return msg;
+  return {
+    ...msg,
+    content: rest,
+  };
 }
 
 interface RunBatchDeps {

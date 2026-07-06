@@ -7,6 +7,7 @@ import { mergeProcessEnv, spawnProcess, type SpawnedProcessByStdio } from '../..
 import { SpawnFailed } from '../../runtime/errors';
 import { prefixBridgeSystemPrompt } from '../bridge-system-prompt';
 import { buildLarkChannelEnv, type LarkChannelEnvContext } from '../lark-channel-env';
+import { LiveSessionPool } from '../live-session';
 import { checkAgentAvailability, type AgentAvailability } from '../preflight';
 import type {
   AgentAdapter,
@@ -28,6 +29,9 @@ export interface CodexAdapterOptions {
   sandbox?: SandboxMode;
   stopGraceMs?: number;
   larkChannel?: LarkChannelEnvContext;
+  sessionMode?: 'turn' | 'live';
+  liveUsePty?: boolean;
+  liveIdleMs?: number;
 }
 
 type CodexChild = SpawnedProcessByStdio<Writable, Readable, Readable>;
@@ -45,6 +49,10 @@ export class CodexAdapter implements AgentAdapter {
   private readonly sandbox: SandboxMode;
   private readonly defaultStopGraceMs: number;
   private readonly larkChannel: LarkChannelEnvContext | undefined;
+  private readonly sessionMode: 'turn' | 'live';
+  private readonly liveUsePty: boolean | undefined;
+  private readonly liveIdleMs: number | undefined;
+  private readonly liveSessions = new LiveSessionPool();
   private botIdentity: AgentBotIdentity | undefined;
 
   constructor(opts: CodexAdapterOptions) {
@@ -57,6 +65,9 @@ export class CodexAdapter implements AgentAdapter {
     this.sandbox = opts.sandbox ?? 'danger-full-access';
     this.defaultStopGraceMs = opts.stopGraceMs ?? 5000;
     this.larkChannel = opts.larkChannel;
+    this.sessionMode = opts.sessionMode ?? 'turn';
+    this.liveUsePty = opts.liveUsePty;
+    this.liveIdleMs = opts.liveIdleMs;
   }
 
   setBotIdentity(identity: AgentBotIdentity): void {
@@ -91,6 +102,9 @@ export class CodexAdapter implements AgentAdapter {
   run(opts: AgentRunOptions): AgentRun {
     if (!opts.cwd) {
       throw new Error('cwd is required for CodexAdapter.run');
+    }
+    if (this.sessionMode === 'live') {
+      return this.runLive(opts);
     }
 
     const args = buildCodexArgs({
@@ -200,6 +214,55 @@ export class CodexAdapter implements AgentAdapter {
         });
       },
     };
+  }
+
+  async shutdown(): Promise<void> {
+    await this.liveSessions.closeAll();
+  }
+
+  private runLive(opts: AgentRunOptions): AgentRun {
+    if (!opts.cwd) {
+      throw new Error('cwd is required for CodexAdapter.run');
+    }
+    const sandbox = opts.sandbox ?? this.sandbox;
+    const args = [
+      '--sandbox',
+      sandbox,
+      ...(opts.model ? ['--model', opts.model] : []),
+      '-c',
+      'approval_policy="never"',
+      '-c',
+      'shell_environment_policy.inherit="all"',
+      ...(this.ignoreUserConfig === true ? ['--ignore-user-config'] : []),
+      ...(this.ignoreRules === false ? [] : ['--ignore-rules']),
+      '--skip-git-repo-check',
+      '-C',
+      opts.cwd,
+    ];
+    const envOverrides: NodeJS.ProcessEnv = buildLarkChannelEnv(this.larkChannel);
+    if (this.codexHome) {
+      envOverrides.CODEX_HOME = this.codexHome;
+    } else if (!this.inheritCodexHome) {
+      envOverrides.CODEX_HOME = join(this.profileStateDir, 'codex-home');
+    }
+    const signature = JSON.stringify({
+      cwd: opts.cwd,
+      model: opts.model ?? null,
+      sandbox,
+      codexHome: envOverrides.CODEX_HOME ?? null,
+      bot: this.botIdentity?.openId ?? null,
+    });
+    const scopeKey = opts.scopeId ?? opts.cwd;
+    const session = this.liveSessions.getOrCreate(scopeKey, {
+      command: this.binary,
+      args,
+      cwd: opts.cwd,
+      env: envOverrides,
+      signature,
+      usePty: this.liveUsePty,
+      idleMs: this.liveIdleMs,
+    });
+    return session.run(opts.runId, prefixBridgeSystemPrompt(opts.prompt, this.botIdentity), opts.cwd);
   }
 }
 

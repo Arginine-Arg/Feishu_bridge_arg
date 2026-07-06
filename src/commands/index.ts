@@ -28,6 +28,7 @@ import { helpCard, resumeCard, statusCard, workspacesCard } from '../card/templa
 import type { AppConfig, AppPreferences, MessageReplyMode, TenantBrand } from '../config/schema';
 import {
   getAgentStopGraceMs,
+  getAgentSessionMode,
   getCotMessages,
   getMaxConcurrentRuns,
   getMessageReplyMode,
@@ -170,6 +171,7 @@ const handlers: Record<string, Handler> = {
   '/account': handleAccount,
   '/config': handleConfig,
   '/stop': handleStop,
+  '/session': handleSession,
   '/timeout': handleTimeout,
   '/ps': handlePs,
   '/exit': handleExit,
@@ -192,6 +194,7 @@ const ADMIN_COMMANDS = new Set([
   '/exit',
   '/reconnect',
   '/doctor',
+  '/session',
   '/cd',
   '/ws',
   '/invite',
@@ -858,6 +861,49 @@ async function handleStop(args: string, ctx: CommandContext): Promise<void> {
   }
   // No reply for the current IM scope: if there was a run, its in-flight
   // render loop will mark the card as interrupted and re-render.
+}
+
+async function handleSession(args: string, ctx: CommandContext): Promise<void> {
+  const action = args.trim().toLowerCase();
+  const current = getAgentSessionMode(ctx.controls.cfg);
+  if (!action || action === 'status') {
+    const label = current === 'live' ? 'live（后台常驻 CLI）' : 'turn（每轮短任务）';
+    await reply(
+      ctx,
+      `当前 agent session 模式：\`${label}\`\n\n用法：\`/session live\` 或 \`/session turn\`。`,
+    );
+    return;
+  }
+
+  const next =
+    action === 'live' || action === 'on'
+      ? 'live'
+      : action === 'turn' || action === 'off'
+        ? 'turn'
+        : undefined;
+  if (!next) {
+    await reply(ctx, '用法：`/session [status|live|turn]`');
+    return;
+  }
+  if (next === current) {
+    await reply(ctx, `当前已经是 \`${next}\` 模式。`);
+    return;
+  }
+
+  const requireMentionInGroup = getRequireMentionInGroup(ctx.controls.cfg);
+  const larkCliIdentity = ctx.controls.profileConfig.larkCli.identityPreset;
+  const preferences: AppPreferences = {
+    ...(ctx.controls.cfg.preferences ?? {}),
+    agentSessionMode: next,
+  };
+  await savePreferencesConfig(ctx, preferences, requireMentionInGroup, larkCliIdentity);
+  await reply(
+    ctx,
+    next === 'live'
+      ? '已切换到 live 模式，正在重连。之后同一 chat/topic 会复用后台 CLI session。'
+      : '已切换到 turn 模式，正在重连。之后恢复每轮短任务执行。',
+  );
+  await ctx.controls.restart();
 }
 
 async function handleTimeout(args: string, ctx: CommandContext): Promise<void> {

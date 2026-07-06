@@ -12,6 +12,7 @@
 - **流式卡片**：文本回复和工具调用实时更新在同一张卡片上。
 - **COT 过程消息**：可选先发一条过程消息展示 agent 的阶段性文本和工具调用，再单独发送最终答案。
 - **会话延续**：每个聊天、话题或文档评论有自己的会话，不会互相串。
+- **可选常驻 CLI session**：owner/admin 可用 `/session live` 把 profile 切到后台常驻模式，同一 chat/topic 复用一个 Claude/Codex CLI，从飞书里继续回答原生斜杠命令和 yes/no 选择。
 - **排队与消息合并**：短时间连续发送的消息会合并处理；任务运行中收到的普通消息会排队到下一轮，`/new`、`/cd`、`/ws use`、`/stop` 这类命令可以中断当前任务。
 - **多工作空间**：用 `/cd` 切换当前项目，用 `/ws` 保存和复用常用项目目录。
 - **图片 / 文件**：直接发给 bot，bridge 下载到本地后交给本机 agent 处理。
@@ -146,6 +147,7 @@ lark-channel-bridge profile export <name> --include-secrets --yes
 | `/resume` | 恢复同 agent、工作目录、权限模式兼容的历史会话 |
 | `/status` | 查看 profile、agent、工作目录、会话、lark-cli 身份和运行状态 |
 | `/config` | 调整展示偏好、访问控制和 lark-cli 身份策略 |
+| `/session [status\|live\|turn]` | 查看或切换 agent 进程生命周期。`live` 为每个 chat/topic 复用后台 CLI session；`turn` 保持默认的每条消息单独运行 |
 | `/invite user @某人` | 允许用户私聊使用 bot |
 | `/invite admin @某人` | 添加访问控制管理员 |
 | `/invite group` | 允许当前群使用 bot |
@@ -160,6 +162,8 @@ lark-channel-bridge profile export <name> --include-secrets --yes
 | `/help` | 帮助卡片 |
 
 私聊不需要 @。群和话题群默认必须 `@bot`；`@all` 会被忽略。支持的云文档评论里 @bot 就会触发回复。
+
+live session 模式下，`/new`、`/cd`、`/status` 等 bridge 自己的命令仍由 bridge 处理；未被 bridge 识别的斜杠命令会转发给当前 agent session。也可以显式写 `/claude /命令` 或 `/codex /命令`，bridge 会去掉 agent 前缀后把原生命令送入 CLI。
 
 ## 回复展示与 COT
 

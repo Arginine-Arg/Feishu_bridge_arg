@@ -12,6 +12,7 @@ For a product walkthrough, see the [Feishu document](https://larkcommunity.feish
 - **Streaming card**: text replies and tool calls update on one Lark card in real time.
 - **COT process messages**: optionally send a process message with agent progress text and tool calls, then send the final answer separately.
 - **Session continuity**: each chat, topic, or document comment thread keeps its own session.
+- **Optional live CLI sessions**: owner/admin users can switch a profile to `/session live`, keeping one background Claude/Codex CLI per chat or topic so native CLI slash commands and yes/no prompts can be answered from Lark.
 - **Queueing and batching**: messages sent in quick succession are handled together; messages sent during a run are queued for the next turn, while commands like `/new`, `/cd`, `/ws use`, and `/stop` can interrupt the current task.
 - **Multiple workspaces**: use `/cd` to switch the current project, and `/ws` to save and reuse common project directories.
 - **Images and files**: send them to the bot directly, and the bridge downloads them locally for the agent.
@@ -146,6 +147,7 @@ If a profile was created with the wrong agent kind, stop or unregister any match
 | `/resume` | Resume compatible history for the same agent, working directory, and permission mode |
 | `/status` | Show profile, agent, working directory, session, lark-cli identity, and run state |
 | `/config` | Adjust presentation preferences, access settings, and lark-cli identity policy |
+| `/session [status\|live\|turn]` | Inspect or switch the agent process lifecycle. `live` reuses a background CLI session per chat/topic; `turn` keeps the default one-run-per-message behavior |
 | `/invite user @name` | Allow a user to use the bot in DMs |
 | `/invite admin @name` | Add an access-control admin |
 | `/invite group` | Allow the current group to use the bot |
@@ -160,6 +162,8 @@ If a profile was created with the wrong agent kind, stop or unregister any match
 | `/help` | Help card |
 
 DMs do not require an @ mention. Groups and topic groups require `@bot` by default; `@all` is ignored. Cloud-doc comments in supported document types run when the bot is mentioned.
+
+In live session mode, bridge-owned commands such as `/new`, `/cd`, and `/status` are still handled by the bridge. Unknown slash commands are forwarded to the current agent session. You can also target the active agent explicitly with `/claude /command` or `/codex /command`; the bridge strips the agent prefix before sending the native command to the CLI.
 
 ## Reply Display and COT
 

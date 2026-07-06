@@ -67,6 +67,7 @@ export interface SecretsConfig {
  * `markdown`. See `messageReplyMigrated` for the auto-coercion logic.
  */
 export type MessageReplyMode = 'card' | 'markdown' | 'text';
+export type AgentSessionMode = 'turn' | 'live';
 export type CotMessagesMode = 'off' | 'brief' | 'detailed';
 
 /**
@@ -87,6 +88,12 @@ export interface AppAccess {
 }
 
 export interface AppPreferences {
+  /**
+   * Agent process lifecycle. `turn` preserves the original one-subprocess per
+   * message behavior; `live` keeps one interactive CLI process per chat/topic
+   * scope so native slash commands and yes/no prompts can be answered from Lark.
+   */
+  agentSessionMode?: AgentSessionMode;
   /** Reply rendering mode for IM (group/p2p) messages. Default 'card'. */
   messageReply?: MessageReplyMode;
   /**
@@ -209,6 +216,11 @@ export function getMessageReplyMode(cfg: AppConfig): MessageReplyMode {
   }
   if (raw === 'card' || raw === 'markdown' || raw === 'text') return raw;
   return 'markdown';
+}
+
+export function getAgentSessionMode(cfg: AppConfig): AgentSessionMode {
+  const raw = cfg.preferences?.agentSessionMode;
+  return raw === 'live' ? 'live' : 'turn';
 }
 
 /** Resolve the show-tool-calls preference with default fallback. */

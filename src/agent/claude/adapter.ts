@@ -7,6 +7,7 @@ import { log } from '../../core/logger';
 import { mergeProcessEnv, spawnProcess, type SpawnedProcessByStdio } from '../../platform/spawn';
 import { buildBridgeSystemPrompt } from '../bridge-system-prompt';
 import { buildLarkChannelEnv, type LarkChannelEnvContext } from '../lark-channel-env';
+import { LiveSessionPool } from '../live-session';
 import { checkAgentAvailability, type AgentAvailability } from '../preflight';
 import {
   CLAUDE_DEFAULT_PERMISSION_MODE,
@@ -21,6 +22,9 @@ import { translateEvent } from './stream-json';
 export interface ClaudeAdapterOptions {
   binary?: string;
   larkChannel?: LarkChannelEnvContext;
+  sessionMode?: 'turn' | 'live';
+  liveUsePty?: boolean;
+  liveIdleMs?: number;
 }
 
 type ClaudeChild = SpawnedProcessByStdio<Writable, Readable, Readable>;
@@ -31,11 +35,18 @@ export class ClaudeAdapter implements AgentAdapter {
 
   private readonly binary: string;
   private readonly larkChannel: LarkChannelEnvContext | undefined;
+  private readonly sessionMode: 'turn' | 'live';
+  private readonly liveUsePty: boolean | undefined;
+  private readonly liveIdleMs: number | undefined;
+  private readonly liveSessions = new LiveSessionPool();
   private botIdentity: AgentBotIdentity | undefined;
 
   constructor(opts: ClaudeAdapterOptions = {}) {
     this.binary = opts.binary ?? 'claude';
     this.larkChannel = opts.larkChannel;
+    this.sessionMode = opts.sessionMode ?? 'turn';
+    this.liveUsePty = opts.liveUsePty;
+    this.liveIdleMs = opts.liveIdleMs;
   }
 
   setBotIdentity(identity: AgentBotIdentity): void {
@@ -58,6 +69,9 @@ export class ClaudeAdapter implements AgentAdapter {
   run(opts: AgentRunOptions): AgentRun {
     if (!opts.cwd) {
       throw new Error('cwd is required for ClaudeAdapter.run');
+    }
+    if (this.sessionMode === 'live') {
+      return this.runLive(opts);
     }
 
     // The prompt and bridge system prompt must NOT go through argv. On Windows,
@@ -183,6 +197,42 @@ export class ClaudeAdapter implements AgentAdapter {
         });
       },
     };
+  }
+
+  async shutdown(): Promise<void> {
+    await this.liveSessions.closeAll();
+  }
+
+  private runLive(opts: AgentRunOptions): AgentRun {
+    if (!opts.cwd) {
+      throw new Error('cwd is required for ClaudeAdapter.run');
+    }
+    const systemPromptFile = writeSystemPromptFile(buildBridgeSystemPrompt(this.botIdentity));
+    const args = [
+      '--permission-mode',
+      opts.permissionMode ?? CLAUDE_DEFAULT_PERMISSION_MODE,
+      '--append-system-prompt-file',
+      systemPromptFile.path,
+    ];
+    if (opts.model) args.push('--model', opts.model);
+    const signature = JSON.stringify({
+      cwd: opts.cwd,
+      model: opts.model ?? null,
+      permissionMode: opts.permissionMode ?? CLAUDE_DEFAULT_PERMISSION_MODE,
+      bot: this.botIdentity?.openId ?? null,
+    });
+    const scopeKey = opts.scopeId ?? opts.cwd;
+    const session = this.liveSessions.getOrCreate(scopeKey, {
+      command: this.binary,
+      args,
+      cwd: opts.cwd,
+      env: buildLarkChannelEnv(this.larkChannel),
+      signature,
+      usePty: this.liveUsePty,
+      idleMs: this.liveIdleMs,
+      cleanup: systemPromptFile.cleanup,
+    });
+    return session.run(opts.runId, opts.prompt, opts.cwd);
   }
 }
 
