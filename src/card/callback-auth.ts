@@ -25,12 +25,20 @@ export interface CallbackSignInput {
 }
 
 export interface CallbackVerifyExpected {
-  runId: string;
+  /**
+   * Expected run id. Omit (undefined) to skip the equality check — used for
+   * *deferred* prompt-answer callbacks whose asking run has already ended, so
+   * there's no live run to match against. The HMAC signature still covers the
+   * run id, and the single-use nonce + expiry + scope/operator binding keep
+   * the token unforgeable and unreplayable.
+   */
+  runId?: string;
   scope: string;
   chatId: string;
   operatorOpenId: string;
   action: string;
-  policyFingerprint: string;
+  /** Expected policy fingerprint. Omit to skip (see runId — also run-scoped). */
+  policyFingerprint?: string;
 }
 
 export interface CallbackPayload {
@@ -135,12 +143,12 @@ function matchesExpected(
   expected: CallbackVerifyExpected,
 ): boolean {
   return (
-    payload.r === expected.runId &&
+    (expected.runId === undefined || payload.r === expected.runId) &&
     payload.s === expected.scope &&
     payload.c === expected.chatId &&
     payload.o === expected.operatorOpenId &&
     payload.a === expected.action &&
-    payload.fp === expected.policyFingerprint
+    (expected.policyFingerprint === undefined || payload.fp === expected.policyFingerprint)
   );
 }
 

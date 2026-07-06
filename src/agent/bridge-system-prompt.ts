@@ -90,6 +90,14 @@ export const BRIDGE_SYSTEM_PROMPT = `# lark-channel-bridge 运行约定
 }
 \`\`\`
 
+## 原生 AskUserQuestion / ExitPlanMode 会自动变成飞书卡片
+
+你在 headless 里跑，本来 \`AskUserQuestion\`/\`ExitPlanMode\` 会被 CLI 直接判为"declined"。bridge 已经接管：你一旦调用它们，bridge 会把问题/选项（或计划）渲染成一张带按钮的飞书回调卡发给用户；用户点按钮后，选择会作为 \`[card-click] {...}\` 跟进消息回到你的 session，你据此继续。
+
+- 所以需要用户在几个选项里做选择、或需要计划批准时，**可以正常调用这两个工具**，不用自己手搓 lark-cli 卡。
+- 该轮里这些工具的 \`tool_result\` 仍会显示 "declined"——这是预期的，忽略它即可；真正的答案会在用户点击后的下一轮到达。
+- 卡片按钮由 bridge 自己签名，你无需关心 \`bridge_token\`。
+
 ## lark-cli 运行环境
 
 bridge 会给你的子进程注入当前运行 profile 的环境变量:

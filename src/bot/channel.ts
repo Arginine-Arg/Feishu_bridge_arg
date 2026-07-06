@@ -16,6 +16,7 @@ import {
 } from '../agent/prompt';
 import type { AgentAdapter, AgentEvent } from '../agent/types';
 import { handleCardAction } from '../card/dispatcher';
+import { consumeInteractivePrompts, PROMPT_CALLBACK_ACTION } from '../card/interactive-prompt';
 import { CallbackAuth } from '../card/callback-auth';
 import { CallbackNonceStore } from '../card/callback-store';
 import { renderCard } from '../card/run-renderer';
@@ -1000,6 +1001,31 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       }
     : {};
 
+  // Interactive-prompt bridging: when the agent raises AskUserQuestion /
+  // ExitPlanMode, the headless CLI auto-declines it ("Answer questions?"),
+  // but we surface it as a Feishu callback card so the user can answer with a
+  // click. The click resumes the session (via handleCardAction → pending
+  // queue) as a follow-up turn carrying the choice. Runs as an independent
+  // stream subscriber; awaited in finally so it drains before cleanup.
+  const promptBridge = callbackAuth
+    ? consumeInteractivePrompts(execution.subscribe(), {
+        channel,
+        chatId,
+        scope,
+        sendOpts,
+        sign: () =>
+          callbackAuth.sign({
+            runId: execution.runId,
+            scope,
+            chatId,
+            operatorOpenId: firstMsg.senderId,
+            action: PROMPT_CALLBACK_ACTION,
+            policyFingerprint: flow.policy.policyFingerprint,
+            ttlMs: 24 * 60 * 60 * 1000,
+          }),
+      })
+    : Promise.resolve();
+
   // For non-card modes Claude's output doesn't surface visually until either
   // a first streamed token (markdown mode) or the whole run ends (text mode).
   // Add a "Typing" reaction to the triggering message as an instant ack, but
@@ -1235,6 +1261,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   } catch (err) {
     log.fail('stream', err);
   } finally {
+    // Let the interactive-prompt subscriber drain (it resolves when the event
+    // stream ends); it never rejects, so this can't mask a run error.
+    await promptBridge;
     activePolicyFingerprints.delete(scope);
     scheduleWorkingReactionCleanup(channel, lastMsg.messageId, reactionPromise);
   }

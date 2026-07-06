@@ -117,6 +117,43 @@ describe('CallbackAuth', () => {
     expect(h.auth.verify(old, baseExpected())).toMatchObject({ ok: true });
   });
 
+  it('accepts a deferred token when runId and policyFingerprint are omitted', async () => {
+    // Prompt-answer callbacks are verified after the asking run has ended, so
+    // runId/fp are no longer available to match — they must be skippable.
+    const h = await harness();
+    const token = h.auth.sign({
+      ...baseSignInput(),
+      runId: 'run-that-ended',
+      policyFingerprint: 'fp-gone',
+      action: 'prompt_answer',
+    });
+
+    expect(
+      h.auth.verify(token, {
+        scope: 'chat-1',
+        chatId: 'oc_1',
+        operatorOpenId: 'ou_1',
+        action: 'prompt_answer',
+        // runId + policyFingerprint intentionally omitted
+      }),
+    ).toMatchObject({ ok: true });
+  });
+
+  it('deferred verify still enforces scope/operator/action binding', async () => {
+    const h = await harness();
+    const token = h.auth.sign({ ...baseSignInput(), action: 'prompt_answer' });
+
+    // Wrong operator is still rejected even without runId/fp.
+    expect(
+      h.auth.verify(token, {
+        scope: 'chat-1',
+        chatId: 'oc_1',
+        operatorOpenId: 'ou_other',
+        action: 'prompt_answer',
+      }),
+    ).toMatchObject({ ok: false, reason: 'context-mismatch' });
+  });
+
   it('rejects force-revoked nonces', async () => {
     const h = await harness({ nonce: 'nonce-revoke' });
     const token = h.auth.sign(baseSignInput());

@@ -113,6 +113,37 @@ describe('signed card callback dispatch', () => {
     expect(activeRun.stopped).toBe(false);
     expect(h.pending.cancel('oc_group')).toHaveLength(0);
   });
+
+  it('forwards a deferred prompt-answer callback even with no active run', async () => {
+    const h = await createHarness();
+    // A prompt card is answered after the asking run has ended — there is
+    // deliberately NO active run registered for the scope here.
+    await h.dispatch({
+      __bridge_prompt: true,
+      bridge_token: h.token('prompt_answer', { nonce: 'nonce-prompt' }),
+      kind: 'ask',
+      answer: 'Redis',
+    });
+
+    const queued = h.pending.cancel('oc_group');
+    expect(queued).toHaveLength(1);
+    expect(queued[0]?.content).toBe('[card-click] {"kind":"ask","answer":"Redis"}');
+  });
+
+  it('rejects a deferred prompt-answer callback signed for a different operator', async () => {
+    const h = await createHarness();
+    await h.dispatch({
+      __bridge_prompt: true,
+      bridge_token: h.token('prompt_answer', {
+        operatorOpenId: 'ou_other',
+        nonce: 'nonce-prompt2',
+      }),
+      kind: 'ask',
+      answer: 'Redis',
+    });
+
+    expect(h.pending.cancel('oc_group')).toHaveLength(0);
+  });
 });
 
 type Harness = {

@@ -14,6 +14,7 @@ import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
 import { commandSessionCatalogIdentity } from '../bot/session-catalog-identity';
 import { lookupMessageThreadId } from '../bot/thread-id';
+import { BRIDGE_PROMPT_CALLBACK_MARKER, PROMPT_CALLBACK_ACTION } from './interactive-prompt';
 
 /** Marker key on a button's value object that flags the cardAction as
  * a callback that should be forwarded back to the agent instead
@@ -128,6 +129,16 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
     return;
   }
 
+  // Deferred prompt-answer callback: the button answers an AskUserQuestion /
+  // ExitPlanMode prompt the agent raised in a run that has since ended. Verify
+  // without requiring an active run (see verifyPromptToken), then forward the
+  // answer so the session resumes as a follow-up turn.
+  if (BRIDGE_PROMPT_CALLBACK_MARKER in payload) {
+    if (!verifyPromptToken(deps, payload, scope, operatorId)) return;
+    forwardToAgent(deps, payload, formValue, scope, threadId, mode);
+    return;
+  }
+
   // Agent-driven callback: the button was rendered by an agent via lark-cli,
   // with `__bridge_cb` set on the value. Forward the click back into the
   // scope's pending queue so the agent resumes its session and sees the click
@@ -168,9 +179,10 @@ function forwardToAgent(
   threadId: string | undefined,
   mode: 'p2p' | 'group' | 'topic',
 ): void {
-  // Strip the marker so the agent only sees the meaningful fields it set.
+  // Strip the markers/token so the agent only sees the meaningful fields it set.
   const {
     [BRIDGE_CALLBACK_MARKER]: _marker,
+    [BRIDGE_PROMPT_CALLBACK_MARKER]: _promptMarker,
     bridge_token: _token,
     ...agentPayload
   } = payload;
@@ -228,6 +240,47 @@ function verifyBridgeToken(
       reason: result.reason,
     });
     log.warn('callback', 'denied', { scope, action, reason: result.reason });
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Verify a deferred prompt-answer token. Unlike verifyBridgeToken this does
+ * NOT require an active run for the scope: the run that raised the prompt has
+ * already ended by the time the user clicks. Binding is to the stable
+ * scope/chat/operator/action identity; the HMAC still covers the run id and
+ * policy fingerprint, and the single-use nonce + expiry prevent replay/forgery.
+ */
+function verifyPromptToken(
+  deps: CardDispatchDeps,
+  payload: Record<string, unknown>,
+  scope: string,
+  operatorId: string,
+): boolean {
+  const token = typeof payload.bridge_token === 'string' ? payload.bridge_token : '';
+  if (!deps.callbackAuth || !token) {
+    log.warn('callback', 'denied', {
+      scope,
+      action: PROMPT_CALLBACK_ACTION,
+      reason: 'missing-token',
+    });
+    return false;
+  }
+  const result = deps.callbackAuth.verify(token, {
+    scope,
+    chatId: deps.evt.chatId,
+    operatorOpenId: operatorId,
+    action: PROMPT_CALLBACK_ACTION,
+    // runId + policyFingerprint intentionally omitted (run has ended).
+  });
+  if (!result.ok) {
+    log.info('cardAction', 'skip-prompt-auth-failed', { scope, reason: result.reason });
+    log.warn('callback', 'denied', {
+      scope,
+      action: PROMPT_CALLBACK_ACTION,
+      reason: result.reason,
+    });
     return false;
   }
   return true;
