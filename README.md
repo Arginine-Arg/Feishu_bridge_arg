@@ -17,6 +17,8 @@ For a product walkthrough, see the [Feishu document](https://larkcommunity.feish
 - **Multiple workspaces**: use `/cd` to switch the current project, and `/ws` to save and reuse common project directories.
 - **Images and files**: send them to the bot directly, and the bridge downloads them locally for the agent.
 - **Interactive cards**: `/help`, `/ws list`, and `/status` return cards with clickable buttons.
+- **Prompt bridging**: the agent's `AskUserQuestion` / `ExitPlanMode` are auto-rendered as Lark cards with buttons — click to answer and resume the session.
+- **Long-conversation resilience**: if a streaming card is withdrawn/invalidated mid-run, output is no longer lost — it degrades to posting the final answer as a fresh message; queued messages get a one-time notice.
 
 ## Prerequisites
 
@@ -28,11 +30,17 @@ For a product walkthrough, see the [Feishu document](https://larkcommunity.feish
 
 ## Install
 
+This fork's package name is `arg_lark-channel-bridge`, installed from GitHub. **The installed command is still `lark-channel-bridge`** (same name as upstream — a drop-in replacement, so migrating is seamless).
+
 ```bash
-npm i -g lark-channel-bridge
-# or
-pnpm add -g lark-channel-bridge
+npm i -g git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git
+# or, with SSH access to the repo
+npm i -g git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git
 ```
+
+> Installing builds automatically (`prepare` runs tsup); requires Node ≥ 20.12. If later published to npm: `npm i -g arg_lark-channel-bridge`.
+>
+> **Migrating from upstream**: `lark-channel-bridge stop && lark-channel-bridge unregister` (per profile), install this fork, then `lark-channel-bridge start` to re-register the service. All state lives in `~/.lark-channel/` and is preserved — the same Feishu app / bot reconnects, no re-scan.
 
 ## First run
 
@@ -163,7 +171,18 @@ If a profile was created with the wrong agent kind, stop or unregister any match
 
 DMs do not require an @ mention. Groups and topic groups require `@bot` by default; `@all` is ignored. Cloud-doc comments in supported document types run when the bot is mentioned.
 
-In live session mode, bridge-owned commands such as `/new`, `/cd`, and `/status` are still handled by the bridge. Unknown slash commands are forwarded to the current agent session. You can also target the active agent explicitly with `/claude /command` or `/codex /command`; the bridge strips the agent prefix before sending the native command to the CLI.
+**Using the agent's own commands**: switch to a live session with `/session live`; bridge-owned commands (`/new`, `/cd`, `/status`, …) are still handled by the bridge, while **unknown slash commands are forwarded verbatim to the current agent CLI** (e.g. Claude Code's `/compact`, `/context`). You can also target the active agent explicitly with `/claude /command` or `/codex /command`; the bridge strips the agent prefix before sending the native command to the CLI. `turn` mode (the default, one run per message) does not forward native commands.
+
+**Interactive prompts become cards**: when the agent calls `AskUserQuestion` (pick one) or `ExitPlanMode` (approve a plan), the bridge renders it as a Lark card with buttons; click to answer and your choice resumes the session on the next turn — no hand-rolled card needed.
+
+## Long-running tasks and stability
+
+Long conversations / tasks are not cut off by a fixed time limit, but two behaviors are worth knowing (optimized in this fork):
+
+- **Queued messages (looks unresponsive)**: while a run is active on the same chat/topic, a new ordinary message does **not** interrupt it — it queues for after the current run. The bridge sends a one-time "task running, queued" notice (never spammed). **Send `/stop` to interrupt now.**
+- **Streaming-card degradation**: if the streamed card is withdrawn or invalidated mid-run (Feishu `230011`), the bridge stops patching the dead card, finishes the run, and **posts the full answer as a fresh message** (never lost, never doubled).
+
+**Best practices for long tasks**: have the agent write full logs/reports to project files (`report.md`, `task.log`) and only post short progress + a final summary to Lark (cards have length limits); to check progress send a fresh `@bot progress` rather than relying on an old card; use `/stop` to interrupt.
 
 ## Reply Display and COT
 

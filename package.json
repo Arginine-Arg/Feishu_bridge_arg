@@ -1,7 +1,7 @@
 {
-  "name": "lark-channel-bridge",
+  "name": "arg_lark-channel-bridge",
   "version": "0.5.5",
-  "description": "Bridge Feishu/Lark messenger with local CLI coding agents",
+  "description": "Bridge Feishu/Lark messenger with local CLI coding agents (arg fork: long-conversation resilience + interactive-prompt cards)",
   "type": "module",
   "packageManager": "pnpm@10.33.0",
   "publishConfig": {

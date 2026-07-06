@@ -17,6 +17,8 @@
 - **多工作空间**：用 `/cd` 切换当前项目，用 `/ws` 保存和复用常用项目目录。
 - **图片 / 文件**：直接发给 bot，bridge 下载到本地后交给本机 agent 处理。
 - **卡片按钮**：`/help`、`/ws list`、`/status` 返回可点击的交互卡片。
+- **交互提问桥接**：agent 的 `AskUserQuestion` / `ExitPlanMode` 会自动渲染成带按钮的飞书卡片，点击即可回答并续上会话。
+- **长对话稳定性**：流式卡片被撤回/失效时自动降级为补发新消息，不再吞掉最终输出;忙时排队有一次性提示。
 
 ## 前置条件
 
@@ -28,11 +30,17 @@
 
 ## 安装
 
+本 fork 的包名是 `arg_lark-channel-bridge`,从 GitHub 安装;**安装后的命令仍是 `lark-channel-bridge`**(与原版同名,可直接顶替原版,迁移无缝)。
+
 ```bash
-npm i -g lark-channel-bridge
-# 或
-pnpm add -g lark-channel-bridge
+npm i -g git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git
+# 或(有仓库 SSH 权限时)
+npm i -g git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git
 ```
+
+> 安装时会自动构建(`prepare` 触发 tsup),需要 Node ≥ 20.12。日后若发布到 npm,可 `npm i -g arg_lark-channel-bridge`。
+>
+> **从原版迁移**:先 `lark-channel-bridge stop && lark-channel-bridge unregister`(每个 profile 都要),再按上面装本 fork,然后 `lark-channel-bridge start` 重新注册后台服务。所有状态在 `~/.lark-channel/`,原样保留——同一个飞书 app、同一个 bot 自动重连,无需重新扫码。
 
 ## 首次启动
 
@@ -163,7 +171,22 @@ lark-channel-bridge profile export <name> --include-secrets --yes
 
 私聊不需要 @。群和话题群默认必须 `@bot`；`@all` 会被忽略。支持的云文档评论里 @bot 就会触发回复。
 
-live session 模式下，`/new`、`/cd`、`/status` 等 bridge 自己的命令仍由 bridge 处理；未被 bridge 识别的斜杠命令会转发给当前 agent session。也可以显式写 `/claude /命令` 或 `/codex /命令`，bridge 会去掉 agent 前缀后把原生命令送入 CLI。
+**直接使用 agent 自有命令**：先 `/session live` 切到常驻 session，之后 `/new`、`/cd`、`/status` 等 bridge 自己的命令仍由 bridge 处理，**未被 bridge 识别的斜杠命令会原样转发给当前 agent CLI**（如 Claude Code 的 `/compact`、`/context`）。也可以显式写 `/claude /命令` 或 `/codex /命令`，bridge 会去掉 agent 前缀后把原生命令送入 CLI。`turn` 模式（默认，每条消息独立运行）不透传原生命令。
+
+**交互式提问自动变卡片**：agent 调用 `AskUserQuestion`（多选一）或 `ExitPlanMode`（计划确认）时，bridge 会把它渲染成带按钮的飞书卡片；点按钮即可回答，你的选择会作为下一轮跟进消息续上会话。无需 agent 自己拼卡片。
+
+## 长任务与稳定性
+
+长对话 / 长任务不会因为"跑太久"被固定时限掐断,但有两种表现要知道(本 fork 已针对性优化):
+
+- **消息排队(看起来没反应)**:同一个 chat / 话题已经有任务在跑时,你新发的普通消息**不会打断它,会排队**到当前任务结束后处理。此时 bridge 会回一条一次性提示「任务运行中,已排队」,不会刷屏。**要立刻打断,发 `/stop`。**
+- **流式卡片失效自动降级**:bridge 边跑边更新同一张卡片;万一那条消息被撤回或超长失效(飞书 `230011 withdrawn`),bridge 不会中断任务,而是停止更新那条死卡片、把 agent 跑完,并**把完整答案作为一条全新消息补发**(不会丢、也不会重复)。
+
+**长任务最佳实践**:
+
+- 让 agent 把完整日志 / 报告写进项目文件(如 `report.md`、`task.log`),飞书里只发短进度和最终摘要——飞书卡片有长度上限,大量 stdout 塞进卡片会拖累稳定性。
+- 想看进度,发一条新的 `@bot 进度`,别依赖去更新很久以前那条旧卡片。
+- 打断当前任务用 `/stop`;其余新消息大概率只是排队。
 
 ## 回复展示与 COT
 
