@@ -6911,7 +6911,7 @@ var CodexAdapter = class {
     this.defaultStopGraceMs = opts.stopGraceMs ?? 5e3;
     this.larkChannel = opts.larkChannel;
     this.sessionMode = opts.sessionMode ?? "turn";
-    this.liveUsePty = opts.liveUsePty;
+    this.liveUsePty = opts.liveUsePty ?? false;
     this.liveIdleMs = opts.liveIdleMs;
   }
   setBotIdentity(identity) {

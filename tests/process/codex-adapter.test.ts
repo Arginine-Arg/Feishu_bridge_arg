@@ -302,7 +302,6 @@ describe('CodexAdapter process contract', () => {
       binary: fake.path,
       profileStateDir: fake.dir,
       sessionMode: 'live',
-      liveUsePty: false,
       sandbox: 'read-only',
       ignoreUserConfig: true,
       ignoreRules: true,

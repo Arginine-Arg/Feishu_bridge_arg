@@ -66,7 +66,7 @@ export class CodexAdapter implements AgentAdapter {
     this.defaultStopGraceMs = opts.stopGraceMs ?? 5000;
     this.larkChannel = opts.larkChannel;
     this.sessionMode = opts.sessionMode ?? 'turn';
-    this.liveUsePty = opts.liveUsePty;
+    this.liveUsePty = opts.liveUsePty ?? false;
     this.liveIdleMs = opts.liveIdleMs;
   }
 
