@@ -5890,6 +5890,8 @@ var COMMAND_IDLE_MS = 2500;
 var MAX_TURN_OUTPUT_CHARS = 12e4;
 var DEFAULT_PTY_ROWS = "48";
 var DEFAULT_PTY_COLUMNS = "120";
+var LIVE_DIAG_PREVIEW_CHARS = 800;
+var LIVE_DIAG_MAX_FRAMES = 8;
 var LiveSessionPool = class {
   sessions = /* @__PURE__ */ new Map();
   getOrCreate(key, command) {
@@ -6018,16 +6020,26 @@ var LiveTerminalSession = class {
   }
   async *turnEvents(prompt, cwd, inputMode) {
     yield { type: "system", cwd };
-    const idleMs = inputMode === "command" ? Math.max(this.opts.idleMs ?? DEFAULT_IDLE_MS, COMMAND_IDLE_MS) : this.opts.idleMs ?? DEFAULT_IDLE_MS;
+    const commandMode = inputMode === "command";
+    const idleMs = commandMode ? Math.max(this.opts.idleMs ?? DEFAULT_IDLE_MS, COMMAND_IDLE_MS) : this.opts.idleMs ?? DEFAULT_IDLE_MS;
     const outputFlushMs = this.opts.outputFlushMs ?? DEFAULT_OUTPUT_FLUSH_MS;
-    const startupTimeoutMs = inputMode === "command" ? Math.max(this.opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS, COMMAND_STARTUP_TIMEOUT_MS) : this.opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
-    const output = new TurnOutputBuffer(MAX_TURN_OUTPUT_CHARS, prompt, inputMode === "command");
+    const startupTimeoutMs = commandMode ? Math.max(this.opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS, COMMAND_STARTUP_TIMEOUT_MS) : this.opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
+    const output = new TurnOutputBuffer(MAX_TURN_OUTPUT_CHARS, prompt, commandMode);
     const queue = [];
     let done = false;
     let wake;
     let timer;
     let outputTimer;
     let acceptingOutput = false;
+    let diagFrames = 0;
+    if (commandMode) {
+      log.info("agent-live", "command-start", {
+        commandText: prompt,
+        idleMs,
+        startupTimeoutMs,
+        outputFlushMs
+      });
+    }
     const push = (event) => {
       queue.push(event);
       wake?.();
@@ -6036,6 +6048,13 @@ var LiveTerminalSession = class {
       if (outputTimer) clearTimeout(outputTimer);
       outputTimer = void 0;
       const delta = output.take();
+      if (commandMode) {
+        log.info("agent-live", "command-flush", {
+          hasDelta: Boolean(delta),
+          chars: delta.length,
+          deltaPreview: previewLiveText(delta)
+        });
+      }
       if (delta) push({ type: "text", delta });
     };
     const scheduleOutputFlush = () => {
@@ -6045,6 +6064,7 @@ var LiveTerminalSession = class {
     const finish = () => {
       if (done) return;
       done = true;
+      if (commandMode) log.info("agent-live", "command-finish", { reason: "idle-or-startup" });
       if (timer) clearTimeout(timer);
       flushOutput();
       push({ type: "done", terminationReason: "normal" });
@@ -6055,12 +6075,30 @@ var LiveTerminalSession = class {
     };
     const onData = (event) => {
       if (!acceptingOutput) {
+        if (commandMode && diagFrames < LIVE_DIAG_MAX_FRAMES) {
+          diagFrames += 1;
+          log.info("agent-live", "command-pre-output", {
+            mode: event.mode,
+            textPreview: previewLiveText(event.text)
+          });
+        }
         arm(startupTimeoutMs);
         return;
       }
       const text = sanitizeLiveTurnOutput(event.text);
+      const beforeAppendFrame = commandMode && diagFrames < LIVE_DIAG_MAX_FRAMES;
+      if (beforeAppendFrame) diagFrames += 1;
       if (!text) return;
-      if (event.mode === "snapshot" ? output.replace(text) : output.append(text)) {
+      const accepted = event.mode === "snapshot" ? output.replace(text) : output.append(text);
+      if (beforeAppendFrame) {
+        log.info("agent-live", "command-output", {
+          mode: event.mode,
+          accepted,
+          rawPreview: previewLiveText(event.text),
+          sanitizedPreview: previewLiveText(text)
+        });
+      }
+      if (accepted) {
         scheduleOutputFlush();
         arm(idleMs);
       }
@@ -6090,7 +6128,8 @@ var LiveTerminalSession = class {
     await delay(STARTUP_INPUT_GRACE_MS);
     if (!done) {
       this.cleaner.resetTurn();
-      if (inputMode === "command") {
+      if (commandMode) {
+        log.info("agent-live", "command-clear", { sequence: "esc esc ctrl-a ctrl-k" });
         await this.clearPendingInput();
         this.cleaner.resetTurn();
       }
@@ -6102,6 +6141,7 @@ var LiveTerminalSession = class {
           this.write(controlKeys[i]);
         }
       } else {
+        if (commandMode) log.info("agent-live", "command-submit", { commandText: prompt });
         this.write(translateLiveInput(prompt));
       }
     }
@@ -6409,6 +6449,9 @@ function translateLiveInput(input) {
   const keys = parseLiveControlSequence(input);
   if (keys) return keys.join("");
   return `${input}\r`;
+}
+function previewLiveText(input) {
+  return input.replace(/\x1B/g, "<ESC>").replace(/\r/g, "<CR>").replace(/\t/g, "<TAB>").slice(0, LIVE_DIAG_PREVIEW_CHARS);
 }
 function cleanTerminalOutput(input) {
   const withoutAnsi = input.replace(/\x1B\][^\x07]*(?:\x07|\x1B\\)/g, "").replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "").replace(/\x1B[@-Z\\-_]/g, "").replace(/(^|[\r\n])\d{1,4}G(?=\S)/g, "$1").replace(/(\S)78\s+(?=\S)/g, "$1").replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "").replace(/\r\n/g, "\n");

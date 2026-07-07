@@ -41,6 +41,8 @@ const COMMAND_IDLE_MS = 2_500;
 const MAX_TURN_OUTPUT_CHARS = 120_000;
 const DEFAULT_PTY_ROWS = '48';
 const DEFAULT_PTY_COLUMNS = '120';
+const LIVE_DIAG_PREVIEW_CHARS = 800;
+const LIVE_DIAG_MAX_FRAMES = 8;
 
 export class LiveSessionPool {
   private readonly sessions = new Map<string, LiveTerminalSession>();
@@ -187,22 +189,33 @@ export class LiveTerminalSession {
   ): AsyncGenerator<AgentEvent> {
     yield { type: 'system', cwd };
 
+    const commandMode = inputMode === 'command';
     const idleMs =
-      inputMode === 'command'
+      commandMode
         ? Math.max(this.opts.idleMs ?? DEFAULT_IDLE_MS, COMMAND_IDLE_MS)
         : (this.opts.idleMs ?? DEFAULT_IDLE_MS);
     const outputFlushMs = this.opts.outputFlushMs ?? DEFAULT_OUTPUT_FLUSH_MS;
     const startupTimeoutMs =
-      inputMode === 'command'
+      commandMode
         ? Math.max(this.opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS, COMMAND_STARTUP_TIMEOUT_MS)
         : (this.opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS);
-    const output = new TurnOutputBuffer(MAX_TURN_OUTPUT_CHARS, prompt, inputMode === 'command');
+    const output = new TurnOutputBuffer(MAX_TURN_OUTPUT_CHARS, prompt, commandMode);
     const queue: AgentEvent[] = [];
     let done = false;
     let wake: (() => void) | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let outputTimer: ReturnType<typeof setTimeout> | undefined;
     let acceptingOutput = false;
+    let diagFrames = 0;
+
+    if (commandMode) {
+      log.info('agent-live', 'command-start', {
+        commandText: prompt,
+        idleMs,
+        startupTimeoutMs,
+        outputFlushMs,
+      });
+    }
 
     const push = (event: AgentEvent): void => {
       queue.push(event);
@@ -212,6 +225,13 @@ export class LiveTerminalSession {
       if (outputTimer) clearTimeout(outputTimer);
       outputTimer = undefined;
       const delta = output.take();
+      if (commandMode) {
+        log.info('agent-live', 'command-flush', {
+          hasDelta: Boolean(delta),
+          chars: delta.length,
+          deltaPreview: previewLiveText(delta),
+        });
+      }
       if (delta) push({ type: 'text', delta });
     };
     const scheduleOutputFlush = (): void => {
@@ -221,6 +241,7 @@ export class LiveTerminalSession {
     const finish = (): void => {
       if (done) return;
       done = true;
+      if (commandMode) log.info('agent-live', 'command-finish', { reason: 'idle-or-startup' });
       if (timer) clearTimeout(timer);
       flushOutput();
       push({ type: 'done', terminationReason: 'normal' });
@@ -232,12 +253,30 @@ export class LiveTerminalSession {
 
     const onData = (event: LiveOutput): void => {
       if (!acceptingOutput) {
+        if (commandMode && diagFrames < LIVE_DIAG_MAX_FRAMES) {
+          diagFrames += 1;
+          log.info('agent-live', 'command-pre-output', {
+            mode: event.mode,
+            textPreview: previewLiveText(event.text),
+          });
+        }
         arm(startupTimeoutMs);
         return;
       }
       const text = sanitizeLiveTurnOutput(event.text);
+      const beforeAppendFrame = commandMode && diagFrames < LIVE_DIAG_MAX_FRAMES;
+      if (beforeAppendFrame) diagFrames += 1;
       if (!text) return;
-      if (event.mode === 'snapshot' ? output.replace(text) : output.append(text)) {
+      const accepted = event.mode === 'snapshot' ? output.replace(text) : output.append(text);
+      if (beforeAppendFrame) {
+        log.info('agent-live', 'command-output', {
+          mode: event.mode,
+          accepted,
+          rawPreview: previewLiveText(event.text),
+          sanitizedPreview: previewLiveText(text),
+        });
+      }
+      if (accepted) {
         scheduleOutputFlush();
         arm(idleMs);
       }
@@ -270,7 +309,8 @@ export class LiveTerminalSession {
     await delay(STARTUP_INPUT_GRACE_MS);
     if (!done) {
       this.cleaner.resetTurn();
-      if (inputMode === 'command') {
+      if (commandMode) {
+        log.info('agent-live', 'command-clear', { sequence: 'esc esc ctrl-a ctrl-k' });
         await this.clearPendingInput();
         this.cleaner.resetTurn();
       }
@@ -285,6 +325,7 @@ export class LiveTerminalSession {
           this.write(controlKeys[i]!);
         }
       } else {
+        if (commandMode) log.info('agent-live', 'command-submit', { commandText: prompt });
         this.write(translateLiveInput(prompt));
       }
     }
@@ -616,6 +657,14 @@ function translateLiveInput(input: string): string {
   const keys = parseLiveControlSequence(input);
   if (keys) return keys.join('');
   return `${input}\r`;
+}
+
+function previewLiveText(input: string): string {
+  return input
+    .replace(/\x1B/g, '<ESC>')
+    .replace(/\r/g, '<CR>')
+    .replace(/\t/g, '<TAB>')
+    .slice(0, LIVE_DIAG_PREVIEW_CHARS);
 }
 
 export function cleanTerminalOutput(input: string): string {
