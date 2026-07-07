@@ -2,7 +2,7 @@ import { readAndPrune, resolveTarget, isAlive } from '../../runtime/registry';
 import type { ProcessEntry } from '../../runtime/registry';
 
 /**
- * Pretty-print the list of running lark-channel-bridge processes.
+ * Pretty-print the list of running arg-bridge processes.
  *
  * `readAndPrune` is a legacy name; read-only views never rewrite registry
  * state. Persistence happens on the next `register` / `unregister` /
@@ -33,13 +33,13 @@ export function runPs(): void {
 
 export async function runKillCli(target: string | undefined): Promise<void> {
   if (!target) {
-    console.error('用法: lark-channel-bridge kill <bot id 或序号>');
+    console.error('用法: arg-bridge kill <bot id 或序号>');
     process.exit(1);
   }
   const entry = resolveTarget(target);
   if (!entry) {
     console.error(`✗ 没找到匹配的 bot:${target}`);
-    console.error('  用 `lark-channel-bridge ps` 看可选目标。');
+    console.error('  用 `arg-bridge ps` 看可选目标。');
     process.exit(1);
   }
   console.log(`正在关闭 bot ${entry.id}…`);

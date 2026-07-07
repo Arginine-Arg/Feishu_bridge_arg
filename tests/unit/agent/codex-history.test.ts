@@ -131,7 +131,7 @@ describe('Codex thread history provider', () => {
 
   it('summarizes bridge-prefixed Codex previews using the real user input section', async () => {
     const fake = await createFakeCodex({
-      firstPreview: `# lark-channel-bridge 运行约定\n\n## user_message\n\n${buildAgentPrompt({
+      firstPreview: `# arg-bridge 运行约定\n\n## user_message\n\n${buildAgentPrompt({
         context: {
           chatId: 'oc_secret',
           chatType: 'p2p',

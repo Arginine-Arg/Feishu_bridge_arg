@@ -430,6 +430,11 @@ function sendLiteral(text) {
   sendKeys(['-l', text]);
 }
 
+function sendBracketedPaste(text) {
+  if (!text) return;
+  sendKeys(['-l', '\x1b[200~' + text + '\x1b[201~']);
+}
+
 function sendInput(input) {
   if (input === '\x03') {
     sendKeys(['C-c']);
@@ -456,17 +461,12 @@ function sendInput(input) {
     return;
   }
 
-  let current = '';
-  for (const char of input) {
-    if (char === '\r' || char === '\n') {
-      sendLiteral(current);
-      current = '';
-      sendKeys(['Enter']);
-    } else {
-      current += char;
-    }
-  }
-  sendLiteral(current);
+  const shouldSubmit = input.endsWith('\r') || input.endsWith('\n');
+  const body = shouldSubmit ? input.replace(/[\r\n]+$/u, '') : input;
+  const normalized = body.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  if (normalized.includes('\n')) sendBracketedPaste(normalized);
+  else sendLiteral(normalized);
+  if (shouldSubmit) sendKeys(['Enter']);
 }
 
 function capture() {

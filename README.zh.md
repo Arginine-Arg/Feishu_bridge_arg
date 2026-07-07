@@ -1,4 +1,4 @@
-# lark-channel-bridge
+# arg-bridge
 
 把飞书 / Lark 消息和本地 Claude Code 或 Codex CLI 打通的轻量 bot。用一条命令启动，扫码绑定 PersonalAgent 应用，然后在飞书里和本机编程助手对话，让它读图、处理文件、改代码。
 
@@ -30,7 +30,7 @@
 
 ## 安装
 
-本 fork 的包名是 `arg_lark-channel-bridge`,从 GitHub 安装;**安装后的命令仍是 `lark-channel-bridge`**(与原版同名,可直接顶替原版,迁移无缝)。
+本 fork 的包名是 `arg-bridge`,从 GitHub 安装；主命令是 `arg-bridge`。为了迁移期兼容，仍保留 `lark-channel-bridge` 作为旧脚本别名。
 
 ```bash
 npm i -g git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git
@@ -38,15 +38,19 @@ npm i -g git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git
 npm i -g git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git
 ```
 
-> 仓库已内置预构建的 `dist/`,**安装即用,不需要本地构建**(需要 Node ≥ 20.12)。日后若发布到 npm,可 `npm i -g arg_lark-channel-bridge`。
+> 仓库已内置预构建的 `dist/`,**安装即用,不需要本地构建**(需要 Node ≥ 20.12)。日后若发布到 npm,可 `npm i -g arg-bridge`。
 > 从源码开发:`npm i && npm run build`。
 >
-> **从原版迁移**:先 `lark-channel-bridge stop && lark-channel-bridge unregister`(每个 profile 都要),再按上面装本 fork,然后 `lark-channel-bridge start` 重新注册后台服务。所有状态在 `~/.lark-channel/`,原样保留——同一个飞书 app、同一个 bot 自动重连,无需重新扫码。
+> **从原版迁移**:先用旧命令停止并注销旧服务：`lark-channel-bridge stop && lark-channel-bridge unregister`(每个 profile 都要),再按上面装本 fork,然后用 `arg-bridge start` 注册新后台服务。所有状态在 `~/.lark-channel/`,原样保留——同一个飞书 app、同一个 bot 自动重连,无需重新扫码。
+
+## 来源说明
+
+`arg-bridge` 的 turn 模式保持与原 lark-channel bridge 的飞书/Lark 到本地 agent 桥接契约兼容，并在此基础上改造。当前 live CLI 模式、tmux 后台终端 session、Codex 适配加固、长任务/卡片稳定性以及下面记录的命令和 profile 行为，是 Arg 侧实现和维护的部分。
 
 ## 首次启动
 
 ```bash
-lark-channel-bridge run
+arg-bridge run
 ```
 
 第一次运行会进入扫码向导：
@@ -62,9 +66,9 @@ lark-channel-bridge run
 如果已经有 PersonalAgent app，可以在初始化时传 `--app-id` 跳过创建应用流程；命令会提示输入 App Secret。
 
 ```bash
-lark-channel-bridge run --app-id cli_xxx
+arg-bridge run --app-id cli_xxx
 # 或直接初始化并启动后台服务
-lark-channel-bridge start --app-id cli_xxx
+arg-bridge start --app-id cli_xxx
 ```
 
 Lark 国际版应用可加 `--tenant lark`。
@@ -74,9 +78,9 @@ Lark 国际版应用可加 `--tenant lark`。
 `run` 适合首次配置和前台调试。确认 bot 能正常收发消息后，先用 `Ctrl-C` 停掉前台进程，再用系统服务常驻后台：
 
 ```bash
-lark-channel-bridge start
-lark-channel-bridge status
-lark-channel-bridge stop
+arg-bridge start
+arg-bridge status
+arg-bridge stop
 ```
 
 服务层命令必须先全局安装，不能直接用 `npx`。daemon 的 launchd plist / systemd unit / Windows 任务会记录 bridge CLI 的路径；如果这个路径来自 npm 临时缓存，缓存清掉后 daemon 就起不来。`run` 用 `npx` 单次启动没问题。
@@ -84,17 +88,17 @@ lark-channel-bridge stop
 服务层命令按 profile 注册，每个 profile 有独立服务：
 
 ```bash
-lark-channel-bridge start [--profile <name>]
-lark-channel-bridge stop [--profile <name>]
-lark-channel-bridge restart [--profile <name>]
-lark-channel-bridge status [--profile <name>]
-lark-channel-bridge unregister [--profile <name>]
+arg-bridge start [--profile <name>]
+arg-bridge stop [--profile <name>]
+arg-bridge restart [--profile <name>]
+arg-bridge status [--profile <name>]
+arg-bridge unregister [--profile <name>]
 ```
 
 平台映射：
-- **macOS**：launchd 用户代理 `ai.lark-channel-bridge.bot.<profile>`
-- **Linux**：systemd 用户单元 `lark-channel-bridge.bot.<profile>.service`
-- **Windows**：Task Scheduler 任务 `LarkChannelBridge.Bot.<profile>`，launcher 是 `.cmd`
+- **macOS**：launchd 用户代理 `ai.arg-bridge.bot.<profile>`
+- **Linux**：systemd 用户单元 `arg-bridge.bot.<profile>.service`
+- **Windows**：Task Scheduler 任务 `ArgBridge.Bot.<profile>`，launcher 是 `.cmd`
 
 daemon 日志在 `~/.lark-channel/profiles/<profile>/logs/daemon/`。
 
@@ -103,15 +107,15 @@ daemon 日志在 `~/.lark-channel/profiles/<profile>/logs/daemon/`。
 默认情况下，bridge 使用当前激活的 profile；可以通过 `profile use <name>` 切换。每个 profile 会维护独立的应用凭据、会话、工作目录和日志。只有在需要同时连接多个 PersonalAgent 应用，或分别运行 Claude 和 Codex 时，才需要创建多个 profile：
 
 ```bash
-lark-channel-bridge start --profile claude --agent claude
-lark-channel-bridge start --profile codex --agent codex
+arg-bridge start --profile claude --agent claude
+arg-bridge start --profile codex --agent codex
 ```
 
 例如只重启 Codex bot：
 
 ```bash
-lark-channel-bridge restart --profile codex
-lark-channel-bridge status --profile codex
+arg-bridge restart --profile codex
+arg-bridge status --profile codex
 ```
 
 ## 命令速查
@@ -119,24 +123,24 @@ lark-channel-bridge status --profile codex
 ### 宿主 CLI
 
 ```text
-lark-channel-bridge run [--profile <name>] [--agent claude|codex] [--workspace <path>] [-c <config>]
-lark-channel-bridge migrate [--profile <name>] [--agent claude|codex]
-lark-channel-bridge ps
-lark-channel-bridge kill <id|#>
-lark-channel-bridge --help
+arg-bridge run [--profile <name>] [--agent claude|codex] [--workspace <path>] [-c <config>]
+arg-bridge migrate [--profile <name>] [--agent claude|codex]
+arg-bridge ps
+arg-bridge kill <id|#>
+arg-bridge --help
 ```
 
 `profile use <name>` 会切换后续默认启动使用的 profile。需要同时跑 Claude / Codex 两个 bot、连接多套 PersonalAgent 应用，或做脚本化部署时，再使用这些 profile 管理命令：
 
 ```bash
-lark-channel-bridge profile create claude --agent claude
-lark-channel-bridge profile create codex --agent codex
-lark-channel-bridge profile list
-lark-channel-bridge profile use <name>
-lark-channel-bridge profile remove <name>
-lark-channel-bridge profile remove <name> --purge --yes
-lark-channel-bridge profile export <name> [--output ./profile.json] [--force]
-lark-channel-bridge profile export <name> --include-secrets --yes
+arg-bridge profile create claude --agent claude
+arg-bridge profile create codex --agent codex
+arg-bridge profile list
+arg-bridge profile use <name>
+arg-bridge profile remove <name>
+arg-bridge profile remove <name> --purge --yes
+arg-bridge profile export <name> [--output ./profile.json] [--force]
+arg-bridge profile export <name> --include-secrets --yes
 ```
 
 `profile remove` 默认归档本地状态，也可以删除当前激活的 profile。若还剩其他 profile，会自动切到下一个；若这是最后一个 profile，会清空 root config，之后可以用同名重新创建。只有加 `--purge --yes` 才会永久删除。`profile export` 默认脱敏 app secret；只有加 `--include-secrets --yes` 才会导出敏感配置。
@@ -358,13 +362,13 @@ pnpm build
 想接自己的监控时，用环境变量指向一个 default export（或导出 `createAdapter`）`AdapterFactory` 的模块：
 
 ```bash
-LARK_CHANNEL_TELEMETRY_MODULE=your-telemetry-package lark-channel-bridge start
+LARK_CHANNEL_TELEMETRY_MODULE=your-telemetry-package arg-bridge start
 ```
 
 该模块会收到每一条 `log.*` 事件，以及错误 / 指标钩子，转发到任何你想要的地方。接口从包根导出：
 
 ```ts
-import type { AdapterFactory, TelemetryAdapter, TelemetryEvent } from 'lark-channel-bridge';
+import type { AdapterFactory, TelemetryAdapter, TelemetryEvent } from 'arg-bridge';
 
 const createAdapter: AdapterFactory = (meta) => ({
   emit(event) {/* 上报事件 */},

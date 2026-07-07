@@ -235,7 +235,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       cfg.accounts.app.tenant === 'lark'
         ? 'https://open.larksuite.com'
         : 'https://open.feishu.cn',
-    source: 'lark-channel-bridge',
+    source: 'arg-bridge',
     logger: buildQuietLogger(),
     policy: {
       dmMode: 'open',

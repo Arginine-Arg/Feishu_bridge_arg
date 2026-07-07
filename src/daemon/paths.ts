@@ -8,7 +8,7 @@ import { paths } from '../config/paths';
  * unit name. Single-instance for now; if we ever support multiple bots
  * per machine the suffix can grow `.{appid}` without breaking installs.
  */
-export const SERVICE_NAME = 'lark-channel-bridge.bot';
+export const SERVICE_NAME = 'arg-bridge.bot';
 
 export function serviceProfileId(profile: string): string {
   const trimmed = profile.trim();
@@ -61,13 +61,13 @@ export function systemdUnitPath(profile: string = paths.profile): string {
 
 /**
  * schtasks task name. Backslashes turn into Task Scheduler "folders" so
- * `LarkChannelBridge\Bot` would create a Bot task under a LarkChannelBridge
+ * `ArgBridge\Bot` would create a Bot task under a ArgBridge
  * folder. We keep it flat for now.
  */
 export const WINDOWS_TASK_NAME = windowsTaskName();
 
 export function windowsTaskName(profile: string = paths.profile): string {
-  return `LarkChannelBridge.Bot.${serviceProfileId(profile)}`;
+  return `ArgBridge.Bot.${serviceProfileId(profile)}`;
 }
 
 /**

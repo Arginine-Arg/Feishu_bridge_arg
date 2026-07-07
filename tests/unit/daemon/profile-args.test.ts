@@ -27,7 +27,7 @@ describe('profile-scoped daemon paths and arguments', () => {
   it('pins launchd, systemd, and schtasks launch commands to run --profile', () => {
     const inputs = {
       nodePath: '/usr/local/bin/node',
-      bridgeEntryPath: '/repo/bin/lark-channel-bridge.mjs',
+      bridgeEntryPath: '/repo/bin/arg-bridge.mjs',
       envPath: '/usr/local/bin:/usr/bin',
       profile: 'codex-dev',
       channelHome: '/tmp/lark-channel-home',

@@ -42,7 +42,7 @@ export interface UnitInputs {
 export function buildUnit(inputs: UnitInputs): string {
   const escape = (s: string): string => s.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   return `[Unit]
-Description=Lark Channel Bridge bot
+Description=Arg Bridge bot
 After=network-online.target
 Wants=network-online.target
 

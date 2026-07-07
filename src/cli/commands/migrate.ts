@@ -33,7 +33,7 @@ interface LegacyShape {
 /**
  * One-shot migrator for two pre-0.1.11 changes:
  *
- *  1. Path: ~/.config/lark-channel-bridge/ + ~/.cache/lark-channel-bridge/
+ *  1. Path: ~/.config/arg-bridge/ + ~/.cache/arg-bridge/
  *     → ~/.lark-channel/
  *  2. Shape: { app: {...} } → { accounts: { app: {...} } }
  *

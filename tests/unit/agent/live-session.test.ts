@@ -219,6 +219,61 @@ setInterval(() => {}, 1000);
     expect(textOf(events)).toContain('tmux:hello\n48 120\n48x120\n');
   });
 
+  tmuxIt('pastes multiline live prompts into tmux before submitting once', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-paste-test-'));
+    const bin = join(dir, 'fake-tmux-paste-agent.mjs');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+let text = '';
+let inPaste = false;
+process.stdin.on('data', (chunk) => {
+  for (let i = 0; i < chunk.length; i += 1) {
+    if (chunk.startsWith('\\x1b[200~', i)) {
+      inPaste = true;
+      i += '\\x1b[200~'.length - 1;
+      continue;
+    }
+    if (chunk.startsWith('\\x1b[201~', i)) {
+      inPaste = false;
+      i += '\\x1b[201~'.length - 1;
+      continue;
+    }
+    const char = chunk[i];
+    if ((char === '\\r' || char === '\\n') && !inPaste) {
+      process.stdout.write('submitted:' + JSON.stringify(text) + '\\n');
+      text = '';
+      continue;
+    }
+    text += char;
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-paste-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-paste',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 300,
+      outputFlushMs: 40,
+      startupTimeoutMs: 1000,
+    });
+
+    const events = await collect(session.run('run-tmux-paste', 'alpha\nbeta', dir).events);
+    await pool.closeAll();
+
+    expect(textOf(events)).toContain('submitted:"alpha\\nbeta"\n');
+  });
+
   it('normalizes terminal redraws instead of appending every frame', () => {
     expect(cleanTerminalOutput('progress 1\rprogress 2\rdone\n')).toBe('done\n');
   });

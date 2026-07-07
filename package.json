@@ -1,7 +1,7 @@
 {
-  "name": "arg_lark-channel-bridge",
+  "name": "arg-bridge",
   "version": "0.5.5",
-  "description": "Bridge Feishu/Lark messenger with local CLI coding agents (arg fork: long-conversation resilience + interactive-prompt cards)",
+  "description": "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   "type": "module",
   "packageManager": "pnpm@10.33.0",
   "publishConfig": {
@@ -17,7 +17,8 @@
   },
   "homepage": "https://github.com/Arginine-Arg/Feishu_bridge_arg#readme",
   "bin": {
-    "lark-channel-bridge": "./bin/lark-channel-bridge.mjs"
+    "arg-bridge": "./bin/arg-bridge.mjs",
+    "lark-channel-bridge": "./bin/arg-bridge.mjs"
   },
   "exports": {
     ".": {

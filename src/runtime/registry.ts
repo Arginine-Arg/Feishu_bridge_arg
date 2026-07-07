@@ -21,7 +21,7 @@ import { writeFileAtomic } from '../platform/atomic-write';
 import { checkRuntimeLock } from './locks';
 
 /**
- * Tracks running `lark-channel-bridge start` processes so we can:
+ * Tracks running `arg-bridge start` processes so we can:
  *   - Warn on duplicate `start` of the same app (open-platform routes events
  *     to one of N long-connections randomly, leaving users guessing).
  *   - Let users list (`ps` / `/ps`) and terminate (`stop <id>` / `/exit <id>`)
