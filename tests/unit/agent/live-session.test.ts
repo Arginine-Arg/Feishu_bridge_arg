@@ -18,6 +18,7 @@ appendFileSync(${JSON.stringify(countFile)}, 'start\\n');
 process.stdin.setEncoding('utf8');
 let buf = '';
 process.stdin.on('data', (chunk) => {
+  if (chunk.includes('\\x1b[A')) process.stdout.write('arrow-up\\n');
   buf += chunk;
   let idx;
   while ((idx = buf.search(/[\\r\\n]/)) !== -1) {
@@ -71,6 +72,7 @@ setInterval(() => {}, 1000);
     const third = await collect(secondSession.run('run-3', '/repeat', dir).events);
     const fourth = await collect(secondSession.run('run-4', '/split-ansi', dir).events);
     const fifth = await collect(secondSession.run('run-5', '/warning', dir).events);
+    const sixth = await collect(secondSession.run('run-6', 'up', dir).events);
     await pool.closeAll();
 
     expect(textOf(first)).toContain('echo:hello');
@@ -78,6 +80,7 @@ setInterval(() => {}, 1000);
     expect(textOf(third).match(/same-frame/g)).toHaveLength(1);
     expect(textOf(fourth)).toBe('clean-frame\n');
     expect(textOf(fifth)).toBe('answer\n');
+    expect(textOf(sixth)).toContain('arrow-up');
     expect(await readFile(countFile, 'utf8')).toBe('start\n');
   });
 

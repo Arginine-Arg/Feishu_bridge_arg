@@ -155,7 +155,7 @@ export class LiveTerminalSession {
     const idleMs = this.opts.idleMs ?? DEFAULT_IDLE_MS;
     const outputFlushMs = this.opts.outputFlushMs ?? DEFAULT_OUTPUT_FLUSH_MS;
     const startupTimeoutMs = this.opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
-    const output = new TurnOutputBuffer(MAX_TURN_OUTPUT_CHARS);
+    const output = new TurnOutputBuffer(MAX_TURN_OUTPUT_CHARS, prompt);
     const queue: AgentEvent[] = [];
     let done = false;
     let wake: (() => void) | undefined;
@@ -220,7 +220,7 @@ export class LiveTerminalSession {
     this.emitter.once('error', onError);
     arm(startupTimeoutMs);
     await delay(STARTUP_INPUT_GRACE_MS);
-    if (!done) this.write(`${prompt}\r`);
+    if (!done) this.write(translateLiveInput(prompt));
 
     try {
       while (!done || queue.length > 0) {
@@ -279,6 +279,17 @@ function spawnLiveProcess(opts: LiveSessionCommand): {
 function shellQuote(value: string): string {
   if (/^[A-Za-z0-9_/:=.,@%+-]+$/.test(value)) return value;
   return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function translateLiveInput(input: string): string {
+  const trimmed = input.trim().toLowerCase();
+  if (trimmed === 'up' || trimmed === '↑' || trimmed === '上') return '\x1B[A';
+  if (trimmed === 'down' || trimmed === '↓' || trimmed === '下') return '\x1B[B';
+  if (trimmed === 'left' || trimmed === '←' || trimmed === '左') return '\x1B[D';
+  if (trimmed === 'right' || trimmed === '→' || trimmed === '右') return '\x1B[C';
+  if (trimmed === 'enter' || trimmed === 'return' || trimmed === '回车') return '\r';
+  if (trimmed === 'esc' || trimmed === 'escape' || trimmed === '取消') return '\x1B';
+  return `${input}\r`;
 }
 
 export function cleanTerminalOutput(input: string): string {
@@ -498,7 +509,10 @@ class TurnOutputBuffer {
   private lastCompleteLine = '';
   private truncated = false;
 
-  constructor(private readonly maxChars: number) {}
+  constructor(
+    private readonly maxChars: number,
+    private readonly promptEcho: string = '',
+  ) {}
 
   append(raw: string): boolean {
     const compacted = this.compact(raw);
@@ -528,7 +542,7 @@ class TurnOutputBuffer {
   }
 
   private compact(text: string): string {
-    const normalized = cleanTerminalOutput(text);
+    const normalized = stripPromptEcho(cleanTerminalOutput(text), this.promptEcho);
     if (!normalized.trim()) return '';
     const parts = normalized.split(/(\n)/);
     let out = '';
@@ -639,6 +653,15 @@ function stripKnownLiveNoise(input: string): string {
   ])
     .replace(/\n{3,}/g, '\n\n')
     .trimStart();
+}
+
+function stripPromptEcho(input: string, prompt: string): string {
+  const echo = prompt.trim();
+  if (!echo) return input;
+  const trimmed = input.trimStart();
+  if (trimmed === echo) return '';
+  if (trimmed.startsWith(`${echo}\n`)) return trimmed.slice(echo.length + 1);
+  return input;
 }
 
 function stripCompactNoise(input: string, patterns: string[]): string {

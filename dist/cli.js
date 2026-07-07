@@ -5999,7 +5999,7 @@ var LiveTerminalSession = class {
     const idleMs = this.opts.idleMs ?? DEFAULT_IDLE_MS;
     const outputFlushMs = this.opts.outputFlushMs ?? DEFAULT_OUTPUT_FLUSH_MS;
     const startupTimeoutMs = this.opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
-    const output = new TurnOutputBuffer(MAX_TURN_OUTPUT_CHARS);
+    const output = new TurnOutputBuffer(MAX_TURN_OUTPUT_CHARS, prompt);
     const queue = [];
     let done = false;
     let wake;
@@ -6059,7 +6059,7 @@ var LiveTerminalSession = class {
     this.emitter.once("error", onError);
     arm(startupTimeoutMs);
     await delay(STARTUP_INPUT_GRACE_MS);
-    if (!done) this.write(`${prompt}\r`);
+    if (!done) this.write(translateLiveInput(prompt));
     try {
       while (!done || queue.length > 0) {
         if (queue.length === 0) {
@@ -6111,6 +6111,16 @@ function spawnLiveProcess(opts) {
 function shellQuote(value) {
   if (/^[A-Za-z0-9_/:=.,@%+-]+$/.test(value)) return value;
   return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+function translateLiveInput(input) {
+  const trimmed = input.trim().toLowerCase();
+  if (trimmed === "up" || trimmed === "\u2191" || trimmed === "\u4E0A") return "\x1B[A";
+  if (trimmed === "down" || trimmed === "\u2193" || trimmed === "\u4E0B") return "\x1B[B";
+  if (trimmed === "left" || trimmed === "\u2190" || trimmed === "\u5DE6") return "\x1B[D";
+  if (trimmed === "right" || trimmed === "\u2192" || trimmed === "\u53F3") return "\x1B[C";
+  if (trimmed === "enter" || trimmed === "return" || trimmed === "\u56DE\u8F66") return "\r";
+  if (trimmed === "esc" || trimmed === "escape" || trimmed === "\u53D6\u6D88") return "\x1B";
+  return `${input}\r`;
 }
 function cleanTerminalOutput(input) {
   const withoutAnsi = input.replace(/\x1B\][^\x07]*(?:\x07|\x1B\\)/g, "").replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "").replace(/\x1B[@-Z\\-_]/g, "").replace(/(^|[\r\n])\d{1,4}G(?=\S)/g, "$1").replace(/(\S)78\s+(?=\S)/g, "$1").replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "").replace(/\r\n/g, "\n");
@@ -6288,10 +6298,12 @@ var VirtualTerminalScreen = class {
   }
 };
 var TurnOutputBuffer = class {
-  constructor(maxChars) {
+  constructor(maxChars, promptEcho = "") {
     this.maxChars = maxChars;
+    this.promptEcho = promptEcho;
   }
   maxChars;
+  promptEcho;
   emitted = "";
   pending = "";
   lastCompleteLine = "";
@@ -6321,7 +6333,7 @@ var TurnOutputBuffer = class {
     return out;
   }
   compact(text) {
-    const normalized = cleanTerminalOutput(text);
+    const normalized = stripPromptEcho(cleanTerminalOutput(text), this.promptEcho);
     if (!normalized.trim()) return "";
     const parts = normalized.split(/(\n)/);
     let out = "";
@@ -6427,6 +6439,15 @@ function stripKnownLiveNoise(input) {
     "Tip:Use/inittocreateanAGENTS.mdwithproject-specificguidance.",
     "Tip:Use/inittocreateanAGENTS.mdwithproject-specificguidance"
   ]).replace(/\n{3,}/g, "\n\n").trimStart();
+}
+function stripPromptEcho(input, prompt) {
+  const echo = prompt.trim();
+  if (!echo) return input;
+  const trimmed = input.trimStart();
+  if (trimmed === echo) return "";
+  if (trimmed.startsWith(`${echo}
+`)) return trimmed.slice(echo.length + 1);
+  return input;
 }
 function stripCompactNoise(input, patterns) {
   const compactChars = [];
