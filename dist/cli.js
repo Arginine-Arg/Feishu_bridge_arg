@@ -5883,6 +5883,7 @@ var DEFAULT_IDLE_MS = 3500;
 var DEFAULT_OUTPUT_FLUSH_MS = 500;
 var DEFAULT_STARTUP_TIMEOUT_MS = 15e3;
 var STARTUP_INPUT_GRACE_MS = 25;
+var CONTROL_KEY_GAP_MS = 40;
 var MAX_TURN_OUTPUT_CHARS = 12e4;
 var DEFAULT_PTY_ROWS = "48";
 var DEFAULT_PTY_COLUMNS = "120";
@@ -6087,7 +6088,15 @@ var LiveTerminalSession = class {
     if (!done) {
       this.cleaner.resetTurn();
       acceptingOutput = true;
-      this.write(translateLiveInput(prompt));
+      const controlKeys = parseLiveControlSequence(prompt);
+      if (controlKeys) {
+        for (let i = 0; i < controlKeys.length; i++) {
+          if (i > 0) await delay(CONTROL_KEY_GAP_MS);
+          this.write(controlKeys[i]);
+        }
+      } else {
+        this.write(translateLiveInput(prompt));
+      }
     }
     try {
       while (!done || queue.length > 0) {
@@ -6333,14 +6342,47 @@ process.on('SIGINT', () => {
 });
 process.on('exit', cleanup);
 `;
+var CONTROL_KEYS = {
+  up: "\x1B[A",
+  "\u2191": "\x1B[A",
+  \u4E0A: "\x1B[A",
+  down: "\x1B[B",
+  "\u2193": "\x1B[B",
+  \u4E0B: "\x1B[B",
+  left: "\x1B[D",
+  "\u2190": "\x1B[D",
+  \u5DE6: "\x1B[D",
+  right: "\x1B[C",
+  "\u2192": "\x1B[C",
+  \u53F3: "\x1B[C",
+  enter: "\r",
+  return: "\r",
+  \u56DE\u8F66: "\r",
+  \u786E\u8BA4: "\r",
+  esc: "\x1B",
+  escape: "\x1B",
+  \u53D6\u6D88: "\x1B",
+  \u8FD4\u56DE: "\x1B",
+  space: " ",
+  tab: "	"
+};
+function parseLiveControlSequence(input) {
+  const tokens = input.trim().split(/\s+/u).filter(Boolean);
+  if (tokens.length === 0) return null;
+  const keys = [];
+  for (const token of tokens) {
+    const key = CONTROL_KEYS[token.toLowerCase()] ?? CONTROL_KEYS[token];
+    if (key === void 0) return null;
+    keys.push(key);
+  }
+  return keys;
+}
+function isLiveControlInput(input) {
+  return parseLiveControlSequence(input) !== null;
+}
 function translateLiveInput(input) {
-  const trimmed = input.trim().toLowerCase();
-  if (trimmed === "up" || trimmed === "\u2191" || trimmed === "\u4E0A") return "\x1B[A";
-  if (trimmed === "down" || trimmed === "\u2193" || trimmed === "\u4E0B") return "\x1B[B";
-  if (trimmed === "left" || trimmed === "\u2190" || trimmed === "\u5DE6") return "\x1B[D";
-  if (trimmed === "right" || trimmed === "\u2192" || trimmed === "\u53F3") return "\x1B[C";
-  if (trimmed === "enter" || trimmed === "return" || trimmed === "\u56DE\u8F66") return "\r";
-  if (trimmed === "esc" || trimmed === "escape" || trimmed === "\u53D6\u6D88") return "\x1B";
+  const keys = parseLiveControlSequence(input);
+  if (keys) return keys.join("");
   return `${input}\r`;
 }
 function cleanTerminalOutput(input) {
@@ -7574,7 +7616,7 @@ var CodexAdapter = class {
   }
 };
 function isNativeCliCommand(prompt) {
-  return prompt.trimStart().startsWith("/");
+  return prompt.trimStart().startsWith("/") || isLiveControlInput(prompt);
 }
 async function* createEventStream2(child, stderrChunks, getError, getStopReason) {
   const translator = new CodexJsonlTranslator();
@@ -14218,7 +14260,7 @@ async function intakeMessage(deps) {
     return;
   }
   const rewrittenMsg = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
-  const agentMsg = getAgentSessionMode(controls.cfg) === "live" && isSlashCommandText(rewrittenMsg.content) ? markNativeAgentCommand(rewrittenMsg) : rewrittenMsg;
+  const agentMsg = getAgentSessionMode(controls.cfg) === "live" && (isSlashCommandText(rewrittenMsg.content) || isLiveControlInput(rewrittenMsg.content)) ? markNativeAgentCommand(rewrittenMsg) : rewrittenMsg;
   const size = pending.push(scope, agentMsg);
   log.info("intake", "queued", { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
   if (pending.shouldAckBusy(scope)) {

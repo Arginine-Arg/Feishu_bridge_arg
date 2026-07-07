@@ -6,9 +6,33 @@ import { describe, expect, it } from 'vitest';
 import type { AgentEvent } from '../../../src/agent/types';
 import {
   cleanTerminalOutput,
+  isLiveControlInput,
   LiveSessionPool,
   LiveTerminalSession,
+  parseLiveControlSequence,
 } from '../../../src/agent/live-session';
+
+describe('parseLiveControlSequence', () => {
+  it('maps single and multi-key navigation words to terminal keys', () => {
+    expect(parseLiveControlSequence('up')).toEqual(['\x1B[A']);
+    expect(parseLiveControlSequence('down')).toEqual(['\x1B[B']);
+    expect(parseLiveControlSequence('enter')).toEqual(['\r']);
+    expect(parseLiveControlSequence('esc')).toEqual(['\x1B']);
+    // Multi-key in one message: move then confirm.
+    expect(parseLiveControlSequence('down down enter')).toEqual(['\x1B[B', '\x1B[B', '\r']);
+    expect(parseLiveControlSequence('UP Enter')).toEqual(['\x1B[A', '\r']);
+    expect(parseLiveControlSequence('上 回车')).toEqual(['\x1B[A', '\r']);
+  });
+
+  it('returns null for ordinary text (not a pure control sequence)', () => {
+    expect(parseLiveControlSequence('你好')).toBeNull();
+    expect(parseLiveControlSequence('up please')).toBeNull();
+    expect(parseLiveControlSequence('/model')).toBeNull();
+    expect(parseLiveControlSequence('')).toBeNull();
+    expect(isLiveControlInput('down enter')).toBe(true);
+    expect(isLiveControlInput('summarize commits')).toBe(false);
+  });
+});
 
 describe('LiveTerminalSession prime slot', () => {
   it('grants the system-prompt prime slot exactly once', () => {

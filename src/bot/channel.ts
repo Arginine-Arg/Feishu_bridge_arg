@@ -17,6 +17,7 @@ import {
 import type { AgentAdapter, AgentEvent } from '../agent/types';
 import { handleCardAction } from '../card/dispatcher';
 import { consumeInteractivePrompts, PROMPT_CALLBACK_ACTION } from '../card/interactive-prompt';
+import { isLiveControlInput } from '../agent/live-session';
 import { CallbackAuth } from '../card/callback-auth';
 import { CallbackNonceStore } from '../card/callback-store';
 import { renderCard } from '../card/run-renderer';
@@ -685,8 +686,13 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   }
 
   const rewrittenMsg = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
+  // In live mode, slash commands (/model) AND bare navigation keys (up / down /
+  // enter / esc …) are forwarded raw to the persistent CLI so they drive its
+  // interactive picker. Without this, nav words get wrapped in bridge_context
+  // and typed literally, so the picker just confirms its default selection.
   const agentMsg =
-    getAgentSessionMode(controls.cfg) === 'live' && isSlashCommandText(rewrittenMsg.content)
+    getAgentSessionMode(controls.cfg) === 'live' &&
+    (isSlashCommandText(rewrittenMsg.content) || isLiveControlInput(rewrittenMsg.content))
       ? markNativeAgentCommand(rewrittenMsg)
       : rewrittenMsg;
   const size = pending.push(scope, agentMsg);

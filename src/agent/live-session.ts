@@ -32,6 +32,7 @@ const DEFAULT_IDLE_MS = 3500;
 const DEFAULT_OUTPUT_FLUSH_MS = 500;
 const DEFAULT_STARTUP_TIMEOUT_MS = 15_000;
 const STARTUP_INPUT_GRACE_MS = 25;
+const CONTROL_KEY_GAP_MS = 40;
 const MAX_TURN_OUTPUT_CHARS = 120_000;
 const DEFAULT_PTY_ROWS = '48';
 const DEFAULT_PTY_COLUMNS = '120';
@@ -255,7 +256,18 @@ export class LiveTerminalSession {
     if (!done) {
       this.cleaner.resetTurn();
       acceptingOutput = true;
-      this.write(translateLiveInput(prompt));
+      const controlKeys = parseLiveControlSequence(prompt);
+      if (controlKeys) {
+        // Send each key as its own write so the tmux backend (which matches a
+        // single key per stdin chunk) sees them individually; a small gap keeps
+        // the writes from coalescing into one unrecognized chunk.
+        for (let i = 0; i < controlKeys.length; i++) {
+          if (i > 0) await delay(CONTROL_KEY_GAP_MS);
+          this.write(controlKeys[i]!);
+        }
+      } else {
+        this.write(translateLiveInput(prompt));
+      }
     }
 
     try {
@@ -526,14 +538,45 @@ process.on('SIGINT', () => {
 process.on('exit', cleanup);
 `;
 
+// Word → terminal key. Lets users drive an agent's interactive picker
+// (e.g. Codex `/model`) from chat by sending navigation words.
+const CONTROL_KEYS: Record<string, string> = {
+  up: '\x1B[A', '↑': '\x1B[A', 上: '\x1B[A',
+  down: '\x1B[B', '↓': '\x1B[B', 下: '\x1B[B',
+  left: '\x1B[D', '←': '\x1B[D', 左: '\x1B[D',
+  right: '\x1B[C', '→': '\x1B[C', 右: '\x1B[C',
+  enter: '\r', return: '\r', 回车: '\r', 确认: '\r',
+  esc: '\x1B', escape: '\x1B', 取消: '\x1B', 返回: '\x1B',
+  space: ' ', tab: '\t',
+};
+
+/**
+ * If `input` is composed ENTIRELY of navigation/control words (single or
+ * space-separated, e.g. "up", "down down enter", "esc"), return the ordered
+ * list of terminal key sequences to send. Otherwise null (ordinary text).
+ * Enables multi-key picker control in one message — "up enter" moves then
+ * confirms, instead of being typed literally and confirming the default.
+ */
+export function parseLiveControlSequence(input: string): string[] | null {
+  const tokens = input.trim().split(/\s+/u).filter(Boolean);
+  if (tokens.length === 0) return null;
+  const keys: string[] = [];
+  for (const token of tokens) {
+    const key = CONTROL_KEYS[token.toLowerCase()] ?? CONTROL_KEYS[token];
+    if (key === undefined) return null;
+    keys.push(key);
+  }
+  return keys;
+}
+
+/** True when the whole message is a navigation/control key sequence. */
+export function isLiveControlInput(input: string): boolean {
+  return parseLiveControlSequence(input) !== null;
+}
+
 function translateLiveInput(input: string): string {
-  const trimmed = input.trim().toLowerCase();
-  if (trimmed === 'up' || trimmed === '↑' || trimmed === '上') return '\x1B[A';
-  if (trimmed === 'down' || trimmed === '↓' || trimmed === '下') return '\x1B[B';
-  if (trimmed === 'left' || trimmed === '←' || trimmed === '左') return '\x1B[D';
-  if (trimmed === 'right' || trimmed === '→' || trimmed === '右') return '\x1B[C';
-  if (trimmed === 'enter' || trimmed === 'return' || trimmed === '回车') return '\r';
-  if (trimmed === 'esc' || trimmed === 'escape' || trimmed === '取消') return '\x1B';
+  const keys = parseLiveControlSequence(input);
+  if (keys) return keys.join('');
   return `${input}\r`;
 }
 

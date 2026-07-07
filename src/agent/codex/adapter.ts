@@ -7,7 +7,7 @@ import { mergeProcessEnv, spawnProcess, type SpawnedProcessByStdio } from '../..
 import { SpawnFailed } from '../../runtime/errors';
 import { prefixBridgeSystemPrompt } from '../bridge-system-prompt';
 import { buildLarkChannelEnv, type LarkChannelEnvContext } from '../lark-channel-env';
-import { LiveSessionPool, type LiveTerminalBackend } from '../live-session';
+import { isLiveControlInput, LiveSessionPool, type LiveTerminalBackend } from '../live-session';
 import { checkAgentAvailability, type AgentAvailability } from '../preflight';
 import type {
   AgentAdapter,
@@ -280,7 +280,9 @@ export class CodexAdapter implements AgentAdapter {
 }
 
 function isNativeCliCommand(prompt: string): boolean {
-  return prompt.trimStart().startsWith('/');
+  // Slash commands and bare navigation keys are forwarded raw to the live CLI
+  // (no system-prompt prefix, no wrapping) so they reach its interactive picker.
+  return prompt.trimStart().startsWith('/') || isLiveControlInput(prompt);
 }
 
 async function* createEventStream(
