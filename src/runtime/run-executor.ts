@@ -220,27 +220,43 @@ function observeRunEvents(
 ): AsyncIterable<AgentEvent> {
   return {
     async *[Symbol.asyncIterator](): AsyncIterator<AgentEvent> {
-      for await (const event of events) {
-        if (event.type === 'done') {
-          log.info('run', 'completed', {
-            ...opts.dimensions,
-            result: event.terminationReason,
-            durationMs: opts.now() - opts.startedAt,
-          });
+      const iterator = events[Symbol.asyncIterator]();
+      let closed = false;
+      const close = async (): Promise<void> => {
+        if (closed) return;
+        closed = true;
+        await iterator.return?.();
+      };
+      try {
+        while (true) {
+          const next = await iterator.next();
+          if (next.done) return;
+          const event = next.value;
+          if (event.type === 'done') {
+            log.info('run', 'completed', {
+              ...opts.dimensions,
+              result: event.terminationReason,
+              durationMs: opts.now() - opts.startedAt,
+            });
+            await close();
+            yield event;
+            return;
+          }
+          if (event.type === 'error') {
+            log.warn('run', 'failed', {
+              ...opts.dimensions,
+              result: event.terminationReason,
+              durationMs: opts.now() - opts.startedAt,
+              error: event.message,
+            });
+            await close();
+            yield event;
+            return;
+          }
           yield event;
-          return;
         }
-        if (event.type === 'error') {
-          log.warn('run', 'failed', {
-            ...opts.dimensions,
-            result: event.terminationReason,
-            durationMs: opts.now() - opts.startedAt,
-            error: event.message,
-          });
-          yield event;
-          return;
-        }
-        yield event;
+      } finally {
+        await close();
       }
     },
   };
@@ -251,9 +267,13 @@ class EventFanout {
   private readonly onDone: () => Promise<void>;
   private readonly buffer: AgentEvent[] = [];
   private readonly waiters = new Set<() => void>();
+  private sourceIterator: AsyncIterator<AgentEvent> | undefined;
   private started = false;
   private done = false;
   private error: unknown;
+  private activeSubscribers = 0;
+  private cancelRequested = false;
+  private closeSourcePromise: Promise<void> | undefined;
 
   constructor(source: AsyncIterable<AgentEvent>, onDone: () => Promise<void>) {
     this.source = source;
@@ -264,8 +284,32 @@ class EventFanout {
     return {
       [Symbol.asyncIterator]: () => {
         let index = 0;
+        let subscribed = false;
+        let closed = false;
+        let waiter: (() => void) | undefined;
+        const release = (): void => {
+          if (closed) return;
+          closed = true;
+          if (waiter) {
+            this.waiters.delete(waiter);
+            waiter();
+            waiter = undefined;
+          }
+          if (subscribed) {
+            subscribed = false;
+            this.activeSubscribers = Math.max(0, this.activeSubscribers - 1);
+            if (this.activeSubscribers === 0 && !this.done) {
+              this.requestCancel();
+            }
+          }
+        };
         return {
           next: async (): Promise<IteratorResult<AgentEvent>> => {
+            if (closed) return { done: true, value: undefined };
+            if (!subscribed) {
+              subscribed = true;
+              this.activeSubscribers += 1;
+            }
             this.start();
             if (index < this.buffer.length) {
               return { done: false, value: this.buffer[index++]! };
@@ -273,17 +317,27 @@ class EventFanout {
             if (this.error) throw this.error;
             if (this.done) return { done: true, value: undefined };
             await new Promise<void>((resolve) => {
-              const wake = (): void => {
-                this.waiters.delete(wake);
+              waiter = (): void => {
+                if (waiter) this.waiters.delete(waiter);
+                waiter = undefined;
                 resolve();
               };
-              this.waiters.add(wake);
+              this.waiters.add(waiter);
             });
+            if (closed) return { done: true, value: undefined };
             if (index < this.buffer.length) {
               return { done: false, value: this.buffer[index++]! };
             }
             if (this.error) throw this.error;
             return { done: true, value: undefined };
+          },
+          return: async (): Promise<IteratorResult<AgentEvent>> => {
+            release();
+            return { done: true, value: undefined };
+          },
+          throw: async (err?: unknown): Promise<IteratorResult<AgentEvent>> => {
+            release();
+            throw err;
           },
         };
       },
@@ -298,18 +352,41 @@ class EventFanout {
 
   private async pump(): Promise<void> {
     try {
-      for await (const event of this.source) {
+      const iterator = this.source[Symbol.asyncIterator]();
+      this.sourceIterator = iterator;
+      while (!this.cancelRequested) {
+        const next = await iterator.next();
+        if (next.done) break;
+        const event = next.value;
         this.buffer.push(event);
         this.wakeAll();
-        if (isTerminalEvent(event)) break;
+        if (isTerminalEvent(event)) {
+          await this.closeSource();
+          break;
+        }
       }
     } catch (err) {
-      this.error = err;
+      if (!this.cancelRequested) this.error = err;
     } finally {
+      await this.closeSource();
       await this.onDone();
       this.done = true;
       this.wakeAll();
     }
+  }
+
+  private requestCancel(): void {
+    this.cancelRequested = true;
+    void this.closeSource();
+    this.wakeAll();
+  }
+
+  private closeSource(): Promise<void> {
+    if (this.closeSourcePromise) return this.closeSourcePromise;
+    const iterator = this.sourceIterator;
+    if (!iterator) return Promise.resolve();
+    this.closeSourcePromise = Promise.resolve(iterator?.return?.()).then(() => undefined);
+    return this.closeSourcePromise;
   }
 
   private wakeAll(): void {

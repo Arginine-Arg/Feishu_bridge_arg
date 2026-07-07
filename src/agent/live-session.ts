@@ -78,6 +78,7 @@ export class LiveTerminalSession {
   private child: LiveChild | undefined;
   private closed = false;
   private primed = false;
+  private activeTurnCleanup: (() => void) | undefined;
 
   constructor(opts: LiveSessionCommand, onClose: () => void = () => {}) {
     this.opts = opts;
@@ -302,35 +303,51 @@ export class LiveTerminalSession {
       push({ type: 'error', message: `live agent failed: ${err.message}`, terminationReason: 'failed' });
     };
 
+    let turnCleaned = false;
+    const cleanupTurn = (): void => {
+      if (turnCleaned) return;
+      turnCleaned = true;
+      done = true;
+      if (timer) clearTimeout(timer);
+      if (outputTimer) clearTimeout(outputTimer);
+      this.emitter.off('data', onData);
+      this.emitter.off('exit', onExit);
+      this.emitter.off('error', onError);
+      if (this.activeTurnCleanup === cleanupTurn) this.activeTurnCleanup = undefined;
+      wake?.();
+    };
+
+    this.activeTurnCleanup?.();
+    this.activeTurnCleanup = cleanupTurn;
     this.emitter.on('data', onData);
     this.emitter.once('exit', onExit);
     this.emitter.once('error', onError);
-    arm(startupTimeoutMs);
-    await delay(STARTUP_INPUT_GRACE_MS);
-    if (!done) {
-      this.cleaner.resetTurn();
-      if (commandMode) {
-        log.info('agent-live', 'command-clear', { sequence: 'esc esc ctrl-a ctrl-k' });
-        await this.clearPendingInput();
-        this.cleaner.resetTurn();
-      }
-      acceptingOutput = true;
-      const controlKeys = parseLiveControlSequence(prompt);
-      if (controlKeys) {
-        // Send each key as its own write so the tmux backend (which matches a
-        // single key per stdin chunk) sees them individually; a small gap keeps
-        // the writes from coalescing into one unrecognized chunk.
-        for (let i = 0; i < controlKeys.length; i++) {
-          if (i > 0) await delay(CONTROL_KEY_GAP_MS);
-          this.write(controlKeys[i]!);
-        }
-      } else {
-        if (commandMode) log.info('agent-live', 'command-submit', { commandText: prompt });
-        this.write(translateLiveInput(prompt));
-      }
-    }
-
     try {
+      arm(startupTimeoutMs);
+      await delay(STARTUP_INPUT_GRACE_MS);
+      if (!done) {
+        this.cleaner.resetTurn();
+        if (commandMode) {
+          log.info('agent-live', 'command-clear', { sequence: 'esc esc ctrl-a ctrl-k' });
+          await this.clearPendingInput();
+          this.cleaner.resetTurn();
+        }
+        acceptingOutput = true;
+        const controlKeys = parseLiveControlSequence(prompt);
+        if (controlKeys) {
+          // Send each key as its own write so the tmux backend (which matches a
+          // single key per stdin chunk) sees them individually; a small gap keeps
+          // the writes from coalescing into one unrecognized chunk.
+          for (let i = 0; i < controlKeys.length; i++) {
+            if (i > 0) await delay(CONTROL_KEY_GAP_MS);
+            this.write(controlKeys[i]!);
+          }
+        } else {
+          if (commandMode) log.info('agent-live', 'command-submit', { commandText: prompt });
+          this.write(translateLiveInput(prompt));
+        }
+      }
+
       while (!done || queue.length > 0) {
         if (queue.length === 0) {
           await new Promise<void>((resolve) => {
@@ -343,11 +360,7 @@ export class LiveTerminalSession {
         if (event) yield event;
       }
     } finally {
-      if (timer) clearTimeout(timer);
-      if (outputTimer) clearTimeout(outputTimer);
-      this.emitter.off('data', onData);
-      this.emitter.off('exit', onExit);
-      this.emitter.off('error', onError);
+      cleanupTurn();
     }
   }
 

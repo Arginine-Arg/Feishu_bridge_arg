@@ -259,6 +259,57 @@ setInterval(() => {}, 1000);
     expect(textOf(events)).toBe('clean answer\n');
   });
 
+  it('cleans up a previous live turn when a new turn starts', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-turn-cleanup-test-'));
+    const bin = join(dir, 'fake-turn-cleanup-agent.mjs');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+let buf = '';
+process.stdin.on('data', (chunk) => {
+  buf += chunk;
+  let idx;
+  while ((idx = buf.search(/[\\r\\n]/)) !== -1) {
+    const line = buf.slice(0, idx).trim();
+    buf = buf.slice(idx + 1);
+    if (line === 'second') process.stdout.write('second-ok\\n');
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('turn-cleanup-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'turn-cleanup',
+      usePty: false,
+      idleMs: 1000,
+      outputFlushMs: 5,
+      startupTimeoutMs: 1000,
+    });
+
+    const first = session.run('run-turn-cleanup-1', 'first', dir).events[Symbol.asyncIterator]();
+    expect(await first.next()).toMatchObject({ done: false, value: { type: 'system' } });
+    const stalePending = first.next();
+    await testDelay(80);
+
+    const second = await collect(session.run('run-turn-cleanup-2', 'second', dir).events);
+    const staleResult = await Promise.race([
+      stalePending,
+      testDelay(200).then(() => 'timeout' as const),
+    ]);
+    await pool.closeAll();
+
+    expect(staleResult).not.toBe('timeout');
+    expect(textOf(second)).toBe('second-ok\n');
+  });
+
   linuxIt('starts live PTY sessions with a stable terminal size', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-pty-size-test-'));
     const bin = join(dir, 'fake-pty-size-agent.mjs');
@@ -462,4 +513,8 @@ function textOf(events: AgentEvent[]): string {
 
 function hasTmux(): boolean {
   return spawnSync('tmux', ['-V'], { stdio: 'ignore' }).status === 0;
+}
+
+function testDelay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

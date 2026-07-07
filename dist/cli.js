@@ -5923,6 +5923,7 @@ var LiveTerminalSession = class {
   child;
   closed = false;
   primed = false;
+  activeTurnCleanup;
   constructor(opts, onClose = () => {
   }) {
     this.opts = opts;
@@ -6121,31 +6122,46 @@ var LiveTerminalSession = class {
       flushOutput();
       push({ type: "error", message: `live agent failed: ${err.message}`, terminationReason: "failed" });
     };
+    let turnCleaned = false;
+    const cleanupTurn = () => {
+      if (turnCleaned) return;
+      turnCleaned = true;
+      done = true;
+      if (timer) clearTimeout(timer);
+      if (outputTimer) clearTimeout(outputTimer);
+      this.emitter.off("data", onData);
+      this.emitter.off("exit", onExit);
+      this.emitter.off("error", onError);
+      if (this.activeTurnCleanup === cleanupTurn) this.activeTurnCleanup = void 0;
+      wake?.();
+    };
+    this.activeTurnCleanup?.();
+    this.activeTurnCleanup = cleanupTurn;
     this.emitter.on("data", onData);
     this.emitter.once("exit", onExit);
     this.emitter.once("error", onError);
-    arm(startupTimeoutMs);
-    await delay(STARTUP_INPUT_GRACE_MS);
-    if (!done) {
-      this.cleaner.resetTurn();
-      if (commandMode) {
-        log.info("agent-live", "command-clear", { sequence: "esc esc ctrl-a ctrl-k" });
-        await this.clearPendingInput();
-        this.cleaner.resetTurn();
-      }
-      acceptingOutput = true;
-      const controlKeys = parseLiveControlSequence(prompt);
-      if (controlKeys) {
-        for (let i = 0; i < controlKeys.length; i++) {
-          if (i > 0) await delay(CONTROL_KEY_GAP_MS);
-          this.write(controlKeys[i]);
-        }
-      } else {
-        if (commandMode) log.info("agent-live", "command-submit", { commandText: prompt });
-        this.write(translateLiveInput(prompt));
-      }
-    }
     try {
+      arm(startupTimeoutMs);
+      await delay(STARTUP_INPUT_GRACE_MS);
+      if (!done) {
+        this.cleaner.resetTurn();
+        if (commandMode) {
+          log.info("agent-live", "command-clear", { sequence: "esc esc ctrl-a ctrl-k" });
+          await this.clearPendingInput();
+          this.cleaner.resetTurn();
+        }
+        acceptingOutput = true;
+        const controlKeys = parseLiveControlSequence(prompt);
+        if (controlKeys) {
+          for (let i = 0; i < controlKeys.length; i++) {
+            if (i > 0) await delay(CONTROL_KEY_GAP_MS);
+            this.write(controlKeys[i]);
+          }
+        } else {
+          if (commandMode) log.info("agent-live", "command-submit", { commandText: prompt });
+          this.write(translateLiveInput(prompt));
+        }
+      }
       while (!done || queue.length > 0) {
         if (queue.length === 0) {
           await new Promise((resolve2) => {
@@ -6158,11 +6174,7 @@ var LiveTerminalSession = class {
         if (event) yield event;
       }
     } finally {
-      if (timer) clearTimeout(timer);
-      if (outputTimer) clearTimeout(outputTimer);
-      this.emitter.off("data", onData);
-      this.emitter.off("exit", onExit);
-      this.emitter.off("error", onError);
+      cleanupTurn();
     }
   }
   async clearPendingInput() {
@@ -12701,27 +12713,43 @@ var RunExecutor = class {
 function observeRunEvents(events, opts) {
   return {
     async *[Symbol.asyncIterator]() {
-      for await (const event of events) {
-        if (event.type === "done") {
-          log.info("run", "completed", {
-            ...opts.dimensions,
-            result: event.terminationReason,
-            durationMs: opts.now() - opts.startedAt
-          });
+      const iterator = events[Symbol.asyncIterator]();
+      let closed = false;
+      const close = async () => {
+        if (closed) return;
+        closed = true;
+        await iterator.return?.();
+      };
+      try {
+        while (true) {
+          const next = await iterator.next();
+          if (next.done) return;
+          const event = next.value;
+          if (event.type === "done") {
+            log.info("run", "completed", {
+              ...opts.dimensions,
+              result: event.terminationReason,
+              durationMs: opts.now() - opts.startedAt
+            });
+            await close();
+            yield event;
+            return;
+          }
+          if (event.type === "error") {
+            log.warn("run", "failed", {
+              ...opts.dimensions,
+              result: event.terminationReason,
+              durationMs: opts.now() - opts.startedAt,
+              error: event.message
+            });
+            await close();
+            yield event;
+            return;
+          }
           yield event;
-          return;
         }
-        if (event.type === "error") {
-          log.warn("run", "failed", {
-            ...opts.dimensions,
-            result: event.terminationReason,
-            durationMs: opts.now() - opts.startedAt,
-            error: event.message
-          });
-          yield event;
-          return;
-        }
-        yield event;
+      } finally {
+        await close();
       }
     }
   };
@@ -12731,9 +12759,13 @@ var EventFanout = class {
   onDone;
   buffer = [];
   waiters = /* @__PURE__ */ new Set();
+  sourceIterator;
   started = false;
   done = false;
   error;
+  activeSubscribers = 0;
+  cancelRequested = false;
+  closeSourcePromise;
   constructor(source, onDone) {
     this.source = source;
     this.onDone = onDone;
@@ -12742,8 +12774,32 @@ var EventFanout = class {
     return {
       [Symbol.asyncIterator]: () => {
         let index = 0;
+        let subscribed = false;
+        let closed = false;
+        let waiter;
+        const release = () => {
+          if (closed) return;
+          closed = true;
+          if (waiter) {
+            this.waiters.delete(waiter);
+            waiter();
+            waiter = void 0;
+          }
+          if (subscribed) {
+            subscribed = false;
+            this.activeSubscribers = Math.max(0, this.activeSubscribers - 1);
+            if (this.activeSubscribers === 0 && !this.done) {
+              this.requestCancel();
+            }
+          }
+        };
         return {
           next: async () => {
+            if (closed) return { done: true, value: void 0 };
+            if (!subscribed) {
+              subscribed = true;
+              this.activeSubscribers += 1;
+            }
             this.start();
             if (index < this.buffer.length) {
               return { done: false, value: this.buffer[index++] };
@@ -12751,17 +12807,27 @@ var EventFanout = class {
             if (this.error) throw this.error;
             if (this.done) return { done: true, value: void 0 };
             await new Promise((resolve2) => {
-              const wake = () => {
-                this.waiters.delete(wake);
+              waiter = () => {
+                if (waiter) this.waiters.delete(waiter);
+                waiter = void 0;
                 resolve2();
               };
-              this.waiters.add(wake);
+              this.waiters.add(waiter);
             });
+            if (closed) return { done: true, value: void 0 };
             if (index < this.buffer.length) {
               return { done: false, value: this.buffer[index++] };
             }
             if (this.error) throw this.error;
             return { done: true, value: void 0 };
+          },
+          return: async () => {
+            release();
+            return { done: true, value: void 0 };
+          },
+          throw: async (err) => {
+            release();
+            throw err;
           }
         };
       }
@@ -12774,18 +12840,39 @@ var EventFanout = class {
   }
   async pump() {
     try {
-      for await (const event of this.source) {
+      const iterator = this.source[Symbol.asyncIterator]();
+      this.sourceIterator = iterator;
+      while (!this.cancelRequested) {
+        const next = await iterator.next();
+        if (next.done) break;
+        const event = next.value;
         this.buffer.push(event);
         this.wakeAll();
-        if (isTerminalEvent(event)) break;
+        if (isTerminalEvent(event)) {
+          await this.closeSource();
+          break;
+        }
       }
     } catch (err) {
-      this.error = err;
+      if (!this.cancelRequested) this.error = err;
     } finally {
+      await this.closeSource();
       await this.onDone();
       this.done = true;
       this.wakeAll();
     }
+  }
+  requestCancel() {
+    this.cancelRequested = true;
+    void this.closeSource();
+    this.wakeAll();
+  }
+  closeSource() {
+    if (this.closeSourcePromise) return this.closeSourcePromise;
+    const iterator = this.sourceIterator;
+    if (!iterator) return Promise.resolve();
+    this.closeSourcePromise = Promise.resolve(iterator?.return?.()).then(() => void 0);
+    return this.closeSourcePromise;
   }
   wakeAll() {
     for (const wake of [...this.waiters]) wake();
