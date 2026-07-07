@@ -346,6 +346,7 @@ export class LiveTerminalSession {
           if (commandMode) log.info('agent-live', 'command-submit', { commandText: prompt });
           this.write(translateLiveInput(prompt));
         }
+        if (commandMode && isKnownSilentLiveCommand(prompt)) arm(idleMs);
       }
 
       while (!done || queue.length > 0) {
@@ -672,6 +673,10 @@ function translateLiveInput(input: string): string {
   return `${input}\r`;
 }
 
+function isKnownSilentLiveCommand(input: string): boolean {
+  return /^\/(?:clear|cls)\s*$/iu.test(input.trim());
+}
+
 function previewLiveText(input: string): string {
   return input
     .replace(/\x1B/g, '<ESC>')
@@ -937,6 +942,7 @@ class TurnOutputBuffer {
     const compacted = this.compact(raw);
     if (!compacted.trim()) return false;
     if (this.pending === compacted || this.emitted.endsWith(compacted)) return false;
+    if (shouldKeepRicherSnapshot(this.pending, compacted)) return false;
     this.pending = compacted.endsWith('\n') ? compacted : `${compacted}\n`;
     this.enforceLimit();
     return true;
@@ -1155,6 +1161,21 @@ function stripTerminalChrome(input: string): string {
     out.push(line);
   }
   return out.join('\n');
+}
+
+function shouldKeepRicherSnapshot(current: string, next: string): boolean {
+  const currentScore = snapshotInformationScore(current);
+  const nextScore = snapshotInformationScore(next);
+  return currentScore >= 120 && nextScore > 0 && nextScore < currentScore * 0.35;
+}
+
+function snapshotInformationScore(input: string): number {
+  return input
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !/^[╭╰╮╯─│\s]+$/u.test(line))
+    .join('\n').length;
 }
 
 function isTerminalChromeLine(trimmed: string): boolean {

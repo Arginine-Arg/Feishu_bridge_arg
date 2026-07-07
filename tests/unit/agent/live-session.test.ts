@@ -146,6 +146,17 @@ process.stdin.on('data', (chunk) => {
     else if (line === '/status') {
       process.stdout.write('status-ok\\n');
     }
+    else if (line === '/clear') {
+      // Codex /clear intentionally redraws to an empty screen and may not emit
+      // any stable text. The bridge should end this command on the short idle
+      // timer instead of waiting for the long startup timeout.
+    }
+    else if (line === '/status-flicker') {
+      process.stdout.write('│  Model: gpt-5.5 high       │\\n');
+      process.stdout.write('│  Directory: /tmp/project   │\\n');
+      process.stdout.write('│  Permissions: Read Only    │\\n');
+      setTimeout(() => process.stdout.write('╰────────────────────────────╯\\n'), 20);
+    }
     else if (line === '/open-picker') {
       pickerOpen = true;
       process.stdout.write('Select Model and Effort\\n1. gpt-5.5\\nPress enter to confirm or esc to go back\\n');
@@ -200,6 +211,8 @@ setInterval(() => {}, 1000);
     const tenth = await collect(secondSession.run('run-10', '/goal-frame', dir).events);
     await collect(secondSession.run('run-11', '/prime-buffer', dir).events);
     const eleventh = await collect(secondSession.run('run-12', '/status', dir, 'command').events);
+    const silent = await collect(secondSession.run('run-12b', '/clear', dir, 'command').events);
+    const flicker = await collect(secondSession.run('run-12c', '/status-flicker', dir, 'command').events);
     await collect(secondSession.run('run-13', '/open-picker', dir).events);
     const twelfth = await collect(secondSession.run('run-14', '/fast', dir, 'command').events);
     const thirteenth = await collect(secondSession.run('run-15', '/slow-compact', dir, 'command').events);
@@ -219,11 +232,14 @@ setInterval(() => {}, 1000);
       '• Context compacted\n\n⚠ Heads up: Long threads and multiple compactions can cause the model to be less accurate.\n',
     );
     expect(textOf(eleventh)).toBe('status-ok\n');
+    expect(textOf(silent)).toBe('');
+    expect(textOf(flicker)).toContain('Model: gpt-5.5 high');
+    expect(textOf(flicker)).toContain('Permissions: Read Only');
     expect(textOf(twelfth)).toBe('• Service tier set to fast\n');
     expect(textOf(thirteenth)).toBe('• Context compacted\n');
     expect(textOf(fourteenth)).toBe('• Usage: /goal [<objective>|clear|edit|pause|resume] No goal is currently set.\n');
     expect(await readFile(countFile, 'utf8')).toBe('start\n');
-  }, 15_000);
+  }, 30_000);
 
   it('ignores startup terminal output before the turn input is sent', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-startup-noise-test-'));

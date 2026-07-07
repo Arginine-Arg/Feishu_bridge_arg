@@ -6161,6 +6161,7 @@ var LiveTerminalSession = class {
           if (commandMode) log.info("agent-live", "command-submit", { commandText: prompt });
           this.write(translateLiveInput(prompt));
         }
+        if (commandMode && isKnownSilentLiveCommand(prompt)) arm(idleMs);
       }
       while (!done || queue.length > 0) {
         if (queue.length === 0) {
@@ -6462,6 +6463,9 @@ function translateLiveInput(input) {
   if (keys) return keys.join("");
   return `${input}\r`;
 }
+function isKnownSilentLiveCommand(input) {
+  return /^\/(?:clear|cls)\s*$/iu.test(input.trim());
+}
 function previewLiveText(input) {
   return input.replace(/\x1B/g, "<ESC>").replace(/\r/g, "<CR>").replace(/\t/g, "<TAB>").slice(0, LIVE_DIAG_PREVIEW_CHARS);
 }
@@ -6684,6 +6688,7 @@ var TurnOutputBuffer = class {
     const compacted = this.compact(raw);
     if (!compacted.trim()) return false;
     if (this.pending === compacted || this.emitted.endsWith(compacted)) return false;
+    if (shouldKeepRicherSnapshot(this.pending, compacted)) return false;
     this.pending = compacted.endsWith("\n") ? compacted : `${compacted}
 `;
     this.enforceLimit();
@@ -6866,6 +6871,14 @@ function stripTerminalChrome(input) {
     out.push(line);
   }
   return out.join("\n");
+}
+function shouldKeepRicherSnapshot(current, next) {
+  const currentScore = snapshotInformationScore(current);
+  const nextScore = snapshotInformationScore(next);
+  return currentScore >= 120 && nextScore > 0 && nextScore < currentScore * 0.35;
+}
+function snapshotInformationScore(input) {
+  return input.split("\n").map((line) => line.trim()).filter(Boolean).filter((line) => !/^[╭╰╮╯─│\s]+$/u.test(line)).join("\n").length;
 }
 function isTerminalChromeLine(trimmed) {
   return /^Tip:/i.test(trimmed) || /^[•◦]\s+Working\s+\(\d+s\b.*\)$/i.test(trimmed) || /^tab to queue message\b.*context left$/i.test(trimmed) || /^\d+%\s+context left$/i.test(trimmed) || /^›\s*(?:Implement \{feature\}|Summarize recent commits)\s*$/i.test(trimmed) || /^[A-Za-z0-9_.-]+(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?\s+·\s+.+$/.test(trimmed);
