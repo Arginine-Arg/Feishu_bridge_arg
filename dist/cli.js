@@ -6110,7 +6110,7 @@ function shellQuote(value) {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 function cleanTerminalOutput(input) {
-  const withoutAnsi = input.replace(/\x1B\][^\x07]*(?:\x07|\x1B\\)/g, "").replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "").replace(/\x1B[@-Z\\-_]/g, "").replace(/(^|[\r\n])\d{1,4}G(?=\S)/g, "$1").replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "").replace(/\r\n/g, "\n");
+  const withoutAnsi = input.replace(/\x1B\][^\x07]*(?:\x07|\x1B\\)/g, "").replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "").replace(/\x1B[@-Z\\-_]/g, "").replace(/(^|[\r\n])\d{1,4}G(?=\S)/g, "$1").replace(/(\S)78\s+(?=\S)/g, "$1").replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "").replace(/\r\n/g, "\n");
   return normalizeScatteredCursorLines(collapseCarriageReturns(withoutAnsi)).replace(/\n{4,}/g, "\n\n\n");
 }
 var TerminalOutputCleaner = class {
@@ -6141,7 +6141,7 @@ var TurnOutputBuffer = class {
     return true;
   }
   take() {
-    const out = this.pending;
+    const out = stripKnownLiveNoise(this.pending);
     this.emitted += out;
     this.pending = "";
     return out;
@@ -6227,6 +6227,12 @@ function normalizeScatteredCursorLines(input) {
     }
     const scattered = line.match(/^\s*(?:(\d{2,4})\s+|(\d{2,4})G)?(\S)\s*$/u);
     if (scattered) {
+      if ((scattered[1] || scattered[2]) && chars.length === 0 && out.length > 0) {
+        out[out.length - 1] = `${out[out.length - 1]}${scattered[3] ?? ""}`;
+        originals = [];
+        hasCursorColumn = false;
+        continue;
+      }
       chars.push(scattered[3] ?? "");
       originals.push(line);
       if (scattered[1] || scattered[2]) hasCursorColumn = true;
@@ -6237,6 +6243,58 @@ function normalizeScatteredCursorLines(input) {
   }
   flush();
   return out.join("\n");
+}
+function stripKnownLiveNoise(input) {
+  return stripCompactNoise(input, [
+    "\u26A0Ignoringmalformedagentroledefinition:duplicateagentrolenameweb-researcherdeclaredinthesameconfiglayer",
+    "Ignoringmalformedagentroledefinition:duplicateagentrolenameweb-researcherdeclaredinthesameconfiglayer",
+    "\u26A0Ignoringmalformedagentroledefinition:agentroleweb-researchermustdefineadescription",
+    "Ignoringmalformedagentroledefinition:agentroleweb-researchermustdefineadescription",
+    "Tip:Use/inittocreateanAGENTS.mdwithproject-specificguidance.",
+    "Tip:Use/inittocreateanAGENTS.mdwithproject-specificguidance"
+  ]).replace(/\n{3,}/g, "\n\n").trimStart();
+}
+function stripCompactNoise(input, patterns) {
+  const compactChars = [];
+  const map = [];
+  for (let i = 0; i < input.length; i += 1) {
+    const char = input[i] ?? "";
+    if (/\s|`/.test(char)) continue;
+    compactChars.push(char.toLowerCase());
+    map.push(i);
+  }
+  const compact = compactChars.join("");
+  const ranges = [];
+  for (const pattern of patterns) {
+    const needle = pattern.replace(/\s|`/g, "").toLowerCase();
+    let from = 0;
+    let idx = compact.indexOf(needle, from);
+    while (idx !== -1) {
+      const start = map[idx] ?? 0;
+      const end = (map[idx + needle.length - 1] ?? start) + 1;
+      ranges.push([start, end]);
+      from = idx + needle.length;
+      idx = compact.indexOf(needle, from);
+    }
+  }
+  if (ranges.length === 0) return input;
+  ranges.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
+  const merged = [];
+  for (const range of ranges) {
+    const last = merged[merged.length - 1];
+    if (last && range[0] <= last[1]) {
+      last[1] = Math.max(last[1], range[1]);
+    } else {
+      merged.push([...range]);
+    }
+  }
+  let out = "";
+  let cursor = 0;
+  for (const [start, end] of merged) {
+    out += input.slice(cursor, start);
+    cursor = end;
+  }
+  return out + input.slice(cursor);
 }
 function completePrefixEnd(input) {
   const esc = input.lastIndexOf("\x1B");

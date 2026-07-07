@@ -30,6 +30,11 @@ process.stdin.on('data', (chunk) => {
       process.stdout.write('\\x1b[');
       setTimeout(() => process.stdout.write('78Gclean-frame\\n'), 5);
     }
+    else if (line === '/warning') {
+      process.stdout.write('⚠Ignoringmalformedagentroledefinition:duplicateagentrolenameweb-researcherdeclaredinthesameconfiglayer');
+      process.stdout.write('⚠Ignoringmalformedagentroledefinition:agentrole\`w78 e\\n\\n78 b\\n\\n78 -\\n\\n78 r\\n\\n78 e\\n\\n78 s\\n\\n78 e\\n\\n78 a\\n\\n78 r\\n\\n78 c\\n\\n78 h\\n\\n78 e\\n\\n78 r\\n\\n78 \`\\n\\n78 m\\n\\n78 u\\n\\n78 s\\n\\n78 t\\n\\n78 d\\n\\n78 e\\n\\n78 f\\n\\n78 i\\n\\n78 n\\n\\n78 e\\n\\n78 a\\n\\n78 d\\n\\n78 e\\n\\n78 s\\n\\n78 c\\n\\n78 r\\n\\n78 i\\n\\n78 p\\n\\n78 t\\n\\n78 i\\n\\n78 o\\n\\n78 n\\n');
+      process.stdout.write('Tip:Use/inittocreateanAGENTS.mdwithproject-specificguidanc\\n78 e\\n78 .\\nanswer\\n');
+    }
     else process.stdout.write('echo:' + line + '\\n');
   }
 });
@@ -65,12 +70,14 @@ setInterval(() => {}, 1000);
     const second = await collect(secondSession.run('run-2', '/help', dir).events);
     const third = await collect(secondSession.run('run-3', '/repeat', dir).events);
     const fourth = await collect(secondSession.run('run-4', '/split-ansi', dir).events);
+    const fifth = await collect(secondSession.run('run-5', '/warning', dir).events);
     await pool.closeAll();
 
     expect(textOf(first)).toContain('echo:hello');
     expect(textOf(second)).toContain('native-help');
     expect(textOf(third).match(/same-frame/g)).toHaveLength(1);
     expect(textOf(fourth)).toBe('clean-frame\n');
+    expect(textOf(fifth)).toBe('answer\n');
     expect(await readFile(countFile, 'utf8')).toBe('start\n');
   });
 
