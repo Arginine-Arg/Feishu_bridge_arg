@@ -384,6 +384,54 @@ setInterval(() => {}, 1000);
     expect(textOf(status)).not.toContain('Usage: /goal');
   }, 20_000);
 
+  it('keeps model-change confirmation for control input but not later slash commands', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-stale-model-change-test-'));
+    const bin = join(dir, 'fake-stale-model-change-agent.mjs');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+let sentChoice = false;
+let sentFast = false;
+process.stdin.on('data', (chunk) => {
+  if (!sentChoice && chunk.includes('2')) {
+    sentChoice = true;
+    process.stdout.write('/status\\n\\n');
+    process.stdout.write('• Model changed to gpt-5.4 medium\\n\\n');
+    process.stdout.write('› Find and fix a bug in @filename\\n');
+  }
+  if (!sentFast && chunk.includes('/fast')) {
+    sentFast = true;
+    process.stdout.write('• Model changed to gpt-5.4 medium\\n');
+    process.stdout.write('• Service tier set to fast\\n');
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('stale-model-change-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'stale-model-change',
+      usePty: false,
+      idleMs: 40,
+      outputFlushMs: 5,
+      startupTimeoutMs: 300,
+    });
+
+    const choice = await collect(session.run('model-choice', '2', dir, 'control').events);
+    const fast = await collect(session.run('fast-after-choice', '/fast', dir, 'command').events);
+    await pool.closeAll();
+
+    expect(textOf(choice)).toBe('• Model changed to gpt-5.4 medium\n');
+    expect(textOf(fast)).toBe('• Service tier set to fast\n');
+  }, 15_000);
+
   it('cleans up a previous live turn when a new turn starts', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-turn-cleanup-test-'));
     const bin = join(dir, 'fake-turn-cleanup-agent.mjs');

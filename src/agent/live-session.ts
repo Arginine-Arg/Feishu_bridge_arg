@@ -205,7 +205,7 @@ export class LiveTerminalSession {
       commandMode
         ? Math.max(this.opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS, COMMAND_STARTUP_TIMEOUT_MS)
         : (this.opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS);
-    const output = new TurnOutputBuffer(MAX_TURN_OUTPUT_CHARS, prompt, commandMode);
+    const output = new TurnOutputBuffer(MAX_TURN_OUTPUT_CHARS, prompt, commandMode || inputMode === 'control');
     const queue: AgentEvent[] = [];
     let done = false;
     let wake: (() => void) | undefined;
@@ -1249,6 +1249,7 @@ function isLiveInputChromeLine(trimmed: string): boolean {
 
 function isPromptScopedTerminalChromeLine(trimmed: string, prompt: string): boolean {
   if (prompt.trim() === '/fast') return false;
+  if (prompt.trim().startsWith('/') && /^•\s+Model changed to\b/i.test(trimmed)) return true;
   return /^•\s+Service tier set to\b/i.test(trimmed);
 }
 
@@ -1283,6 +1284,7 @@ function stripPromptMismatchedLiveContent(input: string, prompt: string): string
   let out = input;
   if (!isStatusCommand(command)) out = stripCodexStatusPanelLines(out);
   if (!isGoalCommand(command)) out = stripGoalUsageLines(out);
+  if (command.startsWith('/')) out = stripModelChangedLines(out);
   return out;
 }
 
@@ -1317,6 +1319,14 @@ function stripGoalUsageLines(input: string): string {
   return input
     .split('\n')
     .filter((line) => !/^•\s+Usage:\s+\/goal\b/i.test(line.trim()))
+    .join('\n')
+    .trimStart();
+}
+
+function stripModelChangedLines(input: string): string {
+  return input
+    .split('\n')
+    .filter((line) => !/^•\s+Model changed to\b/i.test(line.trim()))
     .join('\n')
     .trimStart();
 }
@@ -1387,7 +1397,7 @@ function isTerminalChromeLine(trimmed: string): boolean {
     /^tab to queue message\b.*context left$/i.test(trimmed) ||
     /^\d+%\s+context left$/i.test(trimmed) ||
     /^[╭╰╮╯─│\s]+$/u.test(trimmed) ||
-    /^›\s*(?:Implement \{feature\}|Summarize recent commits)\s*$/i.test(trimmed) ||
+    /^›\s*(?:Implement \{feature\}|Summarize recent commits|Find and fix a bug in @filename|Improve documentation in @filename|Explain this codebase)\s*$/i.test(trimmed) ||
     /^[A-Za-z0-9_.-]+(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?\s+·\s+.+$/.test(trimmed)
   );
 }

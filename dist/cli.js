@@ -6030,7 +6030,7 @@ var LiveTerminalSession = class {
     const idleMs = commandMode ? Math.max(this.opts.idleMs ?? DEFAULT_IDLE_MS, COMMAND_IDLE_MS) : this.opts.idleMs ?? DEFAULT_IDLE_MS;
     const outputFlushMs = this.opts.outputFlushMs ?? DEFAULT_OUTPUT_FLUSH_MS;
     const startupTimeoutMs = commandMode ? Math.max(this.opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS, COMMAND_STARTUP_TIMEOUT_MS) : this.opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
-    const output = new TurnOutputBuffer(MAX_TURN_OUTPUT_CHARS, prompt, commandMode);
+    const output = new TurnOutputBuffer(MAX_TURN_OUTPUT_CHARS, prompt, commandMode || inputMode === "control");
     const queue = [];
     let done = false;
     let wake;
@@ -6945,6 +6945,7 @@ function isLiveInputChromeLine(trimmed) {
 }
 function isPromptScopedTerminalChromeLine(trimmed, prompt) {
   if (prompt.trim() === "/fast") return false;
+  if (prompt.trim().startsWith("/") && /^•\s+Model changed to\b/i.test(trimmed)) return true;
   return /^•\s+Service tier set to\b/i.test(trimmed);
 }
 function stripTerminalChrome(input, prompt = "") {
@@ -6977,6 +6978,7 @@ function stripPromptMismatchedLiveContent(input, prompt) {
   let out = input;
   if (!isStatusCommand(command)) out = stripCodexStatusPanelLines(out);
   if (!isGoalCommand(command)) out = stripGoalUsageLines(out);
+  if (command.startsWith("/")) out = stripModelChangedLines(out);
   return out;
 }
 function isGoalCommand(command) {
@@ -6994,6 +6996,9 @@ function isCodexStatusPanelLine(trimmed) {
 }
 function stripGoalUsageLines(input) {
   return input.split("\n").filter((line) => !/^•\s+Usage:\s+\/goal\b/i.test(line.trim())).join("\n").trimStart();
+}
+function stripModelChangedLines(input) {
+  return input.split("\n").filter((line) => !/^•\s+Model changed to\b/i.test(line.trim())).join("\n").trimStart();
 }
 function isStalePickerSnapshotForPrompt(text, prompt) {
   const command = prompt.trim().toLowerCase();
@@ -7031,7 +7036,7 @@ function snapshotInformationScore(input) {
   return input.split("\n").map((line) => line.trim()).filter(Boolean).filter((line) => !/^[╭╰╮╯─│\s]+$/u.test(line)).join("\n").length;
 }
 function isTerminalChromeLine(trimmed) {
-  return /^Tip:/i.test(trimmed) || /^[•◦]\s+Working\s+\(\d+s\b.*\)$/i.test(trimmed) || /^tab to queue message\b.*context left$/i.test(trimmed) || /^\d+%\s+context left$/i.test(trimmed) || /^[╭╰╮╯─│\s]+$/u.test(trimmed) || /^›\s*(?:Implement \{feature\}|Summarize recent commits)\s*$/i.test(trimmed) || /^[A-Za-z0-9_.-]+(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?\s+·\s+.+$/.test(trimmed);
+  return /^Tip:/i.test(trimmed) || /^[•◦]\s+Working\s+\(\d+s\b.*\)$/i.test(trimmed) || /^tab to queue message\b.*context left$/i.test(trimmed) || /^\d+%\s+context left$/i.test(trimmed) || /^[╭╰╮╯─│\s]+$/u.test(trimmed) || /^›\s*(?:Implement \{feature\}|Summarize recent commits|Find and fix a bug in @filename|Improve documentation in @filename|Explain this codebase)\s*$/i.test(trimmed) || /^[A-Za-z0-9_.-]+(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?\s+·\s+.+$/.test(trimmed);
 }
 function stripCompactNoise(input, patterns) {
   const { compact, map } = compactWithIndex(input);
