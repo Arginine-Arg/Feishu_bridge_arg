@@ -113,6 +113,29 @@ describe('profile-aware account and config commands', () => {
     expect(cleared.profiles.claude?.preferences.model).toBeUndefined();
   });
 
+  it('saves /model submit with Codex reasoning effort into the active profile', async () => {
+    vi.useFakeTimers();
+    const h = await createHarness({ profile: 'codex-dev' });
+
+    await h.command('/model submit', {
+      model: 'gpt-5.5',
+      reasoning_effort: 'high',
+    });
+
+    const root = await waitForRoot(h.rootDir, (candidate) =>
+      candidate.profiles['codex-dev']?.preferences.model === 'gpt-5.5' &&
+      candidate.profiles['codex-dev']?.preferences.reasoningEffort === 'high',
+    );
+    expect(root.schemaVersion).toBe(2);
+    expect(root.activeProfile).toBe('codex-dev');
+    expect(root.profiles['codex-dev']?.preferences).toMatchObject({
+      model: 'gpt-5.5',
+      reasoningEffort: 'high',
+    });
+    expect(root.profiles.claude).toBeDefined();
+    expect((root as unknown as { accounts?: unknown }).accounts).toBeUndefined();
+  });
+
   it('keeps the current message reply mode when the config submit payload omits it', async () => {
     vi.useFakeTimers();
     const h = await createHarness({
@@ -244,23 +267,25 @@ describe('profile-aware account and config commands', () => {
 
 async function createHarness(options: {
   preferences?: RootConfig['profiles'][string]['preferences'];
+  profile?: 'claude' | 'codex-dev';
 } = {}): Promise<{
   rootDir: string;
   channel: ReturnType<typeof createFakeChannel>;
   command(content: string, formValue?: Record<string, unknown>): Promise<boolean>;
 }> {
+  const profileName = options.profile ?? 'claude';
   const rootDir = await mkdtemp(join(tmpdir(), 'bridge-profile-config-command-'));
   roots.push(rootDir);
   const workspace = join(rootDir, 'workspace');
   await mkdir(workspace, { recursive: true });
-  const root = await writeRoot(rootDir, workspace, options.preferences);
-  const profileConfig = root.profiles.claude!;
-  const appPaths = resolveAppPaths({ rootDir, profile: 'claude' });
+  const root = await writeRoot(rootDir, workspace, profileName, options.preferences);
+  const profileConfig = root.profiles[profileName]!;
+  const appPaths = resolveAppPaths({ rootDir, profile: profileName });
   const channel = createFakeChannel();
   const sessions = new SessionStore(appPaths.sessionsFile);
   const workspaces = new WorkspaceStore(appPaths.workspacesFile);
   const controls = {
-    profile: 'claude',
+    profile: profileName,
     profileConfig,
     botOwnerId: 'ou-admin',
     ownerRefreshState: 'ok',
@@ -295,11 +320,12 @@ async function createHarness(options: {
 async function writeRoot(
   rootDir: string,
   workspace: string,
+  activeProfile: 'claude' | 'codex-dev',
   preferences: RootConfig['profiles'][string]['preferences'] = {},
 ): Promise<RootConfig> {
   const root: RootConfig = {
     schemaVersion: 2,
-    activeProfile: 'claude',
+    activeProfile,
     preferences: {},
     profiles: {
       claude: createDefaultProfileConfig({
@@ -319,12 +345,13 @@ async function writeRoot(
     },
   };
   root.profiles.claude!.workspaces.default = workspace;
-  root.profiles.claude!.preferences = {
-    ...root.profiles.claude!.preferences,
+  root.profiles['codex-dev']!.workspaces.default = workspace;
+  root.profiles[activeProfile]!.preferences = {
+    ...root.profiles[activeProfile]!.preferences,
     ...preferences,
   };
   await writeJson(resolveAppPaths({ rootDir }).configFile, root);
-  await writeFile(join(rootDir, 'active-profile'), 'claude\n', 'utf8');
+  await writeFile(join(rootDir, 'active-profile'), `${activeProfile}\n`, 'utf8');
   return root;
 }
 

@@ -7971,6 +7971,13 @@ function accountFailureCard(reason) {
 }
 
 // src/card/config-card.ts
+var DEFAULT_REASONING_EFFORT = "default";
+var CODEX_REASONING_OPTIONS = [
+  { value: DEFAULT_REASONING_EFFORT, label: "\u8DDF\u968F\u9ED8\u8BA4\uFF08\u4E0D\u6307\u5B9A\uFF09" },
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" }
+];
 function collapsedAccessPanel(title, elements) {
   return {
     tag: "collapsible_panel",
@@ -8196,6 +8203,120 @@ _\u52A0 / \u5220\uFF1A_ \`/invite admin @\u67D0\u4EBA\`  \`/remove admin @\u67D0
     }
   };
 }
+function modelFormCard(opts) {
+  const elements = [
+    {
+      tag: "markdown",
+      content: "\u2699\uFE0F **\u6A21\u578B\u8BBE\u7F6E**\n\n\u9009\u62E9\u5F53\u524D profile \u540E\u7EED\u8FD0\u884C\u4F7F\u7528\u7684\u6A21\u578B\u3002\u4FDD\u5B58\u540E\u4ECE\u4E0B\u4E00\u6761\u6D88\u606F\u5F00\u59CB\u751F\u6548\u3002"
+    },
+    { tag: "hr" },
+    {
+      tag: "form",
+      name: "model_form",
+      elements: [
+        {
+          tag: "markdown",
+          content: "**\u6A21\u578B**"
+        },
+        {
+          tag: "select_static",
+          name: "model",
+          initial_option: opts.model,
+          options: supportedModels(opts.agentKind).map((m) => ({
+            text: { tag: "plain_text", content: m.label },
+            value: m.value
+          }))
+        },
+        ...opts.agentKind === "codex" ? [
+          {
+            tag: "markdown",
+            content: "\n**Reasoning effort**"
+          },
+          {
+            tag: "select_static",
+            name: "reasoning_effort",
+            initial_option: opts.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
+            options: CODEX_REASONING_OPTIONS.map((m) => ({
+              text: { tag: "plain_text", content: m.label },
+              value: m.value
+            }))
+          }
+        ] : [],
+        { tag: "hr" },
+        {
+          tag: "column_set",
+          flex_mode: "flow",
+          horizontal_spacing: "small",
+          columns: [
+            {
+              tag: "column",
+              width: "auto",
+              elements: [
+                {
+                  tag: "button",
+                  name: "submit_btn",
+                  text: { tag: "plain_text", content: "\u4FDD\u5B58" },
+                  type: "primary",
+                  form_action_type: "submit",
+                  behaviors: [{ type: "callback", value: { cmd: "model.submit" } }]
+                }
+              ]
+            },
+            {
+              tag: "column",
+              width: "auto",
+              elements: [
+                {
+                  tag: "button",
+                  name: "cancel_btn",
+                  text: { tag: "plain_text", content: "\u53D6\u6D88" },
+                  behaviors: [{ type: "callback", value: { cmd: "model.cancel" } }]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ];
+  return {
+    schema: "2.0",
+    config: { summary: { content: "\u6A21\u578B\u8BBE\u7F6E" } },
+    body: { elements }
+  };
+}
+function modelSavedCard(opts) {
+  return {
+    schema: "2.0",
+    config: { summary: { content: "\u6A21\u578B\u5DF2\u4FDD\u5B58" } },
+    body: {
+      elements: [
+        {
+          tag: "markdown",
+          content: `\u2705 **\u6A21\u578B\u5DF2\u4FDD\u5B58**
+
+**\u6A21\u578B**:\`${modelLabel(opts.agentKind, opts.model)}\`
+` + (opts.agentKind === "codex" ? `**Reasoning effort**:\`${reasoningEffortLabel(opts.reasoningEffort)}\`
+` : "") + "\n\u4E0B\u6761\u6D88\u606F\u5F00\u59CB\u751F\u6548\u3002"
+        }
+      ]
+    }
+  };
+}
+function modelCancelledCard() {
+  return {
+    schema: "2.0",
+    config: { summary: { content: "\u5DF2\u53D6\u6D88" } },
+    body: {
+      elements: [
+        {
+          tag: "markdown",
+          content: "\u5DF2\u53D6\u6D88\u6A21\u578B\u8BBE\u7F6E\u3002"
+        }
+      ]
+    }
+  };
+}
 function configSavedCard(opts) {
   const replyLabel = opts.messageReply === "card" ? "\u4EA4\u4E92\u5361\u7247" : opts.messageReply === "markdown" ? "\u6D88\u606F\u5361\u7247" : "\u7EAF\u6587\u672C";
   const summarize2 = (list) => list.length === 0 ? "_(\u7A7A)_" : `${list.length} \u9879`;
@@ -8234,6 +8355,11 @@ function cotMessagesLabel(value) {
   if (value === "brief") return "\u7B80\u7565";
   if (value === "detailed") return "\u8BE6\u7EC6";
   return "\u5173\u95ED";
+}
+function reasoningEffortLabel(value) {
+  if (!value) return "\u8DDF\u968F\u9ED8\u8BA4";
+  const found = CODEX_REASONING_OPTIONS.find((item) => item.value === value);
+  return found?.label ?? value;
 }
 function groupMsgScopeGrantCard(url, expireMins) {
   return {
@@ -9472,6 +9598,7 @@ var handlers = {
   "/help": handleHelp,
   "/account": handleAccount,
   "/config": handleConfig,
+  "/model": handleModel,
   "/stop": handleStop,
   "/session": handleSession,
   "/timeout": handleTimeout,
@@ -9486,6 +9613,7 @@ var handlers = {
 var ADMIN_COMMANDS = /* @__PURE__ */ new Set([
   "/account",
   "/config",
+  "/model",
   "/ps",
   "/exit",
   "/reconnect",
@@ -10068,6 +10196,82 @@ async function handleSession(args, ctx) {
     next === "live" ? "\u5DF2\u5207\u6362\u5230 live \u6A21\u5F0F\uFF0C\u6B63\u5728\u91CD\u8FDE\u3002\u4E4B\u540E\u540C\u4E00 chat/topic \u4F1A\u590D\u7528\u540E\u53F0 CLI session\u3002" : "\u5DF2\u5207\u6362\u5230 turn \u6A21\u5F0F\uFF0C\u6B63\u5728\u91CD\u8FDE\u3002\u4E4B\u540E\u6062\u590D\u6BCF\u8F6E\u77ED\u4EFB\u52A1\u6267\u884C\u3002"
   );
   await ctx.controls.restart();
+}
+async function handleModel(args, ctx) {
+  const sub = args.trim().split(/\s+/)[0] ?? "";
+  switch (sub) {
+    case "":
+      return showModelForm(ctx);
+    case "submit":
+      return submitModel(ctx);
+    case "cancel":
+      return cancelModel(ctx);
+    default:
+      await reply(ctx, "\u7528\u6CD5:`/model`");
+  }
+}
+async function showModelForm(ctx) {
+  const agentKind = ctx.controls.profileConfig.agentKind;
+  const card = modelFormCard({
+    agentKind,
+    model: normalizeModelSelection(agentKind, ctx.controls.cfg.preferences?.model),
+    reasoningEffort: agentKind === "codex" ? normalizeCodexReasoningEffort(ctx.controls.cfg.preferences?.reasoningEffort) : void 0
+  });
+  if (ctx.fromCardAction) await recallMessage(ctx, ctx.msg.messageId);
+  await sendManagedCard(ctx.channel, ctx.msg.chatId, card, commandReplyOptions(ctx));
+}
+async function cancelModel(ctx) {
+  if (ctx.fromCardAction) {
+    const formMsgId = ctx.msg.messageId;
+    void (async () => {
+      await new Promise((r) => setTimeout(r, FORM_SETTLE_MS));
+      await showResultCardInPlace(ctx, formMsgId, modelCancelledCard());
+    })();
+  }
+}
+async function submitModel(ctx) {
+  const fv = ctx.formValue ?? {};
+  const agentKind = ctx.controls.profileConfig.agentKind;
+  const rawModel = String(fv.model ?? "").trim();
+  const modelValid = rawModel !== "" && supportedModels(agentKind).some((m) => m.value === rawModel);
+  const modelSelection = modelValid ? rawModel : normalizeModelSelection(agentKind, ctx.controls.cfg.preferences?.model);
+  const model = modelSelection === DEFAULT_MODEL ? void 0 : modelSelection;
+  const rawReasoning = String(fv.reasoning_effort ?? "").trim();
+  const reasoningEffort = agentKind === "codex" ? parseCodexReasoningEffort(rawReasoning, ctx.controls.cfg.preferences?.reasoningEffort) : void 0;
+  const formMsgId = ctx.msg.messageId;
+  void (async () => {
+    const submittedAt = Date.now();
+    const waitForSettle = async () => {
+      const elapsed = Date.now() - submittedAt;
+      if (elapsed < FORM_SETTLE_MS) {
+        await new Promise((r) => setTimeout(r, FORM_SETTLE_MS - elapsed));
+      }
+    };
+    try {
+      await saveModelPreferencesConfig(ctx, { model, reasoningEffort });
+    } catch (err) {
+      log.fail("command", err, { step: "model.save" });
+      reportMetric("command_fail", 1, { step: "model.save" });
+      await waitForSettle();
+      await showResultCardInPlace(ctx, formMsgId, configFailedCard("\u6A21\u578B\u8BBE\u7F6E\u672A\u5199\u5165\u3002"));
+      return;
+    }
+    log.info("command", "model-saved", {
+      agentKind,
+      model: modelSelection,
+      ...agentKind === "codex" ? { reasoningEffort: reasoningEffort ?? DEFAULT_REASONING_EFFORT } : {}
+    });
+    await waitForSettle();
+    await showResultCardInPlace(
+      ctx,
+      formMsgId,
+      modelSavedCard({
+        agentKind,
+        model: modelSelection,
+        ...agentKind === "codex" ? { reasoningEffort } : {}
+      })
+    );
+  })();
 }
 async function handleTimeout(args, ctx) {
   const trimmed = args.trim().toLowerCase();
@@ -11108,6 +11312,42 @@ async function savePreferencesConfig(ctx, preferences, requireMentionInGroup, la
     ctx.controls.profileConfig = root.profiles[ctx.controls.profile];
     ctx.controls.cfg = runtimeProfileConfig(root, ctx.controls.profile);
   });
+}
+async function saveModelPreferencesConfig(ctx, update) {
+  await withConfigFileLock(ctx.controls.configPath, async () => {
+    const root = await loadRootConfig(ctx.controls.configPath);
+    if (!root) {
+      const nextPreferences2 = {
+        ...ctx.controls.cfg.preferences ?? {},
+        model: update.model,
+        ...ctx.controls.profileConfig.agentKind === "codex" ? { reasoningEffort: update.reasoningEffort } : {}
+      };
+      ctx.controls.cfg.preferences = nextPreferences2;
+      await saveConfig(ctx.controls.cfg, ctx.controls.configPath);
+      return;
+    }
+    const profile2 = root.profiles[ctx.controls.profile];
+    if (!profile2) throw new Error(`profile not found: ${ctx.controls.profile}`);
+    const nextPreferences = {
+      ...profile2.preferences,
+      model: update.model,
+      ...profile2.agentKind === "codex" ? { reasoningEffort: update.reasoningEffort } : {}
+    };
+    root.profiles[ctx.controls.profile] = {
+      ...profile2,
+      preferences: nextPreferences
+    };
+    await saveRootConfig(root, ctx.controls.configPath);
+    ctx.controls.profileConfig = root.profiles[ctx.controls.profile];
+    ctx.controls.cfg = runtimeProfileConfig(root, ctx.controls.profile);
+  });
+}
+function normalizeCodexReasoningEffort(value) {
+  return value === "minimal" || value === "low" || value === "medium" || value === "high" ? value : void 0;
+}
+function parseCodexReasoningEffort(value, fallback) {
+  if (value === DEFAULT_REASONING_EFFORT) return void 0;
+  return normalizeCodexReasoningEffort(value) ?? normalizeCodexReasoningEffort(fallback);
 }
 
 // src/bot/session-catalog-identity.ts
@@ -15573,6 +15813,16 @@ async function runStart(opts) {
   const appPaths2 = runtime.appPaths;
   let profileConfig = runtime.profileConfig;
   configureLogger({ logsDir: appPaths2.logsDir });
+  console.log(
+    `arg-bridge ${package_default.version} daemon starting profile=${runtime.profile} entry=${process.argv[1] ?? "(unknown)"} pid=${process.pid}`
+  );
+  log.info("daemon", "starting", {
+    version: package_default.version,
+    profile: runtime.profile,
+    entry: process.argv[1],
+    execPath: process.execPath,
+    pid: process.pid
+  });
   await preFlightChecks({
     skipCheckLarkCli: opts.skipCheckLarkCli,
     bridgeConfig: cfg,

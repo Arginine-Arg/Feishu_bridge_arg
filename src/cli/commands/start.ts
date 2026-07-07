@@ -98,6 +98,16 @@ export async function runStart(opts: StartOptions): Promise<void> {
   const appPaths = runtime.appPaths;
   let profileConfig = runtime.profileConfig;
   configureLogger({ logsDir: appPaths.logsDir });
+  console.log(
+    `arg-bridge ${pkg.version} daemon starting profile=${runtime.profile} entry=${process.argv[1] ?? '(unknown)'} pid=${process.pid}`,
+  );
+  log.info('daemon', 'starting', {
+    version: pkg.version,
+    profile: runtime.profile,
+    entry: process.argv[1],
+    execPath: process.execPath,
+    pid: process.pid,
+  });
 
   await preFlightChecks({
     skipCheckLarkCli: opts.skipCheckLarkCli,

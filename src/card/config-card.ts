@@ -1,7 +1,7 @@
 import { modelLabel, supportedModels } from '../agent/models';
 import type { KnownChat } from '../bot/lark-info';
 import type { AgentKind, LarkCliIdentityPreset } from '../config/profile-schema';
-import type { CotMessagesMode, MessageReplyMode } from '../config/schema';
+import type { CodexReasoningEffort, CotMessagesMode, MessageReplyMode } from '../config/schema';
 
 export interface ConfigFormOpts {
   /** Profile's agent kind — decides which model catalog the picker shows. */
@@ -21,6 +21,24 @@ export interface ConfigFormOpts {
   admins: string[];
   knownChats: KnownChat[];
 }
+
+export const DEFAULT_REASONING_EFFORT = 'default';
+
+export interface ModelFormOpts {
+  agentKind: AgentKind;
+  model: string;
+  reasoningEffort?: CodexReasoningEffort;
+}
+
+const CODEX_REASONING_OPTIONS: Array<{
+  value: typeof DEFAULT_REASONING_EFFORT | CodexReasoningEffort;
+  label: string;
+}> = [
+  { value: DEFAULT_REASONING_EFFORT, label: '跟随默认（不指定）' },
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+];
 
 function collapsedAccessPanel(title: string, elements: object[]): object {
   return {
@@ -282,6 +300,130 @@ export function configFormCard(opts: ConfigFormOpts): object {
   };
 }
 
+export function modelFormCard(opts: ModelFormOpts): object {
+  const elements: object[] = [
+    {
+      tag: 'markdown',
+      content:
+        '⚙️ **模型设置**\n\n' +
+        '选择当前 profile 后续运行使用的模型。保存后从下一条消息开始生效。',
+    },
+    { tag: 'hr' },
+    {
+      tag: 'form',
+      name: 'model_form',
+      elements: [
+        {
+          tag: 'markdown',
+          content: '**模型**',
+        },
+        {
+          tag: 'select_static',
+          name: 'model',
+          initial_option: opts.model,
+          options: supportedModels(opts.agentKind).map((m) => ({
+            text: { tag: 'plain_text', content: m.label },
+            value: m.value,
+          })),
+        },
+        ...(opts.agentKind === 'codex'
+          ? [
+              {
+                tag: 'markdown',
+                content: '\n**Reasoning effort**',
+              },
+              {
+                tag: 'select_static',
+                name: 'reasoning_effort',
+                initial_option: opts.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
+                options: CODEX_REASONING_OPTIONS.map((m) => ({
+                  text: { tag: 'plain_text', content: m.label },
+                  value: m.value,
+                })),
+              },
+            ]
+          : []),
+        { tag: 'hr' },
+        {
+          tag: 'column_set',
+          flex_mode: 'flow',
+          horizontal_spacing: 'small',
+          columns: [
+            {
+              tag: 'column',
+              width: 'auto',
+              elements: [
+                {
+                  tag: 'button',
+                  name: 'submit_btn',
+                  text: { tag: 'plain_text', content: '保存' },
+                  type: 'primary',
+                  form_action_type: 'submit',
+                  behaviors: [{ type: 'callback', value: { cmd: 'model.submit' } }],
+                },
+              ],
+            },
+            {
+              tag: 'column',
+              width: 'auto',
+              elements: [
+                {
+                  tag: 'button',
+                  name: 'cancel_btn',
+                  text: { tag: 'plain_text', content: '取消' },
+                  behaviors: [{ type: 'callback', value: { cmd: 'model.cancel' } }],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+  ];
+
+  return {
+    schema: '2.0',
+    config: { summary: { content: '模型设置' } },
+    body: { elements },
+  };
+}
+
+export function modelSavedCard(opts: ModelFormOpts): object {
+  return {
+    schema: '2.0',
+    config: { summary: { content: '模型已保存' } },
+    body: {
+      elements: [
+        {
+          tag: 'markdown',
+          content:
+            '✅ **模型已保存**\n\n' +
+            `**模型**:\`${modelLabel(opts.agentKind, opts.model)}\`\n` +
+            (opts.agentKind === 'codex'
+              ? `**Reasoning effort**:\`${reasoningEffortLabel(opts.reasoningEffort)}\`\n`
+              : '') +
+            '\n下条消息开始生效。',
+        },
+      ],
+    },
+  };
+}
+
+export function modelCancelledCard(): object {
+  return {
+    schema: '2.0',
+    config: { summary: { content: '已取消' } },
+    body: {
+      elements: [
+        {
+          tag: 'markdown',
+          content: '已取消模型设置。',
+        },
+      ],
+    },
+  };
+}
+
 export function configSavedCard(opts: ConfigFormOpts): object {
   const replyLabel =
     opts.messageReply === 'card'
@@ -324,6 +466,12 @@ function cotMessagesLabel(value: CotMessagesMode): string {
   if (value === 'brief') return '简略';
   if (value === 'detailed') return '详细';
   return '关闭';
+}
+
+function reasoningEffortLabel(value: CodexReasoningEffort | undefined): string {
+  if (!value) return '跟随默认';
+  const found = CODEX_REASONING_OPTIONS.find((item) => item.value === value);
+  return found?.label ?? value;
 }
 
 /**

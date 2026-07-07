@@ -18,14 +18,24 @@ import {
   configFailedCard,
   configFormCard,
   configSavedCard,
+  DEFAULT_REASONING_EFFORT,
   groupMsgScopeGrantCard,
   groupMsgScopeGrantedCard,
+  modelCancelledCard,
+  modelFormCard,
+  modelSavedCard,
 } from '../card/config-card';
 import { GROUP_MSG_SCOPE, hasGroupMsgScope } from '../bot/app-scope';
 import { requestScopeGrantLink } from '../bot/wizard';
 import { forgetManagedCard, sendManagedCard, updateManagedCard } from '../card/managed';
 import { helpCard, resumeCard, statusCard, workspacesCard } from '../card/templates';
-import type { AppConfig, AppPreferences, MessageReplyMode, TenantBrand } from '../config/schema';
+import type {
+  AppConfig,
+  AppPreferences,
+  CodexReasoningEffort,
+  MessageReplyMode,
+  TenantBrand,
+} from '../config/schema';
 import {
   getAgentStopGraceMs,
   getAgentSessionMode,
@@ -170,6 +180,7 @@ const handlers: Record<string, Handler> = {
   '/help': handleHelp,
   '/account': handleAccount,
   '/config': handleConfig,
+  '/model': handleModel,
   '/stop': handleStop,
   '/session': handleSession,
   '/timeout': handleTimeout,
@@ -190,6 +201,7 @@ const handlers: Record<string, Handler> = {
 const ADMIN_COMMANDS = new Set([
   '/account',
   '/config',
+  '/model',
   '/ps',
   '/exit',
   '/reconnect',
@@ -904,6 +916,99 @@ async function handleSession(args: string, ctx: CommandContext): Promise<void> {
       : '已切换到 turn 模式，正在重连。之后恢复每轮短任务执行。',
   );
   await ctx.controls.restart();
+}
+
+// ────────────── /model — lightweight model form ──────────────
+
+async function handleModel(args: string, ctx: CommandContext): Promise<void> {
+  const sub = args.trim().split(/\s+/)[0] ?? '';
+  switch (sub) {
+    case '':
+      return showModelForm(ctx);
+    case 'submit':
+      return submitModel(ctx);
+    case 'cancel':
+      return cancelModel(ctx);
+    default:
+      await reply(ctx, '用法:`/model`');
+  }
+}
+
+async function showModelForm(ctx: CommandContext): Promise<void> {
+  const agentKind = ctx.controls.profileConfig.agentKind;
+  const card = modelFormCard({
+    agentKind,
+    model: normalizeModelSelection(agentKind, ctx.controls.cfg.preferences?.model),
+    reasoningEffort:
+      agentKind === 'codex'
+        ? normalizeCodexReasoningEffort(ctx.controls.cfg.preferences?.reasoningEffort)
+        : undefined,
+  });
+  if (ctx.fromCardAction) await recallMessage(ctx, ctx.msg.messageId);
+  await sendManagedCard(ctx.channel, ctx.msg.chatId, card, commandReplyOptions(ctx));
+}
+
+async function cancelModel(ctx: CommandContext): Promise<void> {
+  if (ctx.fromCardAction) {
+    const formMsgId = ctx.msg.messageId;
+    void (async () => {
+      await new Promise((r) => setTimeout(r, FORM_SETTLE_MS));
+      await showResultCardInPlace(ctx, formMsgId, modelCancelledCard());
+    })();
+  }
+}
+
+async function submitModel(ctx: CommandContext): Promise<void> {
+  const fv = ctx.formValue ?? {};
+  const agentKind = ctx.controls.profileConfig.agentKind;
+  const rawModel = String(fv.model ?? '').trim();
+  const modelValid = rawModel !== '' && supportedModels(agentKind).some((m) => m.value === rawModel);
+  const modelSelection = modelValid
+    ? rawModel
+    : normalizeModelSelection(agentKind, ctx.controls.cfg.preferences?.model);
+  const model = modelSelection === DEFAULT_MODEL ? undefined : modelSelection;
+  const rawReasoning = String(fv.reasoning_effort ?? '').trim();
+  const reasoningEffort =
+    agentKind === 'codex'
+      ? parseCodexReasoningEffort(rawReasoning, ctx.controls.cfg.preferences?.reasoningEffort)
+      : undefined;
+  const formMsgId = ctx.msg.messageId;
+
+  void (async () => {
+    const submittedAt = Date.now();
+    const waitForSettle = async (): Promise<void> => {
+      const elapsed = Date.now() - submittedAt;
+      if (elapsed < FORM_SETTLE_MS) {
+        await new Promise<void>((r) => setTimeout(r, FORM_SETTLE_MS - elapsed));
+      }
+    };
+
+    try {
+      await saveModelPreferencesConfig(ctx, { model, reasoningEffort });
+    } catch (err) {
+      log.fail('command', err, { step: 'model.save' });
+      reportMetric('command_fail', 1, { step: 'model.save' });
+      await waitForSettle();
+      await showResultCardInPlace(ctx, formMsgId, configFailedCard('模型设置未写入。'));
+      return;
+    }
+
+    log.info('command', 'model-saved', {
+      agentKind,
+      model: modelSelection,
+      ...(agentKind === 'codex' ? { reasoningEffort: reasoningEffort ?? DEFAULT_REASONING_EFFORT } : {}),
+    });
+    await waitForSettle();
+    await showResultCardInPlace(
+      ctx,
+      formMsgId,
+      modelSavedCard({
+        agentKind,
+        model: modelSelection,
+        ...(agentKind === 'codex' ? { reasoningEffort } : {}),
+      }),
+    );
+  })();
 }
 
 async function handleTimeout(args: string, ctx: CommandContext): Promise<void> {
@@ -2195,4 +2300,56 @@ async function savePreferencesConfig(
     ctx.controls.profileConfig = root.profiles[ctx.controls.profile]!;
     ctx.controls.cfg = runtimeProfileConfig(root, ctx.controls.profile);
   });
+}
+
+async function saveModelPreferencesConfig(
+  ctx: CommandContext,
+  update: Pick<AppPreferences, 'model' | 'reasoningEffort'>,
+): Promise<void> {
+  await withConfigFileLock(ctx.controls.configPath, async () => {
+    const root = await loadRootConfig(ctx.controls.configPath);
+    if (!root) {
+      const nextPreferences = {
+        ...(ctx.controls.cfg.preferences ?? {}),
+        model: update.model,
+        ...(ctx.controls.profileConfig.agentKind === 'codex'
+          ? { reasoningEffort: update.reasoningEffort }
+          : {}),
+      };
+      ctx.controls.cfg.preferences = nextPreferences;
+      await saveConfig(ctx.controls.cfg, ctx.controls.configPath);
+      return;
+    }
+
+    const profile = root.profiles[ctx.controls.profile];
+    if (!profile) throw new Error(`profile not found: ${ctx.controls.profile}`);
+    const nextPreferences = {
+      ...profile.preferences,
+      model: update.model,
+      ...(profile.agentKind === 'codex'
+        ? { reasoningEffort: update.reasoningEffort }
+        : {}),
+    };
+    root.profiles[ctx.controls.profile] = {
+      ...profile,
+      preferences: nextPreferences,
+    };
+    await saveRootConfig(root, ctx.controls.configPath);
+    ctx.controls.profileConfig = root.profiles[ctx.controls.profile]!;
+    ctx.controls.cfg = runtimeProfileConfig(root, ctx.controls.profile);
+  });
+}
+
+function normalizeCodexReasoningEffort(value: unknown): CodexReasoningEffort | undefined {
+  return value === 'minimal' || value === 'low' || value === 'medium' || value === 'high'
+    ? value
+    : undefined;
+}
+
+function parseCodexReasoningEffort(
+  value: string,
+  fallback: unknown,
+): CodexReasoningEffort | undefined {
+  if (value === DEFAULT_REASONING_EFFORT) return undefined;
+  return normalizeCodexReasoningEffort(value) ?? normalizeCodexReasoningEffort(fallback);
 }
