@@ -1,4 +1,5 @@
 import { chmod, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -6,6 +7,7 @@ import type { AgentEvent } from '../../../src/agent/types';
 import { cleanTerminalOutput, LiveSessionPool } from '../../../src/agent/live-session';
 
 const linuxIt = process.platform === 'linux' ? it : it.skip;
+const tmuxIt = process.platform === 'linux' && hasTmux() ? it : it.skip;
 
 describe('LiveSessionPool', () => {
   it('reuses a background process and forwards slash commands through stdin', async () => {
@@ -123,6 +125,7 @@ setInterval(() => {}, 1000);
       cwd: dir,
       signature: 'startup-noise',
       usePty: true,
+      backend: 'pty',
       idleMs: 40,
       outputFlushMs: 20,
       startupTimeoutMs: 300,
@@ -159,6 +162,7 @@ setInterval(() => {}, 1000);
       cwd: dir,
       signature: 'pty-size',
       usePty: true,
+      backend: 'pty',
       idleMs: 40,
       outputFlushMs: 20,
       startupTimeoutMs: 300,
@@ -168,6 +172,51 @@ setInterval(() => {}, 1000);
     await pool.closeAll();
 
     expect(textOf(events)).toBe('48 120\n48x120\n');
+  });
+
+  tmuxIt('can run live sessions through tmux capture-pane and send-keys', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-test-'));
+    const bin = join(dir, 'fake-tmux-agent.mjs');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+import { execFileSync } from 'node:child_process';
+process.stdin.setEncoding('utf8');
+let buf = '';
+process.stdin.on('data', (chunk) => {
+  buf += chunk;
+  let idx;
+  while ((idx = buf.search(/[\\r\\n]/)) !== -1) {
+    const line = buf.slice(0, idx).trim();
+    buf = buf.slice(idx + 1);
+    if (!line) continue;
+    const size = execFileSync('stty', ['size'], { encoding: 'utf8', stdio: ['inherit', 'pipe', 'pipe'] }).trim();
+    process.stdout.write('tmux:' + line + '\\n' + size + '\\n' + process.env.LINES + 'x' + process.env.COLUMNS + '\\n');
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 300,
+      outputFlushMs: 40,
+      startupTimeoutMs: 1000,
+    });
+
+    const events = await collect(session.run('run-tmux', 'hello', dir).events);
+    await pool.closeAll();
+
+    expect(textOf(events)).toContain('tmux:hello\n48 120\n48x120\n');
   });
 
   it('normalizes terminal redraws instead of appending every frame', () => {
@@ -198,6 +247,7 @@ setInterval(() => {}, 1000);
       cwd: dir,
       signature: 'pty',
       usePty: true,
+      backend: 'pty',
       idleMs: 40,
       outputFlushMs: 20,
       startupTimeoutMs: 300,
@@ -231,4 +281,8 @@ function textOf(events: AgentEvent[]): string {
     .filter((event): event is Extract<AgentEvent, { type: 'text' }> => event.type === 'text')
     .map((event) => event.delta)
     .join('');
+}
+
+function hasTmux(): boolean {
+  return spawnSync('tmux', ['-V'], { stdio: 'ignore' }).status === 0;
 }

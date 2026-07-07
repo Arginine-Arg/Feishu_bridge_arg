@@ -1,11 +1,18 @@
 import { EventEmitter } from 'node:events';
+import { randomUUID } from 'node:crypto';
 import type { Readable, Writable } from 'node:stream';
 import { log } from '../core/logger';
-import { mergeProcessEnv, spawnProcess, type SpawnedProcessByStdio } from '../platform/spawn';
+import {
+  mergeProcessEnv,
+  spawnProcess,
+  spawnProcessSync,
+  type SpawnedProcessByStdio,
+} from '../platform/spawn';
 import type { AgentEvent, AgentRun } from './types';
 
 type LiveChild = SpawnedProcessByStdio<Writable, Readable, Readable>;
 type LiveOutput = { mode: 'append' | 'snapshot'; text: string };
+export type LiveTerminalBackend = 'auto' | 'tmux' | 'pty' | 'pipe';
 
 export interface LiveSessionCommand {
   command: string;
@@ -14,6 +21,7 @@ export interface LiveSessionCommand {
   env?: NodeJS.ProcessEnv;
   signature: string;
   usePty?: boolean;
+  backend?: LiveTerminalBackend;
   idleMs?: number;
   outputFlushMs?: number;
   startupTimeoutMs?: number;
@@ -271,10 +279,15 @@ function spawnLiveProcess(opts: LiveSessionCommand): {
     COLUMNS: ptyColumns,
     LINES: ptyRows,
   });
-  if (opts.usePty !== false && process.platform === 'linux') {
-    const commandLine = `stty rows ${shellQuote(ptyRows)} cols ${shellQuote(
-      ptyColumns,
-    )} -echo 2>/dev/null; ${[opts.command, ...opts.args].map(shellQuote).join(' ')}`;
+  const backend = opts.usePty === false ? 'pipe' : opts.backend ?? 'auto';
+  if (backend !== 'pipe' && process.platform === 'linux') {
+    const commandLine = liveCommandLine(opts.command, opts.args, ptyRows, ptyColumns);
+    if ((backend === 'auto' || backend === 'tmux') && isTmuxAvailable()) {
+      return spawnTmuxLiveProcess(opts.cwd, env, commandLine, ptyRows, ptyColumns);
+    }
+    if (backend === 'tmux') {
+      log.warn('agent-live', 'tmux-unavailable-fallback', { fallback: 'pty' });
+    }
     return {
       command: 'script',
       pty: true,
@@ -296,6 +309,56 @@ function spawnLiveProcess(opts: LiveSessionCommand): {
   };
 }
 
+function liveCommandLine(command: string, args: string[], rows: string, columns: string): string {
+  return `stty rows ${shellQuote(rows)} cols ${shellQuote(columns)} -echo 2>/dev/null; ${[
+    command,
+    ...args,
+  ]
+    .map(shellQuote)
+    .join(' ')}`;
+}
+
+function spawnTmuxLiveProcess(
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  commandLine: string,
+  rows: string,
+  columns: string,
+): {
+  child: LiveChild;
+  command: string;
+  pty: boolean;
+} {
+  const socketName = `lark-channel-${process.pid}-${randomUUID().replace(/-/g, '').slice(0, 16)}`;
+  const child = spawnProcess(
+    process.execPath,
+    [
+      '-e',
+      TMUX_BRIDGE_HELPER,
+      socketName,
+      Buffer.from(commandLine, 'utf8').toString('base64'),
+      cwd,
+      rows,
+      columns,
+    ],
+    {
+      cwd,
+      env,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    },
+  ) as LiveChild;
+  return {
+    command: 'tmux',
+    pty: true,
+    child,
+  };
+}
+
+function isTmuxAvailable(): boolean {
+  const result = spawnProcessSync('tmux', ['-V'], { stdio: 'ignore' });
+  return result.status === 0;
+}
+
 function positiveIntString(value: string | undefined): string | undefined {
   if (!value || !/^\d+$/.test(value)) return undefined;
   const parsed = Number.parseInt(value, 10);
@@ -307,6 +370,146 @@ function shellQuote(value: string): string {
   if (/^[A-Za-z0-9_/:=.,@%+-]+$/.test(value)) return value;
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
+
+const TMUX_BRIDGE_HELPER = String.raw`
+const { spawnSync } = require('node:child_process');
+
+const [socketName, commandBase64, cwd, rows, columns] = process.argv.slice(1);
+const session = 'main';
+const target = session + ':0.0';
+const commandLine = Buffer.from(commandBase64, 'base64').toString('utf8');
+let closed = false;
+let lastSnapshot = '';
+
+function tmux(args, options = {}) {
+  return spawnSync('tmux', ['-L', socketName, ...args], {
+    cwd,
+    env: process.env,
+    encoding: 'utf8',
+    maxBuffer: 1024 * 1024,
+    ...options,
+  });
+}
+
+function writeError(prefix, result) {
+  const message = (result.stderr || result.error?.message || '').trim();
+  process.stderr.write(prefix + (message ? ': ' + message : '') + '\n');
+}
+
+function cleanup() {
+  if (closed) return;
+  closed = true;
+  tmux(['kill-server'], { stdio: 'ignore' });
+}
+
+const created = tmux([
+  'new-session',
+  '-d',
+  '-x',
+  columns,
+  '-y',
+  rows,
+  '-s',
+  session,
+  '-c',
+  cwd,
+  commandLine,
+]);
+if (created.status !== 0) {
+  writeError('failed to start tmux live session', created);
+  process.exit(1);
+}
+
+function sendKeys(args) {
+  const result = tmux(['send-keys', '-t', target, ...args]);
+  if (result.status !== 0) writeError('failed to send keys to tmux live session', result);
+}
+
+function sendLiteral(text) {
+  if (!text) return;
+  sendKeys(['-l', text]);
+}
+
+function sendInput(input) {
+  if (input === '\x03') {
+    sendKeys(['C-c']);
+    return;
+  }
+  if (input === '\x1B[A') {
+    sendKeys(['Up']);
+    return;
+  }
+  if (input === '\x1B[B') {
+    sendKeys(['Down']);
+    return;
+  }
+  if (input === '\x1B[C') {
+    sendKeys(['Right']);
+    return;
+  }
+  if (input === '\x1B[D') {
+    sendKeys(['Left']);
+    return;
+  }
+  if (input === '\x1B') {
+    sendKeys(['Escape']);
+    return;
+  }
+
+  let current = '';
+  for (const char of input) {
+    if (char === '\r' || char === '\n') {
+      sendLiteral(current);
+      current = '';
+      sendKeys(['Enter']);
+    } else {
+      current += char;
+    }
+  }
+  sendLiteral(current);
+}
+
+function capture() {
+  if (closed) return;
+  const hasSession = tmux(['has-session', '-t', session], { stdio: 'ignore' });
+  if (hasSession.status !== 0) {
+    cleanup();
+    process.exit(0);
+  }
+  const result = tmux(['capture-pane', '-p', '-J', '-t', target]);
+  if (result.status !== 0) {
+    writeError('failed to capture tmux live session', result);
+    cleanup();
+    process.exit(1);
+  }
+  const snapshot = result.stdout.replace(/\s+$/u, '');
+  if (snapshot && snapshot !== lastSnapshot) {
+    lastSnapshot = snapshot;
+    process.stdout.write('\x1b[2J\x1b[H' + snapshot);
+  }
+}
+
+const timer = setInterval(capture, 160);
+capture();
+
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', sendInput);
+process.stdin.on('end', () => {
+  clearInterval(timer);
+  cleanup();
+});
+process.on('SIGTERM', () => {
+  clearInterval(timer);
+  cleanup();
+  process.exit(0);
+});
+process.on('SIGINT', () => {
+  clearInterval(timer);
+  cleanup();
+  process.exit(0);
+});
+process.on('exit', cleanup);
+`;
 
 function translateLiveInput(input: string): string {
   const trimmed = input.trim().toLowerCase();

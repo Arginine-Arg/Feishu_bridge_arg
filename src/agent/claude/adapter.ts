@@ -7,7 +7,7 @@ import { log } from '../../core/logger';
 import { mergeProcessEnv, spawnProcess, type SpawnedProcessByStdio } from '../../platform/spawn';
 import { buildBridgeSystemPrompt } from '../bridge-system-prompt';
 import { buildLarkChannelEnv, type LarkChannelEnvContext } from '../lark-channel-env';
-import { LiveSessionPool } from '../live-session';
+import { LiveSessionPool, type LiveTerminalBackend } from '../live-session';
 import { checkAgentAvailability, type AgentAvailability } from '../preflight';
 import {
   CLAUDE_DEFAULT_PERMISSION_MODE,
@@ -24,6 +24,7 @@ export interface ClaudeAdapterOptions {
   larkChannel?: LarkChannelEnvContext;
   sessionMode?: 'turn' | 'live';
   liveUsePty?: boolean;
+  liveTerminalBackend?: LiveTerminalBackend;
   liveIdleMs?: number;
 }
 
@@ -37,6 +38,7 @@ export class ClaudeAdapter implements AgentAdapter {
   private readonly larkChannel: LarkChannelEnvContext | undefined;
   private readonly sessionMode: 'turn' | 'live';
   private readonly liveUsePty: boolean | undefined;
+  private readonly liveTerminalBackend: LiveTerminalBackend | undefined;
   private readonly liveIdleMs: number | undefined;
   private readonly liveSessions = new LiveSessionPool();
   private botIdentity: AgentBotIdentity | undefined;
@@ -46,6 +48,7 @@ export class ClaudeAdapter implements AgentAdapter {
     this.larkChannel = opts.larkChannel;
     this.sessionMode = opts.sessionMode ?? 'turn';
     this.liveUsePty = opts.liveUsePty;
+    this.liveTerminalBackend = opts.liveTerminalBackend;
     this.liveIdleMs = opts.liveIdleMs;
   }
 
@@ -229,6 +232,7 @@ export class ClaudeAdapter implements AgentAdapter {
       env: buildLarkChannelEnv(this.larkChannel),
       signature,
       usePty: this.liveUsePty,
+      backend: this.liveTerminalBackend,
       idleMs: this.liveIdleMs,
       cleanup: systemPromptFile.cleanup,
     });

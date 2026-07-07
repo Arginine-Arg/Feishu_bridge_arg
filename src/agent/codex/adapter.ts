@@ -7,7 +7,7 @@ import { mergeProcessEnv, spawnProcess, type SpawnedProcessByStdio } from '../..
 import { SpawnFailed } from '../../runtime/errors';
 import { prefixBridgeSystemPrompt } from '../bridge-system-prompt';
 import { buildLarkChannelEnv, type LarkChannelEnvContext } from '../lark-channel-env';
-import { LiveSessionPool } from '../live-session';
+import { LiveSessionPool, type LiveTerminalBackend } from '../live-session';
 import { checkAgentAvailability, type AgentAvailability } from '../preflight';
 import type {
   AgentAdapter,
@@ -31,6 +31,7 @@ export interface CodexAdapterOptions {
   larkChannel?: LarkChannelEnvContext;
   sessionMode?: 'turn' | 'live';
   liveUsePty?: boolean;
+  liveTerminalBackend?: LiveTerminalBackend;
   liveIdleMs?: number;
 }
 
@@ -51,6 +52,7 @@ export class CodexAdapter implements AgentAdapter {
   private readonly larkChannel: LarkChannelEnvContext | undefined;
   private readonly sessionMode: 'turn' | 'live';
   private readonly liveUsePty: boolean | undefined;
+  private readonly liveTerminalBackend: LiveTerminalBackend | undefined;
   private readonly liveIdleMs: number | undefined;
   private readonly liveSessions = new LiveSessionPool();
   private botIdentity: AgentBotIdentity | undefined;
@@ -67,6 +69,7 @@ export class CodexAdapter implements AgentAdapter {
     this.larkChannel = opts.larkChannel;
     this.sessionMode = opts.sessionMode ?? 'turn';
     this.liveUsePty = opts.liveUsePty;
+    this.liveTerminalBackend = opts.liveTerminalBackend;
     this.liveIdleMs = opts.liveIdleMs;
   }
 
@@ -257,6 +260,7 @@ export class CodexAdapter implements AgentAdapter {
       env: envOverrides,
       signature,
       usePty: this.liveUsePty,
+      backend: this.liveTerminalBackend,
       idleMs: this.liveIdleMs,
     });
     const prompt = isNativeCliCommand(opts.prompt)

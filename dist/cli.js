@@ -5877,6 +5877,7 @@ ${prompt}`;
 
 // src/agent/live-session.ts
 import { EventEmitter } from "events";
+import { randomUUID } from "crypto";
 var DEFAULT_IDLE_MS = 3500;
 var DEFAULT_OUTPUT_FLUSH_MS = 500;
 var DEFAULT_STARTUP_TIMEOUT_MS = 15e3;
@@ -6104,10 +6105,15 @@ function spawnLiveProcess(opts) {
     COLUMNS: ptyColumns,
     LINES: ptyRows
   });
-  if (opts.usePty !== false && process.platform === "linux") {
-    const commandLine = `stty rows ${shellQuote(ptyRows)} cols ${shellQuote(
-      ptyColumns
-    )} -echo 2>/dev/null; ${[opts.command, ...opts.args].map(shellQuote).join(" ")}`;
+  const backend = opts.usePty === false ? "pipe" : opts.backend ?? "auto";
+  if (backend !== "pipe" && process.platform === "linux") {
+    const commandLine = liveCommandLine(opts.command, opts.args, ptyRows, ptyColumns);
+    if ((backend === "auto" || backend === "tmux") && isTmuxAvailable()) {
+      return spawnTmuxLiveProcess(opts.cwd, env, commandLine, ptyRows, ptyColumns);
+    }
+    if (backend === "tmux") {
+      log.warn("agent-live", "tmux-unavailable-fallback", { fallback: "pty" });
+    }
     return {
       command: "script",
       pty: true,
@@ -6128,6 +6134,41 @@ function spawnLiveProcess(opts) {
     })
   };
 }
+function liveCommandLine(command, args, rows, columns) {
+  return `stty rows ${shellQuote(rows)} cols ${shellQuote(columns)} -echo 2>/dev/null; ${[
+    command,
+    ...args
+  ].map(shellQuote).join(" ")}`;
+}
+function spawnTmuxLiveProcess(cwd, env, commandLine, rows, columns) {
+  const socketName = `lark-channel-${process.pid}-${randomUUID().replace(/-/g, "").slice(0, 16)}`;
+  const child = spawnProcess(
+    process.execPath,
+    [
+      "-e",
+      TMUX_BRIDGE_HELPER,
+      socketName,
+      Buffer.from(commandLine, "utf8").toString("base64"),
+      cwd,
+      rows,
+      columns
+    ],
+    {
+      cwd,
+      env,
+      stdio: ["pipe", "pipe", "pipe"]
+    }
+  );
+  return {
+    command: "tmux",
+    pty: true,
+    child
+  };
+}
+function isTmuxAvailable() {
+  const result = spawnProcessSync("tmux", ["-V"], { stdio: "ignore" });
+  return result.status === 0;
+}
 function positiveIntString(value) {
   if (!value || !/^\d+$/.test(value)) return void 0;
   const parsed = Number.parseInt(value, 10);
@@ -6138,6 +6179,145 @@ function shellQuote(value) {
   if (/^[A-Za-z0-9_/:=.,@%+-]+$/.test(value)) return value;
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
+var TMUX_BRIDGE_HELPER = String.raw`
+const { spawnSync } = require('node:child_process');
+
+const [socketName, commandBase64, cwd, rows, columns] = process.argv.slice(1);
+const session = 'main';
+const target = session + ':0.0';
+const commandLine = Buffer.from(commandBase64, 'base64').toString('utf8');
+let closed = false;
+let lastSnapshot = '';
+
+function tmux(args, options = {}) {
+  return spawnSync('tmux', ['-L', socketName, ...args], {
+    cwd,
+    env: process.env,
+    encoding: 'utf8',
+    maxBuffer: 1024 * 1024,
+    ...options,
+  });
+}
+
+function writeError(prefix, result) {
+  const message = (result.stderr || result.error?.message || '').trim();
+  process.stderr.write(prefix + (message ? ': ' + message : '') + '\n');
+}
+
+function cleanup() {
+  if (closed) return;
+  closed = true;
+  tmux(['kill-server'], { stdio: 'ignore' });
+}
+
+const created = tmux([
+  'new-session',
+  '-d',
+  '-x',
+  columns,
+  '-y',
+  rows,
+  '-s',
+  session,
+  '-c',
+  cwd,
+  commandLine,
+]);
+if (created.status !== 0) {
+  writeError('failed to start tmux live session', created);
+  process.exit(1);
+}
+
+function sendKeys(args) {
+  const result = tmux(['send-keys', '-t', target, ...args]);
+  if (result.status !== 0) writeError('failed to send keys to tmux live session', result);
+}
+
+function sendLiteral(text) {
+  if (!text) return;
+  sendKeys(['-l', text]);
+}
+
+function sendInput(input) {
+  if (input === '\x03') {
+    sendKeys(['C-c']);
+    return;
+  }
+  if (input === '\x1B[A') {
+    sendKeys(['Up']);
+    return;
+  }
+  if (input === '\x1B[B') {
+    sendKeys(['Down']);
+    return;
+  }
+  if (input === '\x1B[C') {
+    sendKeys(['Right']);
+    return;
+  }
+  if (input === '\x1B[D') {
+    sendKeys(['Left']);
+    return;
+  }
+  if (input === '\x1B') {
+    sendKeys(['Escape']);
+    return;
+  }
+
+  let current = '';
+  for (const char of input) {
+    if (char === '\r' || char === '\n') {
+      sendLiteral(current);
+      current = '';
+      sendKeys(['Enter']);
+    } else {
+      current += char;
+    }
+  }
+  sendLiteral(current);
+}
+
+function capture() {
+  if (closed) return;
+  const hasSession = tmux(['has-session', '-t', session], { stdio: 'ignore' });
+  if (hasSession.status !== 0) {
+    cleanup();
+    process.exit(0);
+  }
+  const result = tmux(['capture-pane', '-p', '-J', '-t', target]);
+  if (result.status !== 0) {
+    writeError('failed to capture tmux live session', result);
+    cleanup();
+    process.exit(1);
+  }
+  const snapshot = result.stdout.replace(/\s+$/u, '');
+  if (snapshot && snapshot !== lastSnapshot) {
+    lastSnapshot = snapshot;
+    process.stdout.write('\x1b[2J\x1b[H' + snapshot);
+  }
+}
+
+const timer = setInterval(capture, 160);
+capture();
+
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', sendInput);
+process.stdin.on('end', () => {
+  clearInterval(timer);
+  cleanup();
+});
+process.on('SIGTERM', () => {
+  clearInterval(timer);
+  cleanup();
+  process.exit(0);
+});
+process.on('SIGINT', () => {
+  clearInterval(timer);
+  cleanup();
+  process.exit(0);
+});
+process.on('exit', cleanup);
+`;
 function translateLiveInput(input) {
   const trimmed = input.trim().toLowerCase();
   if (trimmed === "up" || trimmed === "\u2191" || trimmed === "\u4E0A") return "\x1B[A";
@@ -6654,6 +6834,7 @@ var ClaudeAdapter = class {
   larkChannel;
   sessionMode;
   liveUsePty;
+  liveTerminalBackend;
   liveIdleMs;
   liveSessions = new LiveSessionPool();
   botIdentity;
@@ -6662,6 +6843,7 @@ var ClaudeAdapter = class {
     this.larkChannel = opts.larkChannel;
     this.sessionMode = opts.sessionMode ?? "turn";
     this.liveUsePty = opts.liveUsePty;
+    this.liveTerminalBackend = opts.liveTerminalBackend;
     this.liveIdleMs = opts.liveIdleMs;
   }
   setBotIdentity(identity) {
@@ -6814,6 +6996,7 @@ var ClaudeAdapter = class {
       env: buildLarkChannelEnv(this.larkChannel),
       signature,
       usePty: this.liveUsePty,
+      backend: this.liveTerminalBackend,
       idleMs: this.liveIdleMs,
       cleanup: systemPromptFile.cleanup
     });
@@ -7167,6 +7350,7 @@ var CodexAdapter = class {
   larkChannel;
   sessionMode;
   liveUsePty;
+  liveTerminalBackend;
   liveIdleMs;
   liveSessions = new LiveSessionPool();
   botIdentity;
@@ -7182,6 +7366,7 @@ var CodexAdapter = class {
     this.larkChannel = opts.larkChannel;
     this.sessionMode = opts.sessionMode ?? "turn";
     this.liveUsePty = opts.liveUsePty;
+    this.liveTerminalBackend = opts.liveTerminalBackend;
     this.liveIdleMs = opts.liveIdleMs;
   }
   setBotIdentity(identity) {
@@ -7359,6 +7544,7 @@ var CodexAdapter = class {
       env: envOverrides,
       signature,
       usePty: this.liveUsePty,
+      backend: this.liveTerminalBackend,
       idleMs: this.liveIdleMs
     });
     const prompt = isNativeCliCommand(opts.prompt) ? opts.prompt : prefixBridgeSystemPrompt(opts.prompt, this.botIdentity);
@@ -7504,6 +7690,7 @@ var CLAUDE_MODELS = [
 ];
 var CODEX_MODELS = [
   { value: DEFAULT_MODEL, label: "\u8DDF\u968F\u9ED8\u8BA4\uFF08\u4E0D\u6307\u5B9A\uFF09" },
+  { value: "gpt-5.5", label: "GPT-5.5\uFF08\u6700\u65B0\uFF09" },
   { value: "gpt-5-codex", label: "GPT-5 Codex" },
   { value: "gpt-5", label: "GPT-5" },
   { value: "o3", label: "o3" }
@@ -7553,7 +7740,7 @@ function safeJsonStringify(value) {
 }
 
 // src/commands/index.ts
-import { randomUUID } from "crypto";
+import { randomUUID as randomUUID2 } from "crypto";
 import { readFile as readFile11 } from "fs/promises";
 import { homedir as homedir6 } from "os";
 import { dirname as dirname14, isAbsolute as isAbsolute2 } from "path";
@@ -9636,8 +9823,8 @@ async function applyResume(sessionId, ctx) {
 }
 function issueResumeCandidate(identity, target) {
   pruneResumeCandidates();
-  let nonce = randomUUID().slice(0, 12);
-  while (resumeCandidates.has(nonce)) nonce = randomUUID().slice(0, 12);
+  let nonce = randomUUID2().slice(0, 12);
+  while (resumeCandidates.has(nonce)) nonce = randomUUID2().slice(0, 12);
   resumeCandidates.set(nonce, {
     scopeId: identity.scopeId,
     agentId: identity.agentId,
@@ -11740,7 +11927,7 @@ async function fetchOwnerId(source) {
 }
 
 // src/runtime/run-executor.ts
-import { randomUUID as randomUUID2 } from "crypto";
+import { randomUUID as randomUUID3 } from "crypto";
 
 // src/bot/active-runs.ts
 var ActiveRuns = class {
@@ -11885,7 +12072,7 @@ var RunExecutor = class {
     this.agent = deps.agent;
     this.pool = deps.pool;
     this.activeRuns = deps.activeRuns;
-    this.createRunId = deps.createRunId ?? randomUUID2;
+    this.createRunId = deps.createRunId ?? randomUUID3;
     this.now = deps.now ?? Date.now;
     this.postDoneExitGraceMs = deps.postDoneExitGraceMs ?? DEFAULT_POST_DONE_EXIT_GRACE_MS;
   }
@@ -12151,7 +12338,7 @@ var ChatModeCache = class {
 };
 
 // src/bot/comments.ts
-import { randomUUID as randomUUID3 } from "crypto";
+import { randomUUID as randomUUID4 } from "crypto";
 import { mkdir as mkdir14 } from "fs/promises";
 import { dirname as dirname15 } from "path";
 
@@ -12652,7 +12839,7 @@ function commentRunRejectedReply(code) {
   }
 }
 function commentExecutionScopeId(commentThreadScopeId) {
-  return `${commentThreadScopeId}:${randomUUID3().slice(0, 12)}`;
+  return `${commentThreadScopeId}:${randomUUID4().slice(0, 12)}`;
 }
 function commentDocumentSessionScopeId(fileToken) {
   return `doc:${commentTokenDigest(fileToken)}`;
@@ -14980,7 +15167,7 @@ var SessionStore = class {
 };
 
 // src/session/catalog.ts
-import { randomUUID as randomUUID4 } from "crypto";
+import { randomUUID as randomUUID5 } from "crypto";
 import { open as open3, readFile as readFile14, rename as rename5, mkdir as mkdir15 } from "fs/promises";
 import { dirname as dirname17 } from "path";
 var DEFAULT_MAX_ARCHIVED_AGE_MS = 90 * 24 * 60 * 60 * 1e3;
@@ -15105,7 +15292,7 @@ var SessionCatalog = class {
   }
   async persist() {
     await mkdir15(dirname17(this.path), { recursive: true });
-    const tmp = `${this.path}.${process.pid}.${Date.now()}.${randomUUID4()}.tmp`;
+    const tmp = `${this.path}.${process.pid}.${Date.now()}.${randomUUID5()}.tmp`;
     const payload = `${JSON.stringify(this.entries(), null, 2)}
 `;
     const fh = await open3(tmp, "w", 384);
