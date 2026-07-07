@@ -5883,10 +5883,13 @@ var DEFAULT_IDLE_MS = 3500;
 var DEFAULT_OUTPUT_FLUSH_MS = 500;
 var DEFAULT_STARTUP_TIMEOUT_MS = 15e3;
 var STARTUP_INPUT_GRACE_MS = 25;
+var COMMAND_FRESH_SESSION_GRACE_MS = 1200;
 var CONTROL_KEY_GAP_MS = 40;
+var COMMAND_ESCAPE_SETTLE_MS = 250;
 var COMMAND_CLEAR_SETTLE_MS = 500;
 var COMMAND_STARTUP_TIMEOUT_MS = 25e3;
 var COMMAND_IDLE_MS = 2500;
+var COMMAND_NO_OUTPUT_IDLE_MS = 8e3;
 var MAX_TURN_OUTPUT_CHARS = 12e4;
 var DEFAULT_PTY_ROWS = "48";
 var DEFAULT_PTY_COLUMNS = "120";
@@ -5923,6 +5926,7 @@ var LiveTerminalSession = class {
   child;
   closed = false;
   primed = false;
+  startedAt = 0;
   activeTurnCleanup;
   constructor(opts, onClose = () => {
   }) {
@@ -5984,6 +5988,7 @@ var LiveTerminalSession = class {
     if (this.closed) throw new Error("live session is closed");
     const spawned = spawnLiveProcess(this.opts);
     this.child = spawned.child;
+    this.startedAt = Date.now();
     const child = spawned.child;
     log.info("agent-live", "spawn", {
       pid: child.pid ?? null,
@@ -6031,8 +6036,12 @@ var LiveTerminalSession = class {
     let wake;
     let timer;
     let outputTimer;
+    let slashConfirmTimer;
     let acceptingOutput = false;
     let diagFrames = 0;
+    let sawAcceptedOutput = false;
+    let deliveredText = false;
+    let slashConfirmCount = 0;
     if (commandMode) {
       log.info("agent-live", "command-start", {
         commandText: prompt,
@@ -6056,7 +6065,10 @@ var LiveTerminalSession = class {
           deltaPreview: previewLiveText(delta)
         });
       }
-      if (delta) push({ type: "text", delta });
+      if (delta) {
+        deliveredText = true;
+        push({ type: "text", delta });
+      }
     };
     const scheduleOutputFlush = () => {
       if (outputTimer) return;
@@ -6068,11 +6080,26 @@ var LiveTerminalSession = class {
       if (commandMode) log.info("agent-live", "command-finish", { reason: "idle-or-startup" });
       if (timer) clearTimeout(timer);
       flushOutput();
+      if (commandMode && !deliveredText && isStatusLiveCommand(prompt)) {
+        push({ type: "text", delta: buildLiveStatusFallback(this.opts, cwd) });
+      }
       push({ type: "done", terminationReason: "normal" });
     };
     const arm = (ms) => {
       if (timer) clearTimeout(timer);
       timer = setTimeout(finish, ms);
+    };
+    const scheduleSlashCommandConfirm = () => {
+      if (!commandMode || slashConfirmCount >= 2 || slashConfirmTimer || sawAcceptedOutput) return;
+      if (!prompt.trim().startsWith("/")) return;
+      slashConfirmTimer = setTimeout(() => {
+        slashConfirmTimer = void 0;
+        if (done || sawAcceptedOutput || slashConfirmCount >= 2) return;
+        slashConfirmCount += 1;
+        log.info("agent-live", "command-confirm", { commandText: prompt, attempt: slashConfirmCount });
+        this.write("\r");
+        if (isStatusLiveCommand(prompt) && slashConfirmCount >= 2) arm(idleMs);
+      }, 200);
     };
     const onData = (event) => {
       if (!acceptingOutput) {
@@ -6089,7 +6116,14 @@ var LiveTerminalSession = class {
       const text = sanitizeLiveTurnOutput(event.text);
       const beforeAppendFrame = commandMode && diagFrames < LIVE_DIAG_MAX_FRAMES;
       if (beforeAppendFrame) diagFrames += 1;
-      if (!text) return;
+      if (!text) {
+        if (commandMode) {
+          arm(
+            sawAcceptedOutput || isKnownSilentLiveCommand(prompt) ? idleMs : Math.max(idleMs, COMMAND_NO_OUTPUT_IDLE_MS)
+          );
+        }
+        return;
+      }
       const accepted = event.mode === "snapshot" ? output.replace(text) : output.append(text);
       if (beforeAppendFrame) {
         log.info("agent-live", "command-output", {
@@ -6100,8 +6134,12 @@ var LiveTerminalSession = class {
         });
       }
       if (accepted) {
+        sawAcceptedOutput = true;
         scheduleOutputFlush();
         arm(idleMs);
+      } else if (commandMode) {
+        scheduleSlashCommandConfirm();
+        arm(sawAcceptedOutput ? idleMs : Math.max(idleMs, COMMAND_NO_OUTPUT_IDLE_MS));
       }
     };
     const onExit = (evt) => {
@@ -6129,6 +6167,7 @@ var LiveTerminalSession = class {
       done = true;
       if (timer) clearTimeout(timer);
       if (outputTimer) clearTimeout(outputTimer);
+      if (slashConfirmTimer) clearTimeout(slashConfirmTimer);
       this.emitter.off("data", onData);
       this.emitter.off("exit", onExit);
       this.emitter.off("error", onError);
@@ -6142,7 +6181,7 @@ var LiveTerminalSession = class {
     this.emitter.once("error", onError);
     try {
       arm(startupTimeoutMs);
-      await delay(STARTUP_INPUT_GRACE_MS);
+      await delay(this.inputGraceMs(commandMode));
       if (!done) {
         this.cleaner.resetTurn();
         if (commandMode) {
@@ -6180,13 +6219,18 @@ var LiveTerminalSession = class {
   }
   async clearPendingInput() {
     this.write("\x1B");
-    await delay(CONTROL_KEY_GAP_MS);
+    await delay(COMMAND_ESCAPE_SETTLE_MS);
     this.write("\x1B");
-    await delay(CONTROL_KEY_GAP_MS);
+    await delay(COMMAND_ESCAPE_SETTLE_MS);
     this.write("");
     await delay(CONTROL_KEY_GAP_MS);
     this.write("\v");
     await delay(COMMAND_CLEAR_SETTLE_MS);
+  }
+  inputGraceMs(commandMode) {
+    if (!commandMode || !this.startedAt) return STARTUP_INPUT_GRACE_MS;
+    const ageMs = Date.now() - this.startedAt;
+    return Math.max(STARTUP_INPUT_GRACE_MS, COMMAND_FRESH_SESSION_GRACE_MS - ageMs);
   }
 };
 function spawnLiveProcess(opts) {
@@ -6466,6 +6510,38 @@ function translateLiveInput(input) {
 function isKnownSilentLiveCommand(input) {
   return /^\/(?:clear|cls)\s*$/iu.test(input.trim());
 }
+function isStatusLiveCommand(input) {
+  return /^\/status\s*$/iu.test(input.trim());
+}
+function buildLiveStatusFallback(opts, cwd) {
+  return [
+    "Codex live session status",
+    `Directory: ${cwd}`,
+    `Model: ${argValue(opts.args, "--model") ?? "default"}`,
+    `Reasoning effort: ${configValue(opts.args, "model_reasoning_effort") ?? "default"}`,
+    `Sandbox: ${argValue(opts.args, "--sandbox") ?? "default"}`,
+    `Approval policy: ${configValue(opts.args, "approval_policy") ?? "default"}`,
+    `Backend: ${opts.backend ?? (opts.usePty === false ? "pipe" : "auto")}`,
+    "Token usage: unavailable from Codex TUI fallback",
+    ""
+  ].join("\n");
+}
+function argValue(args, name) {
+  const idx = args.indexOf(name);
+  const value = idx >= 0 ? args[idx + 1] : void 0;
+  return value && !value.startsWith("-") ? value : void 0;
+}
+function configValue(args, key) {
+  for (let i = 0; i < args.length; i += 1) {
+    if (args[i] !== "-c") continue;
+    const raw = args[i + 1];
+    if (!raw) continue;
+    const match = raw.match(/^([^=]+)=(.*)$/);
+    if (!match || match[1] !== key) continue;
+    return match[2]?.replace(/^"|"$/g, "");
+  }
+  return void 0;
+}
 function previewLiveText(input) {
   return input.replace(/\x1B/g, "<ESC>").replace(/\r/g, "<CR>").replace(/\t/g, "<TAB>").slice(0, LIVE_DIAG_PREVIEW_CHARS);
 }
@@ -6678,6 +6754,8 @@ var TurnOutputBuffer = class {
   append(raw) {
     const compacted = this.compact(raw);
     if (!compacted.trim()) return false;
+    if (isStalePickerSnapshotForPrompt(compacted, this.promptEcho)) return false;
+    if (isSlashCompletionSnapshotForPrompt(compacted, this.promptEcho)) return false;
     const existing = this.emitted + this.pending;
     if (existing.endsWith(compacted)) return false;
     this.pending += compacted;
@@ -6687,6 +6765,8 @@ var TurnOutputBuffer = class {
   replace(raw) {
     const compacted = this.compact(raw);
     if (!compacted.trim()) return false;
+    if (isStalePickerSnapshotForPrompt(compacted, this.promptEcho)) return false;
+    if (isSlashCompletionSnapshotForPrompt(compacted, this.promptEcho)) return false;
     if (this.pending === compacted || this.emitted.endsWith(compacted)) return false;
     if (shouldKeepRicherSnapshot(this.pending, compacted)) return false;
     this.pending = compacted.endsWith("\n") ? compacted : `${compacted}
@@ -6695,7 +6775,7 @@ var TurnOutputBuffer = class {
     return true;
   }
   take() {
-    const out = stripKnownLiveNoise(this.pending);
+    const out = stripKnownLiveNoise(this.pending, this.promptEcho);
     this.emitted += out;
     this.pending = "";
     return out;
@@ -6799,7 +6879,7 @@ function normalizeScatteredCursorLines(input) {
   flush();
   return out.join("\n");
 }
-function stripKnownLiveNoise(input) {
+function stripKnownLiveNoise(input, prompt = "") {
   return stripTerminalChrome(stripCompactNoise(input, [
     "\u26A0Ignoringmalformedagentroledefinition:duplicateagentrolenameweb-researcherdeclaredinthesameconfiglayer",
     "Ignoringmalformedagentroledefinition:duplicateagentrolenameweb-researcherdeclaredinthesameconfiglayer",
@@ -6816,7 +6896,7 @@ function stripKnownLiveNoise(input) {
     "Tip:Use/inittocreateanAGENTS.mdwithproject-specificguidance",
     "Tip:NewBuildfasterwithCodex.",
     "Tip:NewBuildfasterwithCodex"
-  ])).replace(/(^|\n)\s*`\s*(?=\n|$)/g, "$1").replace(/\n{3,}/g, "\n\n").replace(/\n{2,}$/g, "\n").trimStart();
+  ]), prompt).replace(/(^|\n)\s*`\s*(?=\n|$)/g, "$1").replace(/\n{3,}/g, "\n\n").replace(/\n{2,}$/g, "\n").trimStart();
 }
 function sanitizeLiveTurnOutput(input) {
   const stripped = stripKnownLiveNoise(input);
@@ -6853,12 +6933,18 @@ function isPromptScopedTerminalChromeLine(trimmed, prompt) {
   if (prompt.trim() === "/fast") return false;
   return /^•\s+Service tier set to\b/i.test(trimmed);
 }
-function stripTerminalChrome(input) {
+function stripTerminalChrome(input, prompt = "") {
+  const preserveBoxes = prompt.trim().toLowerCase().startsWith("/status");
   const out = [];
   const lines = input.split("\n");
   let inBox = false;
   for (const line of lines) {
     const trimmed = line.trim();
+    if (preserveBoxes) {
+      if (isTerminalChromeLine(trimmed)) continue;
+      out.push(line);
+      continue;
+    }
     if (!inBox && /^╭[─\s]*╮?$/.test(trimmed)) {
       inBox = true;
       continue;
@@ -6871,6 +6957,21 @@ function stripTerminalChrome(input) {
     out.push(line);
   }
   return out.join("\n");
+}
+function isStalePickerSnapshotForPrompt(text, prompt) {
+  const command = prompt.trim().toLowerCase();
+  if (command === "/model") return false;
+  const compact = compactForNoiseMatch(text);
+  return compact.includes("selectmodelandeffort") && compact.includes("accesslegacymodels") && compact.includes("pressentertoconfirmoresctogoback");
+}
+function isSlashCompletionSnapshotForPrompt(text, prompt) {
+  const command = prompt.trim().toLowerCase();
+  if (!command.startsWith("/") || command.length < 2) return false;
+  const escaped = escapeRegExp(command);
+  return text.split("\n").map((line) => line.trim().toLowerCase()).some((line) => new RegExp(`^${escaped}\\s{2,}\\S`).test(line));
+}
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 function shouldKeepRicherSnapshot(current, next) {
   const currentScore = snapshotInformationScore(current);
@@ -11720,6 +11821,7 @@ async function consumeInteractivePrompts(events, deps) {
 // src/card/dispatcher.ts
 var BRIDGE_CALLBACK_MARKER = "__bridge_cb";
 var LEGACY_CLAUDE_CALLBACK_MARKER = "__claude_cb";
+var LIVE_INPUT_CALLBACK_ACTION = "live_input";
 async function handleCardAction(deps) {
   const value = deps.evt.action.value;
   if (!value || typeof value !== "object") return;
@@ -11744,6 +11846,7 @@ async function handleCardAction(deps) {
   const cmd = typeof payload.cmd === "string" ? payload.cmd : "";
   if (cmd) {
     if (cmd === "live.input") {
+      if (!verifyDeferredLiveInputToken(deps, payload, scope, operatorId)) return;
       forwardLiveInput(deps, payload, scope, threadId, mode);
       return;
     }
@@ -11798,6 +11901,33 @@ async function handleCardAction(deps) {
     return;
   }
   return;
+}
+function verifyDeferredLiveInputToken(deps, payload, scope, operatorId) {
+  const token = typeof payload.bridge_token === "string" ? payload.bridge_token : "";
+  if (!deps.callbackAuth || !token || !(BRIDGE_CALLBACK_MARKER in payload)) {
+    log.warn("callback", "denied", {
+      scope,
+      action: LIVE_INPUT_CALLBACK_ACTION,
+      reason: "missing-token"
+    });
+    return false;
+  }
+  const result = deps.callbackAuth.verify(token, {
+    scope,
+    chatId: deps.evt.chatId,
+    operatorOpenId: operatorId,
+    action: LIVE_INPUT_CALLBACK_ACTION
+  });
+  if (!result.ok) {
+    log.info("cardAction", "skip-live-input-auth-failed", { scope, reason: result.reason });
+    log.warn("callback", "denied", {
+      scope,
+      action: LIVE_INPUT_CALLBACK_ACTION,
+      reason: result.reason
+    });
+    return false;
+  }
+  return true;
 }
 function forwardLiveInput(deps, payload, scope, threadId, mode) {
   const input = typeof payload.input === "string" ? payload.input.trim() : "";
@@ -15033,7 +15163,7 @@ async function runAgentBatch(deps) {
       });
       if (!wasActive) log.info("agent-live", "picker-enter", { scope });
       if (interaction && previous?.signature !== interaction.signature) {
-        void channel.send(chatId, { card: liveInteractionCard(interaction) }, sendOpts).catch(
+        void channel.send(chatId, { card: liveInteractionCard(interaction, cardRenderOptions.signCallback) }, sendOpts).catch(
           (err) => log.warn("agent-live", "interaction-card-failed", { scope, err: String(err) })
         );
       }
@@ -15657,7 +15787,20 @@ ${buttons.map((button2) => button2.input).join("|")}`.slice(0, 500),
     buttons
   };
 }
-function liveInteractionCard(interaction) {
+function liveInteractionCard(interaction, signCallback) {
+  const actions2 = interaction.buttons.map((button2) => {
+    const value = { cmd: "live.input", input: button2.input };
+    if (signCallback) {
+      value[BRIDGE_CALLBACK_MARKER] = true;
+      value.bridge_token = signCallback(LIVE_INPUT_CALLBACK_ACTION);
+    }
+    return {
+      tag: "button",
+      text: { tag: "plain_text", content: button2.label },
+      type: button2.input === "yes" || button2.input === "enter" ? "primary" : "default",
+      ...signCallback ? { behaviors: [{ type: "callback", value }] } : {}
+    };
+  });
   return {
     schema: "2.0",
     config: {
@@ -15675,12 +15818,7 @@ ${escapeFence(interaction.prompt)}
         },
         {
           tag: "action",
-          actions: interaction.buttons.map((button2) => ({
-            tag: "button",
-            text: { tag: "plain_text", content: button2.label },
-            type: button2.input === "yes" || button2.input === "enter" ? "primary" : "default",
-            behaviors: [{ type: "callback", value: { cmd: "live.input", input: button2.input } }]
-          }))
+          actions: actions2
         }
       ]
     }

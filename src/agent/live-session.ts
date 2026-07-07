@@ -34,10 +34,13 @@ const DEFAULT_IDLE_MS = 3500;
 const DEFAULT_OUTPUT_FLUSH_MS = 500;
 const DEFAULT_STARTUP_TIMEOUT_MS = 15_000;
 const STARTUP_INPUT_GRACE_MS = 25;
+const COMMAND_FRESH_SESSION_GRACE_MS = 1200;
 const CONTROL_KEY_GAP_MS = 40;
+const COMMAND_ESCAPE_SETTLE_MS = 250;
 const COMMAND_CLEAR_SETTLE_MS = 500;
 const COMMAND_STARTUP_TIMEOUT_MS = 25_000;
 const COMMAND_IDLE_MS = 2_500;
+const COMMAND_NO_OUTPUT_IDLE_MS = 8_000;
 const MAX_TURN_OUTPUT_CHARS = 120_000;
 const DEFAULT_PTY_ROWS = '48';
 const DEFAULT_PTY_COLUMNS = '120';
@@ -78,6 +81,7 @@ export class LiveTerminalSession {
   private child: LiveChild | undefined;
   private closed = false;
   private primed = false;
+  private startedAt = 0;
   private activeTurnCleanup: (() => void) | undefined;
 
   constructor(opts: LiveSessionCommand, onClose: () => void = () => {}) {
@@ -145,6 +149,7 @@ export class LiveTerminalSession {
 
     const spawned = spawnLiveProcess(this.opts);
     this.child = spawned.child;
+    this.startedAt = Date.now();
     const child = spawned.child;
     log.info('agent-live', 'spawn', {
       pid: child.pid ?? null,
@@ -206,8 +211,12 @@ export class LiveTerminalSession {
     let wake: (() => void) | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let outputTimer: ReturnType<typeof setTimeout> | undefined;
+    let slashConfirmTimer: ReturnType<typeof setTimeout> | undefined;
     let acceptingOutput = false;
     let diagFrames = 0;
+    let sawAcceptedOutput = false;
+    let deliveredText = false;
+    let slashConfirmCount = 0;
 
     if (commandMode) {
       log.info('agent-live', 'command-start', {
@@ -233,7 +242,10 @@ export class LiveTerminalSession {
           deltaPreview: previewLiveText(delta),
         });
       }
-      if (delta) push({ type: 'text', delta });
+      if (delta) {
+        deliveredText = true;
+        push({ type: 'text', delta });
+      }
     };
     const scheduleOutputFlush = (): void => {
       if (outputTimer) return;
@@ -245,11 +257,26 @@ export class LiveTerminalSession {
       if (commandMode) log.info('agent-live', 'command-finish', { reason: 'idle-or-startup' });
       if (timer) clearTimeout(timer);
       flushOutput();
+      if (commandMode && !deliveredText && isStatusLiveCommand(prompt)) {
+        push({ type: 'text', delta: buildLiveStatusFallback(this.opts, cwd) });
+      }
       push({ type: 'done', terminationReason: 'normal' });
     };
     const arm = (ms: number): void => {
       if (timer) clearTimeout(timer);
       timer = setTimeout(finish, ms);
+    };
+    const scheduleSlashCommandConfirm = (): void => {
+      if (!commandMode || slashConfirmCount >= 2 || slashConfirmTimer || sawAcceptedOutput) return;
+      if (!prompt.trim().startsWith('/')) return;
+      slashConfirmTimer = setTimeout(() => {
+        slashConfirmTimer = undefined;
+        if (done || sawAcceptedOutput || slashConfirmCount >= 2) return;
+        slashConfirmCount += 1;
+        log.info('agent-live', 'command-confirm', { commandText: prompt, attempt: slashConfirmCount });
+        this.write('\r');
+        if (isStatusLiveCommand(prompt) && slashConfirmCount >= 2) arm(idleMs);
+      }, 200);
     };
 
     const onData = (event: LiveOutput): void => {
@@ -267,7 +294,16 @@ export class LiveTerminalSession {
       const text = sanitizeLiveTurnOutput(event.text);
       const beforeAppendFrame = commandMode && diagFrames < LIVE_DIAG_MAX_FRAMES;
       if (beforeAppendFrame) diagFrames += 1;
-      if (!text) return;
+      if (!text) {
+        if (commandMode) {
+          arm(
+            sawAcceptedOutput || isKnownSilentLiveCommand(prompt)
+              ? idleMs
+              : Math.max(idleMs, COMMAND_NO_OUTPUT_IDLE_MS),
+          );
+        }
+        return;
+      }
       const accepted = event.mode === 'snapshot' ? output.replace(text) : output.append(text);
       if (beforeAppendFrame) {
         log.info('agent-live', 'command-output', {
@@ -278,8 +314,12 @@ export class LiveTerminalSession {
         });
       }
       if (accepted) {
+        sawAcceptedOutput = true;
         scheduleOutputFlush();
         arm(idleMs);
+      } else if (commandMode) {
+        scheduleSlashCommandConfirm();
+        arm(sawAcceptedOutput ? idleMs : Math.max(idleMs, COMMAND_NO_OUTPUT_IDLE_MS));
       }
     };
     const onExit = (evt: { code: number | null; signal: NodeJS.Signals | null }): void => {
@@ -310,6 +350,7 @@ export class LiveTerminalSession {
       done = true;
       if (timer) clearTimeout(timer);
       if (outputTimer) clearTimeout(outputTimer);
+      if (slashConfirmTimer) clearTimeout(slashConfirmTimer);
       this.emitter.off('data', onData);
       this.emitter.off('exit', onExit);
       this.emitter.off('error', onError);
@@ -324,7 +365,7 @@ export class LiveTerminalSession {
     this.emitter.once('error', onError);
     try {
       arm(startupTimeoutMs);
-      await delay(STARTUP_INPUT_GRACE_MS);
+      await delay(this.inputGraceMs(commandMode));
       if (!done) {
         this.cleaner.resetTurn();
         if (commandMode) {
@@ -367,13 +408,19 @@ export class LiveTerminalSession {
 
   private async clearPendingInput(): Promise<void> {
     this.write('\x1B');
-    await delay(CONTROL_KEY_GAP_MS);
+    await delay(COMMAND_ESCAPE_SETTLE_MS);
     this.write('\x1B');
-    await delay(CONTROL_KEY_GAP_MS);
+    await delay(COMMAND_ESCAPE_SETTLE_MS);
     this.write('\x01');
     await delay(CONTROL_KEY_GAP_MS);
     this.write('\x0B');
     await delay(COMMAND_CLEAR_SETTLE_MS);
+  }
+
+  private inputGraceMs(commandMode: boolean): number {
+    if (!commandMode || !this.startedAt) return STARTUP_INPUT_GRACE_MS;
+    const ageMs = Date.now() - this.startedAt;
+    return Math.max(STARTUP_INPUT_GRACE_MS, COMMAND_FRESH_SESSION_GRACE_MS - ageMs);
   }
 }
 
@@ -677,6 +724,42 @@ function isKnownSilentLiveCommand(input: string): boolean {
   return /^\/(?:clear|cls)\s*$/iu.test(input.trim());
 }
 
+function isStatusLiveCommand(input: string): boolean {
+  return /^\/status\s*$/iu.test(input.trim());
+}
+
+function buildLiveStatusFallback(opts: LiveSessionCommand, cwd: string): string {
+  return [
+    'Codex live session status',
+    `Directory: ${cwd}`,
+    `Model: ${argValue(opts.args, '--model') ?? 'default'}`,
+    `Reasoning effort: ${configValue(opts.args, 'model_reasoning_effort') ?? 'default'}`,
+    `Sandbox: ${argValue(opts.args, '--sandbox') ?? 'default'}`,
+    `Approval policy: ${configValue(opts.args, 'approval_policy') ?? 'default'}`,
+    `Backend: ${opts.backend ?? (opts.usePty === false ? 'pipe' : 'auto')}`,
+    'Token usage: unavailable from Codex TUI fallback',
+    '',
+  ].join('\n');
+}
+
+function argValue(args: string[], name: string): string | undefined {
+  const idx = args.indexOf(name);
+  const value = idx >= 0 ? args[idx + 1] : undefined;
+  return value && !value.startsWith('-') ? value : undefined;
+}
+
+function configValue(args: string[], key: string): string | undefined {
+  for (let i = 0; i < args.length; i += 1) {
+    if (args[i] !== '-c') continue;
+    const raw = args[i + 1];
+    if (!raw) continue;
+    const match = raw.match(/^([^=]+)=(.*)$/);
+    if (!match || match[1] !== key) continue;
+    return match[2]?.replace(/^"|"$/g, '');
+  }
+  return undefined;
+}
+
 function previewLiveText(input: string): string {
   return input
     .replace(/\x1B/g, '<ESC>')
@@ -930,6 +1013,8 @@ class TurnOutputBuffer {
   append(raw: string): boolean {
     const compacted = this.compact(raw);
     if (!compacted.trim()) return false;
+    if (isStalePickerSnapshotForPrompt(compacted, this.promptEcho)) return false;
+    if (isSlashCompletionSnapshotForPrompt(compacted, this.promptEcho)) return false;
     const existing = this.emitted + this.pending;
     if (existing.endsWith(compacted)) return false;
 
@@ -941,6 +1026,8 @@ class TurnOutputBuffer {
   replace(raw: string): boolean {
     const compacted = this.compact(raw);
     if (!compacted.trim()) return false;
+    if (isStalePickerSnapshotForPrompt(compacted, this.promptEcho)) return false;
+    if (isSlashCompletionSnapshotForPrompt(compacted, this.promptEcho)) return false;
     if (this.pending === compacted || this.emitted.endsWith(compacted)) return false;
     if (shouldKeepRicherSnapshot(this.pending, compacted)) return false;
     this.pending = compacted.endsWith('\n') ? compacted : `${compacted}\n`;
@@ -949,7 +1036,7 @@ class TurnOutputBuffer {
   }
 
   take(): string {
-    const out = stripKnownLiveNoise(this.pending);
+    const out = stripKnownLiveNoise(this.pending, this.promptEcho);
     this.emitted += out;
     this.pending = '';
     return out;
@@ -1057,7 +1144,7 @@ function normalizeScatteredCursorLines(input: string): string {
   return out.join('\n');
 }
 
-function stripKnownLiveNoise(input: string): string {
+function stripKnownLiveNoise(input: string, prompt = ''): string {
   return stripTerminalChrome(stripCompactNoise(input, [
     '⚠Ignoringmalformedagentroledefinition:duplicateagentrolenameweb-researcherdeclaredinthesameconfiglayer',
     'Ignoringmalformedagentroledefinition:duplicateagentrolenameweb-researcherdeclaredinthesameconfiglayer',
@@ -1074,7 +1161,7 @@ function stripKnownLiveNoise(input: string): string {
     'Tip:Use/inittocreateanAGENTS.mdwithproject-specificguidance',
     'Tip:NewBuildfasterwithCodex.',
     'Tip:NewBuildfasterwithCodex',
-  ]))
+  ]), prompt)
     .replace(/(^|\n)\s*`\s*(?=\n|$)/g, '$1')
     .replace(/\n{3,}/g, '\n\n')
     .replace(/\n{2,}$/g, '\n')
@@ -1143,12 +1230,18 @@ function isPromptScopedTerminalChromeLine(trimmed: string, prompt: string): bool
   return /^•\s+Service tier set to\b/i.test(trimmed);
 }
 
-function stripTerminalChrome(input: string): string {
+function stripTerminalChrome(input: string, prompt = ''): string {
+  const preserveBoxes = prompt.trim().toLowerCase().startsWith('/status');
   const out: string[] = [];
   const lines = input.split('\n');
   let inBox = false;
   for (const line of lines) {
     const trimmed = line.trim();
+    if (preserveBoxes) {
+      if (isTerminalChromeLine(trimmed)) continue;
+      out.push(line);
+      continue;
+    }
     if (!inBox && /^╭[─\s]*╮?$/.test(trimmed)) {
       inBox = true;
       continue;
@@ -1161,6 +1254,31 @@ function stripTerminalChrome(input: string): string {
     out.push(line);
   }
   return out.join('\n');
+}
+
+function isStalePickerSnapshotForPrompt(text: string, prompt: string): boolean {
+  const command = prompt.trim().toLowerCase();
+  if (command === '/model') return false;
+  const compact = compactForNoiseMatch(text);
+  return (
+    compact.includes('selectmodelandeffort') &&
+    compact.includes('accesslegacymodels') &&
+    compact.includes('pressentertoconfirmoresctogoback')
+  );
+}
+
+function isSlashCompletionSnapshotForPrompt(text: string, prompt: string): boolean {
+  const command = prompt.trim().toLowerCase();
+  if (!command.startsWith('/') || command.length < 2) return false;
+  const escaped = escapeRegExp(command);
+  return text
+    .split('\n')
+    .map((line) => line.trim().toLowerCase())
+    .some((line) => new RegExp(`^${escaped}\\s{2,}\\S`).test(line));
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function shouldKeepRicherSnapshot(current: string, next: string): boolean {

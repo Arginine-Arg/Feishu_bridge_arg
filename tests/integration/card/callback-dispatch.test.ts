@@ -141,6 +141,8 @@ describe('signed card callback dispatch', () => {
     await h.dispatch({
       cmd: 'live.input',
       input: 'yes',
+      __bridge_cb: true,
+      bridge_token: h.token('live_input', { nonce: 'nonce-live-input' }),
     });
 
     const queued = h.pending.cancel('oc_group');
@@ -149,6 +151,17 @@ describe('signed card callback dispatch', () => {
     expect(isNativeAgentCommandMessage(queued[0]!)).toBe(true);
     expect(isForceLiveAgentCommandMessage(queued[0]!)).toBe(true);
     expect(liveInputModeForMessage(queued[0]!)).toBe('control');
+  });
+
+  it('rejects unsigned live.input button clicks', async () => {
+    const h = await createHarness();
+
+    await h.dispatch({
+      cmd: 'live.input',
+      input: 'yes',
+    });
+
+    expect(h.pending.cancel('oc_group')).toHaveLength(0);
   });
 
   it('rejects a deferred prompt-answer callback signed for a different operator', async () => {

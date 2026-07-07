@@ -23,8 +23,9 @@ import { BRIDGE_PROMPT_CALLBACK_MARKER, PROMPT_CALLBACK_ACTION } from './interac
  * sigils make it virtually impossible to collide with normal payload
  * fields the agent might set.
  */
-const BRIDGE_CALLBACK_MARKER = '__bridge_cb';
+export const BRIDGE_CALLBACK_MARKER = '__bridge_cb';
 const LEGACY_CLAUDE_CALLBACK_MARKER = '__claude_cb';
+export const LIVE_INPUT_CALLBACK_ACTION = 'live_input';
 
 export interface CardDispatchDeps {
   channel: LarkChannel;
@@ -87,6 +88,7 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
   const cmd = typeof payload.cmd === 'string' ? payload.cmd : '';
   if (cmd) {
     if (cmd === 'live.input') {
+      if (!verifyDeferredLiveInputToken(deps, payload, scope, operatorId)) return;
       forwardLiveInput(deps, payload, scope, threadId, mode);
       return;
     }
@@ -155,6 +157,39 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
   }
 
   return;
+}
+
+function verifyDeferredLiveInputToken(
+  deps: CardDispatchDeps,
+  payload: Record<string, unknown>,
+  scope: string,
+  operatorId: string,
+): boolean {
+  const token = typeof payload.bridge_token === 'string' ? payload.bridge_token : '';
+  if (!deps.callbackAuth || !token || !(BRIDGE_CALLBACK_MARKER in payload)) {
+    log.warn('callback', 'denied', {
+      scope,
+      action: LIVE_INPUT_CALLBACK_ACTION,
+      reason: 'missing-token',
+    });
+    return false;
+  }
+  const result = deps.callbackAuth.verify(token, {
+    scope,
+    chatId: deps.evt.chatId,
+    operatorOpenId: operatorId,
+    action: LIVE_INPUT_CALLBACK_ACTION,
+  });
+  if (!result.ok) {
+    log.info('cardAction', 'skip-live-input-auth-failed', { scope, reason: result.reason });
+    log.warn('callback', 'denied', {
+      scope,
+      action: LIVE_INPUT_CALLBACK_ACTION,
+      reason: result.reason,
+    });
+    return false;
+  }
+  return true;
 }
 
 function forwardLiveInput(

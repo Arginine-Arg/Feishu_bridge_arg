@@ -15,7 +15,11 @@ import {
   type BridgePromptTopicMessage,
 } from '../agent/prompt';
 import type { AgentAdapter, AgentEvent } from '../agent/types';
-import { handleCardAction } from '../card/dispatcher';
+import {
+  BRIDGE_CALLBACK_MARKER,
+  handleCardAction,
+  LIVE_INPUT_CALLBACK_ACTION,
+} from '../card/dispatcher';
 import { consumeInteractivePrompts, PROMPT_CALLBACK_ACTION } from '../card/interactive-prompt';
 import { isLiveControlInput } from '../agent/live-session';
 import { CallbackAuth } from '../card/callback-auth';
@@ -1056,7 +1060,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       if (!wasActive) log.info('agent-live', 'picker-enter', { scope });
       if (interaction && previous?.signature !== interaction.signature) {
         void channel
-          .send(chatId, { card: liveInteractionCard(interaction) }, sendOpts)
+          .send(chatId, { card: liveInteractionCard(interaction, cardRenderOptions.signCallback) }, sendOpts)
           .catch((err) =>
             log.warn('agent-live', 'interaction-card-failed', { scope, err: String(err) }),
           );
@@ -1875,7 +1879,23 @@ function detectLiveInteraction(text: string): LiveInteractionPrompt | undefined 
   };
 }
 
-function liveInteractionCard(interaction: LiveInteractionPrompt): object {
+export function liveInteractionCard(
+  interaction: LiveInteractionPrompt,
+  signCallback?: (action: string) => string,
+): object {
+  const actions = interaction.buttons.map((button) => {
+    const value: Record<string, unknown> = { cmd: 'live.input', input: button.input };
+    if (signCallback) {
+      value[BRIDGE_CALLBACK_MARKER] = true;
+      value.bridge_token = signCallback(LIVE_INPUT_CALLBACK_ACTION);
+    }
+    return {
+      tag: 'button',
+      text: { tag: 'plain_text', content: button.label },
+      type: button.input === 'yes' || button.input === 'enter' ? 'primary' : 'default',
+      ...(signCallback ? { behaviors: [{ type: 'callback', value }] } : {}),
+    };
+  });
   return {
     schema: '2.0',
     config: {
@@ -1890,12 +1910,7 @@ function liveInteractionCard(interaction: LiveInteractionPrompt): object {
         },
         {
           tag: 'action',
-          actions: interaction.buttons.map((button) => ({
-            tag: 'button',
-            text: { tag: 'plain_text', content: button.label },
-            type: button.input === 'yes' || button.input === 'enter' ? 'primary' : 'default',
-            behaviors: [{ type: 'callback', value: { cmd: 'live.input', input: button.input } }],
-          })),
+          actions,
         },
       ],
     },

@@ -146,6 +146,12 @@ process.stdin.on('data', (chunk) => {
     else if (line === '/status') {
       process.stdout.write('status-ok\\n');
     }
+    else if (line === '/status-stale-picker') {
+      process.stdout.write('Select Model and Effort\\n');
+      process.stdout.write('Access legacy models by running codex -m <model_name> or in your config.toml\\n');
+      process.stdout.write('› 1. gpt-5.5 (current)\\n');
+      process.stdout.write('Press enter to confirm or esc to go back\\n');
+    }
     else if (line === '/clear') {
       // Codex /clear intentionally redraws to an empty screen and may not emit
       // any stable text. The bridge should end this command on the short idle
@@ -211,6 +217,9 @@ setInterval(() => {}, 1000);
     const tenth = await collect(secondSession.run('run-10', '/goal-frame', dir).events);
     await collect(secondSession.run('run-11', '/prime-buffer', dir).events);
     const eleventh = await collect(secondSession.run('run-12', '/status', dir, 'command').events);
+    const stalePicker = await collect(
+      secondSession.run('run-12a', '/status-stale-picker', dir, 'command').events,
+    );
     const silent = await collect(secondSession.run('run-12b', '/clear', dir, 'command').events);
     const flicker = await collect(secondSession.run('run-12c', '/status-flicker', dir, 'command').events);
     await collect(secondSession.run('run-13', '/open-picker', dir).events);
@@ -232,6 +241,7 @@ setInterval(() => {}, 1000);
       '• Context compacted\n\n⚠ Heads up: Long threads and multiple compactions can cause the model to be less accurate.\n',
     );
     expect(textOf(eleventh)).toBe('status-ok\n');
+    expect(textOf(stalePicker)).toBe('');
     expect(textOf(silent)).toBe('');
     expect(textOf(flicker)).toContain('Model: gpt-5.5 high');
     expect(textOf(flicker)).toContain('Permissions: Read Only');
@@ -239,7 +249,7 @@ setInterval(() => {}, 1000);
     expect(textOf(thirteenth)).toBe('• Context compacted\n');
     expect(textOf(fourteenth)).toBe('• Usage: /goal [<objective>|clear|edit|pause|resume] No goal is currently set.\n');
     expect(await readFile(countFile, 'utf8')).toBe('start\n');
-  }, 30_000);
+  }, 45_000);
 
   it('ignores startup terminal output before the turn input is sent', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-startup-noise-test-'));
@@ -274,6 +284,52 @@ setInterval(() => {}, 1000);
 
     expect(textOf(events)).toBe('clean answer\n');
   });
+
+  it('returns a live status fallback when Codex does not render /status output', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-status-fallback-test-'));
+    const bin = join(dir, 'fake-status-empty-agent.mjs');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  if (chunk.includes('/status')) process.stdout.write('› /status\\n');
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('status-fallback-scope', {
+      command: process.execPath,
+      args: [
+        bin,
+        '--sandbox',
+        'danger-full-access',
+        '-c',
+        'approval_policy="never"',
+        '-c',
+        'model_reasoning_effort="high"',
+      ],
+      cwd: dir,
+      signature: 'status-fallback',
+      usePty: false,
+      idleMs: 30,
+      outputFlushMs: 5,
+      startupTimeoutMs: 300,
+    });
+
+    const events = await collect(session.run('status-fallback-run', '/status', dir, 'command').events);
+    await pool.closeAll();
+    const text = textOf(events);
+    expect(text).toContain('Codex live session status');
+    expect(text).toContain(`Directory: ${dir}`);
+    expect(text).toContain('Sandbox: danger-full-access');
+    expect(text).toContain('Approval policy: never');
+    expect(text).toContain('Reasoning effort: high');
+  }, 15_000);
 
   it('cleans up a previous live turn when a new turn starts', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-turn-cleanup-test-'));
