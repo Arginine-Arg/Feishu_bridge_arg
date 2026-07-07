@@ -6712,7 +6712,7 @@ function normalizeScatteredCursorLines(input) {
   return out.join("\n");
 }
 function stripKnownLiveNoise(input) {
-  return stripCompactNoise(input, [
+  return stripTerminalChrome(stripCompactNoise(input, [
     "\u26A0Ignoringmalformedagentroledefinition:duplicateagentrolenameweb-researcherdeclaredinthesameconfiglayer",
     "Ignoringmalformedagentroledefinition:duplicateagentrolenameweb-researcherdeclaredinthesameconfiglayer",
     "nfiglayer\u26A0Ignoringmalforntrole",
@@ -6728,7 +6728,7 @@ function stripKnownLiveNoise(input) {
     "Tip:Use/inittocreateanAGENTS.mdwithproject-specificguidance",
     "Tip:NewBuildfasterwithCodex.",
     "Tip:NewBuildfasterwithCodex"
-  ]).replace(/(^|\n)\s*`\s*(?=\n|$)/g, "$1").replace(/\n{3,}/g, "\n\n").trimStart();
+  ])).replace(/(^|\n)\s*`\s*(?=\n|$)/g, "$1").replace(/\n{3,}/g, "\n\n").replace(/\n{2,}$/g, "\n").trimStart();
 }
 function sanitizeLiveTurnOutput(input) {
   const stripped = stripKnownLiveNoise(input);
@@ -6747,7 +6747,33 @@ function stripPromptEcho(input, prompt) {
   if (trimmed === echo) return "";
   if (trimmed.startsWith(`${echo}
 `)) return trimmed.slice(echo.length + 1);
-  return input;
+  return input.split("\n").filter((line) => !isPromptEchoLine(line, echo)).join("\n").trimStart();
+}
+function isPromptEchoLine(line, echo) {
+  const normalized = line.trim();
+  return normalized === echo || normalized === `\u203A ${echo}`;
+}
+function stripTerminalChrome(input) {
+  const out = [];
+  const lines = input.split("\n");
+  let inBox = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!inBox && /^╭[─\s]*╮?$/.test(trimmed)) {
+      inBox = true;
+      continue;
+    }
+    if (inBox) {
+      if (/^╰[─\s]*╯?$/.test(trimmed)) inBox = false;
+      continue;
+    }
+    if (isTerminalChromeLine(trimmed)) continue;
+    out.push(line);
+  }
+  return out.join("\n");
+}
+function isTerminalChromeLine(trimmed) {
+  return /^Tip:/i.test(trimmed) || /^›\s*(?:Implement \{feature\}|Summarize recent commits)\s*$/i.test(trimmed) || /^[A-Za-z0-9_.-]+(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?\s+·\s+.+$/.test(trimmed);
 }
 function stripCompactNoise(input, patterns) {
   const { compact, map } = compactWithIndex(input);
@@ -14489,9 +14515,10 @@ async function intakeMessage(deps) {
     log.info("intake", "skip-no-mention", { scope, chatType: msg.chatType });
     return;
   }
+  const routedMsg = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
   const handled = await tryHandleCommand({
     channel,
-    msg: emsg,
+    msg: routedMsg,
     scope,
     chatMode,
     sessions,
@@ -14516,8 +14543,7 @@ async function intakeMessage(deps) {
     log.info("intake", "command", { scope, droppedPending: dropped.length });
     return;
   }
-  const rewrittenMsg = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
-  const agentMsg = getAgentSessionMode(controls.cfg) === "live" && isNativeAgentInputText(rewrittenMsg.content, liveInteractionByScope.has(scope)) ? markNativeAgentCommand(rewrittenMsg) : rewrittenMsg;
+  const agentMsg = getAgentSessionMode(controls.cfg) === "live" && isNativeAgentInputText(routedMsg.content, liveInteractionByScope.has(scope)) ? markNativeAgentCommand(routedMsg) : routedMsg;
   const size = pending.push(scope, agentMsg);
   log.info("intake", "queued", { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
   if (pending.shouldAckBusy(scope)) {

@@ -94,6 +94,16 @@ process.stdin.on('data', (chunk) => {
       setTimeout(() => process.stdout.write('real answer\\n'), 80);
     }
     else if (line === '/startup-noise') process.stdout.write('clean answer\\n');
+    else if (line === '/codex-banner') {
+      process.stdout.write('╭───────────────────────────────────────────────────────╮\\n');
+      process.stdout.write('│ >_ OpenAI Codex (v0.142.5)                            │\\n');
+      process.stdout.write('│ model:       gpt-5.5 high   /model to change          │\\n');
+      process.stdout.write('╰───────────────────────────────────────────────────────╯\\n\\n');
+      process.stdout.write('Tip: Run /review to get a code review of your current changes.\\n\\n');
+      process.stdout.write('› /codex-banner\\n\\n');
+      process.stdout.write('• Service tier set to fast\\n\\n');
+      process.stdout.write('gpt-5.5 high · ~/.lark-channel-workspaces/codex/default\\n');
+    }
     else process.stdout.write('echo:' + line + '\\n');
   }
 });
@@ -133,6 +143,7 @@ setInterval(() => {}, 1000);
     const sixth = await collect(secondSession.run('run-6', 'up', dir).events);
     const seventh = await collect(secondSession.run('run-7', '/warning-tail', dir).events);
     const eighth = await collect(secondSession.run('run-8', '/noise-then-answer', dir).events);
+    const ninth = await collect(secondSession.run('run-9', '/codex-banner', dir).events);
     await pool.closeAll();
 
     expect(textOf(first)).toContain('echo:hello');
@@ -143,6 +154,7 @@ setInterval(() => {}, 1000);
     expect(textOf(sixth)).toContain('arrow-up');
     expect(textOf(seventh)).toBe('answer\n');
     expect(textOf(eighth)).toBe('real answer\n');
+    expect(textOf(ninth)).toBe('• Service tier set to fast\n');
     expect(await readFile(countFile, 'utf8')).toBe('start\n');
   });
 

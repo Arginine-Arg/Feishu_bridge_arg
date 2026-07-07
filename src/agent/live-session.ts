@@ -950,7 +950,7 @@ function normalizeScatteredCursorLines(input: string): string {
 }
 
 function stripKnownLiveNoise(input: string): string {
-  return stripCompactNoise(input, [
+  return stripTerminalChrome(stripCompactNoise(input, [
     '⚠Ignoringmalformedagentroledefinition:duplicateagentrolenameweb-researcherdeclaredinthesameconfiglayer',
     'Ignoringmalformedagentroledefinition:duplicateagentrolenameweb-researcherdeclaredinthesameconfiglayer',
     'nfiglayer⚠Ignoringmalforntrole',
@@ -966,9 +966,10 @@ function stripKnownLiveNoise(input: string): string {
     'Tip:Use/inittocreateanAGENTS.mdwithproject-specificguidance',
     'Tip:NewBuildfasterwithCodex.',
     'Tip:NewBuildfasterwithCodex',
-  ])
+  ]))
     .replace(/(^|\n)\s*`\s*(?=\n|$)/g, '$1')
     .replace(/\n{3,}/g, '\n\n')
+    .replace(/\n{2,}$/g, '\n')
     .trimStart();
 }
 
@@ -998,7 +999,44 @@ function stripPromptEcho(input: string, prompt: string): string {
   const trimmed = input.trimStart();
   if (trimmed === echo) return '';
   if (trimmed.startsWith(`${echo}\n`)) return trimmed.slice(echo.length + 1);
-  return input;
+  return input
+    .split('\n')
+    .filter((line) => !isPromptEchoLine(line, echo))
+    .join('\n')
+    .trimStart();
+}
+
+function isPromptEchoLine(line: string, echo: string): boolean {
+  const normalized = line.trim();
+  return normalized === echo || normalized === `› ${echo}`;
+}
+
+function stripTerminalChrome(input: string): string {
+  const out: string[] = [];
+  const lines = input.split('\n');
+  let inBox = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!inBox && /^╭[─\s]*╮?$/.test(trimmed)) {
+      inBox = true;
+      continue;
+    }
+    if (inBox) {
+      if (/^╰[─\s]*╯?$/.test(trimmed)) inBox = false;
+      continue;
+    }
+    if (isTerminalChromeLine(trimmed)) continue;
+    out.push(line);
+  }
+  return out.join('\n');
+}
+
+function isTerminalChromeLine(trimmed: string): boolean {
+  return (
+    /^Tip:/i.test(trimmed) ||
+    /^›\s*(?:Implement \{feature\}|Summarize recent commits)\s*$/i.test(trimmed) ||
+    /^[A-Za-z0-9_.-]+(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?\s+·\s+.+$/.test(trimmed)
+  );
 }
 
 function stripCompactNoise(input: string, patterns: string[]): string {

@@ -665,9 +665,15 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     return;
   }
 
+  // Normalize `/codex ...` / `/claude ...` before command dispatch. The
+  // alias is only a routing hint for mixed-agent chats; bridge-owned commands
+  // such as `/resume` must still be handled by the bridge instead of being
+  // forwarded into the agent TUI as native slash commands.
+  const routedMsg = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
+
   const handled = await tryHandleCommand({
     channel,
-    msg: emsg,
+    msg: routedMsg,
     scope,
     chatMode,
     sessions,
@@ -693,15 +699,16 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     return;
   }
 
-  const rewrittenMsg = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
-  // Hybrid live mode: slash commands (/model) go to the persistent CLI; picker
-  // controls go there only while this scope is known to be inside a picker.
-  // Ordinary chat stays on turn-mode runs instead of being typed into a TUI.
+  // Hybrid live mode: slash commands that survived bridge command dispatch
+  // (/goal, /fast, /compact, agent-specific commands, etc.) go to the
+  // persistent CLI; picker controls go there only while this scope is known to
+  // be inside a picker. Ordinary chat stays on turn-mode runs instead of being
+  // typed into a TUI.
   const agentMsg =
     getAgentSessionMode(controls.cfg) === 'live' &&
-    isNativeAgentInputText(rewrittenMsg.content, liveInteractionByScope.has(scope))
-      ? markNativeAgentCommand(rewrittenMsg)
-      : rewrittenMsg;
+    isNativeAgentInputText(routedMsg.content, liveInteractionByScope.has(scope))
+      ? markNativeAgentCommand(routedMsg)
+      : routedMsg;
   const size = pending.push(scope, agentMsg);
   log.info('intake', 'queued', { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
 
@@ -720,7 +727,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   }
 }
 
-function rewriteAgentCommandMessage(
+export function rewriteAgentCommandMessage(
   msg: NormalizedMessage,
   agentKind: 'claude' | 'codex',
 ): NormalizedMessage {
