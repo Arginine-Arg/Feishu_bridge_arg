@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { liveInteractionCard } from '../../../src/bot/channel.js';
+import {
+  liveInteractionCard,
+  liveInteractionCardForText,
+} from '../../../src/bot/channel.js';
 import { BRIDGE_CALLBACK_MARKER, LIVE_INPUT_CALLBACK_ACTION } from '../../../src/card/dispatcher.js';
 
 function buttonValues(card: unknown): Array<Record<string, unknown>> {
@@ -51,5 +54,48 @@ describe('liveInteractionCard', () => {
       expect(value.cmd).toBe('live.input');
       expect(value[BRIDGE_CALLBACK_MARKER]).toBe(true);
     }
+  });
+
+  it('renders model picker text as signed live input controls', () => {
+    let n = 0;
+    const card = liveInteractionCardForText(
+      [
+        'Select Model and Effort',
+        'Access legacy models by running codex -m <model_name> or in your config.toml',
+        '',
+        '› 1. gpt-5.5 (current)  Frontier model for complex coding, research, and real-world work.',
+        '2. gpt-5.4            Strong model for everyday coding.',
+        '3. gpt-5.4-mini       Small, fast, and cost-efficient model for simpler coding tasks.',
+        '4. gpt-5.3-codex      Coding-optimized model.',
+        '5. gpt-5.2            Optimized for professional work and long-running agents.',
+        'Press enter to confirm or esc to go back',
+      ].join('\n'),
+      (action) => {
+        expect(action).toBe(LIVE_INPUT_CALLBACK_ACTION);
+        return `picker-token-${n++}`;
+      },
+    );
+
+    expect(card).toBeDefined();
+    const values = buttonValues(card);
+    expect(values.map((value) => value.input)).toEqual(['1', '2', '3', '4', '5', 'enter', 'esc']);
+    expect(values.map((value) => value.bridge_token)).toEqual([
+      'picker-token-0',
+      'picker-token-1',
+      'picker-token-2',
+      'picker-token-3',
+      'picker-token-4',
+      'picker-token-5',
+      'picker-token-6',
+    ]);
+    for (const value of values) {
+      expect(value.cmd).toBe('live.input');
+      expect(value[BRIDGE_CALLBACK_MARKER]).toBe(true);
+    }
+  });
+
+  it('does not convert ordinary text into a live input card', () => {
+    expect(liveInteractionCardForText('哈喽，我在。有什么要我处理的任务，直接发我就行。')).toBeUndefined();
+    expect(liveInteractionCardForText('处理结果：\n1. 已更新依赖\n2. 已运行测试')).toBeUndefined();
   });
 });

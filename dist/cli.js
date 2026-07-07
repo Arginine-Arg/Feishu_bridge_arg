@@ -15205,8 +15205,9 @@ async function runAgentBatch(deps) {
   };
   const observeLiveEvent = (evt) => {
     if (!useLiveSession || !nativeCommand || evt.type !== "text") return;
-    const interaction = detectLiveInteraction(evt.delta);
-    if (interaction || looksLikeAgentPicker(evt.delta)) {
+    const pickerLike = looksLikeAgentPicker(evt.delta);
+    const interaction = pickerLike ? detectLiveInteraction(evt.delta) : void 0;
+    if (interaction || pickerLike) {
       const wasActive = liveInteractionByScope.has(scope);
       const previous = liveInteractionByScope.get(scope);
       const nextSignature = interaction?.signature ?? previous?.signature;
@@ -15216,11 +15217,6 @@ async function runAgentBatch(deps) {
         ...nextSignature ? { signature: nextSignature } : {}
       });
       if (!wasActive) log.info("agent-live", "picker-enter", { scope });
-      if (interaction && previous?.signature !== interaction.signature) {
-        void channel.send(chatId, { card: liveInteractionCard(interaction, cardRenderOptions.signCallback) }, sendOpts).catch(
-          (err) => log.warn("agent-live", "interaction-card-failed", { scope, err: String(err) })
-        );
-      }
     }
   };
   const scopeOverride = sessions.getIdleTimeoutMinutes(scope);
@@ -15515,12 +15511,17 @@ async function runAgentBatch(deps) {
 async function sendFinalReply(input) {
   const body = renderText(input.state);
   if (input.replyMode === "card") {
+    const liveCard = liveInteractionCardForText(body, input.cardRenderOptions.signCallback);
     const result = await input.channel.send(
       input.chatId,
-      { card: renderCard(input.state, input.cardRenderOptions) },
+      { card: liveCard ?? renderCard(input.state, input.cardRenderOptions) },
       input.sendOpts
     );
-    log.info("outbound", "sent", outboundLogFields(input, "card", body, result));
+    log.info(
+      "outbound",
+      "sent",
+      outboundLogFields(input, liveCard ? "live-interaction-card" : "card", body, result)
+    );
   } else if (input.replyMode === "markdown") {
     if (body.trim()) {
       try {
@@ -15812,12 +15813,12 @@ function detectLiveInteraction(text) {
     buttons.push({ label, input });
   };
   for (const line of prompt.split("\n")) {
-    const match = line.match(/^(?:[›>▸*+-]\s*)?(\d{1,2})[.)、:\s-]+(.{1,80})$/u);
+    const match = line.match(/^(?:[›>▸*+-]\s*)?(\d{1,2})[.)、:\s-]+\S/u);
     if (!match) continue;
     add(match[1], match[1]);
     if (buttons.length >= 8) break;
   }
-  if (/\b(?:y\/n|yes\/no|no\/yes|\[y\/n\]|\(y\/n\)|confirm|proceed|continue)\b/i.test(prompt)) {
+  if (/\b(?:y\/n|yes\/no|no\/yes|\[y\/n\]|\(y\/n\))\b/i.test(prompt)) {
     add("yes", "yes");
     add("no", "no");
   }
@@ -15877,6 +15878,11 @@ ${escapeFence(interaction.prompt)}
       ]
     }
   };
+}
+function liveInteractionCardForText(text, signCallback) {
+  if (!looksLikeAgentPicker(text)) return void 0;
+  const interaction = detectLiveInteraction(text);
+  return interaction ? liveInteractionCard(interaction, signCallback) : void 0;
 }
 function escapeFence(value) {
   return value.replace(/```/g, "'''");
