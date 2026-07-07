@@ -32,6 +32,7 @@ import { renderText } from '../card/text-renderer';
 import { tryHandleCommand, type Controls } from '../commands';
 import type { AppConfig } from '../config/schema';
 import {
+  getAgentSessionMode,
   getAgentStopGraceMs,
   getCotMessages,
   getMaxConcurrentRuns,
@@ -683,7 +684,11 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     return;
   }
 
-  const agentMsg = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
+  const rewrittenMsg = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
+  const agentMsg =
+    getAgentSessionMode(controls.cfg) === 'live' && isSlashCommandText(rewrittenMsg.content)
+      ? markNativeAgentCommand(rewrittenMsg)
+      : rewrittenMsg;
   const size = pending.push(scope, agentMsg);
   log.info('intake', 'queued', { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
 
@@ -720,6 +725,35 @@ function rewriteAgentCommandMessage(
     ...msg,
     content: rest,
   };
+}
+
+const NATIVE_AGENT_COMMAND_RAW_KEY = '__larkChannelNativeAgentCommand';
+
+function markNativeAgentCommand(msg: NormalizedMessage): NormalizedMessage {
+  const raw = msg.raw && typeof msg.raw === 'object' && !Array.isArray(msg.raw)
+    ? { ...(msg.raw as Record<string, unknown>) }
+    : {};
+  return {
+    ...msg,
+    content: msg.content.trimStart(),
+    raw: {
+      ...raw,
+      [NATIVE_AGENT_COMMAND_RAW_KEY]: true,
+    },
+  };
+}
+
+function isNativeAgentCommandMessage(msg: NormalizedMessage): boolean {
+  return Boolean(
+    msg.raw &&
+      typeof msg.raw === 'object' &&
+      !Array.isArray(msg.raw) &&
+      (msg.raw as Record<string, unknown>)[NATIVE_AGENT_COMMAND_RAW_KEY] === true,
+  );
+}
+
+function isSlashCommandText(text: string): boolean {
+  return text.trimStart().startsWith('/');
 }
 
 interface RunBatchDeps {
@@ -849,16 +883,20 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       ]
     : undefined;
 
-  const prompt = buildPrompt(
-    batch,
-    attachments,
-    quotes,
-    topicContext,
-    channel.botIdentity,
-    extraInstructions,
-  );
+  const nativeCommand = nativeAgentCommandForBatch(batch);
+  const prompt =
+    nativeCommand ??
+    buildPrompt(
+      batch,
+      attachments,
+      quotes,
+      topicContext,
+      channel.botIdentity,
+      extraInstructions,
+    );
   log.info('prompt', 'built', {
     promptChars: prompt.length,
+    nativeCommand: Boolean(nativeCommand),
     quotes: quotes.length,
     topicContext: topicContext.length,
     ...(modelSwitched ? { modelSwitchedTo: modelSelection } : {}),
@@ -1658,6 +1696,14 @@ function buildPrompt(
     interactiveCards: batch.map(toPromptInteractiveCard).filter(isDefined),
     attachments: attachments.map(toPromptAttachment),
   });
+}
+
+function nativeAgentCommandForBatch(batch: NormalizedMessage[]): string | undefined {
+  if (batch.length !== 1) return undefined;
+  const msg = batch[0];
+  if (!msg || !isNativeAgentCommandMessage(msg)) return undefined;
+  const text = msg.content.trimStart();
+  return text.startsWith('/') ? text : undefined;
 }
 
 /**

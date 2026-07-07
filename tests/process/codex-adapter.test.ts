@@ -294,6 +294,51 @@ describe('CodexAdapter process contract', () => {
     expect(record.argv).toContain('--ignore-user-config');
   });
 
+  it('uses interactive-safe argv and raw slash stdin in live mode', async () => {
+    const fake = await createFakeInteractiveCodex();
+    cleanup.push(fake.dir);
+    const cwd = await realpath(fake.dir);
+    const adapter = new CodexAdapter({
+      binary: fake.path,
+      profileStateDir: fake.dir,
+      sessionMode: 'live',
+      liveUsePty: false,
+      sandbox: 'read-only',
+      ignoreUserConfig: true,
+      ignoreRules: true,
+    });
+
+    const run = adapter.run({
+      runId: 'run-live-model',
+      prompt: '/model',
+      cwd,
+    });
+
+    const events = await collect(run.events);
+    await adapter.shutdown();
+    const record = await readRecord(fake.recordPath);
+
+    expect(events).toEqual([
+      { type: 'system', cwd },
+      { type: 'text', delta: 'model menu\n' },
+      { type: 'done', terminationReason: 'normal' },
+    ]);
+    expect(record.argv).toEqual([
+      '--sandbox',
+      'read-only',
+      '-c',
+      'approval_policy="never"',
+      '-c',
+      'shell_environment_policy.inherit="all"',
+      '--skip-git-repo-check',
+      '-C',
+      cwd,
+    ]);
+    expect(record.argv).not.toContain('--ignore-rules');
+    expect(record.argv).not.toContain('--ignore-user-config');
+    expect(record.stdin).toBe('/model\r');
+  });
+
   it('includes stderr when the process exits non-zero before a terminal event', async () => {
     const fake = await createFakeCodex({
       lines: [{ type: 'agent_message', message: 'before failure' }],
@@ -422,6 +467,49 @@ async function collect(events: AsyncIterable<AgentEvent>): Promise<AgentEvent[]>
   const out: AgentEvent[] = [];
   for await (const event of events) out.push(event);
   return out;
+}
+
+async function createFakeInteractiveCodex(): Promise<FakeBinary> {
+  const dir = await mkdtemp(join(tmpdir(), 'codex-live-adapter-test-'));
+  const path = join(dir, 'fake-codex-live.mjs');
+  const recordPath = join(dir, 'argv.json');
+  await writeFile(
+    path,
+    [
+      '#!/usr/bin/env node',
+      'import { writeFileSync } from "node:fs";',
+      'let stdin = "";',
+      'const writeRecord = () => writeFileSync(',
+      `  ${JSON.stringify(recordPath)},`,
+      '  JSON.stringify({',
+      '    argv: process.argv.slice(2),',
+      '    cwd: process.cwd(),',
+      '    stdin,',
+      '    env: {',
+      '      LARK_CHANNEL: process.env.LARK_CHANNEL,',
+      '      LARK_CHANNEL_PROFILE: process.env.LARK_CHANNEL_PROFILE,',
+      '      LARK_CHANNEL_HOME: process.env.LARK_CHANNEL_HOME,',
+      '      LARK_CHANNEL_CONFIG: process.env.LARK_CHANNEL_CONFIG,',
+      '      LARKSUITE_CLI_CONFIG_DIR: process.env.LARKSUITE_CLI_CONFIG_DIR,',
+      '      CODEX_HOME: process.env.CODEX_HOME,',
+      '      APP_SECRET: process.env.APP_SECRET,',
+      '      PATH: process.env.PATH,',
+      '    },',
+      '  }),',
+      ');',
+      'writeRecord();',
+      'process.stdin.setEncoding("utf8");',
+      'process.stdin.on("data", (chunk) => {',
+      '  stdin += chunk;',
+      '  writeRecord();',
+      '  if (stdin.includes("/model")) process.stdout.write("model menu\\n");',
+      '});',
+      'setInterval(() => {}, 1000);',
+    ].join('\n'),
+    'utf8',
+  );
+  await chmod(path, 0o755);
+  return { path, dir, recordPath };
 }
 
 async function createFakeCodex(options: {

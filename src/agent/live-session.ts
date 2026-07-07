@@ -22,6 +22,7 @@ export interface LiveSessionCommand {
 const DEFAULT_IDLE_MS = 3500;
 const DEFAULT_OUTPUT_FLUSH_MS = 500;
 const DEFAULT_STARTUP_TIMEOUT_MS = 15_000;
+const STARTUP_INPUT_GRACE_MS = 25;
 const MAX_TURN_OUTPUT_CHARS = 120_000;
 
 export class LiveSessionPool {
@@ -213,7 +214,8 @@ export class LiveTerminalSession {
     this.emitter.once('exit', onExit);
     this.emitter.once('error', onError);
     arm(startupTimeoutMs);
-    this.write(`${prompt}\r`);
+    await delay(STARTUP_INPUT_GRACE_MS);
+    if (!done) this.write(`${prompt}\r`);
 
     try {
       while (!done || queue.length > 0) {
@@ -366,4 +368,8 @@ function collapseCarriageReturns(input: string): string {
     line += char;
   }
   return out + line;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

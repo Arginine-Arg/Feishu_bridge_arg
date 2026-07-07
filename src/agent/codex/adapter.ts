@@ -233,8 +233,6 @@ export class CodexAdapter implements AgentAdapter {
       'approval_policy="never"',
       '-c',
       'shell_environment_policy.inherit="all"',
-      ...(this.ignoreUserConfig === true ? ['--ignore-user-config'] : []),
-      ...(this.ignoreRules === false ? [] : ['--ignore-rules']),
       '--skip-git-repo-check',
       '-C',
       opts.cwd,
@@ -262,8 +260,15 @@ export class CodexAdapter implements AgentAdapter {
       usePty: this.liveUsePty,
       idleMs: this.liveIdleMs,
     });
-    return session.run(opts.runId, prefixBridgeSystemPrompt(opts.prompt, this.botIdentity), opts.cwd);
+    const prompt = isNativeCliCommand(opts.prompt)
+      ? opts.prompt
+      : prefixBridgeSystemPrompt(opts.prompt, this.botIdentity);
+    return session.run(opts.runId, prompt, opts.cwd);
   }
+}
+
+function isNativeCliCommand(prompt: string): boolean {
+  return prompt.trimStart().startsWith('/');
 }
 
 async function* createEventStream(

@@ -5880,6 +5880,7 @@ import { EventEmitter } from "events";
 var DEFAULT_IDLE_MS = 3500;
 var DEFAULT_OUTPUT_FLUSH_MS = 500;
 var DEFAULT_STARTUP_TIMEOUT_MS = 15e3;
+var STARTUP_INPUT_GRACE_MS = 25;
 var MAX_TURN_OUTPUT_CHARS = 12e4;
 var LiveSessionPool = class {
   sessions = /* @__PURE__ */ new Map();
@@ -6053,7 +6054,8 @@ var LiveTerminalSession = class {
     this.emitter.once("exit", onExit);
     this.emitter.once("error", onError);
     arm(startupTimeoutMs);
-    this.write(`${prompt}\r`);
+    await delay(STARTUP_INPUT_GRACE_MS);
+    if (!done) this.write(`${prompt}\r`);
     try {
       while (!done || queue.length > 0) {
         if (queue.length === 0) {
@@ -6191,6 +6193,9 @@ function collapseCarriageReturns(input) {
     line += char;
   }
   return out + line;
+}
+function delay(ms) {
+  return new Promise((resolve2) => setTimeout(resolve2, ms));
 }
 
 // src/agent/types.ts
@@ -6938,8 +6943,6 @@ var CodexAdapter = class {
       'approval_policy="never"',
       "-c",
       'shell_environment_policy.inherit="all"',
-      ...this.ignoreUserConfig === true ? ["--ignore-user-config"] : [],
-      ...this.ignoreRules === false ? [] : ["--ignore-rules"],
       "--skip-git-repo-check",
       "-C",
       opts.cwd
@@ -6967,9 +6970,13 @@ var CodexAdapter = class {
       usePty: this.liveUsePty,
       idleMs: this.liveIdleMs
     });
-    return session.run(opts.runId, prefixBridgeSystemPrompt(opts.prompt, this.botIdentity), opts.cwd);
+    const prompt = isNativeCliCommand(opts.prompt) ? opts.prompt : prefixBridgeSystemPrompt(opts.prompt, this.botIdentity);
+    return session.run(opts.runId, prompt, opts.cwd);
   }
 };
+function isNativeCliCommand(prompt) {
+  return prompt.trimStart().startsWith("/");
+}
 async function* createEventStream2(child, stderrChunks, getError, getStopReason) {
   const translator = new CodexJsonlTranslator();
   if (!child.pid) {
@@ -13610,7 +13617,8 @@ async function intakeMessage(deps) {
     log.info("intake", "command", { scope, droppedPending: dropped.length });
     return;
   }
-  const agentMsg = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
+  const rewrittenMsg = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
+  const agentMsg = getAgentSessionMode(controls.cfg) === "live" && isSlashCommandText(rewrittenMsg.content) ? markNativeAgentCommand(rewrittenMsg) : rewrittenMsg;
   const size = pending.push(scope, agentMsg);
   log.info("intake", "queued", { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
   if (pending.shouldAckBusy(scope)) {
@@ -13633,6 +13641,26 @@ function rewriteAgentCommandMessage(msg, agentKind) {
     ...msg,
     content: rest
   };
+}
+var NATIVE_AGENT_COMMAND_RAW_KEY = "__larkChannelNativeAgentCommand";
+function markNativeAgentCommand(msg) {
+  const raw = msg.raw && typeof msg.raw === "object" && !Array.isArray(msg.raw) ? { ...msg.raw } : {};
+  return {
+    ...msg,
+    content: msg.content.trimStart(),
+    raw: {
+      ...raw,
+      [NATIVE_AGENT_COMMAND_RAW_KEY]: true
+    }
+  };
+}
+function isNativeAgentCommandMessage(msg) {
+  return Boolean(
+    msg.raw && typeof msg.raw === "object" && !Array.isArray(msg.raw) && msg.raw[NATIVE_AGENT_COMMAND_RAW_KEY] === true
+  );
+}
+function isSlashCommandText(text) {
+  return text.trimStart().startsWith("/");
 }
 async function runAgentBatch(deps) {
   const {
@@ -13717,7 +13745,8 @@ async function runAgentBatch(deps) {
   const extraInstructions = modelSwitched ? [
     `\u7528\u6237\u521A\u628A\u672C\u4F1A\u8BDD\u4F7F\u7528\u7684\u6A21\u578B\u5207\u6362\u4E3A\u300C${modelLabel(agentKind, modelPref)}\u300D\u3002\u4E4B\u524D\u7684\u5BF9\u8BDD\u91CC\u53EF\u80FD\u63D0\u5230\u522B\u7684\u6A21\u578B,\u8BF7\u4EE5\u5F53\u524D\u6A21\u578B\u4E3A\u51C6;\u82E5\u88AB\u95EE\u5230\u4F60\u7528\u7684\u662F\u4EC0\u4E48\u6A21\u578B,\u636E\u6B64\u56DE\u7B54\u3002`
   ] : void 0;
-  const prompt = buildPrompt(
+  const nativeCommand = nativeAgentCommandForBatch(batch);
+  const prompt = nativeCommand ?? buildPrompt(
     batch,
     attachments,
     quotes,
@@ -13727,6 +13756,7 @@ async function runAgentBatch(deps) {
   );
   log.info("prompt", "built", {
     promptChars: prompt.length,
+    nativeCommand: Boolean(nativeCommand),
     quotes: quotes.length,
     topicContext: topicContext.length,
     ...modelSwitched ? { modelSwitchedTo: modelSelection } : {}
@@ -14262,7 +14292,7 @@ async function awaitRenderAwareStream(input) {
   }
   const terminal = await Promise.race([
     streamResult,
-    delay(STREAM_TERMINAL_GRACE_MS).then(() => void 0)
+    delay2(STREAM_TERMINAL_GRACE_MS).then(() => void 0)
   ]);
   if (!terminal) {
     log.warn("stream", "terminal-grace-expired", {
@@ -14294,7 +14324,7 @@ function scheduleWorkingReactionCleanup(channel, messageId, reactionPromise) {
     );
     const settled = await Promise.race([
       reactionResult,
-      delay(REACTION_CLEANUP_GRACE_MS).then(() => void 0)
+      delay2(REACTION_CLEANUP_GRACE_MS).then(() => void 0)
     ]);
     if (!settled) {
       log.warn("reaction", "cleanup-deferred", {
@@ -14311,7 +14341,7 @@ function scheduleWorkingReactionCleanup(channel, messageId, reactionPromise) {
     await removeReaction(channel, messageId, settled.reactionId);
   })();
 }
-function delay(ms) {
+function delay2(ms) {
   return new Promise((resolve2) => setTimeout(resolve2, ms));
 }
 function buildPrompt(batch, attachments, quotes = [], topicContext = [], botIdentity, extraInstructions) {
@@ -14347,6 +14377,13 @@ function buildPrompt(batch, attachments, quotes = [], topicContext = [], botIden
     interactiveCards: batch.map(toPromptInteractiveCard).filter(isDefined),
     attachments: attachments.map(toPromptAttachment)
   });
+}
+function nativeAgentCommandForBatch(batch) {
+  if (batch.length !== 1) return void 0;
+  const msg = batch[0];
+  if (!msg || !isNativeAgentCommandMessage(msg)) return void 0;
+  const text = msg.content.trimStart();
+  return text.startsWith("/") ? text : void 0;
 }
 function senderTypeOf(msg) {
   const raw = msg.raw;
