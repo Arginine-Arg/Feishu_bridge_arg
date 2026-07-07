@@ -26,6 +26,10 @@ process.stdin.on('data', (chunk) => {
     if (!line) continue;
     if (line === '/help') process.stdout.write('native-help\\n');
     else if (line === '/repeat') process.stdout.write('same-frame\\nsame-frame\\nsame-frame\\n');
+    else if (line === '/split-ansi') {
+      process.stdout.write('\\x1b[');
+      setTimeout(() => process.stdout.write('78Gclean-frame\\n'), 5);
+    }
     else process.stdout.write('echo:' + line + '\\n');
   }
 });
@@ -60,11 +64,13 @@ setInterval(() => {}, 1000);
     });
     const second = await collect(secondSession.run('run-2', '/help', dir).events);
     const third = await collect(secondSession.run('run-3', '/repeat', dir).events);
+    const fourth = await collect(secondSession.run('run-4', '/split-ansi', dir).events);
     await pool.closeAll();
 
     expect(textOf(first)).toContain('echo:hello');
     expect(textOf(second)).toContain('native-help');
     expect(textOf(third).match(/same-frame/g)).toHaveLength(1);
+    expect(textOf(fourth)).toBe('clean-frame\n');
     expect(await readFile(countFile, 'utf8')).toBe('start\n');
   });
 

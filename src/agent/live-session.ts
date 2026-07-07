@@ -55,6 +55,7 @@ export class LiveTerminalSession {
   private readonly opts: LiveSessionCommand;
   private readonly onClose: () => void;
   private readonly emitter = new EventEmitter();
+  private readonly cleaner = new TerminalOutputCleaner();
   private child: LiveChild | undefined;
   private closed = false;
 
@@ -135,7 +136,7 @@ export class LiveTerminalSession {
   }
 
   private emitData(chunk: Buffer): void {
-    const text = cleanTerminalOutput(chunk.toString('utf8'));
+    const text = this.cleaner.push(chunk.toString('utf8'));
     if (!text.trim()) return;
     this.emitter.emit('data', text);
   }
@@ -286,6 +287,17 @@ export function cleanTerminalOutput(input: string): string {
   return collapseCarriageReturns(withoutAnsi).replace(/\n{4,}/g, '\n\n\n');
 }
 
+class TerminalOutputCleaner {
+  private carry = '';
+
+  push(input: string): string {
+    const combined = this.carry + input;
+    const splitAt = completePrefixEnd(combined);
+    this.carry = combined.slice(splitAt);
+    return cleanTerminalOutput(combined.slice(0, splitAt));
+  }
+}
+
 class TurnOutputBuffer {
   private emitted = '';
   private pending = '';
@@ -368,6 +380,28 @@ function collapseCarriageReturns(input: string): string {
     line += char;
   }
   return out + line;
+}
+
+function completePrefixEnd(input: string): number {
+  const esc = input.lastIndexOf('\x1B');
+  if (esc === -1) return input.length;
+  return isIncompleteEscapeSequence(input.slice(esc)) ? esc : input.length;
+}
+
+function isIncompleteEscapeSequence(seq: string): boolean {
+  if (seq.length === 1) return true;
+  const second = seq[1];
+  if (second === '[') {
+    for (let i = 2; i < seq.length; i += 1) {
+      const code = seq.charCodeAt(i);
+      if (code >= 0x40 && code <= 0x7e) return false;
+    }
+    return true;
+  }
+  if (second === ']') {
+    return !/\x07|\x1B\\/.test(seq.slice(2));
+  }
+  return false;
 }
 
 function delay(ms: number): Promise<void> {

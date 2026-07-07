@@ -5909,6 +5909,7 @@ var LiveTerminalSession = class {
   opts;
   onClose;
   emitter = new EventEmitter();
+  cleaner = new TerminalOutputCleaner();
   child;
   closed = false;
   constructor(opts, onClose = () => {
@@ -5983,7 +5984,7 @@ var LiveTerminalSession = class {
     });
   }
   emitData(chunk) {
-    const text = cleanTerminalOutput(chunk.toString("utf8"));
+    const text = this.cleaner.push(chunk.toString("utf8"));
     if (!text.trim()) return;
     this.emitter.emit("data", text);
   }
@@ -6112,6 +6113,15 @@ function cleanTerminalOutput(input) {
   const withoutAnsi = input.replace(/\x1B\][^\x07]*(?:\x07|\x1B\\)/g, "").replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "").replace(/\x1B[@-Z\\-_]/g, "").replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "").replace(/\r\n/g, "\n");
   return collapseCarriageReturns(withoutAnsi).replace(/\n{4,}/g, "\n\n\n");
 }
+var TerminalOutputCleaner = class {
+  carry = "";
+  push(input) {
+    const combined = this.carry + input;
+    const splitAt = completePrefixEnd(combined);
+    this.carry = combined.slice(splitAt);
+    return cleanTerminalOutput(combined.slice(0, splitAt));
+  }
+};
 var TurnOutputBuffer = class {
   constructor(maxChars) {
     this.maxChars = maxChars;
@@ -6193,6 +6203,26 @@ function collapseCarriageReturns(input) {
     line += char;
   }
   return out + line;
+}
+function completePrefixEnd(input) {
+  const esc = input.lastIndexOf("\x1B");
+  if (esc === -1) return input.length;
+  return isIncompleteEscapeSequence(input.slice(esc)) ? esc : input.length;
+}
+function isIncompleteEscapeSequence(seq) {
+  if (seq.length === 1) return true;
+  const second = seq[1];
+  if (second === "[") {
+    for (let i = 2; i < seq.length; i += 1) {
+      const code = seq.charCodeAt(i);
+      if (code >= 64 && code <= 126) return false;
+    }
+    return true;
+  }
+  if (second === "]") {
+    return !/\x07|\x1B\\/.test(seq.slice(2));
+  }
+  return false;
 }
 function delay(ms) {
   return new Promise((resolve2) => setTimeout(resolve2, ms));
