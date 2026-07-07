@@ -160,12 +160,6 @@ process.stdin.on('data', (chunk) => {
     else if (line === '/clear-noise') {
       process.stdout.write('• No previous message to edit.\\n');
     }
-    else if (line === '/status-flicker') {
-      process.stdout.write('│  Model: gpt-5.5 high       │\\n');
-      process.stdout.write('│  Directory: /tmp/project   │\\n');
-      process.stdout.write('│  Permissions: Read Only    │\\n');
-      setTimeout(() => process.stdout.write('╰────────────────────────────╯\\n'), 20);
-    }
     else if (line === '/open-picker') {
       pickerOpen = true;
       process.stdout.write('Select Model and Effort\\n1. gpt-5.5\\nPress enter to confirm or esc to go back\\n');
@@ -173,13 +167,10 @@ process.stdin.on('data', (chunk) => {
     else if (line === '/slow-compact') {
       setTimeout(() => process.stdout.write('• Context compacted\\n'), 600);
     }
-    else if (line === '/slow-goal') {
+    else if (line === '/goal') {
+      process.stdout.write('/status\\n\\n');
       process.stdout.write('› Explain this codebase\\n');
       setTimeout(() => process.stdout.write('• Usage: /goal [<objective>|clear|edit|pause|resume] No goal is currently set.\\n'), 600);
-    }
-    else if (line === '/stale-status-goal') {
-      process.stdout.write('/status\\n\\n');
-      process.stdout.write('• Usage: /goal [<objective>|clear|edit|pause|resume] No goal is currently set.\\n');
     }
     else process.stdout.write('echo:' + line + '\\n');
   }
@@ -229,14 +220,10 @@ setInterval(() => {}, 1000);
     );
     const silent = await collect(secondSession.run('run-12b', '/clear', dir, 'command').events);
     const editNoise = await collect(secondSession.run('run-12b2', '/clear-noise', dir, 'command').events);
-    const flicker = await collect(secondSession.run('run-12c', '/status-flicker', dir, 'command').events);
     await collect(secondSession.run('run-13', '/open-picker', dir).events);
     const twelfth = await collect(secondSession.run('run-14', '/fast', dir, 'command').events);
     const thirteenth = await collect(secondSession.run('run-15', '/slow-compact', dir, 'command').events);
-    const fourteenth = await collect(secondSession.run('run-16', '/slow-goal', dir, 'command').events);
-    const staleStatusGoal = await collect(
-      secondSession.run('run-17', '/stale-status-goal', dir, 'command').events,
-    );
+    const fourteenth = await collect(secondSession.run('run-16', '/goal', dir, 'command').events);
     await pool.closeAll();
 
     expect(textOf(first)).toContain('echo:hello');
@@ -255,14 +242,9 @@ setInterval(() => {}, 1000);
     expect(textOf(stalePicker)).toBe('');
     expect(textOf(silent)).toBe('');
     expect(textOf(editNoise)).toBe('');
-    expect(textOf(flicker)).toContain('Model: gpt-5.5 high');
-    expect(textOf(flicker)).toContain('Permissions: Read Only');
     expect(textOf(twelfth)).toBe('• Service tier set to fast\n');
     expect(textOf(thirteenth)).toBe('• Context compacted\n');
     expect(textOf(fourteenth)).toBe('• Usage: /goal [<objective>|clear|edit|pause|resume] No goal is currently set.\n');
-    expect(textOf(staleStatusGoal)).toBe(
-      '• Usage: /goal [<objective>|clear|edit|pause|resume] No goal is currently set.\n',
-    );
     expect(await readFile(countFile, 'utf8')).toBe('start\n');
   }, 70_000);
 
@@ -345,6 +327,62 @@ setInterval(() => {}, 1000);
     expect(text).toContain('Approval policy: never');
     expect(text).toContain('Reasoning effort: high');
   }, 15_000);
+
+  it('ignores stale status panels for other commands and strips stale goal usage from status', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-stale-status-panel-test-'));
+    const bin = join(dir, 'fake-stale-status-panel-agent.mjs');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+let sentFast = false;
+let sentStatus = false;
+function statusPanel() {
+  process.stdout.write('│  >_ OpenAI Codex (v0.142.5)                                                │\\n');
+  process.stdout.write('│  Model:                gpt-5.5 (reasoning high, summaries auto)            │\\n');
+  process.stdout.write('│  Directory:            ~/.lark-channel-workspaces/codex/default            │\\n');
+  process.stdout.write('│  Token usage:          0 total  (0 input + 0 output)                       │\\n');
+  process.stdout.write('╰────────────────────────────────────────────────────────────────────────────╯\\n');
+}
+process.stdin.on('data', (chunk) => {
+  if (!sentFast && chunk.includes('/fast')) {
+    sentFast = true;
+    statusPanel();
+    process.stdout.write('• Usage: /goal [<objective>|clear|edit|pause|resume] No goal is currently set.\\n');
+    setTimeout(() => process.stdout.write('• Service tier set to fast\\n'), 20);
+  }
+  if (!sentStatus && chunk.includes('/status')) {
+    sentStatus = true;
+    statusPanel();
+    process.stdout.write('• Usage: /goal [<objective>|clear|edit|pause|resume] No goal is currently set.\\n');
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('stale-status-panel-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'stale-status-panel',
+      usePty: false,
+      idleMs: 40,
+      outputFlushMs: 5,
+      startupTimeoutMs: 300,
+    });
+
+    const fast = await collect(session.run('stale-status-fast', '/fast', dir, 'command').events);
+    const status = await collect(session.run('status-with-stale-goal', '/status', dir, 'command').events);
+    await pool.closeAll();
+
+    expect(textOf(fast)).toBe('• Service tier set to fast\n');
+    expect(textOf(status)).toContain('Token usage');
+    expect(textOf(status)).not.toContain('Usage: /goal');
+  }, 20_000);
 
   it('cleans up a previous live turn when a new turn starts', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-turn-cleanup-test-'));

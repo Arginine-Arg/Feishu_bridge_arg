@@ -291,7 +291,7 @@ export class LiveTerminalSession {
         arm(startupTimeoutMs);
         return;
       }
-      const text = sanitizeLiveTurnOutput(event.text);
+      const text = sanitizeLiveTurnOutput(event.text, prompt);
       const beforeAppendFrame = commandMode && diagFrames < LIVE_DIAG_MAX_FRAMES;
       if (beforeAppendFrame) diagFrames += 1;
       if (!text) {
@@ -1011,9 +1011,11 @@ class TurnOutputBuffer {
   ) {}
 
   append(raw: string): boolean {
-    const compacted = this.compact(raw);
+    const compacted = stripPromptMismatchedLiveContent(this.compact(raw), this.promptEcho);
     if (!compacted.trim()) return false;
     if (isStalePickerSnapshotForPrompt(compacted, this.promptEcho)) return false;
+    if (isStaleStatusSnapshotForPrompt(compacted, this.promptEcho)) return false;
+    if (isStaleGoalUsageSnapshotForPrompt(compacted, this.promptEcho)) return false;
     if (isSlashCompletionSnapshotForPrompt(compacted, this.promptEcho)) return false;
     const existing = this.emitted + this.pending;
     if (existing.endsWith(compacted)) return false;
@@ -1024,9 +1026,11 @@ class TurnOutputBuffer {
   }
 
   replace(raw: string): boolean {
-    const compacted = this.compact(raw);
+    const compacted = stripPromptMismatchedLiveContent(this.compact(raw), this.promptEcho);
     if (!compacted.trim()) return false;
     if (isStalePickerSnapshotForPrompt(compacted, this.promptEcho)) return false;
+    if (isStaleStatusSnapshotForPrompt(compacted, this.promptEcho)) return false;
+    if (isStaleGoalUsageSnapshotForPrompt(compacted, this.promptEcho)) return false;
     if (isSlashCompletionSnapshotForPrompt(compacted, this.promptEcho)) return false;
     if (this.pending === compacted || this.emitted.endsWith(compacted)) return false;
     if (shouldKeepRicherSnapshot(this.pending, compacted)) return false;
@@ -1147,7 +1151,7 @@ function normalizeScatteredCursorLines(input: string): string {
 }
 
 function stripKnownLiveNoise(input: string, prompt = ''): string {
-  return stripTerminalChrome(stripCompactNoise(input, [
+  return stripPromptMismatchedLiveContent(stripTerminalChrome(stripCompactNoise(input, [
     '⚠Ignoringmalformedagentroledefinition:duplicateagentrolenameweb-researcherdeclaredinthesameconfiglayer',
     'Ignoringmalformedagentroledefinition:duplicateagentrolenameweb-researcherdeclaredinthesameconfiglayer',
     'nfiglayer⚠Ignoringmalforntrole',
@@ -1165,15 +1169,15 @@ function stripKnownLiveNoise(input: string, prompt = ''): string {
     'Tip:NewBuildfasterwithCodex',
     '•Nopreviousmessagetoedit.',
     'Nopreviousmessagetoedit.',
-  ]), prompt)
+  ]), prompt), prompt)
     .replace(/(^|\n)\s*`\s*(?=\n|$)/g, '$1')
     .replace(/\n{3,}/g, '\n\n')
     .replace(/\n{2,}$/g, '\n')
     .trimStart();
 }
 
-function sanitizeLiveTurnOutput(input: string): string {
-  const stripped = stripKnownLiveNoise(input);
+function sanitizeLiveTurnOutput(input: string, prompt = ''): string {
+  const stripped = stripKnownLiveNoise(input, prompt);
   if (!stripped.trim()) return '';
   return isLikelyCodexRoleWarningFragment(stripped) ? '' : stripped;
 }
@@ -1274,6 +1278,49 @@ function stripTerminalChrome(input: string, prompt = ''): string {
   return out.join('\n');
 }
 
+function stripPromptMismatchedLiveContent(input: string, prompt: string): string {
+  const command = prompt.trim().toLowerCase();
+  let out = input;
+  if (!isStatusCommand(command)) out = stripCodexStatusPanelLines(out);
+  if (!isGoalCommand(command)) out = stripGoalUsageLines(out);
+  return out;
+}
+
+function isGoalCommand(command: string): boolean {
+  return /^\/goal(?:\s|$)/.test(command);
+}
+
+function isStatusCommand(command: string): boolean {
+  return command.startsWith('/status');
+}
+
+function stripCodexStatusPanelLines(input: string): string {
+  return input
+    .split('\n')
+    .filter((line) => !isCodexStatusPanelLine(line.trim()))
+    .join('\n')
+    .trimStart();
+}
+
+function isCodexStatusPanelLine(trimmed: string): boolean {
+  if (!trimmed.startsWith('│')) return false;
+  return (
+    /(?:>_\s*)?OpenAI Codex/i.test(trimmed) ||
+    /\b(?:Model|Model provider|Directory|Permissions|Agents\.md|Account|Collaboration mode|Session|Token usage|Limits):/i.test(trimmed) ||
+    /chatgpt\.com\/codex\/settings\/usage/i.test(trimmed) ||
+    /information on rate limits and credits/i.test(trimmed) ||
+    /^│\s*│?$/.test(trimmed)
+  );
+}
+
+function stripGoalUsageLines(input: string): string {
+  return input
+    .split('\n')
+    .filter((line) => !/^•\s+Usage:\s+\/goal\b/i.test(line.trim()))
+    .join('\n')
+    .trimStart();
+}
+
 function isStalePickerSnapshotForPrompt(text: string, prompt: string): boolean {
   const command = prompt.trim().toLowerCase();
   if (command === '/model') return false;
@@ -1283,6 +1330,25 @@ function isStalePickerSnapshotForPrompt(text: string, prompt: string): boolean {
     compact.includes('accesslegacymodels') &&
     compact.includes('pressentertoconfirmoresctogoback')
   );
+}
+
+function isStaleStatusSnapshotForPrompt(text: string, prompt: string): boolean {
+  const command = prompt.trim().toLowerCase();
+  if (isStatusCommand(command)) return false;
+  const compact = compactForNoiseMatch(text);
+  return (
+    compact.includes('openaicodex') &&
+    compact.includes('model:') &&
+    compact.includes('directory:') &&
+    compact.includes('tokenusage:')
+  );
+}
+
+function isStaleGoalUsageSnapshotForPrompt(text: string, prompt: string): boolean {
+  const command = prompt.trim().toLowerCase();
+  if (command === '/goal') return false;
+  const stripped = stripGoalUsageLines(text);
+  return Boolean(text.trim()) && !stripped.trim();
 }
 
 function isSlashCompletionSnapshotForPrompt(text: string, prompt: string): boolean {
