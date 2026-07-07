@@ -5,6 +5,8 @@ import { describe, expect, it } from 'vitest';
 import type { AgentEvent } from '../../../src/agent/types';
 import { cleanTerminalOutput, LiveSessionPool } from '../../../src/agent/live-session';
 
+const linuxIt = process.platform === 'linux' ? it : it.skip;
+
 describe('LiveSessionPool', () => {
   it('reuses a background process and forwards slash commands through stdin', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-test-'));
@@ -130,6 +132,42 @@ setInterval(() => {}, 1000);
     await pool.closeAll();
 
     expect(textOf(events)).toBe('clean answer\n');
+  });
+
+  linuxIt('starts live PTY sessions with a stable terminal size', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-pty-size-test-'));
+    const bin = join(dir, 'fake-pty-size-agent.mjs');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+import { execFileSync } from 'node:child_process';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', () => {
+  const size = execFileSync('stty', ['size'], { encoding: 'utf8', stdio: ['inherit', 'pipe', 'pipe'] }).trim();
+  process.stdout.write(size + '\\n' + process.env.LINES + 'x' + process.env.COLUMNS + '\\n');
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('pty-size-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'pty-size',
+      usePty: true,
+      idleMs: 40,
+      outputFlushMs: 20,
+      startupTimeoutMs: 300,
+    });
+
+    const events = await collect(session.run('run-pty-size', 'size', dir).events);
+    await pool.closeAll();
+
+    expect(textOf(events)).toBe('48 120\n48x120\n');
   });
 
   it('normalizes terminal redraws instead of appending every frame', () => {

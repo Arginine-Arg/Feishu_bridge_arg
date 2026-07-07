@@ -5882,6 +5882,8 @@ var DEFAULT_OUTPUT_FLUSH_MS = 500;
 var DEFAULT_STARTUP_TIMEOUT_MS = 15e3;
 var STARTUP_INPUT_GRACE_MS = 25;
 var MAX_TURN_OUTPUT_CHARS = 12e4;
+var DEFAULT_PTY_ROWS = "48";
+var DEFAULT_PTY_COLUMNS = "120";
 var LiveSessionPool = class {
   sessions = /* @__PURE__ */ new Map();
   getOrCreate(key, command) {
@@ -6093,12 +6095,19 @@ var LiveTerminalSession = class {
   }
 };
 function spawnLiveProcess(opts) {
+  const ptyRows = positiveIntString(opts.env?.LINES) ?? DEFAULT_PTY_ROWS;
+  const ptyColumns = positiveIntString(opts.env?.COLUMNS) ?? DEFAULT_PTY_COLUMNS;
+  const { COLUMNS: _ignoredColumns, LINES: _ignoredLines, ...agentEnv } = opts.env ?? {};
   const env = mergeProcessEnv(process.env, {
     TERM: process.env.TERM || "xterm-256color",
-    ...opts.env
+    ...agentEnv,
+    COLUMNS: ptyColumns,
+    LINES: ptyRows
   });
   if (opts.usePty !== false && process.platform === "linux") {
-    const commandLine = `stty -echo 2>/dev/null; ${[opts.command, ...opts.args].map(shellQuote).join(" ")}`;
+    const commandLine = `stty rows ${shellQuote(ptyRows)} cols ${shellQuote(
+      ptyColumns
+    )} -echo 2>/dev/null; ${[opts.command, ...opts.args].map(shellQuote).join(" ")}`;
     return {
       command: "script",
       pty: true,
@@ -6118,6 +6127,12 @@ function spawnLiveProcess(opts) {
       stdio: ["pipe", "pipe", "pipe"]
     })
   };
+}
+function positiveIntString(value) {
+  if (!value || !/^\d+$/.test(value)) return void 0;
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) return void 0;
+  return String(parsed);
 }
 function shellQuote(value) {
   if (/^[A-Za-z0-9_/:=.,@%+-]+$/.test(value)) return value;

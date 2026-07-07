@@ -25,6 +25,8 @@ const DEFAULT_OUTPUT_FLUSH_MS = 500;
 const DEFAULT_STARTUP_TIMEOUT_MS = 15_000;
 const STARTUP_INPUT_GRACE_MS = 25;
 const MAX_TURN_OUTPUT_CHARS = 120_000;
+const DEFAULT_PTY_ROWS = '48';
+const DEFAULT_PTY_COLUMNS = '120';
 
 export class LiveSessionPool {
   private readonly sessions = new Map<string, LiveTerminalSession>();
@@ -260,12 +262,19 @@ function spawnLiveProcess(opts: LiveSessionCommand): {
   command: string;
   pty: boolean;
 } {
+  const ptyRows = positiveIntString(opts.env?.LINES) ?? DEFAULT_PTY_ROWS;
+  const ptyColumns = positiveIntString(opts.env?.COLUMNS) ?? DEFAULT_PTY_COLUMNS;
+  const { COLUMNS: _ignoredColumns, LINES: _ignoredLines, ...agentEnv } = opts.env ?? {};
   const env = mergeProcessEnv(process.env, {
     TERM: process.env.TERM || 'xterm-256color',
-    ...opts.env,
+    ...agentEnv,
+    COLUMNS: ptyColumns,
+    LINES: ptyRows,
   });
   if (opts.usePty !== false && process.platform === 'linux') {
-    const commandLine = `stty -echo 2>/dev/null; ${[opts.command, ...opts.args].map(shellQuote).join(' ')}`;
+    const commandLine = `stty rows ${shellQuote(ptyRows)} cols ${shellQuote(
+      ptyColumns,
+    )} -echo 2>/dev/null; ${[opts.command, ...opts.args].map(shellQuote).join(' ')}`;
     return {
       command: 'script',
       pty: true,
@@ -285,6 +294,13 @@ function spawnLiveProcess(opts: LiveSessionCommand): {
       stdio: ['pipe', 'pipe', 'pipe'],
     }) as LiveChild,
   };
+}
+
+function positiveIntString(value: string | undefined): string | undefined {
+  if (!value || !/^\d+$/.test(value)) return undefined;
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) return undefined;
+  return String(parsed);
 }
 
 function shellQuote(value: string): string {
