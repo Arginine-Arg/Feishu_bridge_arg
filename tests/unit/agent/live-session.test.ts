@@ -4,7 +4,26 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { AgentEvent } from '../../../src/agent/types';
-import { cleanTerminalOutput, LiveSessionPool } from '../../../src/agent/live-session';
+import {
+  cleanTerminalOutput,
+  LiveSessionPool,
+  LiveTerminalSession,
+} from '../../../src/agent/live-session';
+
+describe('LiveTerminalSession prime slot', () => {
+  it('grants the system-prompt prime slot exactly once', () => {
+    const session = new LiveTerminalSession({
+      command: 'true',
+      args: [],
+      cwd: '/tmp',
+      env: {},
+      signature: 'sig',
+    });
+    expect(session.takePrimeSlot()).toBe(true);
+    expect(session.takePrimeSlot()).toBe(false);
+    expect(session.takePrimeSlot()).toBe(false);
+  });
+});
 
 const linuxIt = process.platform === 'linux' ? it : it.skip;
 const tmuxIt = process.platform === 'linux' && hasTmux() ? it : it.skip;

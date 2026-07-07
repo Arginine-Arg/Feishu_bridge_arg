@@ -69,6 +69,7 @@ export class LiveTerminalSession {
   private readonly cleaner = new TerminalOutputCleaner();
   private child: LiveChild | undefined;
   private closed = false;
+  private primed = false;
 
   constructor(opts: LiveSessionCommand, onClose: () => void = () => {}) {
     this.opts = opts;
@@ -78,6 +79,20 @@ export class LiveTerminalSession {
 
   isAlive(): boolean {
     return Boolean(this.child?.pid && this.child.exitCode === null && this.child.signalCode === null);
+  }
+
+  /**
+   * Returns true exactly once per session (the first call), false afterwards.
+   * A persistent live session retains conversation context across turns, so
+   * the (large) bridge system prompt only needs to be sent on the first turn —
+   * re-sending it every turn floods the CLI's TUI (it gets echoed) and buries
+   * the real answer. The pool creates a fresh session (primed=false) whenever
+   * the process is replaced/dies, so priming re-runs when needed.
+   */
+  takePrimeSlot(): boolean {
+    if (this.primed) return false;
+    this.primed = true;
+    return true;
   }
 
   run(runId: string, prompt: string, cwd: string): AgentRun {

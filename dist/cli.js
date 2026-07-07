@@ -5916,6 +5916,7 @@ var LiveTerminalSession = class {
   cleaner = new TerminalOutputCleaner();
   child;
   closed = false;
+  primed = false;
   constructor(opts, onClose = () => {
   }) {
     this.opts = opts;
@@ -5924,6 +5925,19 @@ var LiveTerminalSession = class {
   }
   isAlive() {
     return Boolean(this.child?.pid && this.child.exitCode === null && this.child.signalCode === null);
+  }
+  /**
+   * Returns true exactly once per session (the first call), false afterwards.
+   * A persistent live session retains conversation context across turns, so
+   * the (large) bridge system prompt only needs to be sent on the first turn —
+   * re-sending it every turn floods the CLI's TUI (it gets echoed) and buries
+   * the real answer. The pool creates a fresh session (primed=false) whenever
+   * the process is replaced/dies, so priming re-runs when needed.
+   */
+  takePrimeSlot() {
+    if (this.primed) return false;
+    this.primed = true;
+    return true;
   }
   run(runId, prompt, cwd) {
     void this.ensureStarted();
@@ -7548,7 +7562,14 @@ var CodexAdapter = class {
       backend: this.liveTerminalBackend,
       idleMs: this.liveIdleMs
     });
-    const prompt = isNativeCliCommand(opts.prompt) ? opts.prompt : prefixBridgeSystemPrompt(opts.prompt, this.botIdentity);
+    let prompt;
+    if (isNativeCliCommand(opts.prompt)) {
+      prompt = opts.prompt;
+    } else if (session.takePrimeSlot()) {
+      prompt = prefixBridgeSystemPrompt(opts.prompt, this.botIdentity);
+    } else {
+      prompt = opts.prompt;
+    }
     return session.run(opts.runId, prompt, opts.cwd);
   }
 };

@@ -263,9 +263,18 @@ export class CodexAdapter implements AgentAdapter {
       backend: this.liveTerminalBackend,
       idleMs: this.liveIdleMs,
     });
-    const prompt = isNativeCliCommand(opts.prompt)
-      ? opts.prompt
-      : prefixBridgeSystemPrompt(opts.prompt, this.botIdentity);
+    // A live session is persistent and retains context across turns, so the
+    // bridge system prompt is sent only on the first normal turn. Re-sending it
+    // every turn floods Codex's TUI (it echoes stdin) and buries the answer.
+    // Native CLI commands (e.g. /model) never carry the system prompt.
+    let prompt: string;
+    if (isNativeCliCommand(opts.prompt)) {
+      prompt = opts.prompt;
+    } else if (session.takePrimeSlot()) {
+      prompt = prefixBridgeSystemPrompt(opts.prompt, this.botIdentity);
+    } else {
+      prompt = opts.prompt;
+    }
     return session.run(opts.runId, prompt, opts.cwd);
   }
 }
