@@ -5966,6 +5966,7 @@ var LiveTerminalSession = class {
       command: spawned.command,
       pty: spawned.pty
     });
+    this.cleaner.setScreenMode(spawned.pty);
     child.stdout.on("data", (chunk) => this.emitData(chunk));
     child.stderr.on("data", (chunk) => this.emitData(chunk));
     child.on("error", (err) => {
@@ -5984,9 +5985,9 @@ var LiveTerminalSession = class {
     });
   }
   emitData(chunk) {
-    const text = this.cleaner.push(chunk.toString("utf8"));
-    if (!text.trim()) return;
-    this.emitter.emit("data", text);
+    const output = this.cleaner.push(chunk.toString("utf8"));
+    if (!output.text.trim()) return;
+    this.emitter.emit("data", output);
   }
   write(input) {
     const child = this.child;
@@ -6029,8 +6030,10 @@ var LiveTerminalSession = class {
       if (timer) clearTimeout(timer);
       timer = setTimeout(finish, ms);
     };
-    const onData = (text) => {
-      if (output.append(text)) scheduleOutputFlush();
+    const onData = (event) => {
+      if (event.mode === "snapshot" ? output.replace(event.text) : output.append(event.text)) {
+        scheduleOutputFlush();
+      }
       arm(idleMs);
     };
     const onExit = (evt) => {
@@ -6115,11 +6118,173 @@ function cleanTerminalOutput(input) {
 }
 var TerminalOutputCleaner = class {
   carry = "";
+  screenMode = false;
+  lastSnapshot = "";
+  screen = new VirtualTerminalScreen();
+  setScreenMode(enabled) {
+    this.screenMode = enabled;
+    this.carry = "";
+    this.lastSnapshot = "";
+    this.screen.reset();
+  }
   push(input) {
+    if (this.screenMode) {
+      this.screen.write(input);
+      const snapshot = stripKnownLiveNoise(this.screen.snapshot());
+      if (!snapshot.trim() || snapshot === this.lastSnapshot) {
+        return { mode: "snapshot", text: "" };
+      }
+      this.lastSnapshot = snapshot;
+      return { mode: "snapshot", text: snapshot };
+    }
     const combined = this.carry + input;
     const splitAt = completePrefixEnd(combined);
     this.carry = combined.slice(splitAt);
-    return cleanTerminalOutput(combined.slice(0, splitAt));
+    return { mode: "append", text: cleanTerminalOutput(combined.slice(0, splitAt)) };
+  }
+};
+var VirtualTerminalScreen = class {
+  width;
+  height;
+  rows;
+  row = 0;
+  col = 0;
+  state = "normal";
+  seq = "";
+  constructor(width = 120, height = 48) {
+    this.width = width;
+    this.height = height;
+    this.rows = this.emptyRows();
+  }
+  reset() {
+    this.rows = this.emptyRows();
+    this.row = 0;
+    this.col = 0;
+    this.state = "normal";
+    this.seq = "";
+  }
+  write(input) {
+    for (const char of input) this.writeChar(char);
+  }
+  snapshot() {
+    return this.rows.map((row) => row.join("").trimEnd()).join("\n").replace(/[ \t]+\n/g, "\n").replace(/\n{4,}/g, "\n\n\n").trim();
+  }
+  writeChar(char) {
+    if (this.state === "osc") {
+      if (char === "\x07") this.state = "normal";
+      else if (char === "\x1B") this.state = "osc-esc";
+      return;
+    }
+    if (this.state === "osc-esc") {
+      this.state = char === "\\" ? "normal" : "osc";
+      return;
+    }
+    if (this.state === "esc") {
+      if (char === "[") {
+        this.seq = "";
+        this.state = "csi";
+      } else if (char === "]") {
+        this.state = "osc";
+      } else {
+        this.state = "normal";
+      }
+      return;
+    }
+    if (this.state === "csi") {
+      this.seq += char;
+      const code2 = char.charCodeAt(0);
+      if (code2 >= 64 && code2 <= 126) {
+        this.applyCsi(this.seq);
+        this.seq = "";
+        this.state = "normal";
+      }
+      return;
+    }
+    if (char === "\x1B") {
+      this.state = "esc";
+      return;
+    }
+    if (char === "\r") {
+      this.col = 0;
+      return;
+    }
+    if (char === "\n") {
+      this.newLine();
+      return;
+    }
+    if (char === "\b") {
+      this.col = Math.max(0, this.col - 1);
+      return;
+    }
+    const code = char.charCodeAt(0);
+    if (code < 32 || code === 127) return;
+    this.put(char);
+  }
+  applyCsi(seq) {
+    const final = seq.at(-1) ?? "";
+    const raw = seq.slice(0, -1).replace(/[?=>]/g, "");
+    const nums = raw.split(";").filter((item) => item !== "").map((item) => Number.parseInt(item, 10)).map((item) => Number.isFinite(item) ? item : 0);
+    const first = nums[0] ?? 0;
+    if (final === "A") this.row = clamp(this.row - (first || 1), 0, this.height - 1);
+    else if (final === "B") this.row = clamp(this.row + (first || 1), 0, this.height - 1);
+    else if (final === "C") this.col = clamp(this.col + (first || 1), 0, this.width - 1);
+    else if (final === "D") this.col = clamp(this.col - (first || 1), 0, this.width - 1);
+    else if (final === "G") this.col = clamp((first || 1) - 1, 0, this.width - 1);
+    else if (final === "H" || final === "f") {
+      this.row = clamp((nums[0] || 1) - 1, 0, this.height - 1);
+      this.col = clamp((nums[1] || 1) - 1, 0, this.width - 1);
+    } else if (final === "J") {
+      this.clearScreen(first);
+    } else if (final === "K") {
+      this.clearLine(first);
+    } else if (final === "m") {
+      return;
+    }
+  }
+  put(char) {
+    this.rows[this.row][this.col] = char;
+    this.col += 1;
+    if (this.col >= this.width) {
+      this.col = 0;
+      this.newLine();
+    }
+  }
+  newLine() {
+    this.row += 1;
+    this.col = 0;
+    if (this.row < this.height) return;
+    this.rows.shift();
+    this.rows.push(this.emptyRow());
+    this.row = this.height - 1;
+  }
+  clearScreen(mode) {
+    if (mode === 2 || mode === 3) {
+      this.rows = this.emptyRows();
+      this.row = 0;
+      this.col = 0;
+      return;
+    }
+    if (mode === 1) {
+      for (let row = 0; row <= this.row; row += 1) this.rows[row] = this.emptyRow();
+      return;
+    }
+    for (let row = this.row; row < this.height; row += 1) this.rows[row] = this.emptyRow();
+  }
+  clearLine(mode) {
+    const row = this.rows[this.row] ?? this.emptyRow();
+    if (mode === 1) {
+      for (let col = 0; col <= this.col; col += 1) row[col] = " ";
+    } else if (mode === 2) {
+      this.rows[this.row] = this.emptyRow();
+    } else {
+      for (let col = this.col; col < this.width; col += 1) row[col] = " ";
+    }
+  }
+  emptyRows() {
+    return Array.from({ length: this.height }, () => this.emptyRow());
+  }
+  emptyRow() {
+    return Array.from({ length: this.width }, () => " ");
   }
 };
 var TurnOutputBuffer = class {
@@ -6137,6 +6302,15 @@ var TurnOutputBuffer = class {
     const existing = this.emitted + this.pending;
     if (existing.endsWith(compacted)) return false;
     this.pending += compacted;
+    this.enforceLimit();
+    return true;
+  }
+  replace(raw) {
+    const compacted = this.compact(raw);
+    if (!compacted.trim()) return false;
+    if (this.pending === compacted || this.emitted.endsWith(compacted)) return false;
+    this.pending = compacted.endsWith("\n") ? compacted : `${compacted}
+`;
     this.enforceLimit();
     return true;
   }
@@ -6318,6 +6492,9 @@ function isIncompleteEscapeSequence(seq) {
 }
 function delay(ms) {
   return new Promise((resolve2) => setTimeout(resolve2, ms));
+}
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
 }
 
 // src/agent/types.ts

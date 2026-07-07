@@ -85,6 +85,41 @@ setInterval(() => {}, 1000);
     expect(cleanTerminalOutput('progress 1\rprogress 2\rdone\n')).toBe('done\n');
   });
 
+  it('renders PTY terminal redraws as a stable screen snapshot', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-pty-test-'));
+    const bin = join(dir, 'fake-pty-agent.mjs');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', () => {
+  process.stdout.write('\\x1b[2J\\x1b[1;1Hfirst frame');
+  setTimeout(() => process.stdout.write('\\x1b[1;1Hfinal frame\\x1b[K\\n'), 5);
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('pty-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'pty',
+      usePty: true,
+      idleMs: 40,
+      outputFlushMs: 20,
+      startupTimeoutMs: 300,
+    });
+
+    const events = await collect(session.run('run-pty', '/screen', dir).events);
+    await pool.closeAll();
+
+    expect(textOf(events)).toBe('final frame\n');
+  });
+
   it('removes orphan cursor controls left after terminal chunks are split', () => {
     expect(cleanTerminalOutput('78Gclean\n')).toBe('clean\n');
   });
