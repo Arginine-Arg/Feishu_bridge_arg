@@ -330,7 +330,6 @@ describe('CodexAdapter process contract', () => {
       'approval_policy="never"',
       '-c',
       'shell_environment_policy.inherit="all"',
-      '--skip-git-repo-check',
       '-C',
       cwd,
     ]);

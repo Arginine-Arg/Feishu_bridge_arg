@@ -6943,7 +6943,6 @@ var CodexAdapter = class {
       'approval_policy="never"',
       "-c",
       'shell_environment_policy.inherit="all"',
-      "--skip-git-repo-check",
       "-C",
       opts.cwd
     ];
