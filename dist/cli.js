@@ -6159,6 +6159,8 @@ var VirtualTerminalScreen = class {
   rows;
   row = 0;
   col = 0;
+  savedRow = 0;
+  savedCol = 0;
   state = "normal";
   seq = "";
   constructor(width = 120, height = 48) {
@@ -6170,6 +6172,8 @@ var VirtualTerminalScreen = class {
     this.rows = this.emptyRows();
     this.row = 0;
     this.col = 0;
+    this.savedRow = 0;
+    this.savedCol = 0;
     this.state = "normal";
     this.seq = "";
   }
@@ -6232,6 +6236,7 @@ var VirtualTerminalScreen = class {
   }
   applyCsi(seq) {
     const final = seq.at(-1) ?? "";
+    const privateMode = seq.includes("?");
     const raw = seq.slice(0, -1).replace(/[?=>]/g, "");
     const nums = raw.split(";").filter((item) => item !== "").map((item) => Number.parseInt(item, 10)).map((item) => Number.isFinite(item) ? item : 0);
     const first = nums[0] ?? 0;
@@ -6249,6 +6254,14 @@ var VirtualTerminalScreen = class {
       this.clearLine(first);
     } else if (final === "m") {
       return;
+    } else if (final === "s") {
+      this.savedRow = this.row;
+      this.savedCol = this.col;
+    } else if (final === "u") {
+      this.row = this.savedRow;
+      this.col = this.savedCol;
+    } else if ((final === "h" || final === "l") && privateMode && nums.some(isAlternateScreenMode)) {
+      this.clearScreen(2);
     }
   }
   put(char) {
@@ -6436,9 +6449,15 @@ function stripKnownLiveNoise(input) {
     "Ignoringmalformedagentroledefinition:duplicateagentrolenameweb-researcherdeclaredinthesameconfiglayer",
     "\u26A0Ignoringmalformedagentroledefinition:agentroleweb-researchermustdefineadescription",
     "Ignoringmalformedagentroledefinition:agentroleweb-researchermustdefineadescription",
+    "web-researchermustdefineadescription",
+    "researchermustdefineadescription",
+    "rmustdefineadescription",
+    "mustdefineadescription",
     "Tip:Use/inittocreateanAGENTS.mdwithproject-specificguidance.",
-    "Tip:Use/inittocreateanAGENTS.mdwithproject-specificguidance"
-  ]).replace(/\n{3,}/g, "\n\n").trimStart();
+    "Tip:Use/inittocreateanAGENTS.mdwithproject-specificguidance",
+    "Tip:NewBuildfasterwithCodex.",
+    "Tip:NewBuildfasterwithCodex"
+  ]).replace(/(^|\n)\s*`\s*(?=\n|$)/g, "$1").replace(/\n{3,}/g, "\n\n").trimStart();
 }
 function stripPromptEcho(input, prompt) {
   const echo = prompt.trim();
@@ -6516,6 +6535,9 @@ function delay(ms) {
 }
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
+}
+function isAlternateScreenMode(value) {
+  return value === 47 || value === 1047 || value === 1049;
 }
 
 // src/agent/types.ts

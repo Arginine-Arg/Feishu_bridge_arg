@@ -18,7 +18,10 @@ appendFileSync(${JSON.stringify(countFile)}, 'start\\n');
 process.stdin.setEncoding('utf8');
 let buf = '';
 process.stdin.on('data', (chunk) => {
-  if (chunk.includes('\\x1b[A')) process.stdout.write('arrow-up\\n');
+  if (chunk.includes('\\x1b[A')) {
+    process.stdout.write('arrow-up\\n');
+    chunk = chunk.replaceAll('\\x1b[A', '');
+  }
   buf += chunk;
   let idx;
   while ((idx = buf.search(/[\\r\\n]/)) !== -1) {
@@ -35,6 +38,9 @@ process.stdin.on('data', (chunk) => {
       process.stdout.write('⚠Ignoringmalformedagentroledefinition:duplicateagentrolenameweb-researcherdeclaredinthesameconfiglayer');
       process.stdout.write('⚠Ignoringmalformedagentroledefinition:agentrole\`w78 e\\n\\n78 b\\n\\n78 -\\n\\n78 r\\n\\n78 e\\n\\n78 s\\n\\n78 e\\n\\n78 a\\n\\n78 r\\n\\n78 c\\n\\n78 h\\n\\n78 e\\n\\n78 r\\n\\n78 \`\\n\\n78 m\\n\\n78 u\\n\\n78 s\\n\\n78 t\\n\\n78 d\\n\\n78 e\\n\\n78 f\\n\\n78 i\\n\\n78 n\\n\\n78 e\\n\\n78 a\\n\\n78 d\\n\\n78 e\\n\\n78 s\\n\\n78 c\\n\\n78 r\\n\\n78 i\\n\\n78 p\\n\\n78 t\\n\\n78 i\\n\\n78 o\\n\\n78 n\\n');
       process.stdout.write('Tip:Use/inittocreateanAGENTS.mdwithproject-specificguidanc\\n78 e\\n78 .\\nanswer\\n');
+    }
+    else if (line === '/warning-tail') {
+      process.stdout.write('r\\n\\n\`\\n\\nm\\n\\nu\\n\\ns\\n\\nt\\n\\nd\\n\\ne\\n\\nf\\n\\ni\\n\\nn\\n\\ne\\n\\na\\n\\nd\\n\\ne\\n\\ns\\n\\nc\\n\\nr\\n\\ni\\n\\np\\n\\nt\\n\\ni\\n\\no\\n\\nn\\nanswer\\n');
     }
     else process.stdout.write('echo:' + line + '\\n');
   }
@@ -73,6 +79,7 @@ setInterval(() => {}, 1000);
     const fourth = await collect(secondSession.run('run-4', '/split-ansi', dir).events);
     const fifth = await collect(secondSession.run('run-5', '/warning', dir).events);
     const sixth = await collect(secondSession.run('run-6', 'up', dir).events);
+    const seventh = await collect(secondSession.run('run-7', '/warning-tail', dir).events);
     await pool.closeAll();
 
     expect(textOf(first)).toContain('echo:hello');
@@ -81,6 +88,7 @@ setInterval(() => {}, 1000);
     expect(textOf(fourth)).toBe('clean-frame\n');
     expect(textOf(fifth)).toBe('answer\n');
     expect(textOf(sixth)).toContain('arrow-up');
+    expect(textOf(seventh)).toBe('answer\n');
     expect(await readFile(countFile, 'utf8')).toBe('start\n');
   });
 
@@ -96,8 +104,8 @@ setInterval(() => {}, 1000);
       `#!/usr/bin/env node
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', () => {
-  process.stdout.write('\\x1b[2J\\x1b[1;1Hfirst frame');
-  setTimeout(() => process.stdout.write('\\x1b[1;1Hfinal frame\\x1b[K\\n'), 5);
+  process.stdout.write('\\x1b[?1049h\\x1b[2J\\x1b[1;1Hfirst frame');
+  setTimeout(() => process.stdout.write('\\x1b[s\\x1b[1;1Hfinal frame\\x1b[K\\x1b[u\\n'), 5);
 });
 setInterval(() => {}, 1000);
 `,

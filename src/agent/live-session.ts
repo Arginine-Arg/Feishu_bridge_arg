@@ -341,6 +341,8 @@ class VirtualTerminalScreen {
   private rows: string[][];
   private row = 0;
   private col = 0;
+  private savedRow = 0;
+  private savedCol = 0;
   private state: 'normal' | 'esc' | 'csi' | 'osc' | 'osc-esc' = 'normal';
   private seq = '';
 
@@ -354,6 +356,8 @@ class VirtualTerminalScreen {
     this.rows = this.emptyRows();
     this.row = 0;
     this.col = 0;
+    this.savedRow = 0;
+    this.savedCol = 0;
     this.state = 'normal';
     this.seq = '';
   }
@@ -426,6 +430,7 @@ class VirtualTerminalScreen {
 
   private applyCsi(seq: string): void {
     const final = seq.at(-1) ?? '';
+    const privateMode = seq.includes('?');
     const raw = seq.slice(0, -1).replace(/[?=>]/g, '');
     const nums = raw
       .split(';')
@@ -448,6 +453,14 @@ class VirtualTerminalScreen {
       this.clearLine(first);
     } else if (final === 'm') {
       return;
+    } else if (final === 's') {
+      this.savedRow = this.row;
+      this.savedCol = this.col;
+    } else if (final === 'u') {
+      this.row = this.savedRow;
+      this.col = this.savedCol;
+    } else if ((final === 'h' || final === 'l') && privateMode && nums.some(isAlternateScreenMode)) {
+      this.clearScreen(2);
     }
   }
 
@@ -648,9 +661,16 @@ function stripKnownLiveNoise(input: string): string {
     'Ignoringmalformedagentroledefinition:duplicateagentrolenameweb-researcherdeclaredinthesameconfiglayer',
     '⚠Ignoringmalformedagentroledefinition:agentroleweb-researchermustdefineadescription',
     'Ignoringmalformedagentroledefinition:agentroleweb-researchermustdefineadescription',
+    'web-researchermustdefineadescription',
+    'researchermustdefineadescription',
+    'rmustdefineadescription',
+    'mustdefineadescription',
     'Tip:Use/inittocreateanAGENTS.mdwithproject-specificguidance.',
     'Tip:Use/inittocreateanAGENTS.mdwithproject-specificguidance',
+    'Tip:NewBuildfasterwithCodex.',
+    'Tip:NewBuildfasterwithCodex',
   ])
+    .replace(/(^|\n)\s*`\s*(?=\n|$)/g, '$1')
     .replace(/\n{3,}/g, '\n\n')
     .trimStart();
 }
@@ -737,4 +757,8 @@ function delay(ms: number): Promise<void> {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
+}
+
+function isAlternateScreenMode(value: number): boolean {
+  return value === 47 || value === 1047 || value === 1049;
 }
