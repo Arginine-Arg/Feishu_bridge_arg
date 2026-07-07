@@ -77,6 +77,16 @@ setInterval(() => {}, 1000);
   it('normalizes terminal redraws instead of appending every frame', () => {
     expect(cleanTerminalOutput('progress 1\rprogress 2\rdone\n')).toBe('done\n');
   });
+
+  it('removes orphan cursor controls left after terminal chunks are split', () => {
+    expect(cleanTerminalOutput('78Gclean\n')).toBe('clean\n');
+  });
+
+  it('reassembles cursor-scattered warning text', () => {
+    expect(cleanTerminalOutput('⚠\nI\n\n78 g\n\n78 n\n\n78 o\n\n78 r\n\n78 i\n\n78 n\n\n78 g\n')).toBe(
+      '⚠Ignoring',
+    );
+  });
 });
 
 async function collect(events: AsyncIterable<AgentEvent>): Promise<AgentEvent[]> {

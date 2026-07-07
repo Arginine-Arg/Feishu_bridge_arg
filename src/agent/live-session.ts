@@ -282,9 +282,10 @@ export function cleanTerminalOutput(input: string): string {
     .replace(/\x1B\][^\x07]*(?:\x07|\x1B\\)/g, '')
     .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
     .replace(/\x1B[@-Z\\-_]/g, '')
+    .replace(/(^|[\r\n])\d{1,4}G(?=\S)/g, '$1')
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
     .replace(/\r\n/g, '\n');
-  return collapseCarriageReturns(withoutAnsi).replace(/\n{4,}/g, '\n\n\n');
+  return normalizeScatteredCursorLines(collapseCarriageReturns(withoutAnsi)).replace(/\n{4,}/g, '\n\n\n');
 }
 
 class TerminalOutputCleaner {
@@ -380,6 +381,43 @@ function collapseCarriageReturns(input: string): string {
     line += char;
   }
   return out + line;
+}
+
+function normalizeScatteredCursorLines(input: string): string {
+  const lines = input.split('\n');
+  const out: string[] = [];
+  let chars: string[] = [];
+  let originals: string[] = [];
+  let hasCursorColumn = false;
+
+  const flush = (): void => {
+    if (chars.length >= 8 && (hasCursorColumn || chars.includes('⚠'))) {
+      out.push(chars.join(''));
+    } else {
+      out.push(...originals);
+    }
+    chars = [];
+    originals = [];
+    hasCursorColumn = false;
+  };
+
+  for (const line of lines) {
+    if (!line.trim() && chars.length > 0) {
+      originals.push(line);
+      continue;
+    }
+    const scattered = line.match(/^\s*(?:(\d{2,4})\s+|(\d{2,4})G)?(\S)\s*$/u);
+    if (scattered) {
+      chars.push(scattered[3] ?? '');
+      originals.push(line);
+      if (scattered[1] || scattered[2]) hasCursorColumn = true;
+      continue;
+    }
+    flush();
+    out.push(line);
+  }
+  flush();
+  return out.join('\n');
 }
 
 function completePrefixEnd(input: string): number {
