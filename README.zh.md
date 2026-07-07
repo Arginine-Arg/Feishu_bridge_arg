@@ -38,7 +38,8 @@ npm i -g git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git
 npm i -g git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git
 ```
 
-> 安装时会自动构建(`prepare` 触发 tsup),需要 Node ≥ 20.12。日后若发布到 npm,可 `npm i -g arg_lark-channel-bridge`。
+> 仓库已内置预构建的 `dist/`,**安装即用,不需要本地构建**(需要 Node ≥ 20.12)。日后若发布到 npm,可 `npm i -g arg_lark-channel-bridge`。
+> 从源码开发:`npm i && npm run build`。
 >
 > **从原版迁移**:先 `lark-channel-bridge stop && lark-channel-bridge unregister`(每个 profile 都要),再按上面装本 fork,然后 `lark-channel-bridge start` 重新注册后台服务。所有状态在 `~/.lark-channel/`,原样保留——同一个飞书 app、同一个 bot 自动重连,无需重新扫码。
 

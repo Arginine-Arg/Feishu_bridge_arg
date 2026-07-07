@@ -38,7 +38,7 @@ npm i -g git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git
 npm i -g git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git
 ```
 
-> Installing builds automatically (`prepare` runs tsup); requires Node ≥ 20.12. If later published to npm: `npm i -g arg_lark-channel-bridge`.
+> The repo ships a prebuilt `dist/`, so **install works out of the box — no local build needed** (requires Node ≥ 20.12). If later published to npm: `npm i -g arg_lark-channel-bridge`. Developing from source: `npm i && npm run build`.
 >
 > **Migrating from upstream**: `lark-channel-bridge stop && lark-channel-bridge unregister` (per profile), install this fork, then `lark-channel-bridge start` to re-register the service. All state lives in `~/.lark-channel/` and is preserved — the same Feishu app / bot reconnects, no re-scan.
 
