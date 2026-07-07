@@ -42,6 +42,7 @@ process.stdin.on('data', (chunk) => {
     else if (line === '/warning-tail') {
       process.stdout.write('r\\n\\n\`\\n\\nm\\n\\nu\\n\\ns\\n\\nt\\n\\nd\\n\\ne\\n\\nf\\n\\ni\\n\\nn\\n\\ne\\n\\na\\n\\nd\\n\\ne\\n\\ns\\n\\nc\\n\\nr\\n\\ni\\n\\np\\n\\nt\\n\\ni\\n\\no\\n\\nn\\nanswer\\n');
     }
+    else if (line === '/startup-noise') process.stdout.write('clean answer\\n');
     else process.stdout.write('echo:' + line + '\\n');
   }
 });
@@ -90,6 +91,39 @@ setInterval(() => {}, 1000);
     expect(textOf(sixth)).toContain('arrow-up');
     expect(textOf(seventh)).toBe('answer\n');
     expect(await readFile(countFile, 'utf8')).toBe('start\n');
+  });
+
+  it('ignores startup terminal output before the turn input is sent', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-startup-noise-test-'));
+    const bin = join(dir, 'fake-startup-noise-agent.mjs');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdout.write('nfiglayer⚠Ignoringmalfor\\nn\\n\\nt\\n\\nr\\n\\no\\n\\nl\\n\\ne\\n');
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', () => setTimeout(() => process.stdout.write('clean answer\\n'), 20));
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('startup-noise-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'startup-noise',
+      usePty: true,
+      idleMs: 40,
+      outputFlushMs: 20,
+      startupTimeoutMs: 300,
+    });
+
+    const events = await collect(session.run('run-startup-noise', '/startup-noise', dir).events);
+    await pool.closeAll();
+
+    expect(textOf(events)).toBe('clean answer\n');
   });
 
   it('normalizes terminal redraws instead of appending every frame', () => {

@@ -161,6 +161,7 @@ export class LiveTerminalSession {
     let wake: (() => void) | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let outputTimer: ReturnType<typeof setTimeout> | undefined;
+    let acceptingOutput = false;
 
     const push = (event: AgentEvent): void => {
       queue.push(event);
@@ -189,6 +190,10 @@ export class LiveTerminalSession {
     };
 
     const onData = (event: LiveOutput): void => {
+      if (!acceptingOutput) {
+        arm(startupTimeoutMs);
+        return;
+      }
       if (event.mode === 'snapshot' ? output.replace(event.text) : output.append(event.text)) {
         scheduleOutputFlush();
       }
@@ -220,7 +225,11 @@ export class LiveTerminalSession {
     this.emitter.once('error', onError);
     arm(startupTimeoutMs);
     await delay(STARTUP_INPUT_GRACE_MS);
-    if (!done) this.write(translateLiveInput(prompt));
+    if (!done) {
+      this.cleaner.resetTurn();
+      acceptingOutput = true;
+      this.write(translateLiveInput(prompt));
+    }
 
     try {
       while (!done || queue.length > 0) {
@@ -315,6 +324,12 @@ class TerminalOutputCleaner {
     this.carry = '';
     this.lastSnapshot = '';
     this.screen.reset();
+  }
+
+  resetTurn(): void {
+    this.carry = '';
+    this.lastSnapshot = '';
+    if (this.screenMode) this.screen.reset();
   }
 
   push(input: string): LiveOutput {
@@ -659,6 +674,9 @@ function stripKnownLiveNoise(input: string): string {
   return stripCompactNoise(input, [
     '⚠Ignoringmalformedagentroledefinition:duplicateagentrolenameweb-researcherdeclaredinthesameconfiglayer',
     'Ignoringmalformedagentroledefinition:duplicateagentrolenameweb-researcherdeclaredinthesameconfiglayer',
+    'nfiglayer⚠Ignoringmalforntrole',
+    'nfiglayerIgnoringmalforntrole',
+    'Ignoringmalforntrole',
     '⚠Ignoringmalformedagentroledefinition:agentroleweb-researchermustdefineadescription',
     'Ignoringmalformedagentroledefinition:agentroleweb-researchermustdefineadescription',
     'web-researchermustdefineadescription',

@@ -6005,6 +6005,7 @@ var LiveTerminalSession = class {
     let wake;
     let timer;
     let outputTimer;
+    let acceptingOutput = false;
     const push = (event) => {
       queue.push(event);
       wake?.();
@@ -6031,6 +6032,10 @@ var LiveTerminalSession = class {
       timer = setTimeout(finish, ms);
     };
     const onData = (event) => {
+      if (!acceptingOutput) {
+        arm(startupTimeoutMs);
+        return;
+      }
       if (event.mode === "snapshot" ? output.replace(event.text) : output.append(event.text)) {
         scheduleOutputFlush();
       }
@@ -6059,7 +6064,11 @@ var LiveTerminalSession = class {
     this.emitter.once("error", onError);
     arm(startupTimeoutMs);
     await delay(STARTUP_INPUT_GRACE_MS);
-    if (!done) this.write(translateLiveInput(prompt));
+    if (!done) {
+      this.cleaner.resetTurn();
+      acceptingOutput = true;
+      this.write(translateLiveInput(prompt));
+    }
     try {
       while (!done || queue.length > 0) {
         if (queue.length === 0) {
@@ -6136,6 +6145,11 @@ var TerminalOutputCleaner = class {
     this.carry = "";
     this.lastSnapshot = "";
     this.screen.reset();
+  }
+  resetTurn() {
+    this.carry = "";
+    this.lastSnapshot = "";
+    if (this.screenMode) this.screen.reset();
   }
   push(input) {
     if (this.screenMode) {
@@ -6447,6 +6461,9 @@ function stripKnownLiveNoise(input) {
   return stripCompactNoise(input, [
     "\u26A0Ignoringmalformedagentroledefinition:duplicateagentrolenameweb-researcherdeclaredinthesameconfiglayer",
     "Ignoringmalformedagentroledefinition:duplicateagentrolenameweb-researcherdeclaredinthesameconfiglayer",
+    "nfiglayer\u26A0Ignoringmalforntrole",
+    "nfiglayerIgnoringmalforntrole",
+    "Ignoringmalforntrole",
     "\u26A0Ignoringmalformedagentroledefinition:agentroleweb-researchermustdefineadescription",
     "Ignoringmalformedagentroledefinition:agentroleweb-researchermustdefineadescription",
     "web-researchermustdefineadescription",
