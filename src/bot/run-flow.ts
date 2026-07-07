@@ -26,6 +26,7 @@ export interface StartRunFlowInput {
   scope: ScopeContext;
   prompt: string;
   sessionMode?: 'turn' | 'live';
+  liveInputMode?: 'command' | 'control';
   attachments: AgentAttachment[];
   access: AccessDecision;
   capability: AgentCapability;
@@ -144,6 +145,7 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
       scopeId: input.scopeId,
       policy,
       sessionMode: input.sessionMode,
+      liveInputMode: input.liveInputMode,
       sessionId,
       threadId,
       model: resolveModelArg(

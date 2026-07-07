@@ -12,6 +12,7 @@ import type { RunExecutor } from '../runtime/run-executor';
 import type { SessionCatalog } from '../session/catalog';
 import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
+import { markNativeAgentCommand } from '../bot/live-input';
 import { commandSessionCatalogIdentity } from '../bot/session-catalog-identity';
 import { lookupMessageThreadId } from '../bot/thread-id';
 import { BRIDGE_PROMPT_CALLBACK_MARKER, PROMPT_CALLBACK_ACTION } from './interactive-prompt';
@@ -85,6 +86,10 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
 
   const cmd = typeof payload.cmd === 'string' ? payload.cmd : '';
   if (cmd) {
+    if (cmd === 'live.input') {
+      forwardLiveInput(deps, payload, scope, threadId, mode);
+      return;
+    }
     if (isSignedBridgeCallback(payload) && !verifyBridgeToken(deps, payload, scope, cmd)) {
       return;
     }
@@ -150,6 +155,37 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
   }
 
   return;
+}
+
+function forwardLiveInput(
+  deps: CardDispatchDeps,
+  payload: Record<string, unknown>,
+  scope: string,
+  threadId: string | undefined,
+  mode: 'p2p' | 'group' | 'topic',
+): void {
+  const input = typeof payload.input === 'string' ? payload.input.trim() : '';
+  if (!input) return;
+  log.info('cardAction', 'live-input', { scope, input });
+  const synthetic: NormalizedMessage = markNativeAgentCommand(
+    {
+      messageId: deps.evt.messageId,
+      chatId: deps.evt.chatId,
+      chatType: mode === 'p2p' ? 'p2p' : 'group',
+      threadId,
+      senderId: deps.evt.operator.openId,
+      senderName: deps.evt.operator.name,
+      content: input,
+      rawContentType: 'card_action',
+      resources: [],
+      mentions: [],
+      mentionAll: false,
+      mentionedBot: false,
+      createTime: Date.now(),
+    },
+    'control',
+  );
+  deps.pending.push(scope, synthetic);
 }
 
 async function resolveScope(

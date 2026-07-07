@@ -6,6 +6,11 @@ import { PendingQueue } from '../../../src/bot/pending-queue.js';
 import { CallbackAuth } from '../../../src/card/callback-auth.js';
 import { CallbackNonceStore } from '../../../src/card/callback-store.js';
 import { handleCardAction } from '../../../src/card/dispatcher.js';
+import {
+  isForceLiveAgentCommandMessage,
+  isNativeAgentCommandMessage,
+  liveInputModeForMessage,
+} from '../../../src/bot/live-input.js';
 import type { Controls } from '../../../src/commands/index.js';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema.js';
 import { SessionStore } from '../../../src/session/store.js';
@@ -128,6 +133,22 @@ describe('signed card callback dispatch', () => {
     const queued = h.pending.cancel('oc_group');
     expect(queued).toHaveLength(1);
     expect(queued[0]?.content).toBe('[card-click] {"kind":"ask","answer":"Redis"}');
+  });
+
+  it('turns live.input button clicks into live control input', async () => {
+    const h = await createHarness();
+
+    await h.dispatch({
+      cmd: 'live.input',
+      input: 'yes',
+    });
+
+    const queued = h.pending.cancel('oc_group');
+    expect(queued).toHaveLength(1);
+    expect(queued[0]?.content).toBe('yes');
+    expect(isNativeAgentCommandMessage(queued[0]!)).toBe(true);
+    expect(isForceLiveAgentCommandMessage(queued[0]!)).toBe(true);
+    expect(liveInputModeForMessage(queued[0]!)).toBe('control');
   });
 
   it('rejects a deferred prompt-answer callback signed for a different operator', async () => {

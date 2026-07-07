@@ -274,14 +274,14 @@ export class CodexAdapter implements AgentAdapter {
     // every turn floods Codex's TUI (it echoes stdin) and buries the answer.
     // Native CLI commands (e.g. /model) never carry the system prompt.
     let prompt: string;
-    if (isNativeCliCommand(opts.prompt)) {
+    if (opts.liveInputMode || isNativeCliCommand(opts.prompt)) {
       prompt = opts.prompt;
     } else if (session.takePrimeSlot()) {
       prompt = prefixBridgeSystemPrompt(opts.prompt, this.botIdentity);
     } else {
       prompt = opts.prompt;
     }
-    return session.run(opts.runId, prompt, opts.cwd);
+    return session.run(opts.runId, prompt, opts.cwd, opts.liveInputMode);
   }
 }
 

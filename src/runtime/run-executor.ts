@@ -19,6 +19,7 @@ export interface SubmitRunInput {
   scopeId: string;
   policy: RunPolicyAllow;
   sessionMode?: 'turn' | 'live';
+  liveInputMode?: 'command' | 'control';
   sessionId?: string;
   threadId?: string;
   model?: string;
@@ -99,6 +100,7 @@ export class RunExecutor {
       runId,
       scopeId: input.scopeId,
       sessionMode: input.sessionMode,
+      liveInputMode: input.liveInputMode,
       prompt: input.policy.prompt,
       cwd: input.policy.cwdRealpath,
       sessionId: input.sessionId,

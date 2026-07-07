@@ -237,7 +237,7 @@ export class ClaudeAdapter implements AgentAdapter {
       idleMs: this.liveIdleMs,
       cleanup: systemPromptFile.cleanup,
     });
-    return session.run(opts.runId, opts.prompt, opts.cwd);
+    return session.run(opts.runId, opts.prompt, opts.cwd, opts.liveInputMode);
   }
 }
 

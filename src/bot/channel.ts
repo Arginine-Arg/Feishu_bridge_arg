@@ -68,6 +68,13 @@ import { fetchQuotedContext, fetchTopicContext, type QuotedContext } from './quo
 import { lookupMessageThreadId } from './thread-id';
 import { addWorkingReaction, removeReaction } from './reaction';
 import { fetchKnownChats } from './lark-info';
+import {
+  isForceLiveAgentCommandMessage,
+  isNativeAgentCommandMessage,
+  liveInputModeForMessage,
+  markNativeAgentCommand,
+  type LiveInputMode,
+} from './live-input';
 import type { AppPaths } from '../config/app-paths';
 import {
   consumeCotEvents,
@@ -216,7 +223,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   // Hybrid live mode keeps normal chat on turn-mode runs. This map records
   // scopes currently showing an agent picker so later up/down/enter messages
   // are routed as terminal controls instead of plain chat.
-  const liveInteractionByScope = new Map<string, { picker: true; updatedAt: number }>();
+  const liveInteractionByScope = new Map<string, LiveInteractionState>();
   const cotClient = new CotClient({
     tenant: cfg.accounts.app.tenant,
     appId: cfg.accounts.app.id,
@@ -554,7 +561,7 @@ interface IntakeDeps {
   logThreadModeOverride: LogThreadModeOverride;
   executor: RunExecutor;
   pool: ProcessPool;
-  liveInteractionByScope: Map<string, { picker: true; updatedAt: number }>;
+  liveInteractionByScope: Map<string, LiveInteractionState>;
 }
 
 type LogThreadModeOverride = (input: {
@@ -705,7 +712,16 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   const agentMsg =
     (route.forceNative || getAgentSessionMode(controls.cfg) === 'live') &&
     isNativeAgentInputText(route.msg.content, liveInteractionByScope.has(scope))
-      ? markNativeAgentCommand(route.msg, route.forceNative)
+      ? markNativeAgentCommand(
+          route.msg,
+          route.forceNative
+            ? 'command'
+            : route.msg.content.trimStart().startsWith('/')
+              ? 'command'
+              : liveInteractionByScope.has(scope)
+                ? 'control'
+                : undefined,
+        )
       : route.msg;
   const size = pending.push(scope, agentMsg);
   log.info('intake', 'queued', { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
@@ -753,42 +769,6 @@ export function rewriteAgentCommandMessage(
   };
 }
 
-const NATIVE_AGENT_COMMAND_RAW_KEY = '__larkChannelNativeAgentCommand';
-const FORCE_LIVE_AGENT_COMMAND_RAW_KEY = '__larkChannelForceLiveAgentCommand';
-
-function markNativeAgentCommand(msg: NormalizedMessage, forceLive = false): NormalizedMessage {
-  const raw = msg.raw && typeof msg.raw === 'object' && !Array.isArray(msg.raw)
-    ? { ...(msg.raw as Record<string, unknown>) }
-    : {};
-  return {
-    ...msg,
-    content: msg.content.trimStart(),
-    raw: {
-      ...raw,
-      [NATIVE_AGENT_COMMAND_RAW_KEY]: true,
-      ...(forceLive ? { [FORCE_LIVE_AGENT_COMMAND_RAW_KEY]: true } : {}),
-    },
-  };
-}
-
-function isNativeAgentCommandMessage(msg: NormalizedMessage): boolean {
-  return Boolean(
-    msg.raw &&
-      typeof msg.raw === 'object' &&
-      !Array.isArray(msg.raw) &&
-      (msg.raw as Record<string, unknown>)[NATIVE_AGENT_COMMAND_RAW_KEY] === true,
-  );
-}
-
-function isForceLiveAgentCommandMessage(msg: NormalizedMessage): boolean {
-  return Boolean(
-    msg.raw &&
-      typeof msg.raw === 'object' &&
-      !Array.isArray(msg.raw) &&
-      (msg.raw as Record<string, unknown>)[FORCE_LIVE_AGENT_COMMAND_RAW_KEY] === true,
-  );
-}
-
 function isSlashCommandText(text: string): boolean {
   return text.trimStart().startsWith('/');
 }
@@ -800,7 +780,13 @@ function isNativeAgentInputText(text: string, pickerActive: boolean): boolean {
 
 function isLivePickerInput(text: string): boolean {
   const trimmed = text.trim();
-  return isLiveControlInput(trimmed) || /^\d{1,2}$/u.test(trimmed);
+  return isLiveControlInput(trimmed) || /^\d{1,2}$/u.test(trimmed) || /^(?:y|yes|n|no)$/iu.test(trimmed);
+}
+
+interface LiveInteractionState {
+  picker: true;
+  updatedAt: number;
+  signature?: string;
 }
 
 interface RunBatchDeps {
@@ -816,7 +802,7 @@ interface RunBatchDeps {
   callbackAuth?: CallbackAuth;
   activePolicyFingerprints: Map<string, string>;
   lastRunModelByScope: Map<string, string>;
-  liveInteractionByScope: Map<string, { picker: true; updatedAt: number }>;
+  liveInteractionByScope: Map<string, LiveInteractionState>;
   scope: string;
   mode: ChatMode;
 }
@@ -934,6 +920,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
 
   const nativeCommand = nativeAgentCommandForBatch(batch);
   const forceLiveSession = batch.some(isForceLiveAgentCommandMessage);
+  const liveInputMode = nativeCommand ? liveInputModeForBatch(batch, nativeCommand) : undefined;
   const useLiveSession =
     Boolean(nativeCommand) && (forceLiveSession || getAgentSessionMode(controls.cfg) === 'live');
   const prompt =
@@ -990,6 +977,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     scope: scopeContext,
     prompt,
     sessionMode: useLiveSession ? 'live' : 'turn',
+    liveInputMode,
     attachments: attachments.map(toPolicyAttachment),
     access: accessDecision,
     capability,
@@ -1055,10 +1043,24 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   };
   const observeLiveEvent = (evt: AgentEvent): void => {
     if (!useLiveSession || !nativeCommand || evt.type !== 'text') return;
-    if (looksLikeAgentPicker(evt.delta)) {
+    const interaction = detectLiveInteraction(evt.delta);
+    if (interaction || looksLikeAgentPicker(evt.delta)) {
       const wasActive = liveInteractionByScope.has(scope);
-      liveInteractionByScope.set(scope, { picker: true, updatedAt: Date.now() });
+      const previous = liveInteractionByScope.get(scope);
+      const nextSignature = interaction?.signature ?? previous?.signature;
+      liveInteractionByScope.set(scope, {
+        picker: true,
+        updatedAt: Date.now(),
+        ...(nextSignature ? { signature: nextSignature } : {}),
+      });
       if (!wasActive) log.info('agent-live', 'picker-enter', { scope });
+      if (interaction && previous?.signature !== interaction.signature) {
+        void channel
+          .send(chatId, { card: liveInteractionCard(interaction) }, sendOpts)
+          .catch((err) =>
+            log.warn('agent-live', 'interaction-card-failed', { scope, err: String(err) }),
+          );
+      }
     }
   };
 
@@ -1086,6 +1088,23 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     if (getShowToolCalls(controls.cfg)) return state;
     return { ...state, blocks: state.blocks.filter((b) => b.kind !== 'tool') };
   };
+  const withNativeEmptyFallback = (state: RunState): RunState => {
+    if (!useLiveSession || !nativeCommand || state.terminal !== 'done' || state.blocks.length > 0) {
+      return state;
+    }
+    return {
+      ...state,
+      blocks: [
+        {
+          kind: 'text',
+          content: `命令已发送到 ${controls.profileConfig.agentKind === 'codex' ? 'Codex' : 'Claude'} live session，未返回文本内容。\n`,
+          streaming: false,
+        },
+      ],
+    };
+  };
+  const prepareStateForReply = (state: RunState): RunState =>
+    filterForPrefs(withNativeEmptyFallback(state));
   const cardRenderOptions = callbackAuth
     ? {
         signCallback: (action: string) =>
@@ -1175,7 +1194,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           channel,
           chatId,
           scope,
-          state: finalAnswerOnlyState(finalState),
+          state: finalAnswerOnlyState(prepareStateForReply(finalState)),
           replyMode,
           sendOpts,
           cardRenderOptions,
@@ -1202,7 +1221,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         freshFinalPosted = true;
         await channel.send(
           chatId,
-          { card: renderCard(filterForPrefs(state), cardRenderOptions) },
+          { card: renderCard(prepareStateForReply(state), cardRenderOptions) },
           sendOpts,
         );
       };
@@ -1216,7 +1235,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           latestState = state;
           if (cardCtrl && !streamDegraded) {
             try {
-              await cardCtrl.update(renderCard(filterForPrefs(state), cardRenderOptions));
+              await cardCtrl.update(renderCard(prepareStateForReply(state), cardRenderOptions));
             } catch (err) {
               streamDegraded = true;
               cardCtrl = undefined;
@@ -1239,7 +1258,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
               producerStarted = true;
               cardCtrl = ctrl;
               try {
-                await ctrl.update(renderCard(filterForPrefs(latestState), cardRenderOptions));
+                await ctrl.update(renderCard(prepareStateForReply(latestState), cardRenderOptions));
               } catch (err) {
                 streamDegraded = true;
                 cardCtrl = undefined;
@@ -1264,7 +1283,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         fallback: postFreshFinal,
       });
       if (streamDegraded) {
-        await postFreshFinal(latestState);
+        await postFreshFinal(prepareStateForReply(latestState));
       }
     } else if (replyMode === 'markdown') {
       let latestState: RunState = initialState;
@@ -1277,7 +1296,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       const postFreshFinal = async (state: RunState): Promise<void> => {
         if (freshFinalPosted) return;
         freshFinalPosted = true;
-        const body = renderText(filterForPrefs(state));
+        const body = renderText(prepareStateForReply(state));
         if (body.trim()) {
           await channel.send(chatId, { markdown: body }, sendOpts);
         }
@@ -1292,7 +1311,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           latestState = state;
           if (markdownCtrl && !streamDegraded) {
             try {
-              await markdownCtrl.setContent(renderText(filterForPrefs(state)));
+              await markdownCtrl.setContent(renderText(prepareStateForReply(state)));
             } catch (err) {
               streamDegraded = true;
               markdownCtrl = undefined;
@@ -1313,7 +1332,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
             producerStarted = true;
             markdownCtrl = ctrl;
             try {
-              await ctrl.setContent(renderText(filterForPrefs(latestState)));
+              await ctrl.setContent(renderText(prepareStateForReply(latestState)));
             } catch (err) {
               streamDegraded = true;
               markdownCtrl = undefined;
@@ -1337,7 +1356,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         fallback: postFreshFinal,
       });
       if (streamDegraded) {
-        await postFreshFinal(latestState);
+        await postFreshFinal(prepareStateForReply(latestState));
       }
     } else {
       // text mode: drain the agent stream without sending anything during
@@ -1356,7 +1375,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         channel,
         chatId,
         scope,
-        state: filterForPrefs(finalState),
+        state: prepareStateForReply(finalState),
         replyMode,
         sendOpts,
         cardRenderOptions,
@@ -1776,16 +1795,115 @@ function nativeAgentCommandForBatch(batch: NormalizedMessage[]): string | undefi
   const msg = batch[0];
   if (!msg || !isNativeAgentCommandMessage(msg)) return undefined;
   const text = msg.content.trimStart();
+  if (isForceLiveAgentCommandMessage(msg)) return text;
   return isSlashCommandText(text) || isLivePickerInput(text) ? text : undefined;
+}
+
+function liveInputModeForBatch(
+  batch: NormalizedMessage[],
+  nativeCommand: string,
+): LiveInputMode | undefined {
+  const mode = batch.map(liveInputModeForMessage).find((item): item is LiveInputMode => Boolean(item));
+  if (mode) return mode;
+  return nativeCommand.trimStart().startsWith('/') ? 'command' : 'control';
 }
 
 function looksLikeAgentPicker(text: string): boolean {
   return (
     /press\s+enter\s+to\s+confirm/i.test(text) ||
     /esc\s+to\s+go\s+back/i.test(text) ||
+    /\b(?:y\/n|yes\/no|no\/yes)\b/i.test(text) ||
     /select\s+(?:a\s+)?(?:model|option|.+)/i.test(text) ||
     /(?:↑|↓|up\/down|arrow keys?|use .*arrows?)/i.test(text)
   );
+}
+
+interface LiveInteractionButton {
+  label: string;
+  input: string;
+}
+
+interface LiveInteractionPrompt {
+  signature: string;
+  prompt: string;
+  buttons: LiveInteractionButton[];
+}
+
+function detectLiveInteraction(text: string): LiveInteractionPrompt | undefined {
+  const prompt = text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(-12)
+    .join('\n');
+  const buttons: LiveInteractionButton[] = [];
+  const seenInputs = new Set<string>();
+  const add = (label: string, input: string): void => {
+    if (seenInputs.has(input)) return;
+    seenInputs.add(input);
+    buttons.push({ label, input });
+  };
+
+  for (const line of prompt.split('\n')) {
+    const match = line.match(/^(?:[›>▸*+-]\s*)?(\d{1,2})[.)、:\s-]+(.{1,80})$/u);
+    if (!match) continue;
+    add(match[1]!, match[1]!);
+    if (buttons.length >= 8) break;
+  }
+
+  if (/\b(?:y\/n|yes\/no|no\/yes|\[y\/n\]|\(y\/n\)|confirm|proceed|continue)\b/i.test(prompt)) {
+    add('yes', 'yes');
+    add('no', 'no');
+  }
+  if (/press\s+enter\s+to\s+confirm|enter\s+to\s+(?:confirm|continue)|回车|确认/i.test(prompt)) {
+    add('enter', 'enter');
+  }
+  if (/esc\s+to\s+(?:go\s+back|cancel)|escape\s+to\s+cancel|取消|返回/i.test(prompt)) {
+    add('esc', 'esc');
+  }
+  if (buttons.length === 0 && looksLikeAgentPicker(prompt)) {
+    add('up', 'up');
+    add('down', 'down');
+    add('enter', 'enter');
+    add('esc', 'esc');
+  }
+  if (buttons.length === 0) return undefined;
+  return {
+    signature: `${prompt}\n${buttons.map((button) => button.input).join('|')}`.slice(0, 500),
+    prompt: prompt.slice(0, 1200),
+    buttons,
+  };
+}
+
+function liveInteractionCard(interaction: LiveInteractionPrompt): object {
+  return {
+    schema: '2.0',
+    config: {
+      streaming_mode: false,
+      summary: { content: 'live CLI 等待选择' },
+    },
+    body: {
+      elements: [
+        {
+          tag: 'markdown',
+          content: `live CLI 正在等待选择：\n\`\`\`\n${escapeFence(interaction.prompt)}\n\`\`\``,
+        },
+        {
+          tag: 'action',
+          actions: interaction.buttons.map((button) => ({
+            tag: 'button',
+            text: { tag: 'plain_text', content: button.label },
+            type: button.input === 'yes' || button.input === 'enter' ? 'primary' : 'default',
+            behaviors: [{ type: 'callback', value: { cmd: 'live.input', input: button.input } }],
+          })),
+        },
+      ],
+    },
+  };
+}
+
+function escapeFence(value: string): string {
+  return value.replace(/```/g, "'''");
 }
 
 function closesLivePicker(input: string): boolean {

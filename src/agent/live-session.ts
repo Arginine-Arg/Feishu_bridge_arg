@@ -10,6 +10,8 @@ import {
 } from '../platform/spawn';
 import type { AgentEvent, AgentRun } from './types';
 
+export type LiveTerminalInputMode = 'command' | 'control';
+
 type LiveChild = SpawnedProcessByStdio<Writable, Readable, Readable>;
 type LiveOutput = { mode: 'append' | 'snapshot'; text: string };
 export type LiveTerminalBackend = 'auto' | 'tmux' | 'pty' | 'pipe';
@@ -96,9 +98,9 @@ export class LiveTerminalSession {
     return true;
   }
 
-  run(runId: string, prompt: string, cwd: string): AgentRun {
+  run(runId: string, prompt: string, cwd: string, inputMode?: LiveTerminalInputMode): AgentRun {
     void this.ensureStarted();
-    const events = this.turnEvents(prompt, cwd);
+    const events = this.turnEvents(prompt, cwd, inputMode);
     return {
       runId,
       events,
@@ -175,7 +177,11 @@ export class LiveTerminalSession {
     child.stdin.write(input);
   }
 
-  private async *turnEvents(prompt: string, cwd: string): AsyncGenerator<AgentEvent> {
+  private async *turnEvents(
+    prompt: string,
+    cwd: string,
+    inputMode?: LiveTerminalInputMode,
+  ): AsyncGenerator<AgentEvent> {
     yield { type: 'system', cwd };
 
     const idleMs = this.opts.idleMs ?? DEFAULT_IDLE_MS;
@@ -255,6 +261,10 @@ export class LiveTerminalSession {
     await delay(STARTUP_INPUT_GRACE_MS);
     if (!done) {
       this.cleaner.resetTurn();
+      if (inputMode === 'command') {
+        await this.clearPendingInput();
+        this.cleaner.resetTurn();
+      }
       acceptingOutput = true;
       const controlKeys = parseLiveControlSequence(prompt);
       if (controlKeys) {
@@ -289,6 +299,13 @@ export class LiveTerminalSession {
       this.emitter.off('exit', onExit);
       this.emitter.off('error', onError);
     }
+  }
+
+  private async clearPendingInput(): Promise<void> {
+    this.write('\x1B');
+    await delay(CONTROL_KEY_GAP_MS);
+    this.write('\x15');
+    await delay(CONTROL_KEY_GAP_MS);
   }
 }
 
@@ -465,6 +482,10 @@ function sendBracketedPaste(text) {
 function sendInput(input) {
   if (input === '\x03') {
     sendKeys(['C-c']);
+    return;
+  }
+  if (input === '\x15') {
+    sendKeys(['C-u']);
     return;
   }
   if (input === '\x1B[A') {

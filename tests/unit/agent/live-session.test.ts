@@ -65,9 +65,16 @@ appendFileSync(${JSON.stringify(countFile)}, 'start\\n');
 process.stdin.setEncoding('utf8');
 let buf = '';
 process.stdin.on('data', (chunk) => {
+  if (chunk.includes('\\x15')) {
+    buf = '';
+    chunk = chunk.replaceAll('\\x15', '');
+  }
   if (chunk.includes('\\x1b[A')) {
     process.stdout.write('arrow-up\\n');
     chunk = chunk.replaceAll('\\x1b[A', '');
+  }
+  if (chunk.includes('\\x1b')) {
+    chunk = chunk.replaceAll('\\x1b', '');
   }
   buf += chunk;
   let idx;
@@ -120,6 +127,13 @@ process.stdin.on('data', (chunk) => {
         process.stdout.write('⚠ Heads up: Long threads and multiple compactions can cause the model to be less accurate.\\n');
       }, 20);
     }
+    else if (line === '/prime-buffer') {
+      process.stdout.write('primed\\n');
+      buf = 'goal';
+    }
+    else if (line === '/status') {
+      process.stdout.write('status-ok\\n');
+    }
     else process.stdout.write('echo:' + line + '\\n');
   }
 });
@@ -161,6 +175,8 @@ setInterval(() => {}, 1000);
     const eighth = await collect(secondSession.run('run-8', '/noise-then-answer', dir).events);
     const ninth = await collect(secondSession.run('run-9', '/fast', dir).events);
     const tenth = await collect(secondSession.run('run-10', '/goal-frame', dir).events);
+    await collect(secondSession.run('run-11', '/prime-buffer', dir).events);
+    const eleventh = await collect(secondSession.run('run-12', '/status', dir, 'command').events);
     await pool.closeAll();
 
     expect(textOf(first)).toContain('echo:hello');
@@ -175,6 +191,7 @@ setInterval(() => {}, 1000);
     expect(textOf(tenth)).toBe(
       '• Context compacted\n\n⚠ Heads up: Long threads and multiple compactions can cause the model to be less accurate.\n',
     );
+    expect(textOf(eleventh)).toBe('status-ok\n');
     expect(await readFile(countFile, 'utf8')).toBe('start\n');
   });
 

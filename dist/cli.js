@@ -5940,9 +5940,9 @@ var LiveTerminalSession = class {
     this.primed = true;
     return true;
   }
-  run(runId, prompt, cwd) {
+  run(runId, prompt, cwd, inputMode) {
     void this.ensureStarted();
-    const events = this.turnEvents(prompt, cwd);
+    const events = this.turnEvents(prompt, cwd, inputMode);
     return {
       runId,
       events,
@@ -6013,7 +6013,7 @@ var LiveTerminalSession = class {
     if (!child || child.exitCode !== null || child.signalCode !== null) return;
     child.stdin.write(input);
   }
-  async *turnEvents(prompt, cwd) {
+  async *turnEvents(prompt, cwd, inputMode) {
     yield { type: "system", cwd };
     const idleMs = this.opts.idleMs ?? DEFAULT_IDLE_MS;
     const outputFlushMs = this.opts.outputFlushMs ?? DEFAULT_OUTPUT_FLUSH_MS;
@@ -6087,6 +6087,10 @@ var LiveTerminalSession = class {
     await delay(STARTUP_INPUT_GRACE_MS);
     if (!done) {
       this.cleaner.resetTurn();
+      if (inputMode === "command") {
+        await this.clearPendingInput();
+        this.cleaner.resetTurn();
+      }
       acceptingOutput = true;
       const controlKeys = parseLiveControlSequence(prompt);
       if (controlKeys) {
@@ -6117,6 +6121,12 @@ var LiveTerminalSession = class {
       this.emitter.off("exit", onExit);
       this.emitter.off("error", onError);
     }
+  }
+  async clearPendingInput() {
+    this.write("\x1B");
+    await delay(CONTROL_KEY_GAP_MS);
+    this.write("");
+    await delay(CONTROL_KEY_GAP_MS);
   }
 };
 function spawnLiveProcess(opts) {
@@ -6270,6 +6280,10 @@ function sendBracketedPaste(text) {
 function sendInput(input) {
   if (input === '\x03') {
     sendKeys(['C-c']);
+    return;
+  }
+  if (input === '\x15') {
+    sendKeys(['C-u']);
     return;
   }
   if (input === '\x1B[A') {
@@ -7089,7 +7103,7 @@ var ClaudeAdapter = class {
       idleMs: this.liveIdleMs,
       cleanup: systemPromptFile.cleanup
     });
-    return session.run(opts.runId, opts.prompt, opts.cwd);
+    return session.run(opts.runId, opts.prompt, opts.cwd, opts.liveInputMode);
   }
 };
 async function* createEventStream(child, stderrChunks, getError) {
@@ -7642,14 +7656,14 @@ var CodexAdapter = class {
       idleMs: this.liveIdleMs
     });
     let prompt;
-    if (isNativeCliCommand(opts.prompt)) {
+    if (opts.liveInputMode || isNativeCliCommand(opts.prompt)) {
       prompt = opts.prompt;
     } else if (session.takePrimeSlot()) {
       prompt = prefixBridgeSystemPrompt(opts.prompt, this.botIdentity);
     } else {
       prompt = opts.prompt;
     }
-    return session.run(opts.runId, prompt, opts.cwd);
+    return session.run(opts.runId, prompt, opts.cwd, opts.liveInputMode);
   }
 };
 function isNativeCliCommand(prompt) {
@@ -11381,6 +11395,38 @@ function parseCodexReasoningEffort(value, fallback) {
   return normalizeCodexReasoningEffort(value) ?? normalizeCodexReasoningEffort(fallback);
 }
 
+// src/bot/live-input.ts
+var NATIVE_AGENT_COMMAND_RAW_KEY = "__larkChannelNativeAgentCommand";
+var FORCE_LIVE_AGENT_COMMAND_RAW_KEY = "__larkChannelForceLiveAgentCommand";
+var LIVE_INPUT_MODE_RAW_KEY = "__larkChannelLiveInputMode";
+function markNativeAgentCommand(msg, mode) {
+  const raw = msg.raw && typeof msg.raw === "object" && !Array.isArray(msg.raw) ? { ...msg.raw } : {};
+  return {
+    ...msg,
+    content: msg.content.trimStart(),
+    raw: {
+      ...raw,
+      [NATIVE_AGENT_COMMAND_RAW_KEY]: true,
+      ...mode ? { [FORCE_LIVE_AGENT_COMMAND_RAW_KEY]: true, [LIVE_INPUT_MODE_RAW_KEY]: mode } : {}
+    }
+  };
+}
+function isNativeAgentCommandMessage(msg) {
+  return Boolean(
+    msg.raw && typeof msg.raw === "object" && !Array.isArray(msg.raw) && msg.raw[NATIVE_AGENT_COMMAND_RAW_KEY] === true
+  );
+}
+function isForceLiveAgentCommandMessage(msg) {
+  return Boolean(
+    msg.raw && typeof msg.raw === "object" && !Array.isArray(msg.raw) && msg.raw[FORCE_LIVE_AGENT_COMMAND_RAW_KEY] === true
+  );
+}
+function liveInputModeForMessage(msg) {
+  if (!msg.raw || typeof msg.raw !== "object" || Array.isArray(msg.raw)) return void 0;
+  const mode = msg.raw[LIVE_INPUT_MODE_RAW_KEY];
+  return mode === "command" || mode === "control" ? mode : void 0;
+}
+
 // src/bot/session-catalog-identity.ts
 async function commandSessionCatalogIdentity(input) {
   const requestedCwd = input.workspaces.cwdFor(input.scope) ?? input.controls.profileConfig.workspaces.default;
@@ -11608,6 +11654,10 @@ async function handleCardAction(deps) {
   }
   const cmd = typeof payload.cmd === "string" ? payload.cmd : "";
   if (cmd) {
+    if (cmd === "live.input") {
+      forwardLiveInput(deps, payload, scope, threadId, mode);
+      return;
+    }
     if (isSignedBridgeCallback(payload) && !verifyBridgeToken(deps, payload, scope, cmd)) {
       return;
     }
@@ -11659,6 +11709,30 @@ async function handleCardAction(deps) {
     return;
   }
   return;
+}
+function forwardLiveInput(deps, payload, scope, threadId, mode) {
+  const input = typeof payload.input === "string" ? payload.input.trim() : "";
+  if (!input) return;
+  log.info("cardAction", "live-input", { scope, input });
+  const synthetic = markNativeAgentCommand(
+    {
+      messageId: deps.evt.messageId,
+      chatId: deps.evt.chatId,
+      chatType: mode === "p2p" ? "p2p" : "group",
+      threadId,
+      senderId: deps.evt.operator.openId,
+      senderName: deps.evt.operator.name,
+      content: input,
+      rawContentType: "card_action",
+      resources: [],
+      mentions: [],
+      mentionAll: false,
+      mentionedBot: false,
+      createTime: Date.now()
+    },
+    "control"
+  );
+  deps.pending.push(scope, synthetic);
 }
 async function resolveScope(deps) {
   const chatId = deps.evt.chatId;
@@ -12452,6 +12526,7 @@ var RunExecutor = class {
       runId,
       scopeId: input.scopeId,
       sessionMode: input.sessionMode,
+      liveInputMode: input.liveInputMode,
       prompt: input.policy.prompt,
       cwd: input.policy.cwdRealpath,
       sessionId: input.sessionId,
@@ -12751,6 +12826,7 @@ async function startRunFlow(input) {
       scopeId: input.scopeId,
       policy,
       sessionMode: input.sessionMode,
+      liveInputMode: input.liveInputMode,
       sessionId,
       threadId,
       model: resolveModelArg(
@@ -14550,7 +14626,10 @@ async function intakeMessage(deps) {
       return;
     }
   }
-  const agentMsg = (route.forceNative || getAgentSessionMode(controls.cfg) === "live") && isNativeAgentInputText(route.msg.content, liveInteractionByScope.has(scope)) ? markNativeAgentCommand(route.msg, route.forceNative) : route.msg;
+  const agentMsg = (route.forceNative || getAgentSessionMode(controls.cfg) === "live") && isNativeAgentInputText(route.msg.content, liveInteractionByScope.has(scope)) ? markNativeAgentCommand(
+    route.msg,
+    route.forceNative ? "command" : route.msg.content.trimStart().startsWith("/") ? "command" : liveInteractionByScope.has(scope) ? "control" : void 0
+  ) : route.msg;
   const size = pending.push(scope, agentMsg);
   log.info("intake", "queued", { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
   if (pending.shouldAckBusy(scope)) {
@@ -14577,30 +14656,6 @@ function rewriteAgentCommandMessage(msg, agentKind) {
     forceNative: rest.trimStart().startsWith("/")
   };
 }
-var NATIVE_AGENT_COMMAND_RAW_KEY = "__larkChannelNativeAgentCommand";
-var FORCE_LIVE_AGENT_COMMAND_RAW_KEY = "__larkChannelForceLiveAgentCommand";
-function markNativeAgentCommand(msg, forceLive = false) {
-  const raw = msg.raw && typeof msg.raw === "object" && !Array.isArray(msg.raw) ? { ...msg.raw } : {};
-  return {
-    ...msg,
-    content: msg.content.trimStart(),
-    raw: {
-      ...raw,
-      [NATIVE_AGENT_COMMAND_RAW_KEY]: true,
-      ...forceLive ? { [FORCE_LIVE_AGENT_COMMAND_RAW_KEY]: true } : {}
-    }
-  };
-}
-function isNativeAgentCommandMessage(msg) {
-  return Boolean(
-    msg.raw && typeof msg.raw === "object" && !Array.isArray(msg.raw) && msg.raw[NATIVE_AGENT_COMMAND_RAW_KEY] === true
-  );
-}
-function isForceLiveAgentCommandMessage(msg) {
-  return Boolean(
-    msg.raw && typeof msg.raw === "object" && !Array.isArray(msg.raw) && msg.raw[FORCE_LIVE_AGENT_COMMAND_RAW_KEY] === true
-  );
-}
 function isSlashCommandText(text) {
   return text.trimStart().startsWith("/");
 }
@@ -14610,7 +14665,7 @@ function isNativeAgentInputText(text, pickerActive) {
 }
 function isLivePickerInput(text) {
   const trimmed = text.trim();
-  return isLiveControlInput(trimmed) || /^\d{1,2}$/u.test(trimmed);
+  return isLiveControlInput(trimmed) || /^\d{1,2}$/u.test(trimmed) || /^(?:y|yes|n|no)$/iu.test(trimmed);
 }
 async function runAgentBatch(deps) {
   const {
@@ -14698,6 +14753,7 @@ async function runAgentBatch(deps) {
   ] : void 0;
   const nativeCommand = nativeAgentCommandForBatch(batch);
   const forceLiveSession = batch.some(isForceLiveAgentCommandMessage);
+  const liveInputMode = nativeCommand ? liveInputModeForBatch(batch, nativeCommand) : void 0;
   const useLiveSession = Boolean(nativeCommand) && (forceLiveSession || getAgentSessionMode(controls.cfg) === "live");
   const prompt = nativeCommand ?? buildPrompt(
     batch,
@@ -14740,6 +14796,7 @@ async function runAgentBatch(deps) {
     scope: scopeContext,
     prompt,
     sessionMode: useLiveSession ? "live" : "turn",
+    liveInputMode,
     attachments: attachments.map(toPolicyAttachment),
     access: accessDecision,
     capability,
@@ -14800,10 +14857,22 @@ async function runAgentBatch(deps) {
   };
   const observeLiveEvent = (evt) => {
     if (!useLiveSession || !nativeCommand || evt.type !== "text") return;
-    if (looksLikeAgentPicker(evt.delta)) {
+    const interaction = detectLiveInteraction(evt.delta);
+    if (interaction || looksLikeAgentPicker(evt.delta)) {
       const wasActive = liveInteractionByScope.has(scope);
-      liveInteractionByScope.set(scope, { picker: true, updatedAt: Date.now() });
+      const previous = liveInteractionByScope.get(scope);
+      const nextSignature = interaction?.signature ?? previous?.signature;
+      liveInteractionByScope.set(scope, {
+        picker: true,
+        updatedAt: Date.now(),
+        ...nextSignature ? { signature: nextSignature } : {}
+      });
       if (!wasActive) log.info("agent-live", "picker-enter", { scope });
+      if (interaction && previous?.signature !== interaction.signature) {
+        void channel.send(chatId, { card: liveInteractionCard(interaction) }, sendOpts).catch(
+          (err) => log.warn("agent-live", "interaction-card-failed", { scope, err: String(err) })
+        );
+      }
     }
   };
   const scopeOverride = sessions.getIdleTimeoutMinutes(scope);
@@ -14819,6 +14888,23 @@ async function runAgentBatch(deps) {
     if (getShowToolCalls(controls.cfg)) return state;
     return { ...state, blocks: state.blocks.filter((b) => b.kind !== "tool") };
   };
+  const withNativeEmptyFallback = (state) => {
+    if (!useLiveSession || !nativeCommand || state.terminal !== "done" || state.blocks.length > 0) {
+      return state;
+    }
+    return {
+      ...state,
+      blocks: [
+        {
+          kind: "text",
+          content: `\u547D\u4EE4\u5DF2\u53D1\u9001\u5230 ${controls.profileConfig.agentKind === "codex" ? "Codex" : "Claude"} live session\uFF0C\u672A\u8FD4\u56DE\u6587\u672C\u5185\u5BB9\u3002
+`,
+          streaming: false
+        }
+      ]
+    };
+  };
+  const prepareStateForReply = (state) => filterForPrefs(withNativeEmptyFallback(state));
   const cardRenderOptions = callbackAuth ? {
     signCallback: (action) => callbackAuth.sign({
       runId: execution.runId,
@@ -14889,7 +14975,7 @@ async function runAgentBatch(deps) {
           channel,
           chatId,
           scope,
-          state: finalAnswerOnlyState(finalState),
+          state: finalAnswerOnlyState(prepareStateForReply(finalState)),
           replyMode,
           sendOpts,
           cardRenderOptions
@@ -14909,7 +14995,7 @@ async function runAgentBatch(deps) {
         freshFinalPosted = true;
         await channel.send(
           chatId,
-          { card: renderCard(filterForPrefs(state), cardRenderOptions) },
+          { card: renderCard(prepareStateForReply(state), cardRenderOptions) },
           sendOpts
         );
       };
@@ -14923,7 +15009,7 @@ async function runAgentBatch(deps) {
           latestState = state;
           if (cardCtrl && !streamDegraded) {
             try {
-              await cardCtrl.update(renderCard(filterForPrefs(state), cardRenderOptions));
+              await cardCtrl.update(renderCard(prepareStateForReply(state), cardRenderOptions));
             } catch (err) {
               streamDegraded = true;
               cardCtrl = void 0;
@@ -14946,7 +15032,7 @@ async function runAgentBatch(deps) {
               producerStarted = true;
               cardCtrl = ctrl;
               try {
-                await ctrl.update(renderCard(filterForPrefs(latestState), cardRenderOptions));
+                await ctrl.update(renderCard(prepareStateForReply(latestState), cardRenderOptions));
               } catch (err) {
                 streamDegraded = true;
                 cardCtrl = void 0;
@@ -14971,7 +15057,7 @@ async function runAgentBatch(deps) {
         fallback: postFreshFinal
       });
       if (streamDegraded) {
-        await postFreshFinal(latestState);
+        await postFreshFinal(prepareStateForReply(latestState));
       }
     } else if (replyMode === "markdown") {
       let latestState = initialState;
@@ -14982,7 +15068,7 @@ async function runAgentBatch(deps) {
       const postFreshFinal = async (state) => {
         if (freshFinalPosted) return;
         freshFinalPosted = true;
-        const body = renderText(filterForPrefs(state));
+        const body = renderText(prepareStateForReply(state));
         if (body.trim()) {
           await channel.send(chatId, { markdown: body }, sendOpts);
         }
@@ -14997,7 +15083,7 @@ async function runAgentBatch(deps) {
           latestState = state;
           if (markdownCtrl && !streamDegraded) {
             try {
-              await markdownCtrl.setContent(renderText(filterForPrefs(state)));
+              await markdownCtrl.setContent(renderText(prepareStateForReply(state)));
             } catch (err) {
               streamDegraded = true;
               markdownCtrl = void 0;
@@ -15018,7 +15104,7 @@ async function runAgentBatch(deps) {
             producerStarted = true;
             markdownCtrl = ctrl;
             try {
-              await ctrl.setContent(renderText(filterForPrefs(latestState)));
+              await ctrl.setContent(renderText(prepareStateForReply(latestState)));
             } catch (err) {
               streamDegraded = true;
               markdownCtrl = void 0;
@@ -15042,7 +15128,7 @@ async function runAgentBatch(deps) {
         fallback: postFreshFinal
       });
       if (streamDegraded) {
-        await postFreshFinal(latestState);
+        await postFreshFinal(prepareStateForReply(latestState));
       }
     } else {
       const finalState = await processAgentStream(
@@ -15059,7 +15145,7 @@ async function runAgentBatch(deps) {
         channel,
         chatId,
         scope,
-        state: filterForPrefs(finalState),
+        state: prepareStateForReply(finalState),
         replyMode,
         sendOpts,
         cardRenderOptions
@@ -15357,10 +15443,87 @@ function nativeAgentCommandForBatch(batch) {
   const msg = batch[0];
   if (!msg || !isNativeAgentCommandMessage(msg)) return void 0;
   const text = msg.content.trimStart();
+  if (isForceLiveAgentCommandMessage(msg)) return text;
   return isSlashCommandText(text) || isLivePickerInput(text) ? text : void 0;
 }
+function liveInputModeForBatch(batch, nativeCommand) {
+  const mode = batch.map(liveInputModeForMessage).find((item) => Boolean(item));
+  if (mode) return mode;
+  return nativeCommand.trimStart().startsWith("/") ? "command" : "control";
+}
 function looksLikeAgentPicker(text) {
-  return /press\s+enter\s+to\s+confirm/i.test(text) || /esc\s+to\s+go\s+back/i.test(text) || /select\s+(?:a\s+)?(?:model|option|.+)/i.test(text) || /(?:↑|↓|up\/down|arrow keys?|use .*arrows?)/i.test(text);
+  return /press\s+enter\s+to\s+confirm/i.test(text) || /esc\s+to\s+go\s+back/i.test(text) || /\b(?:y\/n|yes\/no|no\/yes)\b/i.test(text) || /select\s+(?:a\s+)?(?:model|option|.+)/i.test(text) || /(?:↑|↓|up\/down|arrow keys?|use .*arrows?)/i.test(text);
+}
+function detectLiveInteraction(text) {
+  const prompt = text.split("\n").map((line) => line.trim()).filter(Boolean).slice(-12).join("\n");
+  const buttons = [];
+  const seenInputs = /* @__PURE__ */ new Set();
+  const add = (label, input) => {
+    if (seenInputs.has(input)) return;
+    seenInputs.add(input);
+    buttons.push({ label, input });
+  };
+  for (const line of prompt.split("\n")) {
+    const match = line.match(/^(?:[›>▸*+-]\s*)?(\d{1,2})[.)、:\s-]+(.{1,80})$/u);
+    if (!match) continue;
+    add(match[1], match[1]);
+    if (buttons.length >= 8) break;
+  }
+  if (/\b(?:y\/n|yes\/no|no\/yes|\[y\/n\]|\(y\/n\)|confirm|proceed|continue)\b/i.test(prompt)) {
+    add("yes", "yes");
+    add("no", "no");
+  }
+  if (/press\s+enter\s+to\s+confirm|enter\s+to\s+(?:confirm|continue)|回车|确认/i.test(prompt)) {
+    add("enter", "enter");
+  }
+  if (/esc\s+to\s+(?:go\s+back|cancel)|escape\s+to\s+cancel|取消|返回/i.test(prompt)) {
+    add("esc", "esc");
+  }
+  if (buttons.length === 0 && looksLikeAgentPicker(prompt)) {
+    add("up", "up");
+    add("down", "down");
+    add("enter", "enter");
+    add("esc", "esc");
+  }
+  if (buttons.length === 0) return void 0;
+  return {
+    signature: `${prompt}
+${buttons.map((button2) => button2.input).join("|")}`.slice(0, 500),
+    prompt: prompt.slice(0, 1200),
+    buttons
+  };
+}
+function liveInteractionCard(interaction) {
+  return {
+    schema: "2.0",
+    config: {
+      streaming_mode: false,
+      summary: { content: "live CLI \u7B49\u5F85\u9009\u62E9" }
+    },
+    body: {
+      elements: [
+        {
+          tag: "markdown",
+          content: `live CLI \u6B63\u5728\u7B49\u5F85\u9009\u62E9\uFF1A
+\`\`\`
+${escapeFence(interaction.prompt)}
+\`\`\``
+        },
+        {
+          tag: "action",
+          actions: interaction.buttons.map((button2) => ({
+            tag: "button",
+            text: { tag: "plain_text", content: button2.label },
+            type: button2.input === "yes" || button2.input === "enter" ? "primary" : "default",
+            behaviors: [{ type: "callback", value: { cmd: "live.input", input: button2.input } }]
+          }))
+        }
+      ]
+    }
+  };
+}
+function escapeFence(value) {
+  return value.replace(/```/g, "'''");
 }
 function closesLivePicker(input) {
   const trimmed = input.trim();
