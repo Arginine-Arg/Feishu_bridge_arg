@@ -35,6 +35,9 @@ const DEFAULT_OUTPUT_FLUSH_MS = 500;
 const DEFAULT_STARTUP_TIMEOUT_MS = 15_000;
 const STARTUP_INPUT_GRACE_MS = 25;
 const CONTROL_KEY_GAP_MS = 40;
+const COMMAND_CLEAR_SETTLE_MS = 500;
+const COMMAND_STARTUP_TIMEOUT_MS = 25_000;
+const COMMAND_IDLE_MS = 2_500;
 const MAX_TURN_OUTPUT_CHARS = 120_000;
 const DEFAULT_PTY_ROWS = '48';
 const DEFAULT_PTY_COLUMNS = '120';
@@ -184,9 +187,15 @@ export class LiveTerminalSession {
   ): AsyncGenerator<AgentEvent> {
     yield { type: 'system', cwd };
 
-    const idleMs = this.opts.idleMs ?? DEFAULT_IDLE_MS;
+    const idleMs =
+      inputMode === 'command'
+        ? Math.max(this.opts.idleMs ?? DEFAULT_IDLE_MS, COMMAND_IDLE_MS)
+        : (this.opts.idleMs ?? DEFAULT_IDLE_MS);
     const outputFlushMs = this.opts.outputFlushMs ?? DEFAULT_OUTPUT_FLUSH_MS;
-    const startupTimeoutMs = this.opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
+    const startupTimeoutMs =
+      inputMode === 'command'
+        ? Math.max(this.opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS, COMMAND_STARTUP_TIMEOUT_MS)
+        : (this.opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS);
     const output = new TurnOutputBuffer(MAX_TURN_OUTPUT_CHARS, prompt);
     const queue: AgentEvent[] = [];
     let done = false;
@@ -304,8 +313,10 @@ export class LiveTerminalSession {
   private async clearPendingInput(): Promise<void> {
     this.write('\x1B');
     await delay(CONTROL_KEY_GAP_MS);
-    this.write('\x15');
+    this.write('\x1B');
     await delay(CONTROL_KEY_GAP_MS);
+    this.write('\x15');
+    await delay(COMMAND_CLEAR_SETTLE_MS);
   }
 }
 

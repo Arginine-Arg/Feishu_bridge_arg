@@ -5884,6 +5884,9 @@ var DEFAULT_OUTPUT_FLUSH_MS = 500;
 var DEFAULT_STARTUP_TIMEOUT_MS = 15e3;
 var STARTUP_INPUT_GRACE_MS = 25;
 var CONTROL_KEY_GAP_MS = 40;
+var COMMAND_CLEAR_SETTLE_MS = 500;
+var COMMAND_STARTUP_TIMEOUT_MS = 25e3;
+var COMMAND_IDLE_MS = 2500;
 var MAX_TURN_OUTPUT_CHARS = 12e4;
 var DEFAULT_PTY_ROWS = "48";
 var DEFAULT_PTY_COLUMNS = "120";
@@ -6015,9 +6018,9 @@ var LiveTerminalSession = class {
   }
   async *turnEvents(prompt, cwd, inputMode) {
     yield { type: "system", cwd };
-    const idleMs = this.opts.idleMs ?? DEFAULT_IDLE_MS;
+    const idleMs = inputMode === "command" ? Math.max(this.opts.idleMs ?? DEFAULT_IDLE_MS, COMMAND_IDLE_MS) : this.opts.idleMs ?? DEFAULT_IDLE_MS;
     const outputFlushMs = this.opts.outputFlushMs ?? DEFAULT_OUTPUT_FLUSH_MS;
-    const startupTimeoutMs = this.opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
+    const startupTimeoutMs = inputMode === "command" ? Math.max(this.opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS, COMMAND_STARTUP_TIMEOUT_MS) : this.opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
     const output = new TurnOutputBuffer(MAX_TURN_OUTPUT_CHARS, prompt);
     const queue = [];
     let done = false;
@@ -6125,8 +6128,10 @@ var LiveTerminalSession = class {
   async clearPendingInput() {
     this.write("\x1B");
     await delay(CONTROL_KEY_GAP_MS);
-    this.write("");
+    this.write("\x1B");
     await delay(CONTROL_KEY_GAP_MS);
+    this.write("");
+    await delay(COMMAND_CLEAR_SETTLE_MS);
   }
 };
 function spawnLiveProcess(opts) {

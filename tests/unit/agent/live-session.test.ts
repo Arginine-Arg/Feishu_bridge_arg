@@ -64,10 +64,15 @@ import { appendFileSync } from 'node:fs';
 appendFileSync(${JSON.stringify(countFile)}, 'start\\n');
 process.stdin.setEncoding('utf8');
 let buf = '';
+let pickerOpen = false;
 process.stdin.on('data', (chunk) => {
   if (chunk.includes('\\x15')) {
     buf = '';
     chunk = chunk.replaceAll('\\x15', '');
+  }
+  if (pickerOpen && chunk.includes('\\x1b')) {
+    pickerOpen = false;
+    setTimeout(() => process.stdout.write('Select Model and Effort\\n1. stale-picker\\nPress enter to confirm or esc to go back\\n'), 120);
   }
   if (chunk.includes('\\x1b[A')) {
     process.stdout.write('arrow-up\\n');
@@ -134,6 +139,13 @@ process.stdin.on('data', (chunk) => {
     else if (line === '/status') {
       process.stdout.write('status-ok\\n');
     }
+    else if (line === '/open-picker') {
+      pickerOpen = true;
+      process.stdout.write('Select Model and Effort\\n1. gpt-5.5\\nPress enter to confirm or esc to go back\\n');
+    }
+    else if (line === '/slow-compact') {
+      setTimeout(() => process.stdout.write('• Context compacted\\n'), 600);
+    }
     else process.stdout.write('echo:' + line + '\\n');
   }
 });
@@ -177,6 +189,9 @@ setInterval(() => {}, 1000);
     const tenth = await collect(secondSession.run('run-10', '/goal-frame', dir).events);
     await collect(secondSession.run('run-11', '/prime-buffer', dir).events);
     const eleventh = await collect(secondSession.run('run-12', '/status', dir, 'command').events);
+    await collect(secondSession.run('run-13', '/open-picker', dir).events);
+    const twelfth = await collect(secondSession.run('run-14', '/fast', dir, 'command').events);
+    const thirteenth = await collect(secondSession.run('run-15', '/slow-compact', dir, 'command').events);
     await pool.closeAll();
 
     expect(textOf(first)).toContain('echo:hello');
@@ -192,8 +207,10 @@ setInterval(() => {}, 1000);
       '• Context compacted\n\n⚠ Heads up: Long threads and multiple compactions can cause the model to be less accurate.\n',
     );
     expect(textOf(eleventh)).toBe('status-ok\n');
+    expect(textOf(twelfth)).toBe('• Service tier set to fast\n');
+    expect(textOf(thirteenth)).toBe('• Context compacted\n');
     expect(await readFile(countFile, 'utf8')).toBe('start\n');
-  });
+  }, 15_000);
 
   it('ignores startup terminal output before the turn input is sent', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-startup-noise-test-'));
