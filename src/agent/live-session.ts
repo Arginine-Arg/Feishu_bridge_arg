@@ -194,10 +194,12 @@ export class LiveTerminalSession {
         arm(startupTimeoutMs);
         return;
       }
-      if (event.mode === 'snapshot' ? output.replace(event.text) : output.append(event.text)) {
+      const text = sanitizeLiveTurnOutput(event.text);
+      if (!text) return;
+      if (event.mode === 'snapshot' ? output.replace(text) : output.append(text)) {
         scheduleOutputFlush();
+        arm(idleMs);
       }
-      arm(idleMs);
     };
     const onExit = (evt: { code: number | null; signal: NodeJS.Signals | null }): void => {
       if (done) return;
@@ -693,6 +695,26 @@ function stripKnownLiveNoise(input: string): string {
     .trimStart();
 }
 
+function sanitizeLiveTurnOutput(input: string): string {
+  const stripped = stripKnownLiveNoise(input);
+  if (!stripped.trim()) return '';
+  return isLikelyCodexRoleWarningFragment(stripped) ? '' : stripped;
+}
+
+function isLikelyCodexRoleWarningFragment(input: string): boolean {
+  const compact = compactForNoiseMatch(input);
+  if (!compact) return false;
+  return (
+    compact.includes('ignoringmalfor') ||
+    compact.includes('malformedagentrole') ||
+    compact.includes('agentroledefi') ||
+    compact.includes('duplicateagentrole') ||
+    compact.includes('mustdefineadescription') ||
+    compact.includes('nfiglayer') ||
+    compact.includes('webresearcher')
+  );
+}
+
 function stripPromptEcho(input: string, prompt: string): string {
   const echo = prompt.trim();
   if (!echo) return input;
@@ -703,15 +725,7 @@ function stripPromptEcho(input: string, prompt: string): string {
 }
 
 function stripCompactNoise(input: string, patterns: string[]): string {
-  const compactChars: string[] = [];
-  const map: number[] = [];
-  for (let i = 0; i < input.length; i += 1) {
-    const char = input[i] ?? '';
-    if (/\s|`/.test(char)) continue;
-    compactChars.push(char.toLowerCase());
-    map.push(i);
-  }
-  const compact = compactChars.join('');
+  const { compact, map } = compactWithIndex(input);
   const ranges: Array<[number, number]> = [];
   for (const pattern of patterns) {
     const needle = pattern.replace(/\s|`/g, '').toLowerCase();
@@ -745,6 +759,22 @@ function stripCompactNoise(input: string, patterns: string[]): string {
     cursor = end;
   }
   return out + input.slice(cursor);
+}
+
+function compactForNoiseMatch(input: string): string {
+  return compactWithIndex(input).compact;
+}
+
+function compactWithIndex(input: string): { compact: string; map: number[] } {
+  const compactChars: string[] = [];
+  const map: number[] = [];
+  for (let i = 0; i < input.length; i += 1) {
+    const char = input[i] ?? '';
+    if (/\s|`/.test(char)) continue;
+    compactChars.push(char.toLowerCase());
+    map.push(i);
+  }
+  return { compact: compactChars.join(''), map };
 }
 
 function completePrefixEnd(input: string): number {

@@ -42,6 +42,10 @@ process.stdin.on('data', (chunk) => {
     else if (line === '/warning-tail') {
       process.stdout.write('r\\n\\n\`\\n\\nm\\n\\nu\\n\\ns\\n\\nt\\n\\nd\\n\\ne\\n\\nf\\n\\ni\\n\\nn\\n\\ne\\n\\na\\n\\nd\\n\\ne\\n\\ns\\n\\nc\\n\\nr\\n\\ni\\n\\np\\n\\nt\\n\\ni\\n\\no\\n\\nn\\nanswer\\n');
     }
+    else if (line === '/noise-then-answer') {
+      process.stdout.write('r\\n\\nm\\n\\nu\\n\\ns\\n\\nt\\n\\nd\\n\\ne\\n\\nf\\n\\ni\\n\\nn\\n\\ne\\n\\na\\n\\nd\\n\\ne\\n\\ns\\n\\nc\\n\\nr\\n\\ni\\n\\np\\n\\nt\\n\\ni\\n\\no\\nn\\ng\\n\\nm\\n\\na\\n\\nl\\n\\nf\\n\\no\\n\\nr\\n\\nm\\n\\ne\\n\\nd\\n\\na\\n\\ng\\n\\ne\\n\\nn\\n\\nt\\n\\nr\\n\\no\\n\\nl\\n\\ne\\n\\nd\\n\\ne\\n\\nf\\n\\ni\\n');
+      setTimeout(() => process.stdout.write('real answer\\n'), 80);
+    }
     else if (line === '/startup-noise') process.stdout.write('clean answer\\n');
     else process.stdout.write('echo:' + line + '\\n');
   }
@@ -81,6 +85,7 @@ setInterval(() => {}, 1000);
     const fifth = await collect(secondSession.run('run-5', '/warning', dir).events);
     const sixth = await collect(secondSession.run('run-6', 'up', dir).events);
     const seventh = await collect(secondSession.run('run-7', '/warning-tail', dir).events);
+    const eighth = await collect(secondSession.run('run-8', '/noise-then-answer', dir).events);
     await pool.closeAll();
 
     expect(textOf(first)).toContain('echo:hello');
@@ -90,6 +95,7 @@ setInterval(() => {}, 1000);
     expect(textOf(fifth)).toBe('answer\n');
     expect(textOf(sixth)).toContain('arrow-up');
     expect(textOf(seventh)).toBe('answer\n');
+    expect(textOf(eighth)).toBe('real answer\n');
     expect(await readFile(countFile, 'utf8')).toBe('start\n');
   });
 

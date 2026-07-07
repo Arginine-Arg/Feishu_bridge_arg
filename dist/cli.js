@@ -6036,10 +6036,12 @@ var LiveTerminalSession = class {
         arm(startupTimeoutMs);
         return;
       }
-      if (event.mode === "snapshot" ? output.replace(event.text) : output.append(event.text)) {
+      const text = sanitizeLiveTurnOutput(event.text);
+      if (!text) return;
+      if (event.mode === "snapshot" ? output.replace(text) : output.append(text)) {
         scheduleOutputFlush();
+        arm(idleMs);
       }
-      arm(idleMs);
     };
     const onExit = (evt) => {
       if (done) return;
@@ -6476,6 +6478,16 @@ function stripKnownLiveNoise(input) {
     "Tip:NewBuildfasterwithCodex"
   ]).replace(/(^|\n)\s*`\s*(?=\n|$)/g, "$1").replace(/\n{3,}/g, "\n\n").trimStart();
 }
+function sanitizeLiveTurnOutput(input) {
+  const stripped = stripKnownLiveNoise(input);
+  if (!stripped.trim()) return "";
+  return isLikelyCodexRoleWarningFragment(stripped) ? "" : stripped;
+}
+function isLikelyCodexRoleWarningFragment(input) {
+  const compact = compactForNoiseMatch(input);
+  if (!compact) return false;
+  return compact.includes("ignoringmalfor") || compact.includes("malformedagentrole") || compact.includes("agentroledefi") || compact.includes("duplicateagentrole") || compact.includes("mustdefineadescription") || compact.includes("nfiglayer") || compact.includes("webresearcher");
+}
 function stripPromptEcho(input, prompt) {
   const echo = prompt.trim();
   if (!echo) return input;
@@ -6486,15 +6498,7 @@ function stripPromptEcho(input, prompt) {
   return input;
 }
 function stripCompactNoise(input, patterns) {
-  const compactChars = [];
-  const map = [];
-  for (let i = 0; i < input.length; i += 1) {
-    const char = input[i] ?? "";
-    if (/\s|`/.test(char)) continue;
-    compactChars.push(char.toLowerCase());
-    map.push(i);
-  }
-  const compact = compactChars.join("");
+  const { compact, map } = compactWithIndex(input);
   const ranges = [];
   for (const pattern of patterns) {
     const needle = pattern.replace(/\s|`/g, "").toLowerCase();
@@ -6526,6 +6530,20 @@ function stripCompactNoise(input, patterns) {
     cursor = end;
   }
   return out + input.slice(cursor);
+}
+function compactForNoiseMatch(input) {
+  return compactWithIndex(input).compact;
+}
+function compactWithIndex(input) {
+  const compactChars = [];
+  const map = [];
+  for (let i = 0; i < input.length; i += 1) {
+    const char = input[i] ?? "";
+    if (/\s|`/.test(char)) continue;
+    compactChars.push(char.toLowerCase());
+    map.push(i);
+  }
+  return { compact: compactChars.join(""), map };
 }
 function completePrefixEnd(input) {
   const esc = input.lastIndexOf("\x1B");
