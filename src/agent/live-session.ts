@@ -196,7 +196,7 @@ export class LiveTerminalSession {
       inputMode === 'command'
         ? Math.max(this.opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS, COMMAND_STARTUP_TIMEOUT_MS)
         : (this.opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS);
-    const output = new TurnOutputBuffer(MAX_TURN_OUTPUT_CHARS, prompt);
+    const output = new TurnOutputBuffer(MAX_TURN_OUTPUT_CHARS, prompt, inputMode === 'command');
     const queue: AgentEvent[] = [];
     let done = false;
     let wake: (() => void) | undefined;
@@ -851,6 +851,7 @@ class TurnOutputBuffer {
   constructor(
     private readonly maxChars: number,
     private readonly promptEcho: string = '',
+    private readonly stripInputLines = false,
   ) {}
 
   append(raw: string): boolean {
@@ -881,7 +882,8 @@ class TurnOutputBuffer {
   }
 
   private compact(text: string): string {
-    const normalized = stripPromptEcho(cleanTerminalOutput(text), this.promptEcho);
+    const withoutEcho = stripPromptEcho(cleanTerminalOutput(text), this.promptEcho);
+    const normalized = this.stripInputLines ? stripLiveInputLines(withoutEcho) : withoutEcho;
     if (!normalized.trim()) return '';
     const parts = normalized.split(/(\n)/);
     let out = '';
@@ -1047,6 +1049,19 @@ function isPromptEchoLine(line: string, echo: string): boolean {
     normalized === `› ${echo}` ||
     (slashless !== echo && (normalized === slashless || normalized === `› ${slashless}`))
   );
+}
+
+function stripLiveInputLines(input: string): string {
+  return input
+    .split('\n')
+    .filter((line) => !isLiveInputChromeLine(line.trim()))
+    .join('\n')
+    .trimStart();
+}
+
+function isLiveInputChromeLine(trimmed: string): boolean {
+  if (!trimmed.startsWith('›')) return false;
+  return !/^›\s*\d{1,2}[.)、:\s-]/u.test(trimmed);
 }
 
 function isPromptScopedTerminalChromeLine(trimmed: string, prompt: string): boolean {

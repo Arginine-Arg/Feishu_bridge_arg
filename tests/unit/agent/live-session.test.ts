@@ -146,6 +146,10 @@ process.stdin.on('data', (chunk) => {
     else if (line === '/slow-compact') {
       setTimeout(() => process.stdout.write('• Context compacted\\n'), 600);
     }
+    else if (line === '/slow-goal') {
+      process.stdout.write('› Explain this codebase\\n');
+      setTimeout(() => process.stdout.write('• Usage: /goal [<objective>|clear|edit|pause|resume] No goal is currently set.\\n'), 600);
+    }
     else process.stdout.write('echo:' + line + '\\n');
   }
 });
@@ -192,6 +196,7 @@ setInterval(() => {}, 1000);
     await collect(secondSession.run('run-13', '/open-picker', dir).events);
     const twelfth = await collect(secondSession.run('run-14', '/fast', dir, 'command').events);
     const thirteenth = await collect(secondSession.run('run-15', '/slow-compact', dir, 'command').events);
+    const fourteenth = await collect(secondSession.run('run-16', '/slow-goal', dir, 'command').events);
     await pool.closeAll();
 
     expect(textOf(first)).toContain('echo:hello');
@@ -209,6 +214,7 @@ setInterval(() => {}, 1000);
     expect(textOf(eleventh)).toBe('status-ok\n');
     expect(textOf(twelfth)).toBe('• Service tier set to fast\n');
     expect(textOf(thirteenth)).toBe('• Context compacted\n');
+    expect(textOf(fourteenth)).toBe('• Usage: /goal [<objective>|clear|edit|pause|resume] No goal is currently set.\n');
     expect(await readFile(countFile, 'utf8')).toBe('start\n');
   }, 15_000);
 

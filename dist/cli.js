@@ -6021,7 +6021,7 @@ var LiveTerminalSession = class {
     const idleMs = inputMode === "command" ? Math.max(this.opts.idleMs ?? DEFAULT_IDLE_MS, COMMAND_IDLE_MS) : this.opts.idleMs ?? DEFAULT_IDLE_MS;
     const outputFlushMs = this.opts.outputFlushMs ?? DEFAULT_OUTPUT_FLUSH_MS;
     const startupTimeoutMs = inputMode === "command" ? Math.max(this.opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS, COMMAND_STARTUP_TIMEOUT_MS) : this.opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
-    const output = new TurnOutputBuffer(MAX_TURN_OUTPUT_CHARS, prompt);
+    const output = new TurnOutputBuffer(MAX_TURN_OUTPUT_CHARS, prompt, inputMode === "command");
     const queue = [];
     let done = false;
     let wake;
@@ -6598,12 +6598,14 @@ var VirtualTerminalScreen = class {
   }
 };
 var TurnOutputBuffer = class {
-  constructor(maxChars, promptEcho = "") {
+  constructor(maxChars, promptEcho = "", stripInputLines = false) {
     this.maxChars = maxChars;
     this.promptEcho = promptEcho;
+    this.stripInputLines = stripInputLines;
   }
   maxChars;
   promptEcho;
+  stripInputLines;
   emitted = "";
   pending = "";
   lastCompleteLine = "";
@@ -6633,7 +6635,8 @@ var TurnOutputBuffer = class {
     return out;
   }
   compact(text) {
-    const normalized = stripPromptEcho(cleanTerminalOutput(text), this.promptEcho);
+    const withoutEcho = stripPromptEcho(cleanTerminalOutput(text), this.promptEcho);
+    const normalized = this.stripInputLines ? stripLiveInputLines(withoutEcho) : withoutEcho;
     if (!normalized.trim()) return "";
     const parts = normalized.split(/(\n)/);
     let out = "";
@@ -6772,6 +6775,13 @@ function isPromptEchoLine(line, echo) {
   const normalized = line.trim();
   const slashless = echo.startsWith("/") ? echo.slice(1) : echo;
   return normalized === echo || normalized === `\u203A ${echo}` || slashless !== echo && (normalized === slashless || normalized === `\u203A ${slashless}`);
+}
+function stripLiveInputLines(input) {
+  return input.split("\n").filter((line) => !isLiveInputChromeLine(line.trim())).join("\n").trimStart();
+}
+function isLiveInputChromeLine(trimmed) {
+  if (!trimmed.startsWith("\u203A")) return false;
+  return !/^›\s*\d{1,2}[.)、:\s-]/u.test(trimmed);
 }
 function isPromptScopedTerminalChromeLine(trimmed, prompt) {
   if (prompt.trim() === "/fast") return false;
