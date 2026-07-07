@@ -1044,7 +1044,9 @@ class TurnOutputBuffer {
 
   private compact(text: string): string {
     const withoutEcho = stripPromptEcho(cleanTerminalOutput(text), this.promptEcho);
-    const normalized = this.stripInputLines ? stripLiveInputLines(withoutEcho) : withoutEcho;
+    const normalized = this.stripInputLines
+      ? stripStaleSlashEchoLines(stripLiveInputLines(withoutEcho), this.promptEcho)
+      : withoutEcho;
     if (!normalized.trim()) return '';
     const parts = normalized.split(/(\n)/);
     let out = '';
@@ -1222,6 +1224,20 @@ function stripLiveInputLines(input: string): string {
     .trimStart();
 }
 
+function stripStaleSlashEchoLines(input: string, prompt: string): string {
+  const echo = prompt.trim();
+  return input
+    .split('\n')
+    .filter((line) => !isStaleSlashEchoLine(line.trim(), echo))
+    .join('\n')
+    .trimStart();
+}
+
+function isStaleSlashEchoLine(trimmed: string, echo: string): boolean {
+  if (!/^\/[A-Za-z][\w-]*(?:\s+\S.*)?$/.test(trimmed)) return false;
+  return !isPromptEchoLine(trimmed, echo);
+}
+
 function isLiveInputChromeLine(trimmed: string): boolean {
   if (!trimmed.startsWith('›')) return false;
   return !/^›\s*\d{1,2}[.)、:\s-]/u.test(trimmed);
@@ -1304,6 +1320,7 @@ function isTerminalChromeLine(trimmed: string): boolean {
     /^[•◦]\s+Working\s+\(\d+s\b.*\)$/i.test(trimmed) ||
     /^tab to queue message\b.*context left$/i.test(trimmed) ||
     /^\d+%\s+context left$/i.test(trimmed) ||
+    /^[╭╰╮╯─│\s]+$/u.test(trimmed) ||
     /^›\s*(?:Implement \{feature\}|Summarize recent commits)\s*$/i.test(trimmed) ||
     /^[A-Za-z0-9_.-]+(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?\s+·\s+.+$/.test(trimmed)
   );

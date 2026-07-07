@@ -177,6 +177,10 @@ process.stdin.on('data', (chunk) => {
       process.stdout.write('› Explain this codebase\\n');
       setTimeout(() => process.stdout.write('• Usage: /goal [<objective>|clear|edit|pause|resume] No goal is currently set.\\n'), 600);
     }
+    else if (line === '/stale-status-goal') {
+      process.stdout.write('/status\\n\\n');
+      process.stdout.write('• Usage: /goal [<objective>|clear|edit|pause|resume] No goal is currently set.\\n');
+    }
     else process.stdout.write('echo:' + line + '\\n');
   }
 });
@@ -230,6 +234,9 @@ setInterval(() => {}, 1000);
     const twelfth = await collect(secondSession.run('run-14', '/fast', dir, 'command').events);
     const thirteenth = await collect(secondSession.run('run-15', '/slow-compact', dir, 'command').events);
     const fourteenth = await collect(secondSession.run('run-16', '/slow-goal', dir, 'command').events);
+    const staleStatusGoal = await collect(
+      secondSession.run('run-17', '/stale-status-goal', dir, 'command').events,
+    );
     await pool.closeAll();
 
     expect(textOf(first)).toContain('echo:hello');
@@ -253,8 +260,11 @@ setInterval(() => {}, 1000);
     expect(textOf(twelfth)).toBe('• Service tier set to fast\n');
     expect(textOf(thirteenth)).toBe('• Context compacted\n');
     expect(textOf(fourteenth)).toBe('• Usage: /goal [<objective>|clear|edit|pause|resume] No goal is currently set.\n');
+    expect(textOf(staleStatusGoal)).toBe(
+      '• Usage: /goal [<objective>|clear|edit|pause|resume] No goal is currently set.\n',
+    );
     expect(await readFile(countFile, 'utf8')).toBe('start\n');
-  }, 45_000);
+  }, 70_000);
 
   it('ignores startup terminal output before the turn input is sent', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-startup-noise-test-'));

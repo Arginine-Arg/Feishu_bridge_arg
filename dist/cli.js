@@ -6782,7 +6782,7 @@ var TurnOutputBuffer = class {
   }
   compact(text) {
     const withoutEcho = stripPromptEcho(cleanTerminalOutput(text), this.promptEcho);
-    const normalized = this.stripInputLines ? stripLiveInputLines(withoutEcho) : withoutEcho;
+    const normalized = this.stripInputLines ? stripStaleSlashEchoLines(stripLiveInputLines(withoutEcho), this.promptEcho) : withoutEcho;
     if (!normalized.trim()) return "";
     const parts = normalized.split(/(\n)/);
     let out = "";
@@ -6927,6 +6927,14 @@ function isPromptEchoLine(line, echo) {
 function stripLiveInputLines(input) {
   return input.split("\n").filter((line) => !isLiveInputChromeLine(line.trim())).join("\n").trimStart();
 }
+function stripStaleSlashEchoLines(input, prompt) {
+  const echo = prompt.trim();
+  return input.split("\n").filter((line) => !isStaleSlashEchoLine(line.trim(), echo)).join("\n").trimStart();
+}
+function isStaleSlashEchoLine(trimmed, echo) {
+  if (!/^\/[A-Za-z][\w-]*(?:\s+\S.*)?$/.test(trimmed)) return false;
+  return !isPromptEchoLine(trimmed, echo);
+}
 function isLiveInputChromeLine(trimmed) {
   if (!trimmed.startsWith("\u203A")) return false;
   return !/^›\s*\d{1,2}[.)、:\s-]/u.test(trimmed);
@@ -6984,7 +6992,7 @@ function snapshotInformationScore(input) {
   return input.split("\n").map((line) => line.trim()).filter(Boolean).filter((line) => !/^[╭╰╮╯─│\s]+$/u.test(line)).join("\n").length;
 }
 function isTerminalChromeLine(trimmed) {
-  return /^Tip:/i.test(trimmed) || /^[•◦]\s+Working\s+\(\d+s\b.*\)$/i.test(trimmed) || /^tab to queue message\b.*context left$/i.test(trimmed) || /^\d+%\s+context left$/i.test(trimmed) || /^›\s*(?:Implement \{feature\}|Summarize recent commits)\s*$/i.test(trimmed) || /^[A-Za-z0-9_.-]+(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?\s+·\s+.+$/.test(trimmed);
+  return /^Tip:/i.test(trimmed) || /^[•◦]\s+Working\s+\(\d+s\b.*\)$/i.test(trimmed) || /^tab to queue message\b.*context left$/i.test(trimmed) || /^\d+%\s+context left$/i.test(trimmed) || /^[╭╰╮╯─│\s]+$/u.test(trimmed) || /^›\s*(?:Implement \{feature\}|Summarize recent commits)\s*$/i.test(trimmed) || /^[A-Za-z0-9_.-]+(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?\s+·\s+.+$/.test(trimmed);
 }
 function stripCompactNoise(input, patterns) {
   const { compact, map } = compactWithIndex(input);
