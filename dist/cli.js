@@ -6130,7 +6130,9 @@ var LiveTerminalSession = class {
     await delay(CONTROL_KEY_GAP_MS);
     this.write("\x1B");
     await delay(CONTROL_KEY_GAP_MS);
-    this.write("");
+    this.write("");
+    await delay(CONTROL_KEY_GAP_MS);
+    this.write("\v");
     await delay(COMMAND_CLEAR_SETTLE_MS);
   }
 };
@@ -6287,8 +6289,12 @@ function sendInput(input) {
     sendKeys(['C-c']);
     return;
   }
-  if (input === '\x15') {
-    sendKeys(['C-u']);
+  if (input === '\x01') {
+    sendKeys(['C-a']);
+    return;
+  }
+  if (input === '\x0B') {
+    sendKeys(['C-k']);
     return;
   }
   if (input === '\x1B[A') {

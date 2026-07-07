@@ -67,8 +67,15 @@ let buf = '';
 let pickerOpen = false;
 process.stdin.on('data', (chunk) => {
   if (chunk.includes('\\x15')) {
-    buf = '';
+    process.stdout.write('• No previous message to edit.\\n');
     chunk = chunk.replaceAll('\\x15', '');
+  }
+  if (chunk.includes('\\x01')) {
+    chunk = chunk.replaceAll('\\x01', '');
+  }
+  if (chunk.includes('\\x0b')) {
+    buf = '';
+    chunk = chunk.replaceAll('\\x0b', '');
   }
   if (pickerOpen && chunk.includes('\\x1b')) {
     pickerOpen = false;
