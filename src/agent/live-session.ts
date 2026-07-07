@@ -1002,13 +1002,24 @@ function stripPromptEcho(input: string, prompt: string): string {
   return input
     .split('\n')
     .filter((line) => !isPromptEchoLine(line, echo))
+    .filter((line) => !isPromptScopedTerminalChromeLine(line.trim(), echo))
     .join('\n')
     .trimStart();
 }
 
 function isPromptEchoLine(line: string, echo: string): boolean {
   const normalized = line.trim();
-  return normalized === echo || normalized === `› ${echo}`;
+  const slashless = echo.startsWith('/') ? echo.slice(1) : echo;
+  return (
+    normalized === echo ||
+    normalized === `› ${echo}` ||
+    (slashless !== echo && (normalized === slashless || normalized === `› ${slashless}`))
+  );
+}
+
+function isPromptScopedTerminalChromeLine(trimmed: string, prompt: string): boolean {
+  if (prompt.trim() === '/fast') return false;
+  return /^•\s+Service tier set to\b/i.test(trimmed);
 }
 
 function stripTerminalChrome(input: string): string {
@@ -1034,6 +1045,9 @@ function stripTerminalChrome(input: string): string {
 function isTerminalChromeLine(trimmed: string): boolean {
   return (
     /^Tip:/i.test(trimmed) ||
+    /^[•◦]\s+Working\s+\(\d+s\b.*\)$/i.test(trimmed) ||
+    /^tab to queue message\b.*context left$/i.test(trimmed) ||
+    /^\d+%\s+context left$/i.test(trimmed) ||
     /^›\s*(?:Implement \{feature\}|Summarize recent commits)\s*$/i.test(trimmed) ||
     /^[A-Za-z0-9_.-]+(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?\s+·\s+.+$/.test(trimmed)
   );

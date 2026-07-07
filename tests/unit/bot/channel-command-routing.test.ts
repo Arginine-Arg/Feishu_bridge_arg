@@ -3,16 +3,41 @@ import type { NormalizedMessage } from '@larksuite/channel';
 import { rewriteAgentCommandMessage } from '../../../src/bot/channel.js';
 
 describe('agent command routing aliases', () => {
-  it('normalizes matching agent aliases before bridge command dispatch', () => {
-    expect(rewriteAgentCommandMessage(message('/codex /resume'), 'codex').content).toBe('/resume');
-    expect(rewriteAgentCommandMessage(message('/codex-cli /fast'), 'codex').content).toBe('/fast');
-    expect(rewriteAgentCommandMessage(message('/claude /resume'), 'claude').content).toBe('/resume');
-    expect(rewriteAgentCommandMessage(message('/claudecode /compact'), 'claude').content).toBe('/compact');
+  it('forces matching agent-prefixed slash commands to the native live CLI', () => {
+    expect(rewriteAgentCommandMessage(message('/codex /resume'), 'codex')).toMatchObject({
+      msg: { content: '/resume' },
+      forceNative: true,
+    });
+    expect(rewriteAgentCommandMessage(message('/codex-cli /fast'), 'codex')).toMatchObject({
+      msg: { content: '/fast' },
+      forceNative: true,
+    });
+    expect(rewriteAgentCommandMessage(message('/claude /resume'), 'claude')).toMatchObject({
+      msg: { content: '/resume' },
+      forceNative: true,
+    });
+    expect(rewriteAgentCommandMessage(message('/claudecode /compact'), 'claude')).toMatchObject({
+      msg: { content: '/compact' },
+      forceNative: true,
+    });
+  });
+
+  it('normalizes matching agent aliases for ordinary text without forcing native command mode', () => {
+    expect(rewriteAgentCommandMessage(message('/codex resume'), 'codex')).toMatchObject({
+      msg: { content: 'resume' },
+      forceNative: false,
+    });
   });
 
   it('leaves non-matching agent aliases untouched', () => {
-    expect(rewriteAgentCommandMessage(message('/claude /resume'), 'codex').content).toBe('/claude /resume');
-    expect(rewriteAgentCommandMessage(message('/codex /resume'), 'claude').content).toBe('/codex /resume');
+    expect(rewriteAgentCommandMessage(message('/claude /resume'), 'codex')).toMatchObject({
+      msg: { content: '/claude /resume' },
+      forceNative: false,
+    });
+    expect(rewriteAgentCommandMessage(message('/codex /resume'), 'claude')).toMatchObject({
+      msg: { content: '/codex /resume' },
+      forceNative: false,
+    });
   });
 });
 

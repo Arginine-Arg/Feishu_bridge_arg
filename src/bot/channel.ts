@@ -665,38 +665,36 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     return;
   }
 
-  // Normalize `/codex ...` / `/claude ...` before command dispatch. The
-  // alias is only a routing hint for mixed-agent chats; bridge-owned commands
-  // such as `/resume` must still be handled by the bridge instead of being
-  // forwarded into the agent TUI as native slash commands.
-  const routedMsg = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
+  const route = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
 
-  const handled = await tryHandleCommand({
-    channel,
-    msg: routedMsg,
-    scope,
-    chatMode,
-    sessions,
-    workspaces,
-    agent,
-    activeRuns,
-    sessionCatalog,
-    sessionCatalogIdentity: await commandSessionCatalogIdentity({
-      msg: emsg,
+  if (!route.forceNative) {
+    const handled = await tryHandleCommand({
+      channel,
+      msg: route.msg,
       scope,
-      mode: chatMode,
+      chatMode,
+      sessions,
       workspaces,
+      agent,
+      activeRuns,
+      sessionCatalog,
+      sessionCatalogIdentity: await commandSessionCatalogIdentity({
+        msg: emsg,
+        scope,
+        mode: chatMode,
+        workspaces,
+        controls,
+        access: accessDecision,
+      }),
+      runExecutor: executor,
+      processPool: pool,
       controls,
-      access: accessDecision,
-    }),
-    runExecutor: executor,
-    processPool: pool,
-    controls,
-  });
-  if (handled) {
-    const dropped = pending.cancel(scope);
-    log.info('intake', 'command', { scope, droppedPending: dropped.length });
-    return;
+    });
+    if (handled) {
+      const dropped = pending.cancel(scope);
+      log.info('intake', 'command', { scope, droppedPending: dropped.length });
+      return;
+    }
   }
 
   // Hybrid live mode: slash commands that survived bridge command dispatch
@@ -705,10 +703,10 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   // be inside a picker. Ordinary chat stays on turn-mode runs instead of being
   // typed into a TUI.
   const agentMsg =
-    getAgentSessionMode(controls.cfg) === 'live' &&
-    isNativeAgentInputText(routedMsg.content, liveInteractionByScope.has(scope))
-      ? markNativeAgentCommand(routedMsg)
-      : routedMsg;
+    (route.forceNative || getAgentSessionMode(controls.cfg) === 'live') &&
+    isNativeAgentInputText(route.msg.content, liveInteractionByScope.has(scope))
+      ? markNativeAgentCommand(route.msg, route.forceNative)
+      : route.msg;
   const size = pending.push(scope, agentMsg);
   log.info('intake', 'queued', { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
 
@@ -727,29 +725,38 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   }
 }
 
+export interface AgentCommandRoute {
+  msg: NormalizedMessage;
+  forceNative: boolean;
+}
+
 export function rewriteAgentCommandMessage(
   msg: NormalizedMessage,
   agentKind: 'claude' | 'codex',
-): NormalizedMessage {
+): AgentCommandRoute {
   const trimmed = msg.content.trimStart();
   const match = /^\/([A-Za-z][A-Za-z0-9_-]*)\s+([\s\S]+)$/.exec(trimmed);
-  if (!match) return msg;
+  if (!match) return { msg, forceNative: false };
   const target = match[1]?.toLowerCase();
   const rest = match[2] ?? '';
   const aliases =
     agentKind === 'claude'
       ? new Set(['claude', 'claude-code', 'claudecode'])
       : new Set(['codex', 'codex-cli', 'codexcli']);
-  if (!target || !aliases.has(target)) return msg;
+  if (!target || !aliases.has(target)) return { msg, forceNative: false };
   return {
-    ...msg,
-    content: rest,
+    msg: {
+      ...msg,
+      content: rest,
+    },
+    forceNative: rest.trimStart().startsWith('/'),
   };
 }
 
 const NATIVE_AGENT_COMMAND_RAW_KEY = '__larkChannelNativeAgentCommand';
+const FORCE_LIVE_AGENT_COMMAND_RAW_KEY = '__larkChannelForceLiveAgentCommand';
 
-function markNativeAgentCommand(msg: NormalizedMessage): NormalizedMessage {
+function markNativeAgentCommand(msg: NormalizedMessage, forceLive = false): NormalizedMessage {
   const raw = msg.raw && typeof msg.raw === 'object' && !Array.isArray(msg.raw)
     ? { ...(msg.raw as Record<string, unknown>) }
     : {};
@@ -759,6 +766,7 @@ function markNativeAgentCommand(msg: NormalizedMessage): NormalizedMessage {
     raw: {
       ...raw,
       [NATIVE_AGENT_COMMAND_RAW_KEY]: true,
+      ...(forceLive ? { [FORCE_LIVE_AGENT_COMMAND_RAW_KEY]: true } : {}),
     },
   };
 }
@@ -769,6 +777,15 @@ function isNativeAgentCommandMessage(msg: NormalizedMessage): boolean {
       typeof msg.raw === 'object' &&
       !Array.isArray(msg.raw) &&
       (msg.raw as Record<string, unknown>)[NATIVE_AGENT_COMMAND_RAW_KEY] === true,
+  );
+}
+
+function isForceLiveAgentCommandMessage(msg: NormalizedMessage): boolean {
+  return Boolean(
+    msg.raw &&
+      typeof msg.raw === 'object' &&
+      !Array.isArray(msg.raw) &&
+      (msg.raw as Record<string, unknown>)[FORCE_LIVE_AGENT_COMMAND_RAW_KEY] === true,
   );
 }
 
@@ -916,7 +933,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     : undefined;
 
   const nativeCommand = nativeAgentCommandForBatch(batch);
-  const useLiveSession = Boolean(nativeCommand) && getAgentSessionMode(controls.cfg) === 'live';
+  const forceLiveSession = batch.some(isForceLiveAgentCommandMessage);
+  const useLiveSession =
+    Boolean(nativeCommand) && (forceLiveSession || getAgentSessionMode(controls.cfg) === 'live');
   const prompt =
     nativeCommand ??
     buildPrompt(

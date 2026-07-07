@@ -6747,11 +6747,16 @@ function stripPromptEcho(input, prompt) {
   if (trimmed === echo) return "";
   if (trimmed.startsWith(`${echo}
 `)) return trimmed.slice(echo.length + 1);
-  return input.split("\n").filter((line) => !isPromptEchoLine(line, echo)).join("\n").trimStart();
+  return input.split("\n").filter((line) => !isPromptEchoLine(line, echo)).filter((line) => !isPromptScopedTerminalChromeLine(line.trim(), echo)).join("\n").trimStart();
 }
 function isPromptEchoLine(line, echo) {
   const normalized = line.trim();
-  return normalized === echo || normalized === `\u203A ${echo}`;
+  const slashless = echo.startsWith("/") ? echo.slice(1) : echo;
+  return normalized === echo || normalized === `\u203A ${echo}` || slashless !== echo && (normalized === slashless || normalized === `\u203A ${slashless}`);
+}
+function isPromptScopedTerminalChromeLine(trimmed, prompt) {
+  if (prompt.trim() === "/fast") return false;
+  return /^•\s+Service tier set to\b/i.test(trimmed);
 }
 function stripTerminalChrome(input) {
   const out = [];
@@ -6773,7 +6778,7 @@ function stripTerminalChrome(input) {
   return out.join("\n");
 }
 function isTerminalChromeLine(trimmed) {
-  return /^Tip:/i.test(trimmed) || /^›\s*(?:Implement \{feature\}|Summarize recent commits)\s*$/i.test(trimmed) || /^[A-Za-z0-9_.-]+(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?\s+·\s+.+$/.test(trimmed);
+  return /^Tip:/i.test(trimmed) || /^[•◦]\s+Working\s+\(\d+s\b.*\)$/i.test(trimmed) || /^tab to queue message\b.*context left$/i.test(trimmed) || /^\d+%\s+context left$/i.test(trimmed) || /^›\s*(?:Implement \{feature\}|Summarize recent commits)\s*$/i.test(trimmed) || /^[A-Za-z0-9_.-]+(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?\s+·\s+.+$/.test(trimmed);
 }
 function stripCompactNoise(input, patterns) {
   const { compact, map } = compactWithIndex(input);
@@ -14515,35 +14520,37 @@ async function intakeMessage(deps) {
     log.info("intake", "skip-no-mention", { scope, chatType: msg.chatType });
     return;
   }
-  const routedMsg = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
-  const handled = await tryHandleCommand({
-    channel,
-    msg: routedMsg,
-    scope,
-    chatMode,
-    sessions,
-    workspaces,
-    agent,
-    activeRuns,
-    sessionCatalog,
-    sessionCatalogIdentity: await commandSessionCatalogIdentity({
-      msg: emsg,
+  const route = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
+  if (!route.forceNative) {
+    const handled = await tryHandleCommand({
+      channel,
+      msg: route.msg,
       scope,
-      mode: chatMode,
+      chatMode,
+      sessions,
       workspaces,
-      controls,
-      access: accessDecision
-    }),
-    runExecutor: executor,
-    processPool: pool,
-    controls
-  });
-  if (handled) {
-    const dropped = pending.cancel(scope);
-    log.info("intake", "command", { scope, droppedPending: dropped.length });
-    return;
+      agent,
+      activeRuns,
+      sessionCatalog,
+      sessionCatalogIdentity: await commandSessionCatalogIdentity({
+        msg: emsg,
+        scope,
+        mode: chatMode,
+        workspaces,
+        controls,
+        access: accessDecision
+      }),
+      runExecutor: executor,
+      processPool: pool,
+      controls
+    });
+    if (handled) {
+      const dropped = pending.cancel(scope);
+      log.info("intake", "command", { scope, droppedPending: dropped.length });
+      return;
+    }
   }
-  const agentMsg = getAgentSessionMode(controls.cfg) === "live" && isNativeAgentInputText(routedMsg.content, liveInteractionByScope.has(scope)) ? markNativeAgentCommand(routedMsg) : routedMsg;
+  const agentMsg = (route.forceNative || getAgentSessionMode(controls.cfg) === "live") && isNativeAgentInputText(route.msg.content, liveInteractionByScope.has(scope)) ? markNativeAgentCommand(route.msg, route.forceNative) : route.msg;
   const size = pending.push(scope, agentMsg);
   log.info("intake", "queued", { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
   if (pending.shouldAckBusy(scope)) {
@@ -14557,31 +14564,41 @@ async function intakeMessage(deps) {
 function rewriteAgentCommandMessage(msg, agentKind) {
   const trimmed = msg.content.trimStart();
   const match = /^\/([A-Za-z][A-Za-z0-9_-]*)\s+([\s\S]+)$/.exec(trimmed);
-  if (!match) return msg;
+  if (!match) return { msg, forceNative: false };
   const target = match[1]?.toLowerCase();
   const rest = match[2] ?? "";
   const aliases = agentKind === "claude" ? /* @__PURE__ */ new Set(["claude", "claude-code", "claudecode"]) : /* @__PURE__ */ new Set(["codex", "codex-cli", "codexcli"]);
-  if (!target || !aliases.has(target)) return msg;
+  if (!target || !aliases.has(target)) return { msg, forceNative: false };
   return {
-    ...msg,
-    content: rest
+    msg: {
+      ...msg,
+      content: rest
+    },
+    forceNative: rest.trimStart().startsWith("/")
   };
 }
 var NATIVE_AGENT_COMMAND_RAW_KEY = "__larkChannelNativeAgentCommand";
-function markNativeAgentCommand(msg) {
+var FORCE_LIVE_AGENT_COMMAND_RAW_KEY = "__larkChannelForceLiveAgentCommand";
+function markNativeAgentCommand(msg, forceLive = false) {
   const raw = msg.raw && typeof msg.raw === "object" && !Array.isArray(msg.raw) ? { ...msg.raw } : {};
   return {
     ...msg,
     content: msg.content.trimStart(),
     raw: {
       ...raw,
-      [NATIVE_AGENT_COMMAND_RAW_KEY]: true
+      [NATIVE_AGENT_COMMAND_RAW_KEY]: true,
+      ...forceLive ? { [FORCE_LIVE_AGENT_COMMAND_RAW_KEY]: true } : {}
     }
   };
 }
 function isNativeAgentCommandMessage(msg) {
   return Boolean(
     msg.raw && typeof msg.raw === "object" && !Array.isArray(msg.raw) && msg.raw[NATIVE_AGENT_COMMAND_RAW_KEY] === true
+  );
+}
+function isForceLiveAgentCommandMessage(msg) {
+  return Boolean(
+    msg.raw && typeof msg.raw === "object" && !Array.isArray(msg.raw) && msg.raw[FORCE_LIVE_AGENT_COMMAND_RAW_KEY] === true
   );
 }
 function isSlashCommandText(text) {
@@ -14680,7 +14697,8 @@ async function runAgentBatch(deps) {
     `\u7528\u6237\u521A\u628A\u672C\u4F1A\u8BDD\u4F7F\u7528\u7684\u6A21\u578B\u5207\u6362\u4E3A\u300C${modelLabel(agentKind, modelPref)}\u300D\u3002\u4E4B\u524D\u7684\u5BF9\u8BDD\u91CC\u53EF\u80FD\u63D0\u5230\u522B\u7684\u6A21\u578B,\u8BF7\u4EE5\u5F53\u524D\u6A21\u578B\u4E3A\u51C6;\u82E5\u88AB\u95EE\u5230\u4F60\u7528\u7684\u662F\u4EC0\u4E48\u6A21\u578B,\u636E\u6B64\u56DE\u7B54\u3002`
   ] : void 0;
   const nativeCommand = nativeAgentCommandForBatch(batch);
-  const useLiveSession = Boolean(nativeCommand) && getAgentSessionMode(controls.cfg) === "live";
+  const forceLiveSession = batch.some(isForceLiveAgentCommandMessage);
+  const useLiveSession = Boolean(nativeCommand) && (forceLiveSession || getAgentSessionMode(controls.cfg) === "live");
   const prompt = nativeCommand ?? buildPrompt(
     batch,
     attachments,
