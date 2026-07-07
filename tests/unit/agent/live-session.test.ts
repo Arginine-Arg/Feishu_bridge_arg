@@ -157,6 +157,9 @@ process.stdin.on('data', (chunk) => {
       // any stable text. The bridge should end this command on the short idle
       // timer instead of waiting for the long startup timeout.
     }
+    else if (line === '/clear-noise') {
+      process.stdout.write('• No previous message to edit.\\n');
+    }
     else if (line === '/status-flicker') {
       process.stdout.write('│  Model: gpt-5.5 high       │\\n');
       process.stdout.write('│  Directory: /tmp/project   │\\n');
@@ -221,6 +224,7 @@ setInterval(() => {}, 1000);
       secondSession.run('run-12a', '/status-stale-picker', dir, 'command').events,
     );
     const silent = await collect(secondSession.run('run-12b', '/clear', dir, 'command').events);
+    const editNoise = await collect(secondSession.run('run-12b2', '/clear-noise', dir, 'command').events);
     const flicker = await collect(secondSession.run('run-12c', '/status-flicker', dir, 'command').events);
     await collect(secondSession.run('run-13', '/open-picker', dir).events);
     const twelfth = await collect(secondSession.run('run-14', '/fast', dir, 'command').events);
@@ -243,6 +247,7 @@ setInterval(() => {}, 1000);
     expect(textOf(eleventh)).toBe('status-ok\n');
     expect(textOf(stalePicker)).toBe('');
     expect(textOf(silent)).toBe('');
+    expect(textOf(editNoise)).toBe('');
     expect(textOf(flicker)).toContain('Model: gpt-5.5 high');
     expect(textOf(flicker)).toContain('Permissions: Read Only');
     expect(textOf(twelfth)).toBe('• Service tier set to fast\n');

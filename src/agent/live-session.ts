@@ -1161,6 +1161,8 @@ function stripKnownLiveNoise(input: string, prompt = ''): string {
     'Tip:Use/inittocreateanAGENTS.mdwithproject-specificguidance',
     'Tip:NewBuildfasterwithCodex.',
     'Tip:NewBuildfasterwithCodex',
+    '•Nopreviousmessagetoedit.',
+    'Nopreviousmessagetoedit.',
   ]), prompt)
     .replace(/(^|\n)\s*`\s*(?=\n|$)/g, '$1')
     .replace(/\n{3,}/g, '\n\n')

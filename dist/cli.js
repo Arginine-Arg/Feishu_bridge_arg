@@ -6895,7 +6895,9 @@ function stripKnownLiveNoise(input, prompt = "") {
     "Tip:Use/inittocreateanAGENTS.mdwithproject-specificguidance.",
     "Tip:Use/inittocreateanAGENTS.mdwithproject-specificguidance",
     "Tip:NewBuildfasterwithCodex.",
-    "Tip:NewBuildfasterwithCodex"
+    "Tip:NewBuildfasterwithCodex",
+    "\u2022Nopreviousmessagetoedit.",
+    "Nopreviousmessagetoedit."
   ]), prompt).replace(/(^|\n)\s*`\s*(?=\n|$)/g, "$1").replace(/\n{3,}/g, "\n\n").replace(/\n{2,}$/g, "\n").trimStart();
 }
 function sanitizeLiveTurnOutput(input) {
