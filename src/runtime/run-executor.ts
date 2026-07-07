@@ -18,9 +18,11 @@ export interface RunExecutorDeps {
 export interface SubmitRunInput {
   scopeId: string;
   policy: RunPolicyAllow;
+  sessionMode?: 'turn' | 'live';
   sessionId?: string;
   threadId?: string;
   model?: string;
+  reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high';
   images?: readonly string[];
   stopGraceMs?: number;
   nowait?: boolean;
@@ -96,11 +98,13 @@ export class RunExecutor {
     const runOptions = {
       runId,
       scopeId: input.scopeId,
+      sessionMode: input.sessionMode,
       prompt: input.policy.prompt,
       cwd: input.policy.cwdRealpath,
       sessionId: input.sessionId,
       threadId: input.threadId,
       model: input.model,
+      reasoningEffort: input.reasoningEffort,
       images: input.images,
       sandbox: input.policy.sandbox,
       permissionMode: input.policy.permissionMode,

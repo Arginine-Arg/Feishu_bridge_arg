@@ -106,7 +106,8 @@ export class CodexAdapter implements AgentAdapter {
     if (!opts.cwd) {
       throw new Error('cwd is required for CodexAdapter.run');
     }
-    if (this.sessionMode === 'live') {
+    const sessionMode = opts.sessionMode ?? this.sessionMode;
+    if (sessionMode === 'live') {
       return this.runLive(opts);
     }
 
@@ -118,6 +119,7 @@ export class CodexAdapter implements AgentAdapter {
       ignoreUserConfig: this.ignoreUserConfig,
       ignoreRules: this.ignoreRules,
       model: opts.model,
+      reasoningEffort: opts.reasoningEffort,
     });
     const envOverrides: NodeJS.ProcessEnv = buildLarkChannelEnv(this.larkChannel);
     if (this.codexHome) {
@@ -232,6 +234,9 @@ export class CodexAdapter implements AgentAdapter {
       '--sandbox',
       sandbox,
       ...(opts.model ? ['--model', opts.model] : []),
+      ...(opts.reasoningEffort
+        ? ['-c', `model_reasoning_effort="${opts.reasoningEffort}"`]
+        : []),
       '-c',
       'approval_policy="never"',
       '-c',
@@ -248,6 +253,7 @@ export class CodexAdapter implements AgentAdapter {
     const signature = JSON.stringify({
       cwd: opts.cwd,
       model: opts.model ?? null,
+      reasoningEffort: opts.reasoningEffort ?? null,
       sandbox,
       codexHome: envOverrides.CODEX_HOME ?? null,
       bot: this.botIdentity?.openId ?? null,

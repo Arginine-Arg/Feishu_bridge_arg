@@ -1,7 +1,7 @@
 import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { claudeCapability } from '../../../src/agent/capability';
+import { claudeCapability, codexCapability } from '../../../src/agent/capability';
 import { ActiveRuns } from '../../../src/bot/active-runs';
 import { startRunFlow } from '../../../src/bot/run-flow';
 import { ProcessPool } from '../../../src/bot/process-pool';
@@ -100,9 +100,46 @@ describe('IM run flow', () => {
     expect(h.agent.runOptions[0]?.cwd).toBe(workspaceRealpath);
   });
 
+  it('passes hybrid session mode and Codex reasoning effort through run flow', async () => {
+    const h = await createHarness({
+      agentKind: 'codex',
+      defaultWorkspace: true,
+      preferences: { reasoningEffort: 'high' },
+    });
+    const workspaceRealpath = await realpath(h.tmp.workspace);
+
+    const result = await startRunFlow({
+      scopeId: 'chat-1',
+      scope: { source: 'im', chatId: 'chat-1', actorId: 'ou_user' },
+      prompt: '/model',
+      sessionMode: 'live',
+      attachments: [],
+      access: { ok: true, reason: 'allowed-user' },
+      capability: codexCapability(h.profileConfig),
+      profileConfig: h.profileConfig,
+      sessions: h.sessions,
+      workspaces: h.workspaces,
+      executor: h.executor,
+      now: 1000,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('expected run flow to start');
+    expect(h.agent.runOptions[0]).toMatchObject({
+      cwd: workspaceRealpath,
+      prompt: '/model',
+      sessionMode: 'live',
+      reasoningEffort: 'high',
+    });
+  });
+
 });
 
-async function createHarness(options: { defaultWorkspace?: boolean } = {}): Promise<{
+async function createHarness(options: {
+  agentKind?: 'claude' | 'codex';
+  defaultWorkspace?: boolean;
+  preferences?: Parameters<typeof createDefaultProfileConfig>[0]['preferences'];
+} = {}): Promise<{
   tmp: TmpProfile;
   agent: FakeAgentAdapter;
   executor: RunExecutor;
@@ -122,7 +159,7 @@ async function createHarness(options: { defaultWorkspace?: boolean } = {}): Prom
     now: () => 1000,
   });
   const profileConfig = createDefaultProfileConfig({
-    agentKind: 'claude',
+    agentKind: options.agentKind ?? 'claude',
     accounts: {
       app: {
         id: 'cli_test',
@@ -130,6 +167,8 @@ async function createHarness(options: { defaultWorkspace?: boolean } = {}): Prom
         tenant: 'feishu',
       },
     },
+    preferences: options.preferences,
+    ...(options.agentKind === 'codex' ? { codex: { binaryPath: 'codex' } } : {}),
   });
   const sessions = new SessionStore(join(tmp.profile, 'sessions.json'));
   const workspaces = new WorkspaceStore(join(tmp.profile, 'workspaces.json'));

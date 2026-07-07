@@ -73,7 +73,8 @@ export class ClaudeAdapter implements AgentAdapter {
     if (!opts.cwd) {
       throw new Error('cwd is required for ClaudeAdapter.run');
     }
-    if (this.sessionMode === 'live') {
+    const sessionMode = opts.sessionMode ?? this.sessionMode;
+    if (sessionMode === 'live') {
       return this.runLive(opts);
     }
 

@@ -35,6 +35,35 @@ describe('RunExecutor policy runtime options', () => {
 
     await collect(execution.subscribe());
   });
+
+  it('passes session override and Codex reasoning effort into each agent run', async () => {
+    const agent = new FakeAgentAdapter({
+      events: [{ type: 'done', terminationReason: 'normal' }],
+    });
+    const executor = new RunExecutor({
+      agent,
+      pool: new ProcessPool(() => 1),
+      activeRuns: new ActiveRuns(),
+      createRunId: () => 'run-hybrid',
+      now: () => 1000,
+      postDoneExitGraceMs: 10,
+    });
+
+    const execution = await executor.submit({
+      scopeId: 'scope-hybrid',
+      policy: policy(),
+      sessionMode: 'live',
+      reasoningEffort: 'high',
+    });
+
+    expect(agent.runOptions[0]).toMatchObject({
+      runId: 'run-hybrid',
+      sessionMode: 'live',
+      reasoningEffort: 'high',
+    });
+
+    await collect(execution.subscribe());
+  });
 });
 
 function policy(overrides: Partial<RunPolicyAllow> = {}): RunPolicyAllow {

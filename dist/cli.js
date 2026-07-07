@@ -6921,7 +6921,8 @@ var ClaudeAdapter = class {
     if (!opts.cwd) {
       throw new Error("cwd is required for ClaudeAdapter.run");
     }
-    if (this.sessionMode === "live") {
+    const sessionMode = opts.sessionMode ?? this.sessionMode;
+    if (sessionMode === "live") {
       return this.runLive(opts);
     }
     const systemPromptFile = writeSystemPromptFile(buildBridgeSystemPrompt(this.botIdentity));
@@ -7183,6 +7184,7 @@ function buildCodexArgs(input) {
     "--sandbox",
     input.sandbox,
     ...input.model ? ["--model", input.model] : [],
+    ...input.reasoningEffort ? ["-c", `model_reasoning_effort="${input.reasoningEffort}"`] : [],
     "-c",
     'approval_policy="never"',
     "-c",
@@ -7455,7 +7457,8 @@ var CodexAdapter = class {
     if (!opts.cwd) {
       throw new Error("cwd is required for CodexAdapter.run");
     }
-    if (this.sessionMode === "live") {
+    const sessionMode = opts.sessionMode ?? this.sessionMode;
+    if (sessionMode === "live") {
       return this.runLive(opts);
     }
     const args = buildCodexArgs({
@@ -7465,7 +7468,8 @@ var CodexAdapter = class {
       images: opts.images,
       ignoreUserConfig: this.ignoreUserConfig,
       ignoreRules: this.ignoreRules,
-      model: opts.model
+      model: opts.model,
+      reasoningEffort: opts.reasoningEffort
     });
     const envOverrides = buildLarkChannelEnv(this.larkChannel);
     if (this.codexHome) {
@@ -7573,6 +7577,7 @@ var CodexAdapter = class {
       "--sandbox",
       sandbox,
       ...opts.model ? ["--model", opts.model] : [],
+      ...opts.reasoningEffort ? ["-c", `model_reasoning_effort="${opts.reasoningEffort}"`] : [],
       "-c",
       'approval_policy="never"',
       "-c",
@@ -7589,6 +7594,7 @@ var CodexAdapter = class {
     const signature = JSON.stringify({
       cwd: opts.cwd,
       model: opts.model ?? null,
+      reasoningEffort: opts.reasoningEffort ?? null,
       sandbox,
       codexHome: envOverrides.CODEX_HOME ?? null,
       bot: this.botIdentity?.openId ?? null
@@ -12174,11 +12180,13 @@ var RunExecutor = class {
     const runOptions = {
       runId,
       scopeId: input.scopeId,
+      sessionMode: input.sessionMode,
       prompt: input.policy.prompt,
       cwd: input.policy.cwdRealpath,
       sessionId: input.sessionId,
       threadId: input.threadId,
       model: input.model,
+      reasoningEffort: input.reasoningEffort,
       images: input.images,
       sandbox: input.policy.sandbox,
       permissionMode: input.policy.permissionMode,
@@ -12471,12 +12479,14 @@ async function startRunFlow(input) {
     execution = await input.executor.submit({
       scopeId: input.scopeId,
       policy,
+      sessionMode: input.sessionMode,
       sessionId,
       threadId,
       model: resolveModelArg(
         input.profileConfig.agentKind,
         input.profileConfig.preferences.model
       ),
+      reasoningEffort: input.profileConfig.agentKind === "codex" ? resolveCodexReasoningEffort(input.profileConfig.preferences.reasoningEffort) : void 0,
       images: input.capability.agentId === "codex" ? policy.attachments.filter((attachment) => attachment.kind === "image" && attachment.decision === "accepted").map((attachment) => attachment.path).filter((path) => Boolean(path)) : void 0,
       stopGraceMs: input.stopGraceMs,
       observability: input.observability
@@ -12501,6 +12511,9 @@ async function startRunFlow(input) {
     cwdRealpath: workspace.cwdRealpath,
     ...resumeFrom ? { resumeFrom } : {}
   };
+}
+function resolveCodexReasoningEffort(value) {
+  return value === "minimal" || value === "low" || value === "medium" || value === "high" ? value : void 0;
 }
 function recordRunSessionEvent(input) {
   if (input.event.type !== "system") return;
@@ -13885,6 +13898,7 @@ async function startChannel(deps) {
   }) : void 0;
   const activePolicyFingerprints = /* @__PURE__ */ new Map();
   const lastRunModelByScope = /* @__PURE__ */ new Map();
+  const liveInteractionByScope = /* @__PURE__ */ new Map();
   const cotClient = new CotClient({
     tenant: cfg.accounts.app.tenant,
     appId: cfg.accounts.app.id,
@@ -13975,6 +13989,7 @@ async function startChannel(deps) {
           callbackAuth,
           activePolicyFingerprints,
           lastRunModelByScope,
+          liveInteractionByScope,
           scope,
           mode
         });
@@ -14004,7 +14019,8 @@ async function startChannel(deps) {
           chatModeCache,
           logThreadModeOverride,
           executor,
-          pool
+          pool,
+          liveInteractionByScope
         })
       ).catch((err) => log.fail("intake", err));
     },
@@ -14177,7 +14193,8 @@ async function intakeMessage(deps) {
     chatModeCache,
     logThreadModeOverride,
     executor,
-    pool
+    pool,
+    liveInteractionByScope
   } = deps;
   const preview2 = msg.content.length > 80 ? `${msg.content.slice(0, 80)}\u2026` : msg.content;
   const resolvedMode = await chatModeCache.resolve(channel, msg.chatId);
@@ -14260,7 +14277,7 @@ async function intakeMessage(deps) {
     return;
   }
   const rewrittenMsg = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
-  const agentMsg = getAgentSessionMode(controls.cfg) === "live" && (isSlashCommandText(rewrittenMsg.content) || isLiveControlInput(rewrittenMsg.content)) ? markNativeAgentCommand(rewrittenMsg) : rewrittenMsg;
+  const agentMsg = getAgentSessionMode(controls.cfg) === "live" && isNativeAgentInputText(rewrittenMsg.content, liveInteractionByScope.has(scope)) ? markNativeAgentCommand(rewrittenMsg) : rewrittenMsg;
   const size = pending.push(scope, agentMsg);
   log.info("intake", "queued", { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
   if (pending.shouldAckBusy(scope)) {
@@ -14304,6 +14321,14 @@ function isNativeAgentCommandMessage(msg) {
 function isSlashCommandText(text) {
   return text.trimStart().startsWith("/");
 }
+function isNativeAgentInputText(text, pickerActive) {
+  if (isSlashCommandText(text)) return true;
+  return pickerActive && isLivePickerInput(text);
+}
+function isLivePickerInput(text) {
+  const trimmed = text.trim();
+  return isLiveControlInput(trimmed) || /^\d{1,2}$/u.test(trimmed);
+}
 async function runAgentBatch(deps) {
   const {
     channel,
@@ -14318,6 +14343,7 @@ async function runAgentBatch(deps) {
     callbackAuth,
     activePolicyFingerprints,
     lastRunModelByScope,
+    liveInteractionByScope,
     scope,
     mode
   } = deps;
@@ -14388,6 +14414,7 @@ async function runAgentBatch(deps) {
     `\u7528\u6237\u521A\u628A\u672C\u4F1A\u8BDD\u4F7F\u7528\u7684\u6A21\u578B\u5207\u6362\u4E3A\u300C${modelLabel(agentKind, modelPref)}\u300D\u3002\u4E4B\u524D\u7684\u5BF9\u8BDD\u91CC\u53EF\u80FD\u63D0\u5230\u522B\u7684\u6A21\u578B,\u8BF7\u4EE5\u5F53\u524D\u6A21\u578B\u4E3A\u51C6;\u82E5\u88AB\u95EE\u5230\u4F60\u7528\u7684\u662F\u4EC0\u4E48\u6A21\u578B,\u636E\u6B64\u56DE\u7B54\u3002`
   ] : void 0;
   const nativeCommand = nativeAgentCommandForBatch(batch);
+  const useLiveSession = Boolean(nativeCommand) && getAgentSessionMode(controls.cfg) === "live";
   const prompt = nativeCommand ?? buildPrompt(
     batch,
     attachments,
@@ -14399,6 +14426,7 @@ async function runAgentBatch(deps) {
   log.info("prompt", "built", {
     promptChars: prompt.length,
     nativeCommand: Boolean(nativeCommand),
+    sessionMode: useLiveSession ? "live" : "turn",
     quotes: quotes.length,
     topicContext: topicContext.length,
     ...modelSwitched ? { modelSwitchedTo: modelSelection } : {}
@@ -14427,6 +14455,7 @@ async function runAgentBatch(deps) {
     scopeId: scope,
     scope: scopeContext,
     prompt,
+    sessionMode: useLiveSession ? "live" : "turn",
     attachments: attachments.map(toPolicyAttachment),
     access: accessDecision,
     capability,
@@ -14483,6 +14512,14 @@ async function runAgentBatch(deps) {
     }
     if (evt.type === "system" && evt.threadId) {
       log.info("session", "set-thread", { threadId: evt.threadId });
+    }
+  };
+  const observeLiveEvent = (evt) => {
+    if (!useLiveSession || !nativeCommand || evt.type !== "text") return;
+    if (looksLikeAgentPicker(evt.delta)) {
+      const wasActive = liveInteractionByScope.has(scope);
+      liveInteractionByScope.set(scope, { picker: true, updatedAt: Date.now() });
+      if (!wasActive) log.info("agent-live", "picker-enter", { scope });
     }
   };
   const scopeOverride = sessions.getIdleTimeoutMinutes(scope);
@@ -14551,7 +14588,8 @@ async function runAgentBatch(deps) {
           idleTimeoutMs,
           recordSession,
           async () => {
-          }
+          },
+          observeLiveEvent
         );
         await cotDone;
         if (cotPublisher.degradedReason) {
@@ -14612,7 +14650,8 @@ async function runAgentBatch(deps) {
               });
             }
           }
-        }
+        },
+        observeLiveEvent
       );
       const streamDone = channel.stream(
         chatId,
@@ -14685,7 +14724,8 @@ async function runAgentBatch(deps) {
               });
             }
           }
-        }
+        },
+        observeLiveEvent
       );
       const streamDone = channel.stream(
         chatId,
@@ -14728,7 +14768,8 @@ async function runAgentBatch(deps) {
         idleTimeoutMs,
         recordSession,
         async () => {
-        }
+        },
+        observeLiveEvent
       );
       await sendFinalReply({
         channel,
@@ -14744,6 +14785,11 @@ async function runAgentBatch(deps) {
     log.fail("stream", err);
   } finally {
     await promptBridge;
+    if (useLiveSession && nativeCommand && closesLivePicker(nativeCommand)) {
+      if (liveInteractionByScope.delete(scope)) {
+        log.info("agent-live", "picker-exit", { scope, input: nativeCommand });
+      }
+    }
     activePolicyFingerprints.delete(scope);
     scheduleWorkingReactionCleanup(channel, lastMsg.messageId, reactionPromise);
   }
@@ -14821,7 +14867,8 @@ function outboundLogFields(input, type, body, result) {
     replyInThread: input.sendOpts?.replyInThread === true
   };
 }
-async function processAgentStream(handle, events, scope, idleTimeoutMs, recordSession, flush) {
+async function processAgentStream(handle, events, scope, idleTimeoutMs, recordSession, flush, observeEvent = () => {
+}) {
   const runStart2 = Date.now();
   let state = initialState;
   let idleFired = false;
@@ -14873,6 +14920,7 @@ async function processAgentStream(handle, events, scope, idleTimeoutMs, recordSe
         }
         continue;
       }
+      observeEvent(evt);
       const prevTerminal = state.terminal;
       const prevFooter = state.footer;
       state = reduce(state, evt);
@@ -15025,7 +15073,14 @@ function nativeAgentCommandForBatch(batch) {
   const msg = batch[0];
   if (!msg || !isNativeAgentCommandMessage(msg)) return void 0;
   const text = msg.content.trimStart();
-  return text.startsWith("/") ? text : void 0;
+  return isSlashCommandText(text) || isLivePickerInput(text) ? text : void 0;
+}
+function looksLikeAgentPicker(text) {
+  return /press\s+enter\s+to\s+confirm/i.test(text) || /esc\s+to\s+go\s+back/i.test(text) || /select\s+(?:a\s+)?(?:model|option|.+)/i.test(text) || /(?:↑|↓|up\/down|arrow keys?|use .*arrows?)/i.test(text);
+}
+function closesLivePicker(input) {
+  const trimmed = input.trim();
+  return /\b(?:enter|return|esc|escape)\b/iu.test(trimmed) || /(?:确认|回车|取消|返回)/u.test(trimmed) || /^[0-9]{1,2}$/u.test(trimmed);
 }
 function senderTypeOf(msg) {
   const raw = msg.raw;

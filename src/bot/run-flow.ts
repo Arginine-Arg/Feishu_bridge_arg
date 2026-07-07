@@ -25,6 +25,7 @@ export interface StartRunFlowInput {
   scopeId: string;
   scope: ScopeContext;
   prompt: string;
+  sessionMode?: 'turn' | 'live';
   attachments: AgentAttachment[];
   access: AccessDecision;
   capability: AgentCapability;
@@ -142,12 +143,17 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
     execution = await input.executor.submit({
       scopeId: input.scopeId,
       policy,
+      sessionMode: input.sessionMode,
       sessionId,
       threadId,
       model: resolveModelArg(
         input.profileConfig.agentKind,
         input.profileConfig.preferences.model,
       ),
+      reasoningEffort:
+        input.profileConfig.agentKind === 'codex'
+          ? resolveCodexReasoningEffort(input.profileConfig.preferences.reasoningEffort)
+          : undefined,
       images:
         input.capability.agentId === 'codex'
           ? policy.attachments
@@ -184,6 +190,14 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
     cwdRealpath: workspace.cwdRealpath,
     ...(resumeFrom ? { resumeFrom } : {}),
   };
+}
+
+function resolveCodexReasoningEffort(
+  value: unknown,
+): 'minimal' | 'low' | 'medium' | 'high' | undefined {
+  return value === 'minimal' || value === 'low' || value === 'medium' || value === 'high'
+    ? value
+    : undefined;
 }
 
 export function recordRunSessionEvent(input: RecordRunSessionEventInput): void {

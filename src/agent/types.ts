@@ -30,11 +30,13 @@ export const CLAUDE_DEFAULT_PERMISSION_MODE: ClaudePermissionMode = 'bypassPermi
 export interface AgentRunOptions {
   runId: string;
   scopeId?: string;
+  sessionMode?: 'turn' | 'live';
   prompt: string;
   cwd?: string;
   sessionId?: string;
   threadId?: string;
   model?: string;
+  reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high';
   images?: readonly string[];
   sandbox?: CodexSandboxMode;
   permissionMode?: ClaudePermissionMode;

@@ -69,6 +69,7 @@ export interface SecretsConfig {
 export type MessageReplyMode = 'card' | 'markdown' | 'text';
 export type AgentSessionMode = 'turn' | 'live';
 export type CotMessagesMode = 'off' | 'brief' | 'detailed';
+export type CodexReasoningEffort = 'minimal' | 'low' | 'medium' | 'high';
 
 /**
  * Access control settings. Empty lists are fail-closed in the v2 policy:
@@ -118,6 +119,12 @@ export interface AppPreferences {
    * CLI / account default applies. Default: unset.
    */
   model?: string;
+  /**
+   * Codex-only reasoning effort. Forwarded as
+   * `-c model_reasoning_effort="<value>"`. Undefined lets Codex use its
+   * config/account default.
+   */
+  reasoningEffort?: CodexReasoningEffort;
   /**
    * Whether to send a separate Lark COT process message before the final
    * answer. `brief` mirrors the lightweight tool/progress visibility from

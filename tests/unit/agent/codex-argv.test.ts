@@ -122,6 +122,19 @@ describe('Codex argv contract', () => {
     expect(modelIdx).toBeLessThan(args.indexOf('resume'));
   });
 
+  it('forwards Codex reasoning effort as a global config flag', () => {
+    const args = buildCodexArgs({
+      cwd: '/repo',
+      sandbox: 'workspace-write',
+      threadId: 'thread-123',
+      reasoningEffort: 'high',
+    });
+    const configIdx = args.indexOf('model_reasoning_effort="high"');
+    expect(configIdx).toBeGreaterThan(0);
+    expect(args[configIdx - 1]).toBe('-c');
+    expect(configIdx).toBeLessThan(args.indexOf('resume'));
+  });
+
   it('omits --model when no model is selected', () => {
     expect(buildCodexArgs({ cwd: '/repo', sandbox: 'read-only' })).not.toContain('--model');
   });

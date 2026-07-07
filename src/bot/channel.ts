@@ -213,6 +213,10 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   // switch can inject a one-time "model changed" note into the next (resumed)
   // prompt. In-memory only: on restart the first run re-seeds silently.
   const lastRunModelByScope = new Map<string, string>();
+  // Hybrid live mode keeps normal chat on turn-mode runs. This map records
+  // scopes currently showing an agent picker so later up/down/enter messages
+  // are routed as terminal controls instead of plain chat.
+  const liveInteractionByScope = new Map<string, { picker: true; updatedAt: number }>();
   const cotClient = new CotClient({
     tenant: cfg.accounts.app.tenant,
     appId: cfg.accounts.app.id,
@@ -318,6 +322,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           callbackAuth,
           activePolicyFingerprints,
           lastRunModelByScope,
+          liveInteractionByScope,
           scope,
           mode,
         });
@@ -350,6 +355,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           logThreadModeOverride,
           executor,
           pool,
+          liveInteractionByScope,
         }),
       ).catch((err) => log.fail('intake', err));
     },
@@ -548,6 +554,7 @@ interface IntakeDeps {
   logThreadModeOverride: LogThreadModeOverride;
   executor: RunExecutor;
   pool: ProcessPool;
+  liveInteractionByScope: Map<string, { picker: true; updatedAt: number }>;
 }
 
 type LogThreadModeOverride = (input: {
@@ -571,6 +578,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     logThreadModeOverride,
     executor,
     pool,
+    liveInteractionByScope,
   } = deps;
   const preview = msg.content.length > 80 ? `${msg.content.slice(0, 80)}…` : msg.content;
   // Resolve scope (and underlying chat mode) once at intake — every
@@ -686,13 +694,12 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   }
 
   const rewrittenMsg = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
-  // In live mode, slash commands (/model) AND bare navigation keys (up / down /
-  // enter / esc …) are forwarded raw to the persistent CLI so they drive its
-  // interactive picker. Without this, nav words get wrapped in bridge_context
-  // and typed literally, so the picker just confirms its default selection.
+  // Hybrid live mode: slash commands (/model) go to the persistent CLI; picker
+  // controls go there only while this scope is known to be inside a picker.
+  // Ordinary chat stays on turn-mode runs instead of being typed into a TUI.
   const agentMsg =
     getAgentSessionMode(controls.cfg) === 'live' &&
-    (isSlashCommandText(rewrittenMsg.content) || isLiveControlInput(rewrittenMsg.content))
+    isNativeAgentInputText(rewrittenMsg.content, liveInteractionByScope.has(scope))
       ? markNativeAgentCommand(rewrittenMsg)
       : rewrittenMsg;
   const size = pending.push(scope, agentMsg);
@@ -762,6 +769,16 @@ function isSlashCommandText(text: string): boolean {
   return text.trimStart().startsWith('/');
 }
 
+function isNativeAgentInputText(text: string, pickerActive: boolean): boolean {
+  if (isSlashCommandText(text)) return true;
+  return pickerActive && isLivePickerInput(text);
+}
+
+function isLivePickerInput(text: string): boolean {
+  const trimmed = text.trim();
+  return isLiveControlInput(trimmed) || /^\d{1,2}$/u.test(trimmed);
+}
+
 interface RunBatchDeps {
   channel: LarkChannel;
   executor: RunExecutor;
@@ -775,6 +792,7 @@ interface RunBatchDeps {
   callbackAuth?: CallbackAuth;
   activePolicyFingerprints: Map<string, string>;
   lastRunModelByScope: Map<string, string>;
+  liveInteractionByScope: Map<string, { picker: true; updatedAt: number }>;
   scope: string;
   mode: ChatMode;
 }
@@ -793,6 +811,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     callbackAuth,
     activePolicyFingerprints,
     lastRunModelByScope,
+    liveInteractionByScope,
     scope,
     mode,
   } = deps;
@@ -890,6 +909,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     : undefined;
 
   const nativeCommand = nativeAgentCommandForBatch(batch);
+  const useLiveSession = Boolean(nativeCommand) && getAgentSessionMode(controls.cfg) === 'live';
   const prompt =
     nativeCommand ??
     buildPrompt(
@@ -903,6 +923,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   log.info('prompt', 'built', {
     promptChars: prompt.length,
     nativeCommand: Boolean(nativeCommand),
+    sessionMode: useLiveSession ? 'live' : 'turn',
     quotes: quotes.length,
     topicContext: topicContext.length,
     ...(modelSwitched ? { modelSwitchedTo: modelSelection } : {}),
@@ -942,6 +963,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     scopeId: scope,
     scope: scopeContext,
     prompt,
+    sessionMode: useLiveSession ? 'live' : 'turn',
     attachments: attachments.map(toPolicyAttachment),
     access: accessDecision,
     capability,
@@ -1003,6 +1025,14 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     }
     if (evt.type === 'system' && evt.threadId) {
       log.info('session', 'set-thread', { threadId: evt.threadId });
+    }
+  };
+  const observeLiveEvent = (evt: AgentEvent): void => {
+    if (!useLiveSession || !nativeCommand || evt.type !== 'text') return;
+    if (looksLikeAgentPicker(evt.delta)) {
+      const wasActive = liveInteractionByScope.has(scope);
+      liveInteractionByScope.set(scope, { picker: true, updatedAt: Date.now() });
+      if (!wasActive) log.info('agent-live', 'picker-enter', { scope });
     }
   };
 
@@ -1103,6 +1133,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           idleTimeoutMs,
           recordSession,
           async () => {},
+          observeLiveEvent,
         );
         await cotDone;
         if (cotPublisher.degradedReason) {
@@ -1171,6 +1202,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
             }
           }
         },
+        observeLiveEvent,
       );
       const streamDone = channel.stream(
         chatId,
@@ -1246,6 +1278,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
             }
           }
         },
+        observeLiveEvent,
       );
       const streamDone = channel.stream(
         chatId,
@@ -1291,6 +1324,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         idleTimeoutMs,
         recordSession,
         async () => {},
+        observeLiveEvent,
       );
       await sendFinalReply({
         channel,
@@ -1308,6 +1342,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     // Let the interactive-prompt subscriber drain (it resolves when the event
     // stream ends); it never rejects, so this can't mask a run error.
     await promptBridge;
+    if (useLiveSession && nativeCommand && closesLivePicker(nativeCommand)) {
+      if (liveInteractionByScope.delete(scope)) {
+        log.info('agent-live', 'picker-exit', { scope, input: nativeCommand });
+      }
+    }
     activePolicyFingerprints.delete(scope);
     scheduleWorkingReactionCleanup(channel, lastMsg.messageId, reactionPromise);
   }
@@ -1425,6 +1464,7 @@ async function processAgentStream(
   idleTimeoutMs: number | undefined,
   recordSession: (event: AgentEvent) => void,
   flush: (state: RunState) => Promise<void>,
+  observeEvent: (event: AgentEvent) => void = () => {},
 ): Promise<RunState> {
   const runStart = Date.now();
   let state: RunState = initialState;
@@ -1500,6 +1540,7 @@ async function processAgentStream(
         continue;
       }
 
+      observeEvent(evt);
       const prevTerminal = state.terminal;
       const prevFooter = state.footer;
       state = reduce(state, evt);
@@ -1709,7 +1750,25 @@ function nativeAgentCommandForBatch(batch: NormalizedMessage[]): string | undefi
   const msg = batch[0];
   if (!msg || !isNativeAgentCommandMessage(msg)) return undefined;
   const text = msg.content.trimStart();
-  return text.startsWith('/') ? text : undefined;
+  return isSlashCommandText(text) || isLivePickerInput(text) ? text : undefined;
+}
+
+function looksLikeAgentPicker(text: string): boolean {
+  return (
+    /press\s+enter\s+to\s+confirm/i.test(text) ||
+    /esc\s+to\s+go\s+back/i.test(text) ||
+    /select\s+(?:a\s+)?(?:model|option|.+)/i.test(text) ||
+    /(?:↑|↓|up\/down|arrow keys?|use .*arrows?)/i.test(text)
+  );
+}
+
+function closesLivePicker(input: string): boolean {
+  const trimmed = input.trim();
+  return (
+    /\b(?:enter|return|esc|escape)\b/iu.test(trimmed) ||
+    /(?:确认|回车|取消|返回)/u.test(trimmed) ||
+    /^[0-9]{1,2}$/u.test(trimmed)
+  );
 }
 
 /**
