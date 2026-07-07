@@ -16,6 +16,7 @@ import {
 } from '../agent/prompt';
 import type { AgentAdapter, AgentEvent } from '../agent/types';
 import {
+  AGENT_INPUT_CALLBACK_ACTION,
   BRIDGE_CALLBACK_MARKER,
   handleCardAction,
   LIVE_INPUT_CALLBACK_ACTION,
@@ -1045,11 +1046,16 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       log.info('session', 'set-thread', { threadId: evt.threadId });
     }
   };
+  const sentInteractionSignatures = new Set<string>();
+  const pendingInteractionSignatures = new Set<string>();
+  const interactionSends: Promise<void>[] = [];
+  let interactionTextBuffer = '';
   const observeLiveEvent = (evt: AgentEvent): void => {
-    if (!useLiveSession || !nativeCommand || evt.type !== 'text') return;
-    const pickerLike = looksLikeAgentPicker(evt.delta);
-    const interaction = pickerLike ? detectLiveInteraction(evt.delta) : undefined;
-    if (interaction || pickerLike) {
+    if (evt.type !== 'text') return;
+    interactionTextBuffer = `${interactionTextBuffer}\n${evt.delta}`.slice(-4000);
+    const pickerLike = looksLikeAgentPicker(interactionTextBuffer);
+    const interaction = pickerLike ? detectLiveInteraction(interactionTextBuffer) : undefined;
+    if (useLiveSession && (interaction || pickerLike)) {
       const wasActive = liveInteractionByScope.has(scope);
       const previous = liveInteractionByScope.get(scope);
       const nextSignature = interaction?.signature ?? previous?.signature;
@@ -1060,6 +1066,32 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       });
       if (!wasActive) log.info('agent-live', 'picker-enter', { scope });
     }
+    if (!interaction || !cardRenderOptions.signCallback) return;
+    if (
+      sentInteractionSignatures.has(interaction.signature) ||
+      pendingInteractionSignatures.has(interaction.signature)
+    ) {
+      return;
+    }
+    pendingInteractionSignatures.add(interaction.signature);
+    const route: LiveInteractionInputRoute = useLiveSession ? 'live' : 'agent';
+    const promise = channel
+      .send(chatId, { card: liveInteractionCard(interaction, cardRenderOptions.signCallback, route) }, sendOpts)
+      .then(() => {
+        sentInteractionSignatures.add(interaction.signature);
+        log.info('agent-live', 'interaction-card-sent', { scope, route });
+      })
+      .catch((err) =>
+        log.warn('agent-live', 'interaction-card-failed', {
+          scope,
+          route,
+          err: err instanceof Error ? err.message : String(err),
+        }),
+      )
+      .finally(() => {
+        pendingInteractionSignatures.delete(interaction.signature);
+      });
+    interactionSends.push(promise);
   };
 
   // Resolve idle-timeout for this run: scope override (on SessionEntry) wins
@@ -1196,6 +1228,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           replyMode,
           sendOpts,
           cardRenderOptions,
+          skipLiveInteractionSignatures: new Set([
+            ...sentInteractionSignatures,
+            ...pendingInteractionSignatures,
+          ]),
+          liveInteractionInputRoute: useLiveSession ? 'live' : 'agent',
         });
         return;
       }
@@ -1377,6 +1414,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         replyMode,
         sendOpts,
         cardRenderOptions,
+        skipLiveInteractionSignatures: new Set([
+          ...sentInteractionSignatures,
+          ...pendingInteractionSignatures,
+        ]),
+        liveInteractionInputRoute: useLiveSession ? 'live' : 'agent',
       });
     }
   } catch (err) {
@@ -1385,6 +1427,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     // Let the interactive-prompt subscriber drain (it resolves when the event
     // stream ends); it never rejects, so this can't mask a run error.
     await promptBridge;
+    await Promise.allSettled(interactionSends);
     if (useLiveSession && nativeCommand && closesLivePicker(nativeCommand)) {
       if (liveInteractionByScope.delete(scope)) {
         log.info('agent-live', 'picker-exit', { scope, input: nativeCommand });
@@ -1403,11 +1446,18 @@ async function sendFinalReply(input: {
   replyMode: ReturnType<typeof getMessageReplyMode>;
   sendOpts: { replyTo: string; replyInThread?: boolean };
   cardRenderOptions: { signCallback?: (action: string) => string };
+  skipLiveInteractionSignatures?: ReadonlySet<string>;
+  liveInteractionInputRoute?: LiveInteractionInputRoute;
 }): Promise<void> {
   const body = renderText(input.state);
 
   if (input.replyMode === 'card') {
-    const liveCard = liveInteractionCardForText(body, input.cardRenderOptions.signCallback);
+    const liveCard = liveInteractionCardForText(
+      body,
+      input.cardRenderOptions.signCallback,
+      input.liveInteractionInputRoute ?? 'live',
+      input.skipLiveInteractionSignatures,
+    );
     const result = await input.channel.send(
       input.chatId,
       { card: liveCard ?? renderCard(input.state, input.cardRenderOptions) },
@@ -1813,11 +1863,17 @@ function liveInputModeForBatch(
 
 function looksLikeAgentPicker(text: string): boolean {
   return (
-    /press\s+enter\s+to\s+confirm/i.test(text) ||
-    /esc\s+to\s+go\s+back/i.test(text) ||
+    /press\s+enter\s+to\s+(?:confirm|continue)/i.test(text) ||
+    /esc\s+to\s+(?:go\s+back|cancel)/i.test(text) ||
     /\b(?:y\/n|yes\/no|no\/yes)\b/i.test(text) ||
-    /select\s+(?:a\s+)?(?:model|option|.+)/i.test(text) ||
-    /(?:↑|↓|up\/down|arrow keys?|use .*arrows?)/i.test(text)
+    /\bselect\s+(?:a\s+)?(?:model|option)\b/i.test(text) ||
+    /(?:↑|↓|up\/down|arrow keys?|use .*arrows?)/i.test(text) ||
+    /(?:do you want to|would you like to|shall i|waiting for (?:user|your) (?:input|confirmation)|requires? (?:approval|confirmation)|approve|allow).*(?:\?|proceed|continue|run|execute|apply|approve|allow)/i.test(
+      text,
+    ) ||
+    /(?:请选择|等待(?:你|用户).*(?:输入|选择|确认)|需要(?:你|用户).*(?:选择|确认)|确认.*(?:继续|执行)|取消|返回)/i.test(
+      text,
+    )
   );
 }
 
@@ -1831,6 +1887,8 @@ interface LiveInteractionPrompt {
   prompt: string;
   buttons: LiveInteractionButton[];
 }
+
+export type LiveInteractionInputRoute = 'live' | 'agent';
 
 function detectLiveInteraction(text: string): LiveInteractionPrompt | undefined {
   const prompt = text
@@ -1854,7 +1912,12 @@ function detectLiveInteraction(text: string): LiveInteractionPrompt | undefined 
     if (buttons.length >= 8) break;
   }
 
-  if (/\b(?:y\/n|yes\/no|no\/yes|\[y\/n\]|\(y\/n\))\b/i.test(prompt)) {
+  if (
+    /\b(?:y\/n|yes\/no|no\/yes)\b|(?:\[y\/n\]|\(y\/n\))/i.test(prompt) ||
+    /(?:do you want to|would you like to|shall i|requires? (?:approval|confirmation)|approve|allow).*(?:\?|proceed|continue|run|execute|apply|approve|allow)/i.test(
+      prompt,
+    )
+  ) {
     add('yes', 'yes');
     add('no', 'no');
   }
@@ -1881,12 +1944,16 @@ function detectLiveInteraction(text: string): LiveInteractionPrompt | undefined 
 export function liveInteractionCard(
   interaction: LiveInteractionPrompt,
   signCallback?: (action: string) => string,
+  inputRoute: LiveInteractionInputRoute = 'live',
 ): object {
+  const actionName =
+    inputRoute === 'live' ? LIVE_INPUT_CALLBACK_ACTION : AGENT_INPUT_CALLBACK_ACTION;
+  const cmd = inputRoute === 'live' ? 'live.input' : 'agent.input';
   const actions = interaction.buttons.map((button) => {
-    const value: Record<string, unknown> = { cmd: 'live.input', input: button.input };
+    const value: Record<string, unknown> = { cmd, input: button.input };
     if (signCallback) {
       value[BRIDGE_CALLBACK_MARKER] = true;
-      value.bridge_token = signCallback(LIVE_INPUT_CALLBACK_ACTION);
+      value.bridge_token = signCallback(actionName);
     }
     return {
       tag: 'button',
@@ -1899,13 +1966,13 @@ export function liveInteractionCard(
     schema: '2.0',
     config: {
       streaming_mode: false,
-      summary: { content: 'live CLI 等待选择' },
+      summary: { content: inputRoute === 'live' ? 'live CLI 等待选择' : 'agent 等待输入' },
     },
     body: {
       elements: [
         {
           tag: 'markdown',
-          content: `live CLI 正在等待选择：\n\`\`\`\n${escapeFence(interaction.prompt)}\n\`\`\``,
+          content: `${inputRoute === 'live' ? 'live CLI 正在等待选择' : 'agent 正在等待输入'}：\n\`\`\`\n${escapeFence(interaction.prompt)}\n\`\`\``,
         },
         {
           tag: 'action',
@@ -1919,10 +1986,13 @@ export function liveInteractionCard(
 export function liveInteractionCardForText(
   text: string,
   signCallback?: (action: string) => string,
+  inputRoute: LiveInteractionInputRoute = 'live',
+  skipSignatures?: ReadonlySet<string>,
 ): object | undefined {
   if (!looksLikeAgentPicker(text)) return undefined;
   const interaction = detectLiveInteraction(text);
-  return interaction ? liveInteractionCard(interaction, signCallback) : undefined;
+  if (!interaction || skipSignatures?.has(interaction.signature)) return undefined;
+  return liveInteractionCard(interaction, signCallback, inputRoute);
 }
 
 function escapeFence(value: string): string {

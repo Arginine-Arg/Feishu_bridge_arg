@@ -11876,6 +11876,7 @@ async function consumeInteractivePrompts(events, deps) {
 var BRIDGE_CALLBACK_MARKER = "__bridge_cb";
 var LEGACY_CLAUDE_CALLBACK_MARKER = "__claude_cb";
 var LIVE_INPUT_CALLBACK_ACTION = "live_input";
+var AGENT_INPUT_CALLBACK_ACTION = "agent_input";
 async function handleCardAction(deps) {
   const value = deps.evt.action.value;
   if (!value || typeof value !== "object") return;
@@ -11902,6 +11903,11 @@ async function handleCardAction(deps) {
     if (cmd === "live.input") {
       if (!verifyDeferredLiveInputToken(deps, payload, scope, operatorId)) return;
       forwardLiveInput(deps, payload, scope, threadId, mode);
+      return;
+    }
+    if (cmd === "agent.input") {
+      if (!verifyDeferredAgentInputToken(deps, payload, scope, operatorId)) return;
+      forwardAgentInput(deps, payload, scope, threadId, mode);
       return;
     }
     if (isSignedBridgeCallback(payload) && !verifyBridgeToken(deps, payload, scope, cmd)) {
@@ -11957,11 +11963,17 @@ async function handleCardAction(deps) {
   return;
 }
 function verifyDeferredLiveInputToken(deps, payload, scope, operatorId) {
+  return verifyDeferredInputToken(deps, payload, scope, operatorId, LIVE_INPUT_CALLBACK_ACTION);
+}
+function verifyDeferredAgentInputToken(deps, payload, scope, operatorId) {
+  return verifyDeferredInputToken(deps, payload, scope, operatorId, AGENT_INPUT_CALLBACK_ACTION);
+}
+function verifyDeferredInputToken(deps, payload, scope, operatorId, action) {
   const token = typeof payload.bridge_token === "string" ? payload.bridge_token : "";
   if (!deps.callbackAuth || !token || !(BRIDGE_CALLBACK_MARKER in payload)) {
     log.warn("callback", "denied", {
       scope,
-      action: LIVE_INPUT_CALLBACK_ACTION,
+      action,
       reason: "missing-token"
     });
     return false;
@@ -11970,13 +11982,13 @@ function verifyDeferredLiveInputToken(deps, payload, scope, operatorId) {
     scope,
     chatId: deps.evt.chatId,
     operatorOpenId: operatorId,
-    action: LIVE_INPUT_CALLBACK_ACTION
+    action
   });
   if (!result.ok) {
-    log.info("cardAction", "skip-live-input-auth-failed", { scope, reason: result.reason });
+    log.info("cardAction", "skip-deferred-input-auth-failed", { scope, action, reason: result.reason });
     log.warn("callback", "denied", {
       scope,
-      action: LIVE_INPUT_CALLBACK_ACTION,
+      action,
       reason: result.reason
     });
     return false;
@@ -12005,6 +12017,27 @@ function forwardLiveInput(deps, payload, scope, threadId, mode) {
     },
     "control"
   );
+  deps.pending.push(scope, synthetic);
+}
+function forwardAgentInput(deps, payload, scope, threadId, mode) {
+  const input = typeof payload.input === "string" ? payload.input.trim() : "";
+  if (!input) return;
+  log.info("cardAction", "agent-input", { scope, input });
+  const synthetic = {
+    messageId: deps.evt.messageId,
+    chatId: deps.evt.chatId,
+    chatType: mode === "p2p" ? "p2p" : "group",
+    threadId,
+    senderId: deps.evt.operator.openId,
+    senderName: deps.evt.operator.name,
+    content: input,
+    rawContentType: "card_action",
+    resources: [],
+    mentions: [],
+    mentionAll: false,
+    mentionedBot: false,
+    createTime: Date.now()
+  };
   deps.pending.push(scope, synthetic);
 }
 async function resolveScope(deps) {
@@ -15203,11 +15236,17 @@ async function runAgentBatch(deps) {
       log.info("session", "set-thread", { threadId: evt.threadId });
     }
   };
+  const sentInteractionSignatures = /* @__PURE__ */ new Set();
+  const pendingInteractionSignatures = /* @__PURE__ */ new Set();
+  const interactionSends = [];
+  let interactionTextBuffer = "";
   const observeLiveEvent = (evt) => {
-    if (!useLiveSession || !nativeCommand || evt.type !== "text") return;
-    const pickerLike = looksLikeAgentPicker(evt.delta);
-    const interaction = pickerLike ? detectLiveInteraction(evt.delta) : void 0;
-    if (interaction || pickerLike) {
+    if (evt.type !== "text") return;
+    interactionTextBuffer = `${interactionTextBuffer}
+${evt.delta}`.slice(-4e3);
+    const pickerLike = looksLikeAgentPicker(interactionTextBuffer);
+    const interaction = pickerLike ? detectLiveInteraction(interactionTextBuffer) : void 0;
+    if (useLiveSession && (interaction || pickerLike)) {
       const wasActive = liveInteractionByScope.has(scope);
       const previous = liveInteractionByScope.get(scope);
       const nextSignature = interaction?.signature ?? previous?.signature;
@@ -15218,6 +15257,25 @@ async function runAgentBatch(deps) {
       });
       if (!wasActive) log.info("agent-live", "picker-enter", { scope });
     }
+    if (!interaction || !cardRenderOptions.signCallback) return;
+    if (sentInteractionSignatures.has(interaction.signature) || pendingInteractionSignatures.has(interaction.signature)) {
+      return;
+    }
+    pendingInteractionSignatures.add(interaction.signature);
+    const route = useLiveSession ? "live" : "agent";
+    const promise = channel.send(chatId, { card: liveInteractionCard(interaction, cardRenderOptions.signCallback, route) }, sendOpts).then(() => {
+      sentInteractionSignatures.add(interaction.signature);
+      log.info("agent-live", "interaction-card-sent", { scope, route });
+    }).catch(
+      (err) => log.warn("agent-live", "interaction-card-failed", {
+        scope,
+        route,
+        err: err instanceof Error ? err.message : String(err)
+      })
+    ).finally(() => {
+      pendingInteractionSignatures.delete(interaction.signature);
+    });
+    interactionSends.push(promise);
   };
   const scopeOverride = sessions.getIdleTimeoutMinutes(scope);
   const idleTimeoutMs = scopeOverride !== void 0 ? scopeOverride > 0 ? scopeOverride * 6e4 : void 0 : getRunIdleTimeoutMs(controls.cfg);
@@ -15322,7 +15380,12 @@ async function runAgentBatch(deps) {
           state: finalAnswerOnlyState(prepareStateForReply(finalState)),
           replyMode,
           sendOpts,
-          cardRenderOptions
+          cardRenderOptions,
+          skipLiveInteractionSignatures: /* @__PURE__ */ new Set([
+            ...sentInteractionSignatures,
+            ...pendingInteractionSignatures
+          ]),
+          liveInteractionInputRoute: useLiveSession ? "live" : "agent"
         });
         return;
       }
@@ -15492,13 +15555,19 @@ async function runAgentBatch(deps) {
         state: prepareStateForReply(finalState),
         replyMode,
         sendOpts,
-        cardRenderOptions
+        cardRenderOptions,
+        skipLiveInteractionSignatures: /* @__PURE__ */ new Set([
+          ...sentInteractionSignatures,
+          ...pendingInteractionSignatures
+        ]),
+        liveInteractionInputRoute: useLiveSession ? "live" : "agent"
       });
     }
   } catch (err) {
     log.fail("stream", err);
   } finally {
     await promptBridge;
+    await Promise.allSettled(interactionSends);
     if (useLiveSession && nativeCommand && closesLivePicker(nativeCommand)) {
       if (liveInteractionByScope.delete(scope)) {
         log.info("agent-live", "picker-exit", { scope, input: nativeCommand });
@@ -15511,7 +15580,12 @@ async function runAgentBatch(deps) {
 async function sendFinalReply(input) {
   const body = renderText(input.state);
   if (input.replyMode === "card") {
-    const liveCard = liveInteractionCardForText(body, input.cardRenderOptions.signCallback);
+    const liveCard = liveInteractionCardForText(
+      body,
+      input.cardRenderOptions.signCallback,
+      input.liveInteractionInputRoute ?? "live",
+      input.skipLiveInteractionSignatures
+    );
     const result = await input.channel.send(
       input.chatId,
       { card: liveCard ?? renderCard(input.state, input.cardRenderOptions) },
@@ -15801,7 +15875,11 @@ function liveInputModeForBatch(batch, nativeCommand) {
   return nativeCommand.trimStart().startsWith("/") ? "command" : "control";
 }
 function looksLikeAgentPicker(text) {
-  return /press\s+enter\s+to\s+confirm/i.test(text) || /esc\s+to\s+go\s+back/i.test(text) || /\b(?:y\/n|yes\/no|no\/yes)\b/i.test(text) || /select\s+(?:a\s+)?(?:model|option|.+)/i.test(text) || /(?:↑|↓|up\/down|arrow keys?|use .*arrows?)/i.test(text);
+  return /press\s+enter\s+to\s+(?:confirm|continue)/i.test(text) || /esc\s+to\s+(?:go\s+back|cancel)/i.test(text) || /\b(?:y\/n|yes\/no|no\/yes)\b/i.test(text) || /\bselect\s+(?:a\s+)?(?:model|option)\b/i.test(text) || /(?:↑|↓|up\/down|arrow keys?|use .*arrows?)/i.test(text) || /(?:do you want to|would you like to|shall i|waiting for (?:user|your) (?:input|confirmation)|requires? (?:approval|confirmation)|approve|allow).*(?:\?|proceed|continue|run|execute|apply|approve|allow)/i.test(
+    text
+  ) || /(?:请选择|等待(?:你|用户).*(?:输入|选择|确认)|需要(?:你|用户).*(?:选择|确认)|确认.*(?:继续|执行)|取消|返回)/i.test(
+    text
+  );
 }
 function detectLiveInteraction(text) {
   const prompt = text.split("\n").map((line) => line.trim()).filter(Boolean).slice(-12).join("\n");
@@ -15818,7 +15896,9 @@ function detectLiveInteraction(text) {
     add(match[1], match[1]);
     if (buttons.length >= 8) break;
   }
-  if (/\b(?:y\/n|yes\/no|no\/yes|\[y\/n\]|\(y\/n\))\b/i.test(prompt)) {
+  if (/\b(?:y\/n|yes\/no|no\/yes)\b|(?:\[y\/n\]|\(y\/n\))/i.test(prompt) || /(?:do you want to|would you like to|shall i|requires? (?:approval|confirmation)|approve|allow).*(?:\?|proceed|continue|run|execute|apply|approve|allow)/i.test(
+    prompt
+  )) {
     add("yes", "yes");
     add("no", "no");
   }
@@ -15842,12 +15922,14 @@ ${buttons.map((button2) => button2.input).join("|")}`.slice(0, 500),
     buttons
   };
 }
-function liveInteractionCard(interaction, signCallback) {
+function liveInteractionCard(interaction, signCallback, inputRoute = "live") {
+  const actionName = inputRoute === "live" ? LIVE_INPUT_CALLBACK_ACTION : AGENT_INPUT_CALLBACK_ACTION;
+  const cmd = inputRoute === "live" ? "live.input" : "agent.input";
   const actions2 = interaction.buttons.map((button2) => {
-    const value = { cmd: "live.input", input: button2.input };
+    const value = { cmd, input: button2.input };
     if (signCallback) {
       value[BRIDGE_CALLBACK_MARKER] = true;
-      value.bridge_token = signCallback(LIVE_INPUT_CALLBACK_ACTION);
+      value.bridge_token = signCallback(actionName);
     }
     return {
       tag: "button",
@@ -15860,13 +15942,13 @@ function liveInteractionCard(interaction, signCallback) {
     schema: "2.0",
     config: {
       streaming_mode: false,
-      summary: { content: "live CLI \u7B49\u5F85\u9009\u62E9" }
+      summary: { content: inputRoute === "live" ? "live CLI \u7B49\u5F85\u9009\u62E9" : "agent \u7B49\u5F85\u8F93\u5165" }
     },
     body: {
       elements: [
         {
           tag: "markdown",
-          content: `live CLI \u6B63\u5728\u7B49\u5F85\u9009\u62E9\uFF1A
+          content: `${inputRoute === "live" ? "live CLI \u6B63\u5728\u7B49\u5F85\u9009\u62E9" : "agent \u6B63\u5728\u7B49\u5F85\u8F93\u5165"}\uFF1A
 \`\`\`
 ${escapeFence(interaction.prompt)}
 \`\`\``
@@ -15879,10 +15961,11 @@ ${escapeFence(interaction.prompt)}
     }
   };
 }
-function liveInteractionCardForText(text, signCallback) {
+function liveInteractionCardForText(text, signCallback, inputRoute = "live", skipSignatures) {
   if (!looksLikeAgentPicker(text)) return void 0;
   const interaction = detectLiveInteraction(text);
-  return interaction ? liveInteractionCard(interaction, signCallback) : void 0;
+  if (!interaction || skipSignatures?.has(interaction.signature)) return void 0;
+  return liveInteractionCard(interaction, signCallback, inputRoute);
 }
 function escapeFence(value) {
   return value.replace(/```/g, "'''");

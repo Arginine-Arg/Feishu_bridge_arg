@@ -3,7 +3,11 @@ import {
   liveInteractionCard,
   liveInteractionCardForText,
 } from '../../../src/bot/channel.js';
-import { BRIDGE_CALLBACK_MARKER, LIVE_INPUT_CALLBACK_ACTION } from '../../../src/card/dispatcher.js';
+import {
+  AGENT_INPUT_CALLBACK_ACTION,
+  BRIDGE_CALLBACK_MARKER,
+  LIVE_INPUT_CALLBACK_ACTION,
+} from '../../../src/card/dispatcher.js';
 
 function buttonValues(card: unknown): Array<Record<string, unknown>> {
   const values: Array<Record<string, unknown>> = [];
@@ -94,8 +98,42 @@ describe('liveInteractionCard', () => {
     }
   });
 
+  it('renders non-live prompts as signed agent input controls', () => {
+    let n = 0;
+    const card = liveInteractionCardForText(
+      'Do you want to proceed with applying this patch?',
+      (action) => {
+        expect(action).toBe(AGENT_INPUT_CALLBACK_ACTION);
+        return `agent-token-${n++}`;
+      },
+      'agent',
+    );
+
+    expect(card).toBeDefined();
+    const values = buttonValues(card);
+    expect(values.map((value) => value.cmd)).toEqual(['agent.input', 'agent.input']);
+    expect(values.map((value) => value.input)).toEqual(['yes', 'no']);
+    expect(values.map((value) => value.bridge_token)).toEqual(['agent-token-0', 'agent-token-1']);
+    for (const value of values) {
+      expect(value[BRIDGE_CALLBACK_MARKER]).toBe(true);
+    }
+  });
+
+  it('can skip prompts already sent as standalone interaction cards', () => {
+    const text = [
+      'Select Model and Effort',
+      '1. gpt-5.5',
+      '2. gpt-5.4',
+      'Press enter to confirm or esc to go back',
+    ].join('\n');
+    const first = liveInteractionCardForText(text, () => 'tok');
+    expect(first).toBeDefined();
+    expect(liveInteractionCardForText(text, () => 'tok', 'live', new Set([`${text}\n1|2|enter|esc`]))).toBeUndefined();
+  });
+
   it('does not convert ordinary text into a live input card', () => {
     expect(liveInteractionCardForText('哈喽，我在。有什么要我处理的任务，直接发我就行。')).toBeUndefined();
     expect(liveInteractionCardForText('处理结果：\n1. 已更新依赖\n2. 已运行测试')).toBeUndefined();
+    expect(liveInteractionCardForText('The query will select rows from the table.')).toBeUndefined();
   });
 });

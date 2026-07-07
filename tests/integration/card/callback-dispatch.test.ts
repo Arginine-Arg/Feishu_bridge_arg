@@ -153,6 +153,24 @@ describe('signed card callback dispatch', () => {
     expect(liveInputModeForMessage(queued[0]!)).toBe('control');
   });
 
+  it('turns agent.input button clicks into ordinary follow-up input', async () => {
+    const h = await createHarness();
+
+    await h.dispatch({
+      cmd: 'agent.input',
+      input: 'yes',
+      __bridge_cb: true,
+      bridge_token: h.token('agent_input', { nonce: 'nonce-agent-input' }),
+    });
+
+    const queued = h.pending.cancel('oc_group');
+    expect(queued).toHaveLength(1);
+    expect(queued[0]?.content).toBe('yes');
+    expect(isNativeAgentCommandMessage(queued[0]!)).toBe(false);
+    expect(isForceLiveAgentCommandMessage(queued[0]!)).toBe(false);
+    expect(liveInputModeForMessage(queued[0]!)).toBeUndefined();
+  });
+
   it('rejects unsigned live.input button clicks', async () => {
     const h = await createHarness();
 

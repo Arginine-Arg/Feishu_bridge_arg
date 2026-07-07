@@ -26,6 +26,7 @@ import { BRIDGE_PROMPT_CALLBACK_MARKER, PROMPT_CALLBACK_ACTION } from './interac
 export const BRIDGE_CALLBACK_MARKER = '__bridge_cb';
 const LEGACY_CLAUDE_CALLBACK_MARKER = '__claude_cb';
 export const LIVE_INPUT_CALLBACK_ACTION = 'live_input';
+export const AGENT_INPUT_CALLBACK_ACTION = 'agent_input';
 
 export interface CardDispatchDeps {
   channel: LarkChannel;
@@ -90,6 +91,11 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
     if (cmd === 'live.input') {
       if (!verifyDeferredLiveInputToken(deps, payload, scope, operatorId)) return;
       forwardLiveInput(deps, payload, scope, threadId, mode);
+      return;
+    }
+    if (cmd === 'agent.input') {
+      if (!verifyDeferredAgentInputToken(deps, payload, scope, operatorId)) return;
+      forwardAgentInput(deps, payload, scope, threadId, mode);
       return;
     }
     if (isSignedBridgeCallback(payload) && !verifyBridgeToken(deps, payload, scope, cmd)) {
@@ -165,11 +171,30 @@ function verifyDeferredLiveInputToken(
   scope: string,
   operatorId: string,
 ): boolean {
+  return verifyDeferredInputToken(deps, payload, scope, operatorId, LIVE_INPUT_CALLBACK_ACTION);
+}
+
+function verifyDeferredAgentInputToken(
+  deps: CardDispatchDeps,
+  payload: Record<string, unknown>,
+  scope: string,
+  operatorId: string,
+): boolean {
+  return verifyDeferredInputToken(deps, payload, scope, operatorId, AGENT_INPUT_CALLBACK_ACTION);
+}
+
+function verifyDeferredInputToken(
+  deps: CardDispatchDeps,
+  payload: Record<string, unknown>,
+  scope: string,
+  operatorId: string,
+  action: typeof LIVE_INPUT_CALLBACK_ACTION | typeof AGENT_INPUT_CALLBACK_ACTION,
+): boolean {
   const token = typeof payload.bridge_token === 'string' ? payload.bridge_token : '';
   if (!deps.callbackAuth || !token || !(BRIDGE_CALLBACK_MARKER in payload)) {
     log.warn('callback', 'denied', {
       scope,
-      action: LIVE_INPUT_CALLBACK_ACTION,
+      action,
       reason: 'missing-token',
     });
     return false;
@@ -178,13 +203,13 @@ function verifyDeferredLiveInputToken(
     scope,
     chatId: deps.evt.chatId,
     operatorOpenId: operatorId,
-    action: LIVE_INPUT_CALLBACK_ACTION,
+    action,
   });
   if (!result.ok) {
-    log.info('cardAction', 'skip-live-input-auth-failed', { scope, reason: result.reason });
+    log.info('cardAction', 'skip-deferred-input-auth-failed', { scope, action, reason: result.reason });
     log.warn('callback', 'denied', {
       scope,
-      action: LIVE_INPUT_CALLBACK_ACTION,
+      action,
       reason: result.reason,
     });
     return false;
@@ -220,6 +245,34 @@ function forwardLiveInput(
     },
     'control',
   );
+  deps.pending.push(scope, synthetic);
+}
+
+function forwardAgentInput(
+  deps: CardDispatchDeps,
+  payload: Record<string, unknown>,
+  scope: string,
+  threadId: string | undefined,
+  mode: 'p2p' | 'group' | 'topic',
+): void {
+  const input = typeof payload.input === 'string' ? payload.input.trim() : '';
+  if (!input) return;
+  log.info('cardAction', 'agent-input', { scope, input });
+  const synthetic: NormalizedMessage = {
+    messageId: deps.evt.messageId,
+    chatId: deps.evt.chatId,
+    chatType: mode === 'p2p' ? 'p2p' : 'group',
+    threadId,
+    senderId: deps.evt.operator.openId,
+    senderName: deps.evt.operator.name,
+    content: input,
+    rawContentType: 'card_action',
+    resources: [],
+    mentions: [],
+    mentionAll: false,
+    mentionedBot: false,
+    createTime: Date.now(),
+  };
   deps.pending.push(scope, synthetic);
 }
 
