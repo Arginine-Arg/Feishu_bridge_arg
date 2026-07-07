@@ -5924,6 +5924,7 @@ var LiveTerminalSession = class {
   emitter = new EventEmitter();
   cleaner = new TerminalOutputCleaner();
   child;
+  terminalInfo;
   closed = false;
   primed = false;
   startedAt = 0;
@@ -5988,13 +5989,15 @@ var LiveTerminalSession = class {
     if (this.closed) throw new Error("live session is closed");
     const spawned = spawnLiveProcess(this.opts);
     this.child = spawned.child;
+    this.terminalInfo = spawned.terminal;
     this.startedAt = Date.now();
     const child = spawned.child;
     log.info("agent-live", "spawn", {
       pid: child.pid ?? null,
       cwd: this.opts.cwd,
       command: spawned.command,
-      pty: spawned.pty
+      pty: spawned.pty,
+      terminal: spawned.terminal
     });
     this.cleaner.setScreenMode(spawned.pty);
     child.stdout.on("data", (chunk) => this.emitData(chunk));
@@ -6081,7 +6084,7 @@ var LiveTerminalSession = class {
       if (timer) clearTimeout(timer);
       flushOutput();
       if (commandMode && !deliveredText && isStatusLiveCommand(prompt)) {
-        push({ type: "text", delta: buildLiveStatusFallback(this.opts, cwd) });
+        push({ type: "text", delta: buildLiveStatusFallback(this.opts, cwd, this.terminalInfo) });
       }
       push({ type: "done", terminationReason: "normal" });
     };
@@ -6255,6 +6258,7 @@ function spawnLiveProcess(opts) {
     return {
       command: "script",
       pty: true,
+      terminal: { backend: "pty" },
       child: spawnProcess("script", ["-qfec", commandLine, "/dev/null"], {
         cwd: opts.cwd,
         env,
@@ -6265,6 +6269,7 @@ function spawnLiveProcess(opts) {
   return {
     command: opts.command,
     pty: false,
+    terminal: { backend: "pipe" },
     child: spawnProcess(opts.command, opts.args, {
       cwd: opts.cwd,
       env,
@@ -6280,6 +6285,8 @@ function liveCommandLine(command, args, rows, columns) {
 }
 function spawnTmuxLiveProcess(cwd, env, commandLine, rows, columns) {
   const socketName = `lark-channel-${process.pid}-${randomUUID().replace(/-/g, "").slice(0, 16)}`;
+  const sessionName = "main";
+  const target = `${sessionName}:0.0`;
   const child = spawnProcess(
     process.execPath,
     [
@@ -6300,6 +6307,13 @@ function spawnTmuxLiveProcess(cwd, env, commandLine, rows, columns) {
   return {
     command: "tmux",
     pty: true,
+    terminal: {
+      backend: "tmux",
+      socketName,
+      sessionName,
+      target,
+      attachCommand: `tmux -L ${shellQuote(socketName)} attach -t ${shellQuote(sessionName)}`
+    },
     child
   };
 }
@@ -6513,8 +6527,8 @@ function isKnownSilentLiveCommand(input) {
 function isStatusLiveCommand(input) {
   return /^\/status\s*$/iu.test(input.trim());
 }
-function buildLiveStatusFallback(opts, cwd) {
-  return [
+function buildLiveStatusFallback(opts, cwd, terminal) {
+  const lines = [
     "Codex live session status",
     `Directory: ${cwd}`,
     `Model: ${argValue(opts.args, "--model") ?? "default"}`,
@@ -6522,9 +6536,16 @@ function buildLiveStatusFallback(opts, cwd) {
     `Sandbox: ${argValue(opts.args, "--sandbox") ?? "default"}`,
     `Approval policy: ${configValue(opts.args, "approval_policy") ?? "default"}`,
     `Backend: ${opts.backend ?? (opts.usePty === false ? "pipe" : "auto")}`,
+    `Terminal backend: ${terminal?.backend ?? "unknown"}`,
+    ...terminal?.attachCommand ? [
+      `Tmux socket: ${terminal.socketName}`,
+      `Tmux target: ${terminal.target}`,
+      `Attach command: ${terminal.attachCommand}`
+    ] : [],
     "Token usage: unavailable from Codex TUI fallback",
     ""
-  ].join("\n");
+  ];
+  return lines.join("\n");
 }
 function argValue(args, name) {
   const idx = args.indexOf(name);

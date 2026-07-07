@@ -16,6 +16,14 @@ type LiveChild = SpawnedProcessByStdio<Writable, Readable, Readable>;
 type LiveOutput = { mode: 'append' | 'snapshot'; text: string };
 export type LiveTerminalBackend = 'auto' | 'tmux' | 'pty' | 'pipe';
 
+interface LiveTerminalInfo {
+  backend: 'tmux' | 'pty' | 'pipe';
+  socketName?: string;
+  sessionName?: string;
+  target?: string;
+  attachCommand?: string;
+}
+
 export interface LiveSessionCommand {
   command: string;
   args: string[];
@@ -79,6 +87,7 @@ export class LiveTerminalSession {
   private readonly emitter = new EventEmitter();
   private readonly cleaner = new TerminalOutputCleaner();
   private child: LiveChild | undefined;
+  private terminalInfo: LiveTerminalInfo | undefined;
   private closed = false;
   private primed = false;
   private startedAt = 0;
@@ -149,6 +158,7 @@ export class LiveTerminalSession {
 
     const spawned = spawnLiveProcess(this.opts);
     this.child = spawned.child;
+    this.terminalInfo = spawned.terminal;
     this.startedAt = Date.now();
     const child = spawned.child;
     log.info('agent-live', 'spawn', {
@@ -156,6 +166,7 @@ export class LiveTerminalSession {
       cwd: this.opts.cwd,
       command: spawned.command,
       pty: spawned.pty,
+      terminal: spawned.terminal,
     });
     this.cleaner.setScreenMode(spawned.pty);
 
@@ -258,7 +269,7 @@ export class LiveTerminalSession {
       if (timer) clearTimeout(timer);
       flushOutput();
       if (commandMode && !deliveredText && isStatusLiveCommand(prompt)) {
-        push({ type: 'text', delta: buildLiveStatusFallback(this.opts, cwd) });
+        push({ type: 'text', delta: buildLiveStatusFallback(this.opts, cwd, this.terminalInfo) });
       }
       push({ type: 'done', terminationReason: 'normal' });
     };
@@ -428,6 +439,7 @@ function spawnLiveProcess(opts: LiveSessionCommand): {
   child: LiveChild;
   command: string;
   pty: boolean;
+  terminal: LiveTerminalInfo;
 } {
   const ptyRows = positiveIntString(opts.env?.LINES) ?? DEFAULT_PTY_ROWS;
   const ptyColumns = positiveIntString(opts.env?.COLUMNS) ?? DEFAULT_PTY_COLUMNS;
@@ -450,6 +462,7 @@ function spawnLiveProcess(opts: LiveSessionCommand): {
     return {
       command: 'script',
       pty: true,
+      terminal: { backend: 'pty' },
       child: spawnProcess('script', ['-qfec', commandLine, '/dev/null'], {
         cwd: opts.cwd,
         env,
@@ -460,6 +473,7 @@ function spawnLiveProcess(opts: LiveSessionCommand): {
   return {
     command: opts.command,
     pty: false,
+    terminal: { backend: 'pipe' },
     child: spawnProcess(opts.command, opts.args, {
       cwd: opts.cwd,
       env,
@@ -487,8 +501,11 @@ function spawnTmuxLiveProcess(
   child: LiveChild;
   command: string;
   pty: boolean;
+  terminal: LiveTerminalInfo;
 } {
   const socketName = `lark-channel-${process.pid}-${randomUUID().replace(/-/g, '').slice(0, 16)}`;
+  const sessionName = 'main';
+  const target = `${sessionName}:0.0`;
   const child = spawnProcess(
     process.execPath,
     [
@@ -509,6 +526,13 @@ function spawnTmuxLiveProcess(
   return {
     command: 'tmux',
     pty: true,
+    terminal: {
+      backend: 'tmux',
+      socketName,
+      sessionName,
+      target,
+      attachCommand: `tmux -L ${shellQuote(socketName)} attach -t ${shellQuote(sessionName)}`,
+    },
     child,
   };
 }
@@ -728,8 +752,12 @@ function isStatusLiveCommand(input: string): boolean {
   return /^\/status\s*$/iu.test(input.trim());
 }
 
-function buildLiveStatusFallback(opts: LiveSessionCommand, cwd: string): string {
-  return [
+function buildLiveStatusFallback(
+  opts: LiveSessionCommand,
+  cwd: string,
+  terminal?: LiveTerminalInfo,
+): string {
+  const lines = [
     'Codex live session status',
     `Directory: ${cwd}`,
     `Model: ${argValue(opts.args, '--model') ?? 'default'}`,
@@ -737,9 +765,18 @@ function buildLiveStatusFallback(opts: LiveSessionCommand, cwd: string): string 
     `Sandbox: ${argValue(opts.args, '--sandbox') ?? 'default'}`,
     `Approval policy: ${configValue(opts.args, 'approval_policy') ?? 'default'}`,
     `Backend: ${opts.backend ?? (opts.usePty === false ? 'pipe' : 'auto')}`,
+    `Terminal backend: ${terminal?.backend ?? 'unknown'}`,
+    ...(terminal?.attachCommand
+      ? [
+          `Tmux socket: ${terminal.socketName}`,
+          `Tmux target: ${terminal.target}`,
+          `Attach command: ${terminal.attachCommand}`,
+        ]
+      : []),
     'Token usage: unavailable from Codex TUI fallback',
     '',
-  ].join('\n');
+  ];
+  return lines.join('\n');
 }
 
 function argValue(args: string[], name: string): string | undefined {

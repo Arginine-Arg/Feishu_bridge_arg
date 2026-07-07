@@ -326,6 +326,46 @@ setInterval(() => {}, 1000);
     expect(text).toContain('Sandbox: danger-full-access');
     expect(text).toContain('Approval policy: never');
     expect(text).toContain('Reasoning effort: high');
+    expect(text).toContain('Terminal backend: pipe');
+  }, 15_000);
+
+  tmuxIt('returns tmux attach details in live status fallback', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-status-test-'));
+    const bin = join(dir, 'fake-tmux-status-empty-agent.mjs');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  if (chunk.includes('/status')) process.stdout.write('› /status\\n');
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-status-fallback-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-status-fallback',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 30,
+      outputFlushMs: 5,
+      startupTimeoutMs: 300,
+    });
+
+    const events = await collect(session.run('tmux-status-fallback-run', '/status', dir, 'command').events);
+    await pool.closeAll();
+    const text = textOf(events);
+    expect(text).toContain('Codex live session status');
+    expect(text).toContain('Terminal backend: tmux');
+    expect(text).toMatch(/Tmux socket: lark-channel-/);
+    expect(text).toContain('Tmux target: main:0.0');
+    expect(text).toMatch(/Attach command: tmux -L lark-channel-[^ ]+ attach -t main/);
   }, 15_000);
 
   it('ignores stale status panels for other commands and strips stale goal usage from status', async () => {
