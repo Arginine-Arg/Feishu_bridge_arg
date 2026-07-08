@@ -509,6 +509,93 @@ setInterval(() => {}, 1000);
     expect(textOf(fast)).toBe('• Service tier set to fast\n');
   }, 15_000);
 
+  it('does not press enter after a picker literal when typing it already produces output', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-control-literal-test-'));
+    const bin = join(dir, 'fake-control-literal-agent.mjs');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+let sawChoice = false;
+process.stdin.on('data', (chunk) => {
+  if (!sawChoice && chunk.includes('1')) {
+    sawChoice = true;
+    process.stdout.write('Reasoning Effort\\n');
+    process.stdout.write('1. Low\\n');
+    process.stdout.write('2. Medium\\n');
+    process.stdout.write('Press enter to confirm or esc to go back\\n');
+  }
+  if (sawChoice && /[\\r\\n]/.test(chunk)) {
+    process.stdout.write('confirmed-too-early\\n');
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('control-literal-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'control-literal',
+      usePty: false,
+      idleMs: 80,
+      outputFlushMs: 10,
+      startupTimeoutMs: 1000,
+    });
+
+    const events = await collect(session.run('control-literal-run', '1', dir, 'control').events);
+    await pool.closeAll();
+
+    const text = textOf(events);
+    expect(text).toContain('Reasoning Effort');
+    expect(text).toContain('Press enter to confirm or esc to go back');
+    expect(text).not.toContain('confirmed-too-early');
+  }, 15_000);
+
+  it('presses enter after a picker literal when typing it produces no output', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-control-literal-confirm-test-'));
+    const bin = join(dir, 'fake-control-literal-confirm-agent.mjs');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+let buf = '';
+process.stdin.on('data', (chunk) => {
+  buf += chunk;
+  if (buf.includes('1') && /[\\r\\n]/.test(buf)) {
+    process.stdout.write('confirmed-after-delay\\n');
+    buf = '';
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('control-literal-confirm-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'control-literal-confirm',
+      usePty: false,
+      idleMs: 80,
+      outputFlushMs: 10,
+      startupTimeoutMs: 1000,
+    });
+
+    const events = await collect(session.run('control-literal-confirm-run', '1', dir, 'control').events);
+    await pool.closeAll();
+
+    expect(textOf(events)).toContain('confirmed-after-delay');
+  }, 15_000);
+
   it('cleans up a previous live turn when a new turn starts', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-turn-cleanup-test-'));
     const bin = join(dir, 'fake-turn-cleanup-agent.mjs');
@@ -696,6 +783,55 @@ setInterval(() => {}, 1000);
 
     expect(textOf(events)).toContain('submitted:"alpha\\nbeta"\n');
   });
+
+  tmuxIt('does not send enter after a tmux picker literal when the screen changes first', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-control-literal-test-'));
+    const bin = join(dir, 'fake-tmux-control-literal-agent.mjs');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+let sawChoice = false;
+process.stdin.on('data', (chunk) => {
+  if (!sawChoice && chunk.includes('1')) {
+    sawChoice = true;
+    process.stdout.write('Reasoning Effort\\n');
+    process.stdout.write('1. Low\\n');
+    process.stdout.write('2. Medium\\n');
+    process.stdout.write('Press enter to confirm or esc to go back\\n');
+  }
+  if (sawChoice && /[\\r\\n]/.test(chunk)) {
+    process.stdout.write('confirmed-too-early\\n');
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-control-literal-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-control-literal',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 500,
+      outputFlushMs: 40,
+      startupTimeoutMs: 1500,
+    });
+
+    const events = await collect(session.run('tmux-control-literal-run', '1', dir, 'control').events);
+    await pool.closeAll();
+
+    const text = textOf(events);
+    expect(text).toContain('Reasoning Effort');
+    expect(text).toContain('Press enter to confirm or esc to go back');
+    expect(text).not.toContain('confirmed-too-early');
+  }, 20_000);
 
   it('normalizes terminal redraws instead of appending every frame', () => {
     expect(cleanTerminalOutput('progress 1\rprogress 2\rdone\n')).toBe('done\n');

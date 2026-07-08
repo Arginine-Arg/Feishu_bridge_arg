@@ -49,6 +49,7 @@ const COMMAND_CLEAR_SETTLE_MS = 500;
 const COMMAND_STARTUP_TIMEOUT_MS = 25_000;
 const COMMAND_IDLE_MS = 2_500;
 const COMMAND_NO_OUTPUT_IDLE_MS = 8_000;
+const CONTROL_LITERAL_CONFIRM_DELAY_MS = 350;
 const MAX_TURN_OUTPUT_CHARS = 120_000;
 const DEFAULT_PTY_ROWS = '48';
 const DEFAULT_PTY_COLUMNS = '120';
@@ -223,6 +224,7 @@ export class LiveTerminalSession {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let outputTimer: ReturnType<typeof setTimeout> | undefined;
     let slashConfirmTimer: ReturnType<typeof setTimeout> | undefined;
+    let controlLiteralConfirmTimer: ReturnType<typeof setTimeout> | undefined;
     let acceptingOutput = false;
     let diagFrames = 0;
     let sawAcceptedOutput = false;
@@ -267,6 +269,7 @@ export class LiveTerminalSession {
       done = true;
       if (commandMode) log.info('agent-live', 'command-finish', { reason: 'idle-or-startup' });
       if (timer) clearTimeout(timer);
+      if (controlLiteralConfirmTimer) clearTimeout(controlLiteralConfirmTimer);
       flushOutput();
       if (commandMode && !deliveredText && isStatusLiveCommand(prompt)) {
         push({ type: 'text', delta: buildLiveStatusFallback(this.opts, cwd, this.terminalInfo) });
@@ -325,6 +328,11 @@ export class LiveTerminalSession {
         });
       }
       if (accepted) {
+        if (controlLiteralConfirmTimer) {
+          clearTimeout(controlLiteralConfirmTimer);
+          controlLiteralConfirmTimer = undefined;
+          log.info('agent-live', 'control-literal-output-before-enter', { input: prompt });
+        }
         sawAcceptedOutput = true;
         scheduleOutputFlush();
         arm(idleMs);
@@ -362,6 +370,7 @@ export class LiveTerminalSession {
       if (timer) clearTimeout(timer);
       if (outputTimer) clearTimeout(outputTimer);
       if (slashConfirmTimer) clearTimeout(slashConfirmTimer);
+      if (controlLiteralConfirmTimer) clearTimeout(controlLiteralConfirmTimer);
       this.emitter.off('data', onData);
       this.emitter.off('exit', onExit);
       this.emitter.off('error', onError);
@@ -396,7 +405,18 @@ export class LiveTerminalSession {
           }
         } else {
           if (commandMode) log.info('agent-live', 'command-submit', { commandText: prompt });
-          this.write(translateLiveInput(prompt));
+          if (inputMode === 'control' && shouldDeferControlLiteralSubmit(prompt)) {
+            log.info('agent-live', 'control-literal-type', { input: prompt });
+            this.write(prompt);
+            controlLiteralConfirmTimer = setTimeout(() => {
+              controlLiteralConfirmTimer = undefined;
+              if (done || sawAcceptedOutput) return;
+              log.info('agent-live', 'control-literal-confirm', { input: prompt });
+              this.write('\r');
+            }, CONTROL_LITERAL_CONFIRM_DELAY_MS);
+          } else {
+            this.write(translateLiveInput(prompt));
+          }
         }
         if (commandMode && isKnownSilentLiveCommand(prompt)) arm(idleMs);
       }
@@ -742,6 +762,11 @@ function translateLiveInput(input: string): string {
   const keys = parseLiveControlSequence(input);
   if (keys) return keys.join('');
   return `${input}\r`;
+}
+
+function shouldDeferControlLiteralSubmit(input: string): boolean {
+  const trimmed = input.trim();
+  return /^\d{1,2}$/u.test(trimmed) || /^(?:y|yes|n|no)$/iu.test(trimmed);
 }
 
 function isKnownSilentLiveCommand(input: string): boolean {

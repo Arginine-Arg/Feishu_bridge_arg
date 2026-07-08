@@ -101,6 +101,39 @@ describe('liveInteractionCard', () => {
     }
   });
 
+  it('renders skills picker text as signed live input controls', () => {
+    let n = 0;
+    const card = liveInteractionCardForText(
+      [
+        'Skills',
+        'Choose an action',
+        '',
+        '› 1. List skills            Tip: press @ to open this list directly.',
+        '2. Enable/Disable Skills  Enable or disable skills.',
+        '',
+        'Press enter to confirm or esc to go back',
+      ].join('\n'),
+      (action) => {
+        expect(action).toBe(LIVE_INPUT_CALLBACK_ACTION);
+        return `skills-token-${n++}`;
+      },
+    );
+
+    expect(card).toBeDefined();
+    const values = buttonValues(card);
+    expect(values.map((value) => value.input)).toEqual(['1', '2', 'enter', 'esc']);
+    expect(values.map((value) => value.bridge_token)).toEqual([
+      'skills-token-0',
+      'skills-token-1',
+      'skills-token-2',
+      'skills-token-3',
+    ]);
+    for (const value of values) {
+      expect(value.cmd).toBe('live.input');
+      expect(value[BRIDGE_CALLBACK_MARKER]).toBe(true);
+    }
+  });
+
   it('renders picker output as controls from the main card reply path', () => {
     let n = 0;
     const card = renderLiveAwareReplyCard(

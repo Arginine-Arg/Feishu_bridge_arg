@@ -5890,6 +5890,7 @@ var COMMAND_CLEAR_SETTLE_MS = 500;
 var COMMAND_STARTUP_TIMEOUT_MS = 25e3;
 var COMMAND_IDLE_MS = 2500;
 var COMMAND_NO_OUTPUT_IDLE_MS = 8e3;
+var CONTROL_LITERAL_CONFIRM_DELAY_MS = 350;
 var MAX_TURN_OUTPUT_CHARS = 12e4;
 var DEFAULT_PTY_ROWS = "48";
 var DEFAULT_PTY_COLUMNS = "120";
@@ -6040,6 +6041,7 @@ var LiveTerminalSession = class {
     let timer;
     let outputTimer;
     let slashConfirmTimer;
+    let controlLiteralConfirmTimer;
     let acceptingOutput = false;
     let diagFrames = 0;
     let sawAcceptedOutput = false;
@@ -6082,6 +6084,7 @@ var LiveTerminalSession = class {
       done = true;
       if (commandMode) log.info("agent-live", "command-finish", { reason: "idle-or-startup" });
       if (timer) clearTimeout(timer);
+      if (controlLiteralConfirmTimer) clearTimeout(controlLiteralConfirmTimer);
       flushOutput();
       if (commandMode && !deliveredText && isStatusLiveCommand(prompt)) {
         push({ type: "text", delta: buildLiveStatusFallback(this.opts, cwd, this.terminalInfo) });
@@ -6137,6 +6140,11 @@ var LiveTerminalSession = class {
         });
       }
       if (accepted) {
+        if (controlLiteralConfirmTimer) {
+          clearTimeout(controlLiteralConfirmTimer);
+          controlLiteralConfirmTimer = void 0;
+          log.info("agent-live", "control-literal-output-before-enter", { input: prompt });
+        }
         sawAcceptedOutput = true;
         scheduleOutputFlush();
         arm(idleMs);
@@ -6171,6 +6179,7 @@ var LiveTerminalSession = class {
       if (timer) clearTimeout(timer);
       if (outputTimer) clearTimeout(outputTimer);
       if (slashConfirmTimer) clearTimeout(slashConfirmTimer);
+      if (controlLiteralConfirmTimer) clearTimeout(controlLiteralConfirmTimer);
       this.emitter.off("data", onData);
       this.emitter.off("exit", onExit);
       this.emitter.off("error", onError);
@@ -6201,7 +6210,18 @@ var LiveTerminalSession = class {
           }
         } else {
           if (commandMode) log.info("agent-live", "command-submit", { commandText: prompt });
-          this.write(translateLiveInput(prompt));
+          if (inputMode === "control" && shouldDeferControlLiteralSubmit(prompt)) {
+            log.info("agent-live", "control-literal-type", { input: prompt });
+            this.write(prompt);
+            controlLiteralConfirmTimer = setTimeout(() => {
+              controlLiteralConfirmTimer = void 0;
+              if (done || sawAcceptedOutput) return;
+              log.info("agent-live", "control-literal-confirm", { input: prompt });
+              this.write("\r");
+            }, CONTROL_LITERAL_CONFIRM_DELAY_MS);
+          } else {
+            this.write(translateLiveInput(prompt));
+          }
         }
         if (commandMode && isKnownSilentLiveCommand(prompt)) arm(idleMs);
       }
@@ -6520,6 +6540,10 @@ function translateLiveInput(input) {
   const keys = parseLiveControlSequence(input);
   if (keys) return keys.join("");
   return `${input}\r`;
+}
+function shouldDeferControlLiteralSubmit(input) {
+  const trimmed = input.trim();
+  return /^\d{1,2}$/u.test(trimmed) || /^(?:y|yes|n|no)$/iu.test(trimmed);
 }
 function isKnownSilentLiveCommand(input) {
   return /^\/(?:clear|cls)\s*$/iu.test(input.trim());
