@@ -22,6 +22,21 @@ describe('agent command routing aliases', () => {
     });
   });
 
+  it('maps a bare matching agent prefix to native status instead of forwarding the alias', () => {
+    expect(rewriteAgentCommandMessage(message('/codex'), 'codex')).toMatchObject({
+      msg: { content: '/status' },
+      forceNative: true,
+    });
+    expect(rewriteAgentCommandMessage(message('/codex   '), 'codex')).toMatchObject({
+      msg: { content: '/status' },
+      forceNative: true,
+    });
+    expect(rewriteAgentCommandMessage(message('/claude'), 'claude')).toMatchObject({
+      msg: { content: '/status' },
+      forceNative: true,
+    });
+  });
+
   it('normalizes matching agent aliases for ordinary text without forcing native command mode', () => {
     expect(rewriteAgentCommandMessage(message('/codex resume'), 'codex')).toMatchObject({
       msg: { content: 'resume' },

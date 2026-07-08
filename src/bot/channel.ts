@@ -756,7 +756,7 @@ export function rewriteAgentCommandMessage(
   agentKind: 'claude' | 'codex',
 ): AgentCommandRoute {
   const trimmed = msg.content.trimStart();
-  const match = /^\/([A-Za-z][A-Za-z0-9_-]*)\s+([\s\S]+)$/.exec(trimmed);
+  const match = /^\/([A-Za-z][A-Za-z0-9_-]*)(?:\s+([\s\S]+))?$/.exec(trimmed);
   if (!match) return { msg, forceNative: false };
   const target = match[1]?.toLowerCase();
   const rest = match[2] ?? '';
@@ -765,12 +765,13 @@ export function rewriteAgentCommandMessage(
       ? new Set(['claude', 'claude-code', 'claudecode'])
       : new Set(['codex', 'codex-cli', 'codexcli']);
   if (!target || !aliases.has(target)) return { msg, forceNative: false };
+  const content = rest.trim() ? rest : '/status';
   return {
     msg: {
       ...msg,
-      content: rest,
+      content,
     },
-    forceNative: rest.trimStart().startsWith('/'),
+    forceNative: content.trimStart().startsWith('/'),
   };
 }
 

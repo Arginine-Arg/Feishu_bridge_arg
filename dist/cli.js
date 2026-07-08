@@ -15078,18 +15078,19 @@ async function intakeMessage(deps) {
 }
 function rewriteAgentCommandMessage(msg, agentKind) {
   const trimmed = msg.content.trimStart();
-  const match = /^\/([A-Za-z][A-Za-z0-9_-]*)\s+([\s\S]+)$/.exec(trimmed);
+  const match = /^\/([A-Za-z][A-Za-z0-9_-]*)(?:\s+([\s\S]+))?$/.exec(trimmed);
   if (!match) return { msg, forceNative: false };
   const target = match[1]?.toLowerCase();
   const rest = match[2] ?? "";
   const aliases = agentKind === "claude" ? /* @__PURE__ */ new Set(["claude", "claude-code", "claudecode"]) : /* @__PURE__ */ new Set(["codex", "codex-cli", "codexcli"]);
   if (!target || !aliases.has(target)) return { msg, forceNative: false };
+  const content = rest.trim() ? rest : "/status";
   return {
     msg: {
       ...msg,
-      content: rest
+      content
     },
-    forceNative: rest.trimStart().startsWith("/")
+    forceNative: content.trimStart().startsWith("/")
   };
 }
 function isSlashCommandText(text) {
