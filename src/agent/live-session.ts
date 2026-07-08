@@ -1318,9 +1318,10 @@ function stripTerminalChrome(input: string, prompt = ''): string {
 
 function stripPromptMismatchedLiveContent(input: string, prompt: string): string {
   const command = prompt.trim().toLowerCase();
-  let out = input;
+  let out = stripNoPreviousMessageLines(input);
   if (!isStatusCommand(command)) out = stripCodexStatusPanelLines(out);
   if (!isGoalCommand(command)) out = stripGoalUsageLines(out);
+  if (isCodexControlCommand(command) && !isCompactCommand(command)) out = stripContextCompactedNotice(out);
   if (command.startsWith('/')) out = stripModelChangedLines(out);
   return out;
 }
@@ -1331,6 +1332,47 @@ function isGoalCommand(command: string): boolean {
 
 function isStatusCommand(command: string): boolean {
   return command.startsWith('/status');
+}
+
+function isCompactCommand(command: string): boolean {
+  return /^\/compact(?:\s|$)/.test(command);
+}
+
+function isCodexControlCommand(command: string): boolean {
+  return /^\/(?:clear|compact|fast|help|init|limits|login|logout|model|new|permissions|resume|status|usage)(?:\s|$)/.test(
+    command,
+  );
+}
+
+function stripNoPreviousMessageLines(input: string): string {
+  return input
+    .split('\n')
+    .filter((line) => !/^•?\s*No previous message to edit\./i.test(line.trim()))
+    .join('\n')
+    .trimStart();
+}
+
+function stripContextCompactedNotice(input: string): string {
+  const lines = input.split('\n');
+  const out: string[] = [];
+  let skippingCompactWarning = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (/^•\s+Context compacted$/i.test(trimmed)) {
+      skippingCompactWarning = true;
+      continue;
+    }
+    if (skippingCompactWarning) {
+      if (!trimmed) continue;
+      if (/^⚠\s*Heads up:/i.test(trimmed)) continue;
+      if (/^(?:cause the model to be less accurate|possible to keep threads small and targeted)/i.test(trimmed)) {
+        continue;
+      }
+      skippingCompactWarning = false;
+    }
+    out.push(line);
+  }
+  return out.join('\n').trimStart();
 }
 
 function stripCodexStatusPanelLines(input: string): string {

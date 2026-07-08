@@ -6996,9 +6996,10 @@ function stripTerminalChrome(input, prompt = "") {
 }
 function stripPromptMismatchedLiveContent(input, prompt) {
   const command = prompt.trim().toLowerCase();
-  let out = input;
+  let out = stripNoPreviousMessageLines(input);
   if (!isStatusCommand(command)) out = stripCodexStatusPanelLines(out);
   if (!isGoalCommand(command)) out = stripGoalUsageLines(out);
+  if (isCodexControlCommand(command) && !isCompactCommand(command)) out = stripContextCompactedNotice(out);
   if (command.startsWith("/")) out = stripModelChangedLines(out);
   return out;
 }
@@ -7007,6 +7008,39 @@ function isGoalCommand(command) {
 }
 function isStatusCommand(command) {
   return command.startsWith("/status");
+}
+function isCompactCommand(command) {
+  return /^\/compact(?:\s|$)/.test(command);
+}
+function isCodexControlCommand(command) {
+  return /^\/(?:clear|compact|fast|help|init|limits|login|logout|model|new|permissions|resume|status|usage)(?:\s|$)/.test(
+    command
+  );
+}
+function stripNoPreviousMessageLines(input) {
+  return input.split("\n").filter((line) => !/^•?\s*No previous message to edit\./i.test(line.trim())).join("\n").trimStart();
+}
+function stripContextCompactedNotice(input) {
+  const lines = input.split("\n");
+  const out = [];
+  let skippingCompactWarning = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (/^•\s+Context compacted$/i.test(trimmed)) {
+      skippingCompactWarning = true;
+      continue;
+    }
+    if (skippingCompactWarning) {
+      if (!trimmed) continue;
+      if (/^⚠\s*Heads up:/i.test(trimmed)) continue;
+      if (/^(?:cause the model to be less accurate|possible to keep threads small and targeted)/i.test(trimmed)) {
+        continue;
+      }
+      skippingCompactWarning = false;
+    }
+    out.push(line);
+  }
+  return out.join("\n").trimStart();
 }
 function stripCodexStatusPanelLines(input) {
   return input.split("\n").filter((line) => !isCodexStatusPanelLine(line.trim())).join("\n").trimStart();

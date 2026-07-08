@@ -152,6 +152,24 @@ process.stdin.on('data', (chunk) => {
       process.stdout.write('› 1. gpt-5.5 (current)\\n');
       process.stdout.write('Press enter to confirm or esc to go back\\n');
     }
+    else if (line === '/model') {
+      process.stdout.write('│  >_ OpenAI Codex (v0.142.5)                                                │\\n');
+      process.stdout.write('│  Model:                gpt-5.5 (reasoning high, summaries auto)            │\\n');
+      process.stdout.write('│  Directory:            ~/.lark-channel-workspaces/codex/default            │\\n');
+      process.stdout.write('│  Token usage:          0 total  (0 input + 0 output)                       │\\n');
+      process.stdout.write('╰────────────────────────────────────────────────────────────────────────────╯\\n');
+      process.stdout.write('• No previous message to edit.\\n');
+      process.stdout.write('• Context compacted\\n');
+      process.stdout.write('⚠ Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when\\n');
+      process.stdout.write('possible to keep threads small and targeted.\\n');
+      setTimeout(() => {
+        process.stdout.write('Select Model and Effort\\n');
+        process.stdout.write('Access legacy models by running codex -m <model_name> or in your config.toml\\n');
+        process.stdout.write('› 1. gpt-5.5 (current)\\n');
+        process.stdout.write('2. gpt-5.4\\n');
+        process.stdout.write('Press enter to confirm or esc to go back\\n');
+      }, 20);
+    }
     else if (line === '/clear') {
       // Codex /clear intentionally redraws to an empty screen and may not emit
       // any stable text. The bridge should end this command on the short idle
@@ -218,6 +236,9 @@ setInterval(() => {}, 1000);
     const stalePicker = await collect(
       secondSession.run('run-12a', '/status-stale-picker', dir, 'command').events,
     );
+    const modelAfterCompact = await collect(
+      secondSession.run('run-12a2', '/model', dir, 'command').events,
+    );
     const silent = await collect(secondSession.run('run-12b', '/clear', dir, 'command').events);
     const editNoise = await collect(secondSession.run('run-12b2', '/clear-noise', dir, 'command').events);
     await collect(secondSession.run('run-13', '/open-picker', dir).events);
@@ -240,6 +261,9 @@ setInterval(() => {}, 1000);
     );
     expect(textOf(eleventh)).toBe('status-ok\n');
     expect(textOf(stalePicker)).toBe('');
+    expect(textOf(modelAfterCompact)).toBe(
+      'Select Model and Effort\nAccess legacy models by running codex -m <model_name> or in your config.toml\n› 1. gpt-5.5 (current)\n2. gpt-5.4\nPress enter to confirm or esc to go back\n',
+    );
     expect(textOf(silent)).toBe('');
     expect(textOf(editNoise)).toBe('');
     expect(textOf(twelfth)).toBe('• Service tier set to fast\n');
