@@ -1339,7 +1339,7 @@ function isCompactCommand(command: string): boolean {
 }
 
 function isCodexControlCommand(command: string): boolean {
-  return /^\/(?:clear|compact|fast|help|init|limits|login|logout|model|new|permissions|resume|status|usage)(?:\s|$)/.test(
+  return /^\/(?:clear|compact|fast|goal|help|init|limits|login|logout|model|new|permissions|resume|skills|status|usage)(?:\s|$)/.test(
     command,
   );
 }

@@ -7013,7 +7013,7 @@ function isCompactCommand(command) {
   return /^\/compact(?:\s|$)/.test(command);
 }
 function isCodexControlCommand(command) {
-  return /^\/(?:clear|compact|fast|help|init|limits|login|logout|model|new|permissions|resume|status|usage)(?:\s|$)/.test(
+  return /^\/(?:clear|compact|fast|goal|help|init|limits|login|logout|model|new|permissions|resume|skills|status|usage)(?:\s|$)/.test(
     command
   );
 }

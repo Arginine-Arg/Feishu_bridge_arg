@@ -185,7 +185,18 @@ process.stdin.on('data', (chunk) => {
     else if (line === '/slow-compact') {
       setTimeout(() => process.stdout.write('• Context compacted\\n'), 600);
     }
+    else if (line === '/skills') {
+      process.stdout.write('• No previous message to edit.\\n');
+      process.stdout.write('• Context compacted\\n');
+      process.stdout.write('⚠ Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when\\n');
+      process.stdout.write('possible to keep threads small and targeted.\\n');
+      setTimeout(() => process.stdout.write('Available skills: research, imagegen\\n'), 20);
+    }
     else if (line === '/goal') {
+      process.stdout.write('• No previous message to edit.\\n');
+      process.stdout.write('• Context compacted\\n');
+      process.stdout.write('⚠ Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when\\n');
+      process.stdout.write('possible to keep threads small and targeted.\\n');
       process.stdout.write('/status\\n\\n');
       process.stdout.write('› Explain this codebase\\n');
       setTimeout(() => process.stdout.write('• Usage: /goal [<objective>|clear|edit|pause|resume] No goal is currently set.\\n'), 600);
@@ -245,6 +256,7 @@ setInterval(() => {}, 1000);
     const twelfth = await collect(secondSession.run('run-14', '/fast', dir, 'command').events);
     const thirteenth = await collect(secondSession.run('run-15', '/slow-compact', dir, 'command').events);
     const fourteenth = await collect(secondSession.run('run-16', '/goal', dir, 'command').events);
+    const fifteenth = await collect(secondSession.run('run-17', '/skills', dir, 'command').events);
     await pool.closeAll();
 
     expect(textOf(first)).toContain('echo:hello');
@@ -269,6 +281,7 @@ setInterval(() => {}, 1000);
     expect(textOf(twelfth)).toBe('• Service tier set to fast\n');
     expect(textOf(thirteenth)).toBe('• Context compacted\n');
     expect(textOf(fourteenth)).toBe('• Usage: /goal [<objective>|clear|edit|pause|resume] No goal is currently set.\n');
+    expect(textOf(fifteenth)).toBe('Available skills: research, imagegen\n');
     expect(await readFile(countFile, 'utf8')).toBe('start\n');
   }, 70_000);
 
