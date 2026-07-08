@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 import {
   liveInteractionCard,
   liveInteractionCardForText,
+  renderLiveAwareReplyCard,
 } from '../../../src/bot/channel.js';
+import type { AgentEvent } from '../../../src/agent/types.js';
+import { initialState, reduce, type RunState } from '../../../src/card/run-state.js';
 import {
   AGENT_INPUT_CALLBACK_ACTION,
   BRIDGE_CALLBACK_MARKER,
@@ -98,6 +101,45 @@ describe('liveInteractionCard', () => {
     }
   });
 
+  it('renders picker output as controls from the main card reply path', () => {
+    let n = 0;
+    const card = renderLiveAwareReplyCard(
+      stateFrom([
+        {
+          type: 'text',
+          delta: [
+            'Select Model and Effort',
+            '1. gpt-5.5',
+            '2. gpt-5.4',
+            'Press enter to confirm or esc to go back',
+          ].join('\n'),
+        },
+      ]),
+      {
+        signCallback: (action) => {
+          expect(action).toBe(LIVE_INPUT_CALLBACK_ACTION);
+          return `main-path-token-${n++}`;
+        },
+      },
+      'live',
+    );
+
+    const values = buttonValues(card);
+    expect(values.map((value) => value.cmd)).toEqual([
+      'live.input',
+      'live.input',
+      'live.input',
+      'live.input',
+    ]);
+    expect(values.map((value) => value.input)).toEqual(['1', '2', 'enter', 'esc']);
+    expect(values.map((value) => value.bridge_token)).toEqual([
+      'main-path-token-0',
+      'main-path-token-1',
+      'main-path-token-2',
+      'main-path-token-3',
+    ]);
+  });
+
   it('renders non-live prompts as signed agent input controls', () => {
     let n = 0;
     const card = liveInteractionCardForText(
@@ -137,3 +179,7 @@ describe('liveInteractionCard', () => {
     expect(liveInteractionCardForText('The query will select rows from the table.')).toBeUndefined();
   });
 });
+
+function stateFrom(events: AgentEvent[]): RunState {
+  return events.reduce((state, event) => reduce(state, event), initialState);
+}

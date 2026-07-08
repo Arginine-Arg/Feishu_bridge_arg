@@ -1256,7 +1256,13 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         freshFinalPosted = true;
         await channel.send(
           chatId,
-          { card: renderCard(prepareStateForReply(state), cardRenderOptions) },
+          {
+            card: renderLiveAwareReplyCard(
+              prepareStateForReply(state),
+              cardRenderOptions,
+              useLiveSession ? 'live' : 'agent',
+            ),
+          },
           sendOpts,
         );
       };
@@ -1270,7 +1276,13 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           latestState = state;
           if (cardCtrl && !streamDegraded) {
             try {
-              await cardCtrl.update(renderCard(prepareStateForReply(state), cardRenderOptions));
+              await cardCtrl.update(
+                renderLiveAwareReplyCard(
+                  prepareStateForReply(state),
+                  cardRenderOptions,
+                  useLiveSession ? 'live' : 'agent',
+                ),
+              );
             } catch (err) {
               streamDegraded = true;
               cardCtrl = undefined;
@@ -1288,12 +1300,18 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         chatId,
         {
           card: {
-            initial: renderCard(initialState, cardRenderOptions),
+            initial: renderLiveAwareReplyCard(initialState, cardRenderOptions, useLiveSession ? 'live' : 'agent'),
             producer: async (ctrl) => {
               producerStarted = true;
               cardCtrl = ctrl;
               try {
-                await ctrl.update(renderCard(prepareStateForReply(latestState), cardRenderOptions));
+                await ctrl.update(
+                  renderLiveAwareReplyCard(
+                    prepareStateForReply(latestState),
+                    cardRenderOptions,
+                    useLiveSession ? 'live' : 'agent',
+                  ),
+                );
               } catch (err) {
                 streamDegraded = true;
                 cardCtrl = undefined;
@@ -1452,21 +1470,26 @@ async function sendFinalReply(input: {
   const body = renderText(input.state);
 
   if (input.replyMode === 'card') {
-    const liveCard = liveInteractionCardForText(
-      body,
-      input.cardRenderOptions.signCallback,
+    const liveCard = renderLiveAwareReplyCard(
+      input.state,
+      input.cardRenderOptions,
       input.liveInteractionInputRoute ?? 'live',
       input.skipLiveInteractionSignatures,
     );
     const result = await input.channel.send(
       input.chatId,
-      { card: liveCard ?? renderCard(input.state, input.cardRenderOptions) },
+      { card: liveCard },
       input.sendOpts,
     );
     log.info(
       'outbound',
       'sent',
-      outboundLogFields(input, liveCard ? 'live-interaction-card' : 'card', body, result),
+      outboundLogFields(
+        input,
+        isLiveInteractionCardForText(body, input.skipLiveInteractionSignatures) ? 'live-interaction-card' : 'card',
+        body,
+        result,
+      ),
     );
   } else if (input.replyMode === 'markdown') {
     if (body.trim()) {
@@ -1993,6 +2016,28 @@ export function liveInteractionCardForText(
   const interaction = detectLiveInteraction(text);
   if (!interaction || skipSignatures?.has(interaction.signature)) return undefined;
   return liveInteractionCard(interaction, signCallback, inputRoute);
+}
+
+export function renderLiveAwareReplyCard(
+  state: RunState,
+  cardRenderOptions: { signCallback?: (action: string) => string } = {},
+  inputRoute: LiveInteractionInputRoute = 'live',
+  skipSignatures?: ReadonlySet<string>,
+): object {
+  const body = renderText(state);
+  return (
+    liveInteractionCardForText(body, cardRenderOptions.signCallback, inputRoute, skipSignatures) ??
+    renderCard(state, cardRenderOptions)
+  );
+}
+
+function isLiveInteractionCardForText(
+  text: string,
+  skipSignatures?: ReadonlySet<string>,
+): boolean {
+  if (!looksLikeAgentPicker(text)) return false;
+  const interaction = detectLiveInteraction(text);
+  return Boolean(interaction && !skipSignatures?.has(interaction.signature));
 }
 
 function escapeFence(value: string): string {
