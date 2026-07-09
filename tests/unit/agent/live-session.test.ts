@@ -366,6 +366,54 @@ setInterval(() => {}, 1000);
     expect(text).toContain('Terminal backend: pipe');
   }, 15_000);
 
+  it('presses enter again when a slash command only produces a non-result redraw', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-slash-confirm-redraw-test-'));
+    const bin = join(dir, 'fake-slash-confirm-redraw-agent.mjs');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+let sawModel = false;
+process.stdin.on('data', (chunk) => {
+  if (!sawModel && chunk.includes('/model')) {
+    sawModel = true;
+    process.stdout.write('redraw-only\\n');
+    return;
+  }
+  if (sawModel && /[\\r\\n]/.test(chunk)) {
+    process.stdout.write('Select Model and Effort\\n');
+    process.stdout.write('› 1. gpt-5.5 (current)\\n');
+    process.stdout.write('2. gpt-5.4\\n');
+    process.stdout.write('Press enter to confirm or esc to go back\\n');
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('slash-confirm-redraw-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'slash-confirm-redraw',
+      usePty: false,
+      idleMs: 60,
+      outputFlushMs: 10,
+      startupTimeoutMs: 500,
+    });
+
+    const events = await collect(session.run('slash-confirm-redraw-run', '/model', dir, 'command').events);
+    await pool.closeAll();
+
+    const text = textOf(events);
+    expect(text).toContain('redraw-only');
+    expect(text).toContain('Select Model and Effort');
+    expect(text).toContain('Press enter to confirm or esc to go back');
+  }, 15_000);
+
   tmuxIt('returns tmux attach details in live status fallback', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-status-test-'));
     const bin = join(dir, 'fake-tmux-status-empty-agent.mjs');

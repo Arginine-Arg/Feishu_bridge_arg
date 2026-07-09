@@ -6045,6 +6045,7 @@ var LiveTerminalSession = class {
     let acceptingOutput = false;
     let diagFrames = 0;
     let sawAcceptedOutput = false;
+    let sawCommandResultOutput = false;
     let deliveredText = false;
     let slashConfirmCount = 0;
     if (commandMode) {
@@ -6096,11 +6097,11 @@ var LiveTerminalSession = class {
       timer = setTimeout(finish, ms);
     };
     const scheduleSlashCommandConfirm = () => {
-      if (!commandMode || slashConfirmCount >= 2 || slashConfirmTimer || sawAcceptedOutput) return;
+      if (!commandMode || slashConfirmCount >= 2 || slashConfirmTimer || sawCommandResultOutput) return;
       if (!prompt.trim().startsWith("/")) return;
       slashConfirmTimer = setTimeout(() => {
         slashConfirmTimer = void 0;
-        if (done || sawAcceptedOutput || slashConfirmCount >= 2) return;
+        if (done || sawCommandResultOutput || slashConfirmCount >= 2) return;
         slashConfirmCount += 1;
         log.info("agent-live", "command-confirm", { commandText: prompt, attempt: slashConfirmCount });
         this.write("\r");
@@ -6140,14 +6141,17 @@ var LiveTerminalSession = class {
         });
       }
       if (accepted) {
+        const resultOutput = isLiveCommandResultOutput(text, prompt);
         if (controlLiteralConfirmTimer) {
           clearTimeout(controlLiteralConfirmTimer);
           controlLiteralConfirmTimer = void 0;
           log.info("agent-live", "control-literal-output-before-enter", { input: prompt });
         }
         sawAcceptedOutput = true;
+        if (resultOutput) sawCommandResultOutput = true;
         scheduleOutputFlush();
         arm(idleMs);
+        if (commandMode && !resultOutput) scheduleSlashCommandConfirm();
       } else if (commandMode) {
         scheduleSlashCommandConfirm();
         arm(sawAcceptedOutput ? idleMs : Math.max(idleMs, COMMAND_NO_OUTPUT_IDLE_MS));
@@ -6550,6 +6554,20 @@ function isKnownSilentLiveCommand(input) {
 }
 function isStatusLiveCommand(input) {
   return /^\/status\s*$/iu.test(input.trim());
+}
+function isLiveCommandResultOutput(text, prompt) {
+  const command = prompt.trim().toLowerCase();
+  if (!command.startsWith("/")) return true;
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (command === "/model") return isModelPickerOutput(trimmed);
+  if (command === "/skills") {
+    return /\bchoose an action\b/i.test(trimmed) || /\bavailable skills\b/i.test(trimmed) || /(?:^|\n)\s*(?:[›>▸*+-]\s*)?\d{1,2}[.)、:\s-]+\S/u.test(trimmed) && /\b(?:skills?|enable|disable|action)\b/i.test(trimmed);
+  }
+  return true;
+}
+function isModelPickerOutput(text) {
+  return /\bselect model and effort\b/i.test(text) || /\bselect\s+(?:a\s+)?model\b/i.test(text) || /\breasoning effort\b/i.test(text) || /press\s+enter\s+to\s+confirm/i.test(text) || /(?:^|\n)\s*(?:[›>▸*+-]\s*)?\d{1,2}[.)、:\s-]+(?:gpt-|low|medium|high)\S*/iu.test(text);
 }
 function buildLiveStatusFallback(opts, cwd, terminal) {
   const lines = [
@@ -15393,8 +15411,26 @@ ${evt.delta}`.slice(-4e3);
     return { ...state, blocks: state.blocks.filter((b) => b.kind !== "tool") };
   };
   const withNativeEmptyFallback = (state) => {
-    if (!useLiveSession || !nativeCommand || state.terminal !== "done" || state.blocks.length > 0) {
+    if (!useLiveSession || !nativeCommand || state.terminal !== "done" || renderText(state).trim()) {
       return state;
+    }
+    const observed = interactionTextBuffer.trim();
+    if (observed && looksLikeAgentPicker(observed)) {
+      log.info("agent-live", "picker-final-fallback", {
+        scope,
+        chars: observed.length
+      });
+      return {
+        ...state,
+        blocks: [
+          {
+            kind: "text",
+            content: `${observed}
+`,
+            streaming: false
+          }
+        ]
+      };
     }
     return {
       ...state,

@@ -228,6 +228,7 @@ export class LiveTerminalSession {
     let acceptingOutput = false;
     let diagFrames = 0;
     let sawAcceptedOutput = false;
+    let sawCommandResultOutput = false;
     let deliveredText = false;
     let slashConfirmCount = 0;
 
@@ -281,11 +282,11 @@ export class LiveTerminalSession {
       timer = setTimeout(finish, ms);
     };
     const scheduleSlashCommandConfirm = (): void => {
-      if (!commandMode || slashConfirmCount >= 2 || slashConfirmTimer || sawAcceptedOutput) return;
+      if (!commandMode || slashConfirmCount >= 2 || slashConfirmTimer || sawCommandResultOutput) return;
       if (!prompt.trim().startsWith('/')) return;
       slashConfirmTimer = setTimeout(() => {
         slashConfirmTimer = undefined;
-        if (done || sawAcceptedOutput || slashConfirmCount >= 2) return;
+        if (done || sawCommandResultOutput || slashConfirmCount >= 2) return;
         slashConfirmCount += 1;
         log.info('agent-live', 'command-confirm', { commandText: prompt, attempt: slashConfirmCount });
         this.write('\r');
@@ -328,14 +329,17 @@ export class LiveTerminalSession {
         });
       }
       if (accepted) {
+        const resultOutput = isLiveCommandResultOutput(text, prompt);
         if (controlLiteralConfirmTimer) {
           clearTimeout(controlLiteralConfirmTimer);
           controlLiteralConfirmTimer = undefined;
           log.info('agent-live', 'control-literal-output-before-enter', { input: prompt });
         }
         sawAcceptedOutput = true;
+        if (resultOutput) sawCommandResultOutput = true;
         scheduleOutputFlush();
         arm(idleMs);
+        if (commandMode && !resultOutput) scheduleSlashCommandConfirm();
       } else if (commandMode) {
         scheduleSlashCommandConfirm();
         arm(sawAcceptedOutput ? idleMs : Math.max(idleMs, COMMAND_NO_OUTPUT_IDLE_MS));
@@ -775,6 +779,33 @@ function isKnownSilentLiveCommand(input: string): boolean {
 
 function isStatusLiveCommand(input: string): boolean {
   return /^\/status\s*$/iu.test(input.trim());
+}
+
+function isLiveCommandResultOutput(text: string, prompt: string): boolean {
+  const command = prompt.trim().toLowerCase();
+  if (!command.startsWith('/')) return true;
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (command === '/model') return isModelPickerOutput(trimmed);
+  if (command === '/skills') {
+    return (
+      /\bchoose an action\b/i.test(trimmed) ||
+      /\bavailable skills\b/i.test(trimmed) ||
+      /(?:^|\n)\s*(?:[›>▸*+-]\s*)?\d{1,2}[.)、:\s-]+\S/u.test(trimmed) &&
+        /\b(?:skills?|enable|disable|action)\b/i.test(trimmed)
+    );
+  }
+  return true;
+}
+
+function isModelPickerOutput(text: string): boolean {
+  return (
+    /\bselect model and effort\b/i.test(text) ||
+    /\bselect\s+(?:a\s+)?model\b/i.test(text) ||
+    /\breasoning effort\b/i.test(text) ||
+    /press\s+enter\s+to\s+confirm/i.test(text) ||
+    /(?:^|\n)\s*(?:[›>▸*+-]\s*)?\d{1,2}[.)、:\s-]+(?:gpt-|low|medium|high)\S*/iu.test(text)
+  );
 }
 
 function buildLiveStatusFallback(

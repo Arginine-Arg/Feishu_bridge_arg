@@ -1146,8 +1146,25 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     return { ...state, blocks: state.blocks.filter((b) => b.kind !== 'tool') };
   };
   const withNativeEmptyFallback = (state: RunState): RunState => {
-    if (!useLiveSession || !nativeCommand || state.terminal !== 'done' || state.blocks.length > 0) {
+    if (!useLiveSession || !nativeCommand || state.terminal !== 'done' || renderText(state).trim()) {
       return state;
+    }
+    const observed = interactionTextBuffer.trim();
+    if (observed && looksLikeAgentPicker(observed)) {
+      log.info('agent-live', 'picker-final-fallback', {
+        scope,
+        chars: observed.length,
+      });
+      return {
+        ...state,
+        blocks: [
+          {
+            kind: 'text',
+            content: `${observed}\n`,
+            streaming: false,
+          },
+        ],
+      };
     }
     return {
       ...state,
