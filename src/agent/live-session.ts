@@ -1475,8 +1475,9 @@ function isStalePickerSnapshotForPrompt(text: string, prompt: string): boolean {
   const compact = compactForNoiseMatch(text);
   return (
     compact.includes('selectmodelandeffort') &&
-    compact.includes('accesslegacymodels') &&
-    compact.includes('pressentertoconfirmoresctogoback')
+    (compact.includes('accesslegacymodels') ||
+      compact.includes('pressentertoconfirmoresctogoback') ||
+      /(?:^|\n)\s*(?:[›>▸*+-]\s*)?\d{1,2}[.)、:\s-]+gpt-/iu.test(text))
   );
 }
 

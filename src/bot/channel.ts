@@ -1264,7 +1264,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         idleTimeoutMs,
         recordSession,
         async () => {},
-        (evt) => observeLiveEvent(evt, { sendInteractionCard: false }),
+        observeLiveEvent,
       );
       await sendFinalReply({
         channel,
@@ -1274,6 +1274,10 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         replyMode: 'card',
         sendOpts,
         cardRenderOptions,
+        skipLiveInteractionSignatures: new Set([
+          ...sentInteractionSignatures,
+          ...pendingInteractionSignatures,
+        ]),
         liveInteractionInputRoute: 'live',
       });
       return;
@@ -1566,6 +1570,10 @@ async function sendFinalReply(input: {
   const body = renderText(input.state);
 
   if (input.replyMode === 'card') {
+    if (isSkippedLiveInteractionForText(body, input.skipLiveInteractionSignatures)) {
+      log.info('outbound', 'skipped', outboundLogFields(input, 'live-interaction-duplicate', body));
+      return;
+    }
     const liveCard = renderLiveAwareReplyCard(
       input.state,
       input.cardRenderOptions,
@@ -2142,6 +2150,15 @@ function isLiveInteractionCardForText(
   if (!looksLikeAgentPicker(text)) return false;
   const interaction = detectLiveInteraction(text);
   return Boolean(interaction && !skipSignatures?.has(interaction.signature));
+}
+
+function isSkippedLiveInteractionForText(
+  text: string,
+  skipSignatures?: ReadonlySet<string>,
+): boolean {
+  if (!skipSignatures || !looksLikeAgentPicker(text)) return false;
+  const interaction = detectLiveInteraction(text);
+  return Boolean(interaction && skipSignatures.has(interaction.signature));
 }
 
 function escapeFence(value: string): string {

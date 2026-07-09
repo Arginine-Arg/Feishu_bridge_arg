@@ -7104,7 +7104,7 @@ function isStalePickerSnapshotForPrompt(text, prompt) {
   const command = prompt.trim().toLowerCase();
   if (command === "/model") return false;
   const compact = compactForNoiseMatch(text);
-  return compact.includes("selectmodelandeffort") && compact.includes("accesslegacymodels") && compact.includes("pressentertoconfirmoresctogoback");
+  return compact.includes("selectmodelandeffort") && (compact.includes("accesslegacymodels") || compact.includes("pressentertoconfirmoresctogoback") || /(?:^|\n)\s*(?:[›>▸*+-]\s*)?\d{1,2}[.)、:\s-]+gpt-/iu.test(text));
 }
 function isStaleStatusSnapshotForPrompt(text, prompt) {
   const command = prompt.trim().toLowerCase();
@@ -15511,7 +15511,7 @@ ${evt.delta}`.slice(-4e3);
         recordSession,
         async () => {
         },
-        (evt) => observeLiveEvent(evt, { sendInteractionCard: false })
+        observeLiveEvent
       );
       await sendFinalReply({
         channel,
@@ -15521,6 +15521,10 @@ ${evt.delta}`.slice(-4e3);
         replyMode: "card",
         sendOpts,
         cardRenderOptions,
+        skipLiveInteractionSignatures: /* @__PURE__ */ new Set([
+          ...sentInteractionSignatures,
+          ...pendingInteractionSignatures
+        ]),
         liveInteractionInputRoute: "live"
       });
       return;
@@ -15788,6 +15792,10 @@ ${evt.delta}`.slice(-4e3);
 async function sendFinalReply(input) {
   const body = renderText(input.state);
   if (input.replyMode === "card") {
+    if (isSkippedLiveInteractionForText(body, input.skipLiveInteractionSignatures)) {
+      log.info("outbound", "skipped", outboundLogFields(input, "live-interaction-duplicate", body));
+      return;
+    }
     const liveCard = renderLiveAwareReplyCard(
       input.state,
       input.cardRenderOptions,
@@ -16193,6 +16201,11 @@ function isLiveInteractionCardForText(text, skipSignatures) {
   if (!looksLikeAgentPicker(text)) return false;
   const interaction = detectLiveInteraction(text);
   return Boolean(interaction && !skipSignatures?.has(interaction.signature));
+}
+function isSkippedLiveInteractionForText(text, skipSignatures) {
+  if (!skipSignatures || !looksLikeAgentPicker(text)) return false;
+  const interaction = detectLiveInteraction(text);
+  return Boolean(interaction && skipSignatures.has(interaction.signature));
 }
 function escapeFence(value) {
   return value.replace(/```/g, "'''");

@@ -109,8 +109,10 @@ describe('markdown stream startup failures', () => {
 
     await h.channel.handlers.message?.(message('om_model', '/codex /model'));
     await waitFor(() => h.channel.sent.length === 1);
+    await settle();
 
     const content = h.channel.sent.at(-1)?.content as { card?: unknown } | undefined;
+    expect(h.channel.sent).toHaveLength(1);
     expect(content?.card).toBeDefined();
     expect(JSON.stringify(content?.card)).toContain('live CLI 正在等待选择');
     expect(buttonLabels(content?.card)).toEqual(['1', '2', 'enter', 'esc']);
@@ -145,11 +147,49 @@ describe('markdown stream startup failures', () => {
 
     await h.channel.handlers.message?.(message('om_skills', '/codex /skills'));
     await waitFor(() => h.channel.sent.length === 1);
+    await settle();
 
     const content = h.channel.sent.at(-1)?.content as { card?: unknown } | undefined;
+    expect(h.channel.sent).toHaveLength(1);
     expect(content?.card).toBeDefined();
     expect(JSON.stringify(content?.card)).toContain('live CLI 正在等待选择');
     expect(buttonLabels(content?.card)).toEqual(['1', '2', 'enter', 'esc']);
+  });
+
+  it('sends live permission approval prompts as button cards', async () => {
+    const h = await createHarness({
+      stream: async () => {
+        throw new Error('native live approval prompts should not use stream');
+      },
+    });
+    h.profileConfig.preferences = {
+      ...(h.profileConfig.preferences ?? {}),
+      messageReply: 'markdown',
+    };
+    h.agent.setEvents([
+      [
+        {
+          type: 'text',
+          delta: [
+            'Command requires approval',
+            'Do you want to allow running `npm test`?',
+            '',
+            '[y/n]',
+          ].join('\n'),
+        },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+    ]);
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_approval', '/codex /permissions'));
+    await waitFor(() => h.channel.sent.length === 1);
+    await settle();
+
+    const content = h.channel.sent.at(-1)?.content as { card?: unknown } | undefined;
+    expect(h.channel.sent).toHaveLength(1);
+    expect(JSON.stringify(content?.card)).toContain('live CLI 正在等待选择');
+    expect(buttonLabels(content?.card)).toEqual(['yes', 'no']);
   });
 
   it('does not merge rapid native live commands into an ordinary prompt', async () => {
@@ -494,6 +534,10 @@ function lastMarkdown(channel: FakeLarkChannel): string {
   const content = channel.sent.at(-1)?.content as { markdown?: string } | undefined;
   expect(content?.markdown).toBeTypeOf('string');
   return content?.markdown ?? '';
+}
+
+async function settle(): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, 20));
 }
 
 function buttonLabels(card: unknown): string[] {
