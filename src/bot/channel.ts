@@ -1118,7 +1118,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       if (!wasActive) log.info('agent-live', 'picker-enter', { scope });
     }
     if (opts.sendInteractionCard === false) return;
-    if (!interaction || !cardRenderOptions.signCallback) return;
+    if (!interaction) return;
     if (
       sentInteractionSignatures.has(interaction.signature) ||
       pendingInteractionSignatures.has(interaction.signature)
@@ -1133,13 +1133,28 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         sentInteractionSignatures.add(interaction.signature);
         log.info('agent-live', 'interaction-card-sent', { scope, route });
       })
-      .catch((err) =>
+      .catch(async (err) => {
         log.warn('agent-live', 'interaction-card-failed', {
           scope,
           route,
           err: err instanceof Error ? err.message : String(err),
-        }),
-      )
+        });
+        try {
+          await channel.send(
+            chatId,
+            { markdown: liveInteractionFallbackMarkdown(interaction, route) },
+            sendOpts,
+          );
+          sentInteractionSignatures.add(interaction.signature);
+          log.info('agent-live', 'interaction-text-fallback-sent', { scope, route });
+        } catch (fallbackErr) {
+          log.warn('agent-live', 'interaction-text-fallback-failed', {
+            scope,
+            route,
+            err: fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr),
+          });
+        }
+      })
       .finally(() => {
         pendingInteractionSignatures.delete(interaction.signature);
       });
@@ -2116,6 +2131,23 @@ export function liveInteractionCard(
       ],
     },
   };
+}
+
+function liveInteractionFallbackMarkdown(
+  interaction: LiveInteractionPrompt,
+  inputRoute: LiveInteractionInputRoute,
+): string {
+  const title = inputRoute === 'live' ? 'live CLI 正在等待选择' : 'agent 正在等待输入';
+  const choices = interaction.buttons.map((button) => button.input).join(' / ');
+  return [
+    `${title}（交互卡片发送失败，已退回文本）：`,
+    '```',
+    escapeFence(interaction.prompt),
+    '```',
+    choices ? `可直接回复：${choices}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n');
 }
 
 export function liveInteractionCardForText(

@@ -156,6 +156,46 @@ describe('markdown stream startup failures', () => {
     expect(buttonLabels(content?.card)).toEqual(['1', '2', 'enter', 'esc']);
   });
 
+  it('falls back to captured picker text when sending the interaction card fails', async () => {
+    const h = await createHarness({
+      failCardSendOnce: true,
+      stream: async () => {
+        throw new Error('native live picker output should not use stream');
+      },
+    });
+    h.profileConfig.preferences = {
+      ...(h.profileConfig.preferences ?? {}),
+      messageReply: 'markdown',
+    };
+    h.agent.setEvents([
+      [
+        {
+          type: 'text',
+          delta: [
+            'Select Model and Effort',
+            '',
+            '› 1. gpt-5.5 (current)',
+            '2. gpt-5.4',
+            'Press enter to confirm or esc to go back',
+          ].join('\n'),
+        },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+    ]);
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_model_fallback', '/codex /model'));
+    await waitFor(() => h.channel.sent.length === 1);
+    await settle();
+
+    expect(h.channel.sent).toHaveLength(1);
+    const content = h.channel.sent.at(-1)?.content as { markdown?: string; card?: unknown } | undefined;
+    expect(content?.card).toBeUndefined();
+    expect(content?.markdown).toContain('交互卡片发送失败，已退回文本');
+    expect(content?.markdown).toContain('Select Model and Effort');
+    expect(content?.markdown).toContain('可直接回复：1 / 2 / enter / esc');
+  });
+
   it('sends live permission approval prompts as button cards', async () => {
     const h = await createHarness({
       stream: async () => {
@@ -336,6 +376,7 @@ describe('markdown stream startup failures', () => {
 async function createHarness(options: {
   reactionCreate?: () => Promise<{ data: { reaction_id: string } }>;
   stream?: StreamFn;
+  failCardSendOnce?: boolean;
 } = {}): Promise<{
   tmp: TmpProfile;
   channel: FakeLarkChannel;
@@ -424,9 +465,11 @@ async function startTestBridge(h: {
 function createFakeLarkChannel(options: {
   reactionCreate?: () => Promise<{ data: { reaction_id: string } }>;
   stream?: StreamFn;
+  failCardSendOnce?: boolean;
 } = {}): FakeLarkChannel {
   const handlers: MessageHandlerMap = {};
   const sent: FakeLarkChannel['sent'] = [];
+  let failedCardSend = false;
   const channel: FakeLarkChannel = {
     handlers,
     sent,
@@ -465,8 +508,12 @@ function createFakeLarkChannel(options: {
     getConnectionStatus() {
       return { state: 'connected', reconnectAttempts: 0 };
     },
-    async send(chatId, content, options) {
-      sent.push({ chatId, content, options });
+    async send(chatId, content, sendOptions) {
+      if (options.failCardSendOnce && (content as { card?: unknown }).card && !failedCardSend) {
+        failedCardSend = true;
+        throw new Error('card send failed');
+      }
+      sent.push({ chatId, content, options: sendOptions });
     },
     stream: options.stream ?? (async () => {
       await new Promise<void>(() => {});

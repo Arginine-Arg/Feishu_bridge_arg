@@ -15402,7 +15402,7 @@ ${evt.delta}`.slice(-4e3);
       if (!wasActive) log.info("agent-live", "picker-enter", { scope });
     }
     if (opts.sendInteractionCard === false) return;
-    if (!interaction || !cardRenderOptions.signCallback) return;
+    if (!interaction) return;
     if (sentInteractionSignatures.has(interaction.signature) || pendingInteractionSignatures.has(interaction.signature)) {
       return;
     }
@@ -15411,13 +15411,28 @@ ${evt.delta}`.slice(-4e3);
     const promise = channel.send(chatId, { card: liveInteractionCard(interaction, cardRenderOptions.signCallback, route) }, sendOpts).then(() => {
       sentInteractionSignatures.add(interaction.signature);
       log.info("agent-live", "interaction-card-sent", { scope, route });
-    }).catch(
-      (err) => log.warn("agent-live", "interaction-card-failed", {
+    }).catch(async (err) => {
+      log.warn("agent-live", "interaction-card-failed", {
         scope,
         route,
         err: err instanceof Error ? err.message : String(err)
-      })
-    ).finally(() => {
+      });
+      try {
+        await channel.send(
+          chatId,
+          { markdown: liveInteractionFallbackMarkdown(interaction, route) },
+          sendOpts
+        );
+        sentInteractionSignatures.add(interaction.signature);
+        log.info("agent-live", "interaction-text-fallback-sent", { scope, route });
+      } catch (fallbackErr) {
+        log.warn("agent-live", "interaction-text-fallback-failed", {
+          scope,
+          route,
+          err: fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr)
+        });
+      }
+    }).finally(() => {
       pendingInteractionSignatures.delete(interaction.signature);
     });
     interactionSends.push(promise);
@@ -16186,6 +16201,17 @@ ${escapeFence(interaction.prompt)}
       ]
     }
   };
+}
+function liveInteractionFallbackMarkdown(interaction, inputRoute) {
+  const title = inputRoute === "live" ? "live CLI \u6B63\u5728\u7B49\u5F85\u9009\u62E9" : "agent \u6B63\u5728\u7B49\u5F85\u8F93\u5165";
+  const choices = interaction.buttons.map((button2) => button2.input).join(" / ");
+  return [
+    `${title}\uFF08\u4EA4\u4E92\u5361\u7247\u53D1\u9001\u5931\u8D25\uFF0C\u5DF2\u9000\u56DE\u6587\u672C\uFF09\uFF1A`,
+    "```",
+    escapeFence(interaction.prompt),
+    "```",
+    choices ? `\u53EF\u76F4\u63A5\u56DE\u590D\uFF1A${choices}` : ""
+  ].filter(Boolean).join("\n");
 }
 function liveInteractionCardForText(text, signCallback, inputRoute = "live", skipSignatures) {
   if (!looksLikeAgentPicker(text)) return void 0;
