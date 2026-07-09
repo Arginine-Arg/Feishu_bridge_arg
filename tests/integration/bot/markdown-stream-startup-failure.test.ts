@@ -152,6 +152,68 @@ describe('markdown stream startup failures', () => {
     expect(buttonLabels(content?.card)).toEqual(['1', '2', 'enter', 'esc']);
   });
 
+  it('does not merge rapid native live commands into an ordinary prompt', async () => {
+    const h = await createHarness({
+      stream: async () => {
+        throw new Error('native live picker output should not use stream');
+      },
+    });
+    h.profileConfig.preferences = {
+      ...(h.profileConfig.preferences ?? {}),
+      messageReply: 'markdown',
+    };
+    h.agent.setEvents([
+      [
+        {
+          type: 'text',
+          delta: [
+            'Select Model and Effort',
+            '',
+            '› 1. gpt-5.5 (current)',
+            '2. gpt-5.4',
+            'Press enter to confirm or esc to go back',
+          ].join('\n'),
+        },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+      [
+        {
+          type: 'text',
+          delta: [
+            'Select Reasoning Level for gpt-5.5',
+            '',
+            '1. Low',
+            '2. Medium',
+            '› 3. High',
+            'Press enter to confirm or esc to go back',
+          ].join('\n'),
+        },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+    ]);
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_model', '/codex /model'));
+    await h.channel.handlers.message?.(message('om_choice', '/codex 1'));
+    await waitFor(() => h.agent.runOptions.length === 2 && h.channel.sent.length === 2, 4000);
+
+    expect(h.agent.runOptions.map((opts) => opts.prompt)).toEqual(['/model', '1']);
+    expect(h.agent.runOptions.map((opts) => opts.liveInputMode)).toEqual(['command', 'control']);
+    expect(buttonLabels((h.channel.sent[0]?.content as { card?: unknown }).card)).toEqual([
+      '1',
+      '2',
+      'enter',
+      'esc',
+    ]);
+    expect(buttonLabels((h.channel.sent[1]?.content as { card?: unknown }).card)).toEqual([
+      '1',
+      '2',
+      '3',
+      'enter',
+      'esc',
+    ]);
+  });
+
   it('does not leave the IM queue blocked when the agent exits before stream producer starts', async () => {
     const h = await createHarness();
     await startTestBridge(h);

@@ -321,23 +321,33 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
             threadId: firstMsg.threadId,
           });
         }
-        await runAgentBatch({
-          channel,
-          executor,
-          sessions,
-          sessionCatalog,
-          workspaces,
-          media,
-          batch,
-          controls,
-          cotClient,
-          callbackAuth,
-          activePolicyFingerprints,
-          lastRunModelByScope,
-          liveInteractionByScope,
-          scope,
-          mode,
-        });
+        const runBatches = splitNativeLiveBatches(batch);
+        if (runBatches.length > 1) {
+          log.info('flush', 'split-native-live-batch', {
+            scope,
+            batchSize: batch.length,
+            runBatches: runBatches.length,
+          });
+        }
+        for (const runBatch of runBatches) {
+          await runAgentBatch({
+            channel,
+            executor,
+            sessions,
+            sessionCatalog,
+            workspaces,
+            media,
+            batch: runBatch,
+            controls,
+            cotClient,
+            callbackAuth,
+            activePolicyFingerprints,
+            lastRunModelByScope,
+            liveInteractionByScope,
+            scope,
+            mode,
+          });
+        }
       } catch (err) {
         log.fail('flush', err);
       } finally {
@@ -714,19 +724,17 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   // persistent CLI; picker controls go there only while this scope is known to
   // be inside a picker. Ordinary chat stays on turn-mode runs instead of being
   // typed into a TUI.
-  const agentMsg =
-    (route.forceNative || getAgentSessionMode(controls.cfg) === 'live') &&
-    isNativeAgentInputText(route.msg.content, liveInteractionByScope.has(scope))
+  const agentMsg = route.forceNative
+    ? markNativeAgentCommand(route.msg, route.nativeMode ?? 'command')
+    : getAgentSessionMode(controls.cfg) === 'live' &&
+        isNativeAgentInputText(route.msg.content, liveInteractionByScope.has(scope))
       ? markNativeAgentCommand(
           route.msg,
-          route.nativeMode ??
-            (route.forceNative
-              ? 'command'
-              : route.msg.content.trimStart().startsWith('/')
-                ? 'command'
-                : liveInteractionByScope.has(scope)
-                  ? 'control'
-                  : undefined),
+          route.msg.content.trimStart().startsWith('/')
+            ? 'command'
+            : liveInteractionByScope.has(scope)
+              ? 'control'
+              : undefined,
         )
       : route.msg;
   const size = pending.push(scope, agentMsg);
@@ -808,6 +816,27 @@ function isNativeAgentInputText(text: string, pickerActive: boolean): boolean {
 function isLivePickerInput(text: string): boolean {
   const trimmed = text.trim();
   return isLiveControlInput(trimmed) || /^\d{1,2}$/u.test(trimmed) || /^(?:y|yes|n|no)$/iu.test(trimmed);
+}
+
+function splitNativeLiveBatches(batch: NormalizedMessage[]): NormalizedMessage[][] {
+  const out: NormalizedMessage[][] = [];
+  let ordinary: NormalizedMessage[] = [];
+  const flushOrdinary = (): void => {
+    if (ordinary.length === 0) return;
+    out.push(ordinary);
+    ordinary = [];
+  };
+
+  for (const msg of batch) {
+    if (isForceLiveAgentCommandMessage(msg)) {
+      flushOrdinary();
+      out.push([msg]);
+    } else {
+      ordinary.push(msg);
+    }
+  }
+  flushOrdinary();
+  return out;
 }
 
 interface LiveInteractionState {

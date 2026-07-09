@@ -14804,23 +14804,33 @@ async function startChannel(deps) {
             threadId: firstMsg.threadId
           });
         }
-        await runAgentBatch({
-          channel,
-          executor,
-          sessions,
-          sessionCatalog,
-          workspaces,
-          media,
-          batch,
-          controls,
-          cotClient,
-          callbackAuth,
-          activePolicyFingerprints,
-          lastRunModelByScope,
-          liveInteractionByScope,
-          scope,
-          mode
-        });
+        const runBatches = splitNativeLiveBatches(batch);
+        if (runBatches.length > 1) {
+          log.info("flush", "split-native-live-batch", {
+            scope,
+            batchSize: batch.length,
+            runBatches: runBatches.length
+          });
+        }
+        for (const runBatch of runBatches) {
+          await runAgentBatch({
+            channel,
+            executor,
+            sessions,
+            sessionCatalog,
+            workspaces,
+            media,
+            batch: runBatch,
+            controls,
+            cotClient,
+            callbackAuth,
+            activePolicyFingerprints,
+            lastRunModelByScope,
+            liveInteractionByScope,
+            scope,
+            mode
+          });
+        }
       } catch (err) {
         log.fail("flush", err);
       } finally {
@@ -15107,9 +15117,9 @@ async function intakeMessage(deps) {
       return;
     }
   }
-  const agentMsg = (route.forceNative || getAgentSessionMode(controls.cfg) === "live") && isNativeAgentInputText(route.msg.content, liveInteractionByScope.has(scope)) ? markNativeAgentCommand(
+  const agentMsg = route.forceNative ? markNativeAgentCommand(route.msg, route.nativeMode ?? "command") : getAgentSessionMode(controls.cfg) === "live" && isNativeAgentInputText(route.msg.content, liveInteractionByScope.has(scope)) ? markNativeAgentCommand(
     route.msg,
-    route.nativeMode ?? (route.forceNative ? "command" : route.msg.content.trimStart().startsWith("/") ? "command" : liveInteractionByScope.has(scope) ? "control" : void 0)
+    route.msg.content.trimStart().startsWith("/") ? "command" : liveInteractionByScope.has(scope) ? "control" : void 0
   ) : route.msg;
   const size = pending.push(scope, agentMsg);
   log.info("intake", "queued", { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
@@ -15162,6 +15172,25 @@ function isNativeAgentInputText(text, pickerActive) {
 function isLivePickerInput(text) {
   const trimmed = text.trim();
   return isLiveControlInput(trimmed) || /^\d{1,2}$/u.test(trimmed) || /^(?:y|yes|n|no)$/iu.test(trimmed);
+}
+function splitNativeLiveBatches(batch) {
+  const out = [];
+  let ordinary = [];
+  const flushOrdinary = () => {
+    if (ordinary.length === 0) return;
+    out.push(ordinary);
+    ordinary = [];
+  };
+  for (const msg of batch) {
+    if (isForceLiveAgentCommandMessage(msg)) {
+      flushOrdinary();
+      out.push([msg]);
+    } else {
+      ordinary.push(msg);
+    }
+  }
+  flushOrdinary();
+  return out;
 }
 async function runAgentBatch(deps) {
   const {
