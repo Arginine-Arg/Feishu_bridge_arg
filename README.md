@@ -22,7 +22,7 @@ For a product walkthrough, see the [Feishu document](https://larkcommunity.feish
 
 ## Prerequisites
 
-- Node.js **>= 20.12.0**
+- Node.js **>= 20.12.0 and < 25**. Node 22 LTS is recommended for deployment; avoid very new non-LTS runtimes such as Node 25 on production hosts.
 - At least one local agent installed and logged in:
   - Claude Code: `claude`, see https://docs.anthropic.com/en/docs/claude-code/quickstart
   - Codex CLI: `codex`, see https://developers.openai.com/codex/cli
@@ -38,9 +38,126 @@ npm i -g git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git
 npm i -g git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git
 ```
 
-> The repo ships a prebuilt `dist/`, so **install works out of the box — no local build needed** (requires Node ≥ 20.12). If later published to npm: `npm i -g arg-bridge`. Developing from source: `npm i && npm run build`.
+> The repo ships a prebuilt `dist/`, so **install works out of the box — no local build needed** (requires Node ≥ 20.12 and < 25; Node 22 LTS recommended). If later published to npm: `npm i -g arg-bridge`. Developing from source: `npm i && npm run build`.
 >
 > **Migrating from upstream**: stop/unregister the old service first (`lark-channel-bridge stop && lark-channel-bridge unregister`, per profile), install this fork, then use `arg-bridge start` to register the new service. All state lives in `~/.lark-channel/` and is preserved — the same Feishu app / bot reconnects, no re-scan.
+
+## Installation Troubleshooting
+
+The package metadata is intentionally simple: the package is named `arg-bridge`, the primary binary is `arg-bridge`, and `lark-channel-bridge` remains as a compatibility alias. `npm pack` includes `bin/arg-bridge.mjs` and the prebuilt `dist/cli.js`. Most install failures are caused by the target machine's SSH, npm, Node, global-prefix, or shell environment.
+
+### 1. GitHub SSH permission denied
+
+If installing from a private GitHub repo fails with:
+
+```text
+git@github.com: Permission denied (publickey).
+fatal: Could not read from remote repository.
+```
+
+Check which key SSH is using:
+
+```bash
+ssh -T git@github.com
+ls -la ~/.ssh
+```
+
+If needed, configure a dedicated key in `~/.ssh/config`:
+
+```sshconfig
+Host github-arg
+  HostName github.com
+  User git
+  IdentityFile ~/.ssh/arg_githubkey
+  IdentitiesOnly yes
+```
+
+Then install or clone through that host alias:
+
+```bash
+npm i -g git+ssh://git@github-arg/Arginine-Arg/Feishu_bridge_arg.git
+git clone git@github-arg:Arginine-Arg/Feishu_bridge_arg.git
+```
+
+### 2. Clear broken global installs
+
+If npm failed midway, it can leave broken command symlinks or package directories:
+
+```bash
+rm -f "$(npm prefix -g)/bin/arg-bridge" "$(npm prefix -g)/bin/lark-channel-bridge"
+rm -rf "$(npm root -g)/arg-bridge" "$(npm root -g)/lark-channel-bridge"
+hash -r
+```
+
+Then reinstall.
+
+### 3. `EEXIST` during global install
+
+If npm reports `EEXIST: file already exists`, an older install already owns the command name. Remove it first:
+
+```bash
+npm uninstall -g arg-bridge
+npm uninstall -g lark-channel-bridge
+```
+
+Then reinstall this fork.
+
+### 4. npm lifecycle script `ENOENT`
+
+If npm fails around a dependency lifecycle script with messages such as:
+
+```text
+npm error syscall spawn sh
+npm error syscall spawn /bin/sh
+```
+
+this is usually a local npm/Node/global-directory issue, especially with very new Node versions or NAS-mounted global directories. Prefer Node 22 LTS for deployment. As a workaround:
+
+```bash
+npm config set script-shell /bin/sh
+npm i -g --ignore-scripts git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git
+```
+
+### 5. Install from a local tarball
+
+If git-based global install is unstable:
+
+```bash
+git clone git@github.com:Arginine-Arg/Feishu_bridge_arg.git
+cd Feishu_bridge_arg
+npm pack
+npm i -g --ignore-scripts ./arg-bridge-0.5.5.tgz
+hash -r
+arg-bridge --help
+arg-bridge --version
+```
+
+### 6. PATH and shell command cache
+
+If the command exists under npm's global bin directory but the shell cannot find it:
+
+```bash
+npm prefix -g
+echo "$PATH"
+hash -r
+```
+
+Temporarily add npm's global bin directory to `PATH`:
+
+```bash
+export PATH="$(npm prefix -g)/bin:$PATH"
+```
+
+For a permanent fix, add that line or the concrete Node bin directory to `~/.bashrc`.
+
+### 7. Verify the install
+
+```bash
+command -v arg-bridge
+arg-bridge --help
+arg-bridge --version
+command -v lark-channel-bridge
+```
 
 ## Attribution
 

@@ -22,7 +22,7 @@
 
 ## 前置条件
 
-- Node.js **>= 20.12.0**
+- Node.js **>= 20.12.0 且 < 25**。部署推荐 Node 22 LTS；生产机器不建议使用 Node 25 这类过新的非 LTS 版本。
 - 本机至少安装并登录一个 agent：
   - Claude Code：`claude`，安装说明：https://docs.anthropic.com/en/docs/claude-code/quickstart
   - Codex CLI：`codex`，安装说明：https://developers.openai.com/codex/cli
@@ -38,10 +38,127 @@ npm i -g git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git
 npm i -g git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git
 ```
 
-> 仓库已内置预构建的 `dist/`,**安装即用,不需要本地构建**(需要 Node ≥ 20.12)。日后若发布到 npm,可 `npm i -g arg-bridge`。
+> 仓库已内置预构建的 `dist/`,**安装即用,不需要本地构建**(需要 Node ≥ 20.12 且 < 25；推荐 Node 22 LTS)。日后若发布到 npm,可 `npm i -g arg-bridge`。
 > 从源码开发:`npm i && npm run build`。
 >
 > **从原版迁移**:先用旧命令停止并注销旧服务：`lark-channel-bridge stop && lark-channel-bridge unregister`(每个 profile 都要),再按上面装本 fork,然后用 `arg-bridge start` 注册新后台服务。所有状态在 `~/.lark-channel/`,原样保留——同一个飞书 app、同一个 bot 自动重连,无需重新扫码。
+
+## 安装排障
+
+项目打包配置本身比较直接：包名是 `arg-bridge`，主命令是 `arg-bridge`，`lark-channel-bridge` 只是迁移期兼容别名；`npm pack` 会包含 `bin/arg-bridge.mjs` 和预构建的 `dist/cli.js`。多数安装失败来自目标机器环境：SSH key、npm 半安装残留、Node/npm 版本、NAS 全局目录、`PATH` 或 shell 命令缓存。
+
+### 1. GitHub SSH permission denied
+
+如果从私有 GitHub 仓库安装时报：
+
+```text
+git@github.com: Permission denied (publickey).
+fatal: Could not read from remote repository.
+```
+
+先确认 SSH 使用的是正确 key：
+
+```bash
+ssh -T git@github.com
+ls -la ~/.ssh
+```
+
+必要时在 `~/.ssh/config` 配一个专用 key：
+
+```sshconfig
+Host github-arg
+  HostName github.com
+  User git
+  IdentityFile ~/.ssh/arg_githubkey
+  IdentitiesOnly yes
+```
+
+然后用这个 host alias 安装或 clone：
+
+```bash
+npm i -g git+ssh://git@github-arg/Arginine-Arg/Feishu_bridge_arg.git
+git clone git@github-arg:Arginine-Arg/Feishu_bridge_arg.git
+```
+
+### 2. 清理失败安装留下的全局残留
+
+npm 中途失败后，可能留下坏的命令软链或包目录：
+
+```bash
+rm -f "$(npm prefix -g)/bin/arg-bridge" "$(npm prefix -g)/bin/lark-channel-bridge"
+rm -rf "$(npm root -g)/arg-bridge" "$(npm root -g)/lark-channel-bridge"
+hash -r
+```
+
+然后重新安装。
+
+### 3. 全局安装时报 `EEXIST`
+
+如果 npm 报 `EEXIST: file already exists`，说明旧安装已经占用了命令名。先卸载旧包：
+
+```bash
+npm uninstall -g arg-bridge
+npm uninstall -g lark-channel-bridge
+```
+
+再重新安装本 fork。
+
+### 4. npm lifecycle script `ENOENT`
+
+如果 npm 在依赖 lifecycle script 附近失败，例如：
+
+```text
+npm error syscall spawn sh
+npm error syscall spawn /bin/sh
+```
+
+通常是本机 npm/Node/全局目录问题，尤其常见于过新的 Node 版本或 NAS 挂载的全局目录。部署优先用 Node 22 LTS。临时绕过方式：
+
+```bash
+npm config set script-shell /bin/sh
+npm i -g --ignore-scripts git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git
+```
+
+### 5. 从本地 tarball 安装
+
+如果 git-based 全局安装不稳定：
+
+```bash
+git clone git@github.com:Arginine-Arg/Feishu_bridge_arg.git
+cd Feishu_bridge_arg
+npm pack
+npm i -g --ignore-scripts ./arg-bridge-0.5.5.tgz
+hash -r
+arg-bridge --help
+arg-bridge --version
+```
+
+### 6. PATH 和 shell 缓存
+
+如果命令已经在 npm 全局 bin 目录下，但 shell 找不到：
+
+```bash
+npm prefix -g
+echo "$PATH"
+hash -r
+```
+
+临时把 npm 全局 bin 加到 `PATH`：
+
+```bash
+export PATH="$(npm prefix -g)/bin:$PATH"
+```
+
+长期修复可以把这行，或实际 Node bin 目录，写进 `~/.bashrc`。
+
+### 7. 验证安装
+
+```bash
+command -v arg-bridge
+arg-bridge --help
+arg-bridge --version
+command -v lark-channel-bridge
+```
 
 ## 来源说明
 
