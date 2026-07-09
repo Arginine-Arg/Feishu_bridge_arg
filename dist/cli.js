@@ -16023,7 +16023,7 @@ function liveInputModeForBatch(batch, nativeCommand) {
   return nativeCommand.trimStart().startsWith("/") ? "command" : "control";
 }
 function looksLikeAgentPicker(text) {
-  return /press\s+enter\s+to\s+(?:confirm|continue)/i.test(text) || /esc\s+to\s+(?:go\s+back|cancel)/i.test(text) || /\b(?:y\/n|yes\/no|no\/yes)\b/i.test(text) || /\bselect\s+(?:a\s+)?(?:model|option)\b/i.test(text) || /(?:↑|↓|up\/down|arrow keys?|use .*arrows?)/i.test(text) || /(?:do you want to|would you like to|shall i|waiting for (?:user|your) (?:input|confirmation)|requires? (?:approval|confirmation)|approve|allow).*(?:\?|proceed|continue|run|execute|apply|approve|allow)/i.test(
+  return /press\s+enter\s+to\s+(?:confirm|continue)/i.test(text) || /esc\s+to\s+(?:go\s+back|cancel)/i.test(text) || /\b(?:y\/n|yes\/no|no\/yes)\b/i.test(text) || /\bselect\s+(?:a\s+)?(?:model|option)\b/i.test(text) || /\bchoose an action\b/i.test(text) || /(?:^|\n)\s*(?:[›>▸*+-]\s*)?\d{1,2}[.)、:\s-]+\S/u.test(text) && /\b(?:choose|select|enable|disable|skills?|model|effort|action)\b/i.test(text) || /(?:↑|↓|up\/down|arrow keys?|use .*arrows?)/i.test(text) || /(?:do you want to|would you like to|shall i|waiting for (?:user|your) (?:input|confirmation)|requires? (?:approval|confirmation)|approve|allow).*(?:\?|proceed|continue|run|execute|apply|approve|allow)/i.test(
     text
   ) || /(?:请选择|等待(?:你|用户).*(?:输入|选择|确认)|需要(?:你|用户).*(?:选择|确认)|确认.*(?:继续|执行)|取消|返回)/i.test(
     text
@@ -16044,6 +16044,7 @@ function detectLiveInteraction(text) {
     add(match[1], match[1]);
     if (buttons.length >= 8) break;
   }
+  const hasNumberedChoices = buttons.length > 0;
   if (/\b(?:y\/n|yes\/no|no\/yes)\b|(?:\[y\/n\]|\(y\/n\))/i.test(prompt) || /(?:do you want to|would you like to|shall i|requires? (?:approval|confirmation)|approve|allow).*(?:\?|proceed|continue|run|execute|apply|approve|allow)/i.test(
     prompt
   )) {
@@ -16054,6 +16055,10 @@ function detectLiveInteraction(text) {
     add("enter", "enter");
   }
   if (/esc\s+to\s+(?:go\s+back|cancel)|escape\s+to\s+cancel|取消|返回/i.test(prompt)) {
+    add("esc", "esc");
+  }
+  if (hasNumberedChoices && looksLikeAgentPicker(prompt)) {
+    add("enter", "enter");
     add("esc", "esc");
   }
   if (buttons.length === 0 && looksLikeAgentPicker(prompt)) {

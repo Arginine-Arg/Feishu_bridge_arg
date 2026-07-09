@@ -1940,6 +1940,9 @@ function looksLikeAgentPicker(text: string): boolean {
     /esc\s+to\s+(?:go\s+back|cancel)/i.test(text) ||
     /\b(?:y\/n|yes\/no|no\/yes)\b/i.test(text) ||
     /\bselect\s+(?:a\s+)?(?:model|option)\b/i.test(text) ||
+    /\bchoose an action\b/i.test(text) ||
+    /(?:^|\n)\s*(?:[›>▸*+-]\s*)?\d{1,2}[.)、:\s-]+\S/u.test(text) &&
+      /\b(?:choose|select|enable|disable|skills?|model|effort|action)\b/i.test(text) ||
     /(?:↑|↓|up\/down|arrow keys?|use .*arrows?)/i.test(text) ||
     /(?:do you want to|would you like to|shall i|waiting for (?:user|your) (?:input|confirmation)|requires? (?:approval|confirmation)|approve|allow).*(?:\?|proceed|continue|run|execute|apply|approve|allow)/i.test(
       text,
@@ -1984,6 +1987,7 @@ function detectLiveInteraction(text: string): LiveInteractionPrompt | undefined 
     add(match[1]!, match[1]!);
     if (buttons.length >= 8) break;
   }
+  const hasNumberedChoices = buttons.length > 0;
 
   if (
     /\b(?:y\/n|yes\/no|no\/yes)\b|(?:\[y\/n\]|\(y\/n\))/i.test(prompt) ||
@@ -1998,6 +2002,10 @@ function detectLiveInteraction(text: string): LiveInteractionPrompt | undefined 
     add('enter', 'enter');
   }
   if (/esc\s+to\s+(?:go\s+back|cancel)|escape\s+to\s+cancel|取消|返回/i.test(prompt)) {
+    add('esc', 'esc');
+  }
+  if (hasNumberedChoices && looksLikeAgentPicker(prompt)) {
+    add('enter', 'enter');
     add('esc', 'esc');
   }
   if (buttons.length === 0 && looksLikeAgentPicker(prompt)) {

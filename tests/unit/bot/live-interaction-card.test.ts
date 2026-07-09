@@ -110,8 +110,6 @@ describe('liveInteractionCard', () => {
         '',
         '› 1. List skills            Tip: press @ to open this list directly.',
         '2. Enable/Disable Skills  Enable or disable skills.',
-        '',
-        'Press enter to confirm or esc to go back',
       ].join('\n'),
       (action) => {
         expect(action).toBe(LIVE_INPUT_CALLBACK_ACTION);

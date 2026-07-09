@@ -116,6 +116,42 @@ describe('markdown stream startup failures', () => {
     expect(buttonLabels(content?.card)).toEqual(['1', '2', 'enter', 'esc']);
   });
 
+  it('sends native live skills picker output as a final button card without explicit enter hint', async () => {
+    const h = await createHarness({
+      stream: async () => {
+        throw new Error('native live skills picker output should not use stream');
+      },
+    });
+    h.profileConfig.preferences = {
+      ...(h.profileConfig.preferences ?? {}),
+      messageReply: 'markdown',
+    };
+    h.agent.setEvents([
+      [
+        {
+          type: 'text',
+          delta: [
+            'Skills',
+            'Choose an action',
+            '',
+            '1. List skills            Tip: press @ to open this list directly.',
+            '› 2. Enable/Disable Skills  Enable or disable skills.',
+          ].join('\n'),
+        },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+    ]);
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_skills', '/codex /skills'));
+    await waitFor(() => h.channel.sent.length === 1);
+
+    const content = h.channel.sent.at(-1)?.content as { card?: unknown } | undefined;
+    expect(content?.card).toBeDefined();
+    expect(JSON.stringify(content?.card)).toContain('live CLI 正在等待选择');
+    expect(buttonLabels(content?.card)).toEqual(['1', '2', 'enter', 'esc']);
+  });
+
   it('does not leave the IM queue blocked when the agent exits before stream producer starts', async () => {
     const h = await createHarness();
     await startTestBridge(h);
