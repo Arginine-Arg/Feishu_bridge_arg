@@ -1118,7 +1118,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       if (!wasActive) log.info('agent-live', 'picker-enter', { scope });
     }
     if (opts.sendInteractionCard === false) return;
-    if (!interaction) return;
+    if (!interaction || !cardRenderOptions.signCallback) return;
     if (
       sentInteractionSignatures.has(interaction.signature) ||
       pendingInteractionSignatures.has(interaction.signature)
@@ -1595,11 +1595,27 @@ async function sendFinalReply(input: {
       input.liveInteractionInputRoute ?? 'live',
       input.skipLiveInteractionSignatures,
     );
-    const result = await input.channel.send(
-      input.chatId,
-      { card: liveCard },
-      input.sendOpts,
-    );
+    let result: { messageId?: string } | undefined;
+    try {
+      result = await input.channel.send(
+        input.chatId,
+        { card: liveCard },
+        input.sendOpts,
+      );
+    } catch (err) {
+      log.warn('outbound', 'card-fallback', {
+        scope: input.scope,
+        err: err instanceof Error ? err.message : String(err),
+      });
+      if (!body.trim()) return;
+      result = await input.channel.send(
+        input.chatId,
+        { markdown: body },
+        input.sendOpts,
+      );
+      log.info('outbound', 'sent', outboundLogFields(input, 'markdown', body, result));
+      return;
+    }
     log.info(
       'outbound',
       'sent',
@@ -2093,23 +2109,22 @@ function detectLiveInteraction(text: string): LiveInteractionPrompt | undefined 
 
 export function liveInteractionCard(
   interaction: LiveInteractionPrompt,
-  signCallback?: (action: string) => string,
+  signCallback: (action: string) => string,
   inputRoute: LiveInteractionInputRoute = 'live',
 ): object {
   const actionName =
     inputRoute === 'live' ? LIVE_INPUT_CALLBACK_ACTION : AGENT_INPUT_CALLBACK_ACTION;
   const cmd = inputRoute === 'live' ? 'live.input' : 'agent.input';
-  const actions = interaction.buttons.map((button) => {
+  const buttons = interaction.buttons.map((button) => {
     const value: Record<string, unknown> = { cmd, input: button.input };
-    if (signCallback) {
-      value[BRIDGE_CALLBACK_MARKER] = true;
-      value.bridge_token = signCallback(actionName);
-    }
+    value[BRIDGE_CALLBACK_MARKER] = true;
+    value.bridge_token = signCallback(actionName);
     return {
       tag: 'button',
       text: { tag: 'plain_text', content: button.label },
       type: button.input === 'yes' || button.input === 'enter' ? 'primary' : 'default',
-      ...(signCallback ? { behaviors: [{ type: 'callback', value }] } : {}),
+      width: 'default',
+      behaviors: [{ type: 'callback', value }],
     };
   });
   return {
@@ -2124,10 +2139,7 @@ export function liveInteractionCard(
           tag: 'markdown',
           content: `${inputRoute === 'live' ? 'live CLI 正在等待选择' : 'agent 正在等待输入'}：\n\`\`\`\n${escapeFence(interaction.prompt)}\n\`\`\``,
         },
-        {
-          tag: 'action',
-          actions,
-        },
+        ...buttons,
       ],
     },
   };
@@ -2156,6 +2168,7 @@ export function liveInteractionCardForText(
   inputRoute: LiveInteractionInputRoute = 'live',
   skipSignatures?: ReadonlySet<string>,
 ): object | undefined {
+  if (!signCallback) return undefined;
   if (!looksLikeAgentPicker(text)) return undefined;
   const interaction = detectLiveInteraction(text);
   if (!interaction || skipSignatures?.has(interaction.signature)) return undefined;

@@ -15402,7 +15402,7 @@ ${evt.delta}`.slice(-4e3);
       if (!wasActive) log.info("agent-live", "picker-enter", { scope });
     }
     if (opts.sendInteractionCard === false) return;
-    if (!interaction) return;
+    if (!interaction || !cardRenderOptions.signCallback) return;
     if (sentInteractionSignatures.has(interaction.signature) || pendingInteractionSignatures.has(interaction.signature)) {
       return;
     }
@@ -15817,11 +15817,27 @@ async function sendFinalReply(input) {
       input.liveInteractionInputRoute ?? "live",
       input.skipLiveInteractionSignatures
     );
-    const result = await input.channel.send(
-      input.chatId,
-      { card: liveCard },
-      input.sendOpts
-    );
+    let result;
+    try {
+      result = await input.channel.send(
+        input.chatId,
+        { card: liveCard },
+        input.sendOpts
+      );
+    } catch (err) {
+      log.warn("outbound", "card-fallback", {
+        scope: input.scope,
+        err: err instanceof Error ? err.message : String(err)
+      });
+      if (!body.trim()) return;
+      result = await input.channel.send(
+        input.chatId,
+        { markdown: body },
+        input.sendOpts
+      );
+      log.info("outbound", "sent", outboundLogFields(input, "markdown", body, result));
+      return;
+    }
     log.info(
       "outbound",
       "sent",
@@ -16166,17 +16182,16 @@ ${buttons.map((button2) => button2.input).join("|")}`.slice(0, 500),
 function liveInteractionCard(interaction, signCallback, inputRoute = "live") {
   const actionName = inputRoute === "live" ? LIVE_INPUT_CALLBACK_ACTION : AGENT_INPUT_CALLBACK_ACTION;
   const cmd = inputRoute === "live" ? "live.input" : "agent.input";
-  const actions2 = interaction.buttons.map((button2) => {
+  const buttons = interaction.buttons.map((button2) => {
     const value = { cmd, input: button2.input };
-    if (signCallback) {
-      value[BRIDGE_CALLBACK_MARKER] = true;
-      value.bridge_token = signCallback(actionName);
-    }
+    value[BRIDGE_CALLBACK_MARKER] = true;
+    value.bridge_token = signCallback(actionName);
     return {
       tag: "button",
       text: { tag: "plain_text", content: button2.label },
       type: button2.input === "yes" || button2.input === "enter" ? "primary" : "default",
-      ...signCallback ? { behaviors: [{ type: "callback", value }] } : {}
+      width: "default",
+      behaviors: [{ type: "callback", value }]
     };
   });
   return {
@@ -16194,10 +16209,7 @@ function liveInteractionCard(interaction, signCallback, inputRoute = "live") {
 ${escapeFence(interaction.prompt)}
 \`\`\``
         },
-        {
-          tag: "action",
-          actions: actions2
-        }
+        ...buttons
       ]
     }
   };
@@ -16214,6 +16226,7 @@ function liveInteractionFallbackMarkdown(interaction, inputRoute) {
   ].filter(Boolean).join("\n");
 }
 function liveInteractionCardForText(text, signCallback, inputRoute = "live", skipSignatures) {
+  if (!signCallback) return void 0;
   if (!looksLikeAgentPicker(text)) return void 0;
   const interaction = detectLiveInteraction(text);
   if (!interaction || skipSignatures?.has(interaction.signature)) return void 0;

@@ -446,6 +446,7 @@ async function createHarness(options: {
 }
 
 async function startTestBridge(h: {
+  tmp: TmpProfile;
   profileConfig: ReturnType<typeof createDefaultProfileConfig>;
   agent: FakeAgentAdapter;
   sessions: SessionStore;
@@ -458,6 +459,11 @@ async function startTestBridge(h: {
     sessions: h.sessions,
     workspaces: h.workspaces,
     controls: h.controls,
+    appPaths: {
+      secretsFile: join(h.tmp.profile, 'secrets.enc'),
+      keystoreSaltFile: join(h.tmp.profile, '.keystore.salt'),
+      mediaDir: join(h.tmp.profile, 'media'),
+    },
   });
   cleanups.push(() => bridge.disconnect());
 }

@@ -34,6 +34,22 @@ function buttonValues(card: unknown): Array<Record<string, unknown>> {
   return values;
 }
 
+function tags(card: unknown): string[] {
+  const out: string[] = [];
+  const walk = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      node.forEach(walk);
+      return;
+    }
+    if (!node || typeof node !== 'object') return;
+    const obj = node as Record<string, unknown>;
+    if (typeof obj.tag === 'string') out.push(obj.tag);
+    for (const value of Object.values(obj)) walk(value);
+  };
+  walk(card);
+  return out;
+}
+
 describe('liveInteractionCard', () => {
   it('signs each live input button as a bridge callback', () => {
     let n = 0;
@@ -61,6 +77,8 @@ describe('liveInteractionCard', () => {
       expect(value.cmd).toBe('live.input');
       expect(value[BRIDGE_CALLBACK_MARKER]).toBe(true);
     }
+    expect(tags(card)).toContain('button');
+    expect(tags(card)).not.toContain('action');
   });
 
   it('renders model picker text as signed live input controls', () => {
