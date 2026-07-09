@@ -79,6 +79,43 @@ afterEach(async () => {
 });
 
 describe('markdown stream startup failures', () => {
+  it('sends native live picker output as a final button card without streaming', async () => {
+    const h = await createHarness({
+      stream: async () => {
+        throw new Error('native live picker output should not use stream');
+      },
+    });
+    h.profileConfig.preferences = {
+      ...(h.profileConfig.preferences ?? {}),
+      messageReply: 'markdown',
+    };
+    h.agent.setEvents([
+      [
+        {
+          type: 'text',
+          delta: [
+            'Select Model and Effort',
+            'Access legacy models by running codex -m <model_name> or in your config.toml',
+            '',
+            '› 1. gpt-5.5 (current)',
+            '2. gpt-5.4',
+            'Press enter to confirm or esc to go back',
+          ].join('\n'),
+        },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+    ]);
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_model', '/codex /model'));
+    await waitFor(() => h.channel.sent.length === 1);
+
+    const content = h.channel.sent.at(-1)?.content as { card?: unknown } | undefined;
+    expect(content?.card).toBeDefined();
+    expect(JSON.stringify(content?.card)).toContain('live CLI 正在等待选择');
+    expect(buttonLabels(content?.card)).toEqual(['1', '2', 'enter', 'esc']);
+  });
+
   it('does not leave the IM queue blocked when the agent exits before stream producer starts', async () => {
     const h = await createHarness();
     await startTestBridge(h);
@@ -359,6 +396,25 @@ function lastMarkdown(channel: FakeLarkChannel): string {
   const content = channel.sent.at(-1)?.content as { markdown?: string } | undefined;
   expect(content?.markdown).toBeTypeOf('string');
   return content?.markdown ?? '';
+}
+
+function buttonLabels(card: unknown): string[] {
+  const labels: string[] = [];
+  const walk = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      node.forEach(walk);
+      return;
+    }
+    if (!node || typeof node !== 'object') return;
+    const obj = node as Record<string, unknown>;
+    if (obj.tag === 'button') {
+      const text = obj.text as { content?: unknown } | undefined;
+      if (typeof text?.content === 'string') labels.push(text.content);
+    }
+    for (const value of Object.values(obj)) walk(value);
+  };
+  walk(card);
+  return labels;
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 3000): Promise<void> {

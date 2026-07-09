@@ -5890,7 +5890,7 @@ var COMMAND_CLEAR_SETTLE_MS = 500;
 var COMMAND_STARTUP_TIMEOUT_MS = 25e3;
 var COMMAND_IDLE_MS = 2500;
 var COMMAND_NO_OUTPUT_IDLE_MS = 8e3;
-var CONTROL_LITERAL_CONFIRM_DELAY_MS = 350;
+var CONTROL_LITERAL_CONFIRM_DELAY_MS = 900;
 var MAX_TURN_OUTPUT_CHARS = 12e4;
 var DEFAULT_PTY_ROWS = "48";
 var DEFAULT_PTY_COLUMNS = "120";
@@ -7054,9 +7054,12 @@ function stripContextCompactedNotice(input) {
       skippingCompactWarning = true;
       continue;
     }
+    if (/^⚠\s*Heads up:/i.test(trimmed)) {
+      skippingCompactWarning = true;
+      continue;
+    }
     if (skippingCompactWarning) {
       if (!trimmed) continue;
-      if (/^⚠\s*Heads up:/i.test(trimmed)) continue;
       if (/^(?:cause the model to be less accurate|possible to keep threads small and targeted)/i.test(trimmed)) {
         continue;
       }
@@ -15334,7 +15337,7 @@ async function runAgentBatch(deps) {
   const pendingInteractionSignatures = /* @__PURE__ */ new Set();
   const interactionSends = [];
   let interactionTextBuffer = "";
-  const observeLiveEvent = (evt) => {
+  const observeLiveEvent = (evt, opts = {}) => {
     if (evt.type !== "text") return;
     interactionTextBuffer = `${interactionTextBuffer}
 ${evt.delta}`.slice(-4e3);
@@ -15351,6 +15354,7 @@ ${evt.delta}`.slice(-4e3);
       });
       if (!wasActive) log.info("agent-live", "picker-enter", { scope });
     }
+    if (opts.sendInteractionCard === false) return;
     if (!interaction || !cardRenderOptions.signCallback) return;
     if (sentInteractionSignatures.has(interaction.signature) || pendingInteractionSignatures.has(interaction.signature)) {
       return;
@@ -15433,6 +15437,29 @@ ${evt.delta}`.slice(-4e3);
   }) : Promise.resolve();
   const reactionPromise = cotEnabled || replyMode === "card" ? void 0 : addWorkingReaction(channel, lastMsg.messageId);
   try {
+    if (useLiveSession && nativeCommand) {
+      const finalState = await processAgentStream(
+        handle,
+        eventStream,
+        scope,
+        idleTimeoutMs,
+        recordSession,
+        async () => {
+        },
+        (evt) => observeLiveEvent(evt, { sendInteractionCard: false })
+      );
+      await sendFinalReply({
+        channel,
+        chatId,
+        scope,
+        state: prepareStateForReply(finalState),
+        replyMode: "card",
+        sendOpts,
+        cardRenderOptions,
+        liveInteractionInputRoute: "live"
+      });
+      return;
+    }
     if (cotEnabled) {
       const cotPublisher = new CotPublisher({
         client: cotClient,

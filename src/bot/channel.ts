@@ -1072,7 +1072,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const pendingInteractionSignatures = new Set<string>();
   const interactionSends: Promise<void>[] = [];
   let interactionTextBuffer = '';
-  const observeLiveEvent = (evt: AgentEvent): void => {
+  const observeLiveEvent = (evt: AgentEvent, opts: { sendInteractionCard?: boolean } = {}): void => {
     if (evt.type !== 'text') return;
     interactionTextBuffer = `${interactionTextBuffer}\n${evt.delta}`.slice(-4000);
     const pickerLike = looksLikeAgentPicker(interactionTextBuffer);
@@ -1088,6 +1088,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       });
       if (!wasActive) log.info('agent-live', 'picker-enter', { scope });
     }
+    if (opts.sendInteractionCard === false) return;
     if (!interaction || !cardRenderOptions.signCallback) return;
     if (
       sentInteractionSignatures.has(interaction.signature) ||
@@ -1209,6 +1210,29 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     cotEnabled || replyMode === 'card' ? undefined : addWorkingReaction(channel, lastMsg.messageId);
 
   try {
+    if (useLiveSession && nativeCommand) {
+      const finalState = await processAgentStream(
+        handle,
+        eventStream,
+        scope,
+        idleTimeoutMs,
+        recordSession,
+        async () => {},
+        (evt) => observeLiveEvent(evt, { sendInteractionCard: false }),
+      );
+      await sendFinalReply({
+        channel,
+        chatId,
+        scope,
+        state: prepareStateForReply(finalState),
+        replyMode: 'card',
+        sendOpts,
+        cardRenderOptions,
+        liveInteractionInputRoute: 'live',
+      });
+      return;
+    }
+
     if (cotEnabled) {
       const cotPublisher = new CotPublisher({
         client: cotClient,

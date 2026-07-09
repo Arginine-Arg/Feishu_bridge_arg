@@ -49,7 +49,7 @@ const COMMAND_CLEAR_SETTLE_MS = 500;
 const COMMAND_STARTUP_TIMEOUT_MS = 25_000;
 const COMMAND_IDLE_MS = 2_500;
 const COMMAND_NO_OUTPUT_IDLE_MS = 8_000;
-const CONTROL_LITERAL_CONFIRM_DELAY_MS = 350;
+const CONTROL_LITERAL_CONFIRM_DELAY_MS = 900;
 const MAX_TURN_OUTPUT_CHARS = 120_000;
 const DEFAULT_PTY_ROWS = '48';
 const DEFAULT_PTY_COLUMNS = '120';
@@ -1387,9 +1387,12 @@ function stripContextCompactedNotice(input: string): string {
       skippingCompactWarning = true;
       continue;
     }
+    if (/^⚠\s*Heads up:/i.test(trimmed)) {
+      skippingCompactWarning = true;
+      continue;
+    }
     if (skippingCompactWarning) {
       if (!trimmed) continue;
-      if (/^⚠\s*Heads up:/i.test(trimmed)) continue;
       if (/^(?:cause the model to be less accurate|possible to keep threads small and targeted)/i.test(trimmed)) {
         continue;
       }
