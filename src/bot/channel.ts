@@ -724,15 +724,18 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   // persistent CLI; picker controls go there only while this scope is known to
   // be inside a picker. Ordinary chat stays on turn-mode runs instead of being
   // typed into a TUI.
+  const pickerActive = liveInteractionByScope.has(scope);
+  const nativeInputActive =
+    pickerActive || getAgentSessionMode(controls.cfg) === 'live';
   const agentMsg = route.forceNative
     ? markNativeAgentCommand(route.msg, route.nativeMode ?? 'command')
-    : getAgentSessionMode(controls.cfg) === 'live' &&
-        isNativeAgentInputText(route.msg.content, liveInteractionByScope.has(scope))
+    : nativeInputActive &&
+        isNativeAgentInputText(route.msg.content, pickerActive)
       ? markNativeAgentCommand(
           route.msg,
           route.msg.content.trimStart().startsWith('/')
             ? 'command'
-            : liveInteractionByScope.has(scope)
+            : pickerActive
               ? 'control'
               : undefined,
         )
@@ -1101,6 +1104,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const pendingInteractionSignatures = new Set<string>();
   const interactionSends: Promise<void>[] = [];
   let interactionTextBuffer = '';
+  if (useLiveSession && nativeCommand && opensLivePicker(nativeCommand)) {
+    const wasActive = liveInteractionByScope.has(scope);
+    liveInteractionByScope.set(scope, { picker: true, updatedAt: Date.now() });
+    if (!wasActive) log.info('agent-live', 'picker-enter', { scope, input: nativeCommand });
+  }
   const observeLiveEvent = (evt: AgentEvent, opts: { sendInteractionCard?: boolean } = {}): void => {
     if (evt.type !== 'text') return;
     interactionTextBuffer = `${interactionTextBuffer}\n${evt.delta}`.slice(-4000);
@@ -2217,6 +2225,10 @@ function closesLivePicker(input: string): boolean {
     /(?:确认|回车|取消|返回)/u.test(trimmed) ||
     /^[0-9]{1,2}$/u.test(trimmed)
   );
+}
+
+function opensLivePicker(input: string): boolean {
+  return /^\/(?:model|skills|permissions|resume)(?:\s|$)/iu.test(input.trim());
 }
 
 /**

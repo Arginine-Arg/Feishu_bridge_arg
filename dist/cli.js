@@ -15117,9 +15117,11 @@ async function intakeMessage(deps) {
       return;
     }
   }
-  const agentMsg = route.forceNative ? markNativeAgentCommand(route.msg, route.nativeMode ?? "command") : getAgentSessionMode(controls.cfg) === "live" && isNativeAgentInputText(route.msg.content, liveInteractionByScope.has(scope)) ? markNativeAgentCommand(
+  const pickerActive = liveInteractionByScope.has(scope);
+  const nativeInputActive = pickerActive || getAgentSessionMode(controls.cfg) === "live";
+  const agentMsg = route.forceNative ? markNativeAgentCommand(route.msg, route.nativeMode ?? "command") : nativeInputActive && isNativeAgentInputText(route.msg.content, pickerActive) ? markNativeAgentCommand(
     route.msg,
-    route.msg.content.trimStart().startsWith("/") ? "command" : liveInteractionByScope.has(scope) ? "control" : void 0
+    route.msg.content.trimStart().startsWith("/") ? "command" : pickerActive ? "control" : void 0
   ) : route.msg;
   const size = pending.push(scope, agentMsg);
   log.info("intake", "queued", { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
@@ -15384,6 +15386,11 @@ async function runAgentBatch(deps) {
   const pendingInteractionSignatures = /* @__PURE__ */ new Set();
   const interactionSends = [];
   let interactionTextBuffer = "";
+  if (useLiveSession && nativeCommand && opensLivePicker(nativeCommand)) {
+    const wasActive = liveInteractionByScope.has(scope);
+    liveInteractionByScope.set(scope, { picker: true, updatedAt: Date.now() });
+    if (!wasActive) log.info("agent-live", "picker-enter", { scope, input: nativeCommand });
+  }
   const observeLiveEvent = (evt, opts = {}) => {
     if (evt.type !== "text") return;
     interactionTextBuffer = `${interactionTextBuffer}
@@ -16252,6 +16259,9 @@ function escapeFence(value) {
 function closesLivePicker(input) {
   const trimmed = input.trim();
   return /\b(?:enter|return|esc|escape)\b/iu.test(trimmed) || /(?:确认|回车|取消|返回)/u.test(trimmed) || /^[0-9]{1,2}$/u.test(trimmed);
+}
+function opensLivePicker(input) {
+  return /^\/(?:model|skills|permissions|resume)(?:\s|$)/iu.test(input.trim());
 }
 function senderTypeOf(msg) {
   const raw = msg.raw;

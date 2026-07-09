@@ -294,6 +294,46 @@ describe('markdown stream startup failures', () => {
     ]);
   });
 
+  it('routes enter after native resume as a live control even before picker text is recognized', async () => {
+    const h = await createHarness({
+      stream: async () => {
+        throw new Error('native live resume controls should not use stream');
+      },
+    });
+    h.profileConfig.preferences = {
+      ...(h.profileConfig.preferences ?? {}),
+      messageReply: 'markdown',
+    };
+    h.agent.setEvents([
+      [
+        {
+          type: 'text',
+          delta: [
+            'Resume previous conversation',
+            'Use arrows to choose a thread.',
+          ].join('\n'),
+        },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+      [
+        {
+          type: 'text',
+          delta: 'Resuming selected conversation\n',
+        },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+    ]);
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_resume', '/codex /resume'));
+    await waitFor(() => h.agent.runOptions.length === 1);
+    await h.channel.handlers.message?.(message('om_enter', 'enter'));
+    await waitFor(() => h.agent.runOptions.length === 2);
+
+    expect(h.agent.runOptions.map((opts) => opts.prompt)).toEqual(['/resume', 'enter']);
+    expect(h.agent.runOptions.map((opts) => opts.liveInputMode)).toEqual(['command', 'control']);
+  });
+
   it('does not leave the IM queue blocked when the agent exits before stream producer starts', async () => {
     const h = await createHarness();
     await startTestBridge(h);
