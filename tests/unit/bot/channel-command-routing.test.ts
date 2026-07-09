@@ -44,6 +44,29 @@ describe('agent command routing aliases', () => {
     });
   });
 
+  it('forces matching agent-prefixed picker controls to live control input', () => {
+    expect(rewriteAgentCommandMessage(message('/codex 2'), 'codex')).toMatchObject({
+      msg: { content: '2' },
+      forceNative: true,
+      nativeMode: 'control',
+    });
+    expect(rewriteAgentCommandMessage(message('/codex /2'), 'codex')).toMatchObject({
+      msg: { content: '2' },
+      forceNative: true,
+      nativeMode: 'control',
+    });
+    expect(rewriteAgentCommandMessage(message('/codex enter'), 'codex')).toMatchObject({
+      msg: { content: 'enter' },
+      forceNative: true,
+      nativeMode: 'control',
+    });
+    expect(rewriteAgentCommandMessage(message('/codex esc'), 'codex')).toMatchObject({
+      msg: { content: 'esc' },
+      forceNative: true,
+      nativeMode: 'control',
+    });
+  });
+
   it('leaves non-matching agent aliases untouched', () => {
     expect(rewriteAgentCommandMessage(message('/claude /resume'), 'codex')).toMatchObject({
       msg: { content: '/claude /resume' },

@@ -719,13 +719,14 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     isNativeAgentInputText(route.msg.content, liveInteractionByScope.has(scope))
       ? markNativeAgentCommand(
           route.msg,
-          route.forceNative
-            ? 'command'
-            : route.msg.content.trimStart().startsWith('/')
+          route.nativeMode ??
+            (route.forceNative
               ? 'command'
-              : liveInteractionByScope.has(scope)
-                ? 'control'
-                : undefined,
+              : route.msg.content.trimStart().startsWith('/')
+                ? 'command'
+                : liveInteractionByScope.has(scope)
+                  ? 'control'
+                  : undefined),
         )
       : route.msg;
   const size = pending.push(scope, agentMsg);
@@ -749,6 +750,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
 export interface AgentCommandRoute {
   msg: NormalizedMessage;
   forceNative: boolean;
+  nativeMode?: LiveInputMode;
 }
 
 export function rewriteAgentCommandMessage(
@@ -765,13 +767,32 @@ export function rewriteAgentCommandMessage(
       ? new Set(['claude', 'claude-code', 'claudecode'])
       : new Set(['codex', 'codex-cli', 'codexcli']);
   if (!target || !aliases.has(target)) return { msg, forceNative: false };
-  const content = rest.trim() ? rest : '/status';
+  const normalized = normalizeAgentPrefixedNativeInput(rest.trim() ? rest : '/status');
   return {
     msg: {
       ...msg,
-      content,
+      content: normalized.text,
     },
-    forceNative: content.trimStart().startsWith('/'),
+    forceNative: normalized.forceNative,
+    ...(normalized.nativeMode ? { nativeMode: normalized.nativeMode } : {}),
+  };
+}
+
+function normalizeAgentPrefixedNativeInput(input: string): {
+  text: string;
+  forceNative: boolean;
+  nativeMode?: LiveInputMode;
+} {
+  const trimmed = input.trim();
+  const slashless = /^\/([A-Za-z0-9_-]+)$/u.exec(trimmed)?.[1];
+  const controlText = slashless && isLivePickerInput(slashless) ? slashless : trimmed;
+  if (isLivePickerInput(controlText)) {
+    return { text: controlText, forceNative: true, nativeMode: 'control' };
+  }
+  return {
+    text: input,
+    forceNative: trimmed.startsWith('/'),
+    ...(trimmed.startsWith('/') ? { nativeMode: 'command' as const } : {}),
   };
 }
 
@@ -1108,8 +1129,12 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     log.info('flush', 'idle-watchdog', { idleTimeoutMs });
   }
 
-  const replyMode = getMessageReplyMode(controls.cfg);
-  log.info('flush', 'reply-mode', { mode: replyMode });
+  const configuredReplyMode = getMessageReplyMode(controls.cfg);
+  const replyMode = useLiveSession && nativeCommand ? 'card' : configuredReplyMode;
+  log.info('flush', 'reply-mode', {
+    mode: replyMode,
+    ...(replyMode !== configuredReplyMode ? { configuredMode: configuredReplyMode } : {}),
+  });
   const cotMessages = getCotMessages(controls.cfg);
   const cotEnabled = cotMessages !== 'off';
 
