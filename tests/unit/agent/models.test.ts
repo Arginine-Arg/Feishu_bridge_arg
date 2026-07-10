@@ -29,6 +29,7 @@ describe('agent model catalog', () => {
 
   it('coerces unknown / cross-agent selections back to the default option', () => {
     expect(normalizeModelSelection('claude', 'claude-opus-4-8')).toBe('claude-opus-4-8');
+    expect(normalizeModelSelection('codex', 'gpt-5.6-sol')).toBe('gpt-5.6-sol');
     // A Codex model left over after switching a profile to Claude is invalid.
     expect(normalizeModelSelection('claude', 'gpt-5-codex')).toBe(DEFAULT_MODEL);
     expect(normalizeModelSelection('claude', undefined)).toBe(DEFAULT_MODEL);
@@ -37,6 +38,7 @@ describe('agent model catalog', () => {
   it('resolves the --model argument, omitting it for the default', () => {
     expect(resolveModelArg('claude', 'claude-sonnet-5')).toBe('claude-sonnet-5');
     expect(resolveModelArg('codex', 'gpt-5.5')).toBe('gpt-5.5');
+    expect(resolveModelArg('codex', 'gpt-5.6-terra')).toBe('gpt-5.6-terra');
     expect(resolveModelArg('claude', DEFAULT_MODEL)).toBeUndefined();
     expect(resolveModelArg('claude', undefined)).toBeUndefined();
     // Cross-agent value → no flag rather than a broken model.
@@ -45,6 +47,7 @@ describe('agent model catalog', () => {
 
   it('labels a stored value using the picker option text', () => {
     expect(modelLabel('claude', 'claude-opus-4-8')).toBe('Opus 4.8（最新）');
+    expect(modelLabel('codex', 'gpt-5.6-luna')).toBe('gpt-5.6-luna');
     expect(modelLabel('claude', DEFAULT_MODEL)).toContain('跟随默认');
   });
 });

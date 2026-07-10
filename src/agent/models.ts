@@ -44,6 +44,17 @@ const CODEX_MODELS: ModelOption[] = [
   { value: 'o3', label: 'o3' },
 ];
 
+const CODEX_MODEL_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/iu;
+
+export function isCodexModelId(value: string | undefined): value is string {
+  return Boolean(
+    value &&
+      value !== DEFAULT_MODEL &&
+      CODEX_MODEL_ID.test(value) &&
+      !value.toLowerCase().startsWith('claude-'),
+  );
+}
+
 /** The model picker options for a profile's agent kind. */
 export function supportedModels(agentKind: AgentKind): ModelOption[] {
   return agentKind === 'codex' ? CODEX_MODELS : CLAUDE_MODELS;
@@ -66,6 +77,7 @@ export function normalizeModelSelection(
   value: string | undefined,
 ): string {
   if (isDefaultModel(value)) return DEFAULT_MODEL;
+  if (agentKind === 'codex' && isCodexModelId(value)) return value;
   return supportedModels(agentKind).some((m) => m.value === value)
     ? (value as string)
     : DEFAULT_MODEL;

@@ -6,7 +6,12 @@ import type {
 import { createLarkChannel } from '@larksuite/channel';
 import { dirname, join } from 'node:path';
 import { claudeCapability, codexCapability } from '../agent/capability';
-import { modelLabel, normalizeModelSelection, resolveModelArg } from '../agent/models';
+import {
+  isCodexModelId,
+  modelLabel,
+  normalizeModelSelection,
+  resolveModelArg,
+} from '../agent/models';
 import {
   buildAgentPrompt,
   type BridgePromptInteractiveCard,
@@ -35,8 +40,8 @@ import {
   type RunState,
 } from '../card/run-state';
 import { renderText } from '../card/text-renderer';
-import { tryHandleCommand, type Controls } from '../commands';
-import type { AppConfig } from '../config/schema';
+import { saveProfileModelPreferences, tryHandleCommand, type Controls } from '../commands';
+import type { AppConfig, CodexReasoningEffort } from '../config/schema';
 import {
   getAgentSessionMode,
   getAgentStopGraceMs,
@@ -54,7 +59,7 @@ import {
   toPolicyAttachment,
   toPromptAttachment,
 } from '../media/attachment';
-import { canUseDm, canUseGroup } from '../policy/access';
+import { canRunAdminCommand, canUseDm, canUseGroup } from '../policy/access';
 import type { ScopeContext } from '../policy/run-policy';
 import { createOwnerRefreshController } from '../policy/owner';
 import { RunExecutor } from '../runtime/run-executor';
@@ -688,8 +693,29 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   }
 
   const route = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
+  const nativeCodexModelCommand =
+    controls.profileConfig.agentKind === 'codex' && route.msg.content.trim() === '/model';
 
-  if (!route.forceNative) {
+  if (
+    nativeCodexModelCommand &&
+    !canRunAdminCommand(controls.profileConfig, controls, msg.senderId).ok
+  ) {
+    log.info('command', 'admin-deny', {
+      cmd: '/model',
+      sender: msg.senderId.slice(-6),
+    });
+    await channel.send(
+      msg.chatId,
+      { markdown: '❌ 此命令仅管理员可用。' },
+      {
+        replyTo: msg.messageId,
+        ...(chatMode === 'topic' && threadId ? { replyInThread: true } : {}),
+      },
+    );
+    return;
+  }
+
+  if (!route.forceNative && !nativeCodexModelCommand) {
     const handled = await tryHandleCommand({
       channel,
       msg: route.msg,
@@ -727,8 +753,12 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   const pickerActive = liveInteractionByScope.has(scope);
   const nativeInputActive =
     pickerActive || getAgentSessionMode(controls.cfg) === 'live';
-  const agentMsg = route.forceNative
-    ? markNativeAgentCommand(route.msg, route.nativeMode ?? 'command')
+  const forceNative = route.forceNative || nativeCodexModelCommand;
+  const agentMsg = forceNative
+    ? markNativeAgentCommand(
+        route.msg,
+        nativeCodexModelCommand ? 'command' : (route.nativeMode ?? 'command'),
+      )
     : nativeInputActive &&
         isNativeAgentInputText(route.msg.content, pickerActive)
       ? markNativeAgentCommand(
@@ -1103,6 +1133,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const sentInteractionSignatures = new Set<string>();
   const pendingInteractionSignatures = new Set<string>();
   const interactionSends: Promise<void>[] = [];
+  const modelPreferenceSaves: Promise<void>[] = [];
+  const syncedNativeModelSelections = new Set<string>();
   let interactionTextBuffer = '';
   if (useLiveSession && nativeCommand && opensLivePicker(nativeCommand)) {
     const wasActive = liveInteractionByScope.has(scope);
@@ -1111,6 +1143,36 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   }
   const observeLiveEvent = (evt: AgentEvent, opts: { sendInteractionCard?: boolean } = {}): void => {
     if (evt.type !== 'text') return;
+    if (useLiveSession && nativeCommand && controls.profileConfig.agentKind === 'codex') {
+      const selection = parseNativeCodexModelSelection(evt.delta);
+      if (selection) {
+        const signature = `${selection.model}:${selection.reasoningEffort ?? ''}`;
+        if (!syncedNativeModelSelections.has(signature)) {
+          syncedNativeModelSelections.add(signature);
+          const save = saveProfileModelPreferences(controls, {
+            model: selection.model,
+            reasoningEffort:
+              selection.reasoningEffort ?? controls.profileConfig.preferences.reasoningEffort,
+          })
+            .then(() => {
+              log.info('agent-live', 'model-preference-synced', {
+                scope,
+                model: selection.model,
+                ...(selection.reasoningEffort
+                  ? { reasoningEffort: selection.reasoningEffort }
+                  : {}),
+              });
+            })
+            .catch((err) => {
+              log.warn('agent-live', 'model-preference-sync-failed', {
+                scope,
+                err: err instanceof Error ? err.message : String(err),
+              });
+            });
+          modelPreferenceSaves.push(save);
+        }
+      }
+    }
     interactionTextBuffer = `${interactionTextBuffer}\n${evt.delta}`.slice(-4000);
     const pickerLike = looksLikeAgentPicker(interactionTextBuffer);
     const interaction = pickerLike ? detectLiveInteraction(interactionTextBuffer) : undefined;
@@ -1569,6 +1631,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     // stream ends); it never rejects, so this can't mask a run error.
     await promptBridge;
     await Promise.allSettled(interactionSends);
+    await Promise.allSettled(modelPreferenceSaves);
     if (useLiveSession && nativeCommand && closesLivePicker(nativeCommand)) {
       if (liveInteractionByScope.delete(scope)) {
         log.info('agent-live', 'picker-exit', { scope, input: nativeCommand });
@@ -2229,6 +2292,56 @@ function closesLivePicker(input: string): boolean {
 
 function opensLivePicker(input: string): boolean {
   return /^\/(?:model|skills|permissions|resume)(?:\s|$)/iu.test(input.trim());
+}
+
+export interface NativeCodexModelSelection {
+  model: string;
+  reasoningEffort?: CodexReasoningEffort;
+}
+
+export function parseNativeCodexModelSelection(
+  text: string,
+): NativeCodexModelSelection | undefined {
+  const lines = text.split('\n').reverse();
+  for (const line of lines) {
+    const match = line
+      .trim()
+      .match(/^(?:[•*+-]\s*)?Model changed to\s+([a-z0-9][a-z0-9._-]{0,127})(?:\s+(.+?))?\s*$/iu);
+    if (!match || !isCodexModelId(match[1])) continue;
+    const rawEffort = match[2]?.trim();
+    const reasoningEffort = rawEffort
+      ? normalizeNativeCodexReasoningEffort(rawEffort)
+      : undefined;
+    if (rawEffort && !reasoningEffort) continue;
+    return {
+      model: match[1],
+      ...(reasoningEffort ? { reasoningEffort } : {}),
+    };
+  }
+  return undefined;
+}
+
+function normalizeNativeCodexReasoningEffort(
+  value: string,
+): CodexReasoningEffort | undefined {
+  const normalized = value
+    .toLowerCase()
+    .replace(/[()]/gu, '')
+    .replace(/^reasoning\s+/u, '')
+    .replace(/[.!。]+$/u, '')
+    .trim();
+  if (normalized === 'extra high' || normalized === 'extra-high' || normalized === 'extra_high') {
+    return 'xhigh';
+  }
+  return normalized === 'minimal' ||
+    normalized === 'low' ||
+    normalized === 'medium' ||
+    normalized === 'high' ||
+    normalized === 'xhigh' ||
+    normalized === 'max' ||
+    normalized === 'ultra'
+    ? normalized
+    : undefined;
 }
 
 /**

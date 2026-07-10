@@ -2306,23 +2306,31 @@ async function saveModelPreferencesConfig(
   ctx: CommandContext,
   update: Pick<AppPreferences, 'model' | 'reasoningEffort'>,
 ): Promise<void> {
-  await withConfigFileLock(ctx.controls.configPath, async () => {
-    const root = await loadRootConfig(ctx.controls.configPath);
+  await saveProfileModelPreferences(ctx.controls, update);
+}
+
+export async function saveProfileModelPreferences(
+  controls: Controls,
+  update: Pick<AppPreferences, 'model' | 'reasoningEffort'>,
+): Promise<void> {
+  await withConfigFileLock(controls.configPath, async () => {
+    const root = await loadRootConfig(controls.configPath);
     if (!root) {
       const nextPreferences = {
-        ...(ctx.controls.cfg.preferences ?? {}),
+        ...(controls.cfg.preferences ?? {}),
         model: update.model,
-        ...(ctx.controls.profileConfig.agentKind === 'codex'
+        ...(controls.profileConfig.agentKind === 'codex'
           ? { reasoningEffort: update.reasoningEffort }
           : {}),
       };
-      ctx.controls.cfg.preferences = nextPreferences;
-      await saveConfig(ctx.controls.cfg, ctx.controls.configPath);
+      controls.cfg.preferences = nextPreferences;
+      controls.profileConfig.preferences = nextPreferences;
+      await saveConfig(controls.cfg, controls.configPath);
       return;
     }
 
-    const profile = root.profiles[ctx.controls.profile];
-    if (!profile) throw new Error(`profile not found: ${ctx.controls.profile}`);
+    const profile = root.profiles[controls.profile];
+    if (!profile) throw new Error(`profile not found: ${controls.profile}`);
     const nextPreferences = {
       ...profile.preferences,
       model: update.model,
@@ -2330,18 +2338,24 @@ async function saveModelPreferencesConfig(
         ? { reasoningEffort: update.reasoningEffort }
         : {}),
     };
-    root.profiles[ctx.controls.profile] = {
+    root.profiles[controls.profile] = {
       ...profile,
       preferences: nextPreferences,
     };
-    await saveRootConfig(root, ctx.controls.configPath);
-    ctx.controls.profileConfig = root.profiles[ctx.controls.profile]!;
-    ctx.controls.cfg = runtimeProfileConfig(root, ctx.controls.profile);
+    await saveRootConfig(root, controls.configPath);
+    controls.profileConfig = root.profiles[controls.profile]!;
+    controls.cfg = runtimeProfileConfig(root, controls.profile);
   });
 }
 
 function normalizeCodexReasoningEffort(value: unknown): CodexReasoningEffort | undefined {
-  return value === 'minimal' || value === 'low' || value === 'medium' || value === 'high'
+  return value === 'minimal' ||
+    value === 'low' ||
+    value === 'medium' ||
+    value === 'high' ||
+    value === 'xhigh' ||
+    value === 'max' ||
+    value === 'ultra'
     ? value
     : undefined;
 }

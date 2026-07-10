@@ -276,6 +276,7 @@ If a profile was created with the wrong agent kind, stop or unregister any match
 | `/resume` | Resume compatible history for the same agent, working directory, and permission mode |
 | `/status` | Show profile, agent, working directory, session, lark-cli identity, and run state |
 | `/config` | Adjust presentation preferences, access settings, and lark-cli identity policy |
+| `/model` | Choose the model; Codex uses its native model/reasoning picker and syncs the result to the active profile |
 | `/session [status\|live\|turn]` | Inspect or switch the agent process lifecycle. `live` reuses a background CLI session per chat/topic; `turn` keeps the default one-run-per-message behavior |
 | `/invite user @name` | Allow a user to use the bot in DMs |
 | `/invite admin @name` | Add an access-control admin |

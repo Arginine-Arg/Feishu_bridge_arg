@@ -1,5 +1,6 @@
 import type { AgentCapability } from '../agent/capability';
 import { resolveModelArg } from '../agent/models';
+import type { CodexReasoningEffort } from '../config/schema';
 import type { AgentEvent } from '../agent/types';
 import type { ProfileConfig } from '../config/profile-schema';
 import type { AccessDecision } from '../policy/access';
@@ -196,8 +197,14 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
 
 function resolveCodexReasoningEffort(
   value: unknown,
-): 'minimal' | 'low' | 'medium' | 'high' | undefined {
-  return value === 'minimal' || value === 'low' || value === 'medium' || value === 'high'
+): CodexReasoningEffort | undefined {
+  return value === 'minimal' ||
+    value === 'low' ||
+    value === 'medium' ||
+    value === 'high' ||
+    value === 'xhigh' ||
+    value === 'max' ||
+    value === 'ultra'
     ? value
     : undefined;
 }

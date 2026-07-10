@@ -38,7 +38,16 @@ const CODEX_REASONING_OPTIONS: Array<{
   { value: 'low', label: 'Low' },
   { value: 'medium', label: 'Medium' },
   { value: 'high', label: 'High' },
+  { value: 'xhigh', label: 'Extra high' },
+  { value: 'max', label: 'Max' },
+  { value: 'ultra', label: 'Ultra' },
 ];
+
+function modelsWithCurrentSelection(agentKind: AgentKind, model: string) {
+  const models = supportedModels(agentKind);
+  if (models.some((item) => item.value === model)) return models;
+  return [{ value: model, label: model }, ...models];
+}
 
 function collapsedAccessPanel(title: string, elements: object[]): object {
   return {
@@ -126,22 +135,33 @@ export function configFormCard(opts: ConfigFormOpts): object {
           tag: 'form',
           name: 'config_form',
           elements: [
-            {
-              tag: 'markdown',
-              content:
-                '**模型**\n' +
-                '_底层 agent 运行使用的模型_\n' +
-                '_「跟随默认」= 不指定,由 CLI/账号决定_',
-            },
-            {
-              tag: 'select_static',
-              name: 'model',
-              initial_option: opts.model,
-              options: supportedModels(opts.agentKind).map((m) => ({
-                text: { tag: 'plain_text', content: m.label },
-                value: m.value,
-              })),
-            },
+            ...(opts.agentKind === 'codex'
+              ? [
+                  {
+                    tag: 'markdown',
+                    content:
+                      `**模型**：\`${modelLabel(opts.agentKind, opts.model)}\`\n` +
+                      '_发送 `/model` 打开 Codex CLI 原生模型与 reasoning 选项；选择结果会自动同步到当前 profile。_',
+                  },
+                ]
+              : [
+                  {
+                    tag: 'markdown',
+                    content:
+                      '**模型**\n' +
+                      '_底层 agent 运行使用的模型_\n' +
+                      '_「跟随默认」= 不指定,由 CLI/账号决定_',
+                  },
+                  {
+                    tag: 'select_static',
+                    name: 'model',
+                    initial_option: opts.model,
+                    options: modelsWithCurrentSelection(opts.agentKind, opts.model).map((m) => ({
+                      text: { tag: 'plain_text', content: m.label },
+                      value: m.value,
+                    })),
+                  },
+                ]),
             { tag: 'hr' },
             {
               tag: 'markdown',
@@ -321,7 +341,7 @@ export function modelFormCard(opts: ModelFormOpts): object {
           tag: 'select_static',
           name: 'model',
           initial_option: opts.model,
-          options: supportedModels(opts.agentKind).map((m) => ({
+          options: modelsWithCurrentSelection(opts.agentKind, opts.model).map((m) => ({
             text: { tag: 'plain_text', content: m.label },
             value: m.value,
           })),

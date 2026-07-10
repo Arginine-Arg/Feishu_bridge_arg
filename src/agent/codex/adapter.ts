@@ -250,10 +250,11 @@ export class CodexAdapter implements AgentAdapter {
     } else if (!this.inheritCodexHome) {
       envOverrides.CODEX_HOME = join(this.profileStateDir, 'codex-home');
     }
+    // Native /model changes the active TUI in place and is then synced back to
+    // the profile. Excluding model/effort prevents that sync from replacing the
+    // already-updated live process on the next turn.
     const signature = JSON.stringify({
       cwd: opts.cwd,
-      model: opts.model ?? null,
-      reasoningEffort: opts.reasoningEffort ?? null,
       sandbox,
       codexHome: envOverrides.CODEX_HOME ?? null,
       bot: this.botIdentity?.openId ?? null,

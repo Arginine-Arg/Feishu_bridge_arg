@@ -69,7 +69,14 @@ export interface SecretsConfig {
 export type MessageReplyMode = 'card' | 'markdown' | 'text';
 export type AgentSessionMode = 'turn' | 'live';
 export type CotMessagesMode = 'off' | 'brief' | 'detailed';
-export type CodexReasoningEffort = 'minimal' | 'low' | 'medium' | 'high';
+export type CodexReasoningEffort =
+  | 'minimal'
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'xhigh'
+  | 'max'
+  | 'ultra';
 
 /**
  * Access control settings. Empty lists are fail-closed in the v2 policy:

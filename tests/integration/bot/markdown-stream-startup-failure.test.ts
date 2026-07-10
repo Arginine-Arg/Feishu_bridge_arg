@@ -3,6 +3,11 @@ import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema.js';
+import {
+  createRootConfig,
+  loadRootConfig,
+  saveRootConfig,
+} from '../../../src/config/profile-store.js';
 import { log } from '../../../src/core/logger.js';
 import { SessionStore } from '../../../src/session/store.js';
 import { WorkspaceStore } from '../../../src/workspace/store.js';
@@ -116,6 +121,123 @@ describe('markdown stream startup failures', () => {
     expect(content?.card).toBeDefined();
     expect(JSON.stringify(content?.card)).toContain('live CLI 正在等待选择');
     expect(buttonLabels(content?.card)).toEqual(['1', '2', 'enter', 'esc']);
+  });
+
+  it('uses the native Codex model picker and syncs its selection into later turn runs', async () => {
+    const h = await createHarness();
+    h.profileConfig.preferences = {
+      ...(h.profileConfig.preferences ?? {}),
+      messageReply: 'text',
+    };
+    h.controls.profileConfig.preferences = h.profileConfig.preferences;
+    h.controls.cfg.preferences = h.profileConfig.preferences;
+    h.agent.setEvents([
+      [
+        {
+          type: 'text',
+          delta: [
+            'Select Model and Effort',
+            '1. gpt-5.6-sol (default)',
+            '2. gpt-5.6-terra',
+            '3. gpt-5.6-luna',
+            '4. gpt-5.5 (current)',
+            '5. gpt-5.4',
+            '6. gpt-5.4-mini',
+            '7. gpt-5.2',
+            'Press enter to confirm or esc to go back',
+          ].join('\n'),
+        },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+      [
+        {
+          type: 'text',
+          delta: [
+            'Select Reasoning Level for gpt-5.6-sol',
+            '1. Low',
+            '2. Medium',
+            '3. High',
+            '4. Extra high',
+            '5. Max',
+            '6. Ultra',
+            'Press enter to confirm or esc to go back',
+          ].join('\n'),
+        },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+      [
+        { type: 'text', delta: '• Model changed to gpt-5.6-sol ultra\n' },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+      [
+        { type: 'text', delta: 'ordinary turn complete\n' },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+    ]);
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_plain_model', '/model'));
+    await waitFor(() => h.agent.runOptions.length === 1 && h.channel.sent.length >= 1);
+    expect(h.agent.runOptions[0]).toMatchObject({ prompt: '/model', liveInputMode: 'command' });
+    expect(buttonLabels((h.channel.sent[0]?.content as { card?: unknown }).card)).toEqual([
+      '1',
+      '2',
+      '3',
+      '4',
+      '5',
+      '6',
+      '7',
+      'enter',
+      'esc',
+    ]);
+
+    await h.channel.handlers.message?.(message('om_model_choice', '/codex 1'));
+    await waitFor(() => h.agent.runOptions.length === 2 && h.channel.sent.length >= 2);
+    expect(buttonLabels((h.channel.sent[1]?.content as { card?: unknown }).card)).toEqual([
+      '1',
+      '2',
+      '3',
+      '4',
+      '5',
+      '6',
+      'enter',
+      'esc',
+    ]);
+
+    await h.channel.handlers.message?.(message('om_effort_choice', '/codex 6'));
+    await waitFor(
+      () =>
+        h.controls.profileConfig.preferences.model === 'gpt-5.6-sol' &&
+        h.controls.profileConfig.preferences.reasoningEffort === 'ultra',
+      4000,
+    );
+
+    const root = await loadRootConfig(h.controls.configPath);
+    expect(root?.profiles.codex?.preferences).toMatchObject({
+      model: 'gpt-5.6-sol',
+      reasoningEffort: 'ultra',
+    });
+
+    await h.channel.handlers.message?.(message('om_ordinary_turn', 'continue the task'));
+    await waitFor(() => h.agent.runOptions.length === 4);
+    expect(h.agent.runOptions[3]).toMatchObject({
+      sessionMode: 'turn',
+      model: 'gpt-5.6-sol',
+      reasoningEffort: 'ultra',
+    });
+  });
+
+  it('keeps plain Codex /model restricted to profile admins', async () => {
+    const h = await createHarness();
+    h.profileConfig.access.admins = [];
+    h.controls.profileConfig.access.admins = [];
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_model_denied', '/model'));
+    await waitFor(() => h.channel.sent.length === 1);
+
+    expect(h.agent.runOptions).toHaveLength(0);
+    expect(lastMarkdown(h.channel)).toContain('仅管理员可用');
   });
 
   it('sends native live skills picker output as a final button card without explicit enter hint', async () => {
@@ -439,6 +561,7 @@ async function createHarness(options: {
     },
     access: {
       allowedUsers: ['ou_user'],
+      admins: ['ou_user'],
     },
     codex: {
       binaryPath: '/usr/local/bin/codex',
@@ -451,6 +574,8 @@ async function createHarness(options: {
       default: workspace,
     },
   };
+  const configPath = join(tmp.root, 'config.json');
+  await saveRootConfig(createRootConfig('codex', profileConfig), configPath);
   const sessions = new SessionStore(join(tmp.profile, 'sessions.json'));
   const workspaces = new WorkspaceStore(join(tmp.profile, 'workspaces.json'));
   const agent = new FakeAgentAdapter({
@@ -469,7 +594,7 @@ async function createHarness(options: {
   });
   const channel = createFakeLarkChannel(options);
   sdkMock.channel = channel;
-  const controls = createControls(profileConfig);
+  const controls = createControls(profileConfig, configPath);
   cleanups.push(async () => {
     await Promise.all([sessions.flush(), workspaces.flush()]);
     await tmp.cleanup();
@@ -594,7 +719,10 @@ function deferred<T>(): {
   return { promise, resolve, reject };
 }
 
-function createControls(profileConfig: ReturnType<typeof createDefaultProfileConfig>) {
+function createControls(
+  profileConfig: ReturnType<typeof createDefaultProfileConfig>,
+  configPath: string,
+) {
   return {
     profile: 'codex',
     profileConfig,
@@ -602,7 +730,7 @@ function createControls(profileConfig: ReturnType<typeof createDefaultProfileCon
     async refreshOwner() {},
     async restart() {},
     async exit() {},
-    configPath: '/tmp/config.json',
+    configPath,
     cfg: profileConfig,
     processId: 'proc_test',
   };

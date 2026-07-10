@@ -1,4 +1,5 @@
 import type { SandboxMode } from '../../config/profile-schema';
+import type { CodexReasoningEffort } from '../../config/schema';
 
 export interface BuildCodexArgsInput {
   cwd: string;
@@ -10,7 +11,7 @@ export interface BuildCodexArgsInput {
   /** Forwarded to `codex exec --model`. Omitted uses the Codex default. */
   model?: string;
   /** Forwarded to Codex config as `model_reasoning_effort`. */
-  reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high';
+  reasoningEffort?: CodexReasoningEffort;
 }
 
 export function buildCodexArgs(input: BuildCodexArgsInput): string[] {

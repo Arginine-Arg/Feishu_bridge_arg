@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   liveInteractionCard,
   liveInteractionCardForText,
+  parseNativeCodexModelSelection,
   renderLiveAwareReplyCard,
 } from '../../../src/bot/channel.js';
 import type { AgentEvent } from '../../../src/agent/types.js';
@@ -51,6 +52,22 @@ function tags(card: unknown): string[] {
 }
 
 describe('liveInteractionCard', () => {
+  it('parses native Codex model confirmations with new reasoning levels', () => {
+    expect(parseNativeCodexModelSelection('• Model changed to gpt-5.6-sol ultra')).toEqual({
+      model: 'gpt-5.6-sol',
+      reasoningEffort: 'ultra',
+    });
+    expect(parseNativeCodexModelSelection('Model changed to gpt-5.6-terra Extra high')).toEqual({
+      model: 'gpt-5.6-terra',
+      reasoningEffort: 'xhigh',
+    });
+    expect(parseNativeCodexModelSelection('Model changed to gpt-5.6-luna (reasoning max)')).toEqual({
+      model: 'gpt-5.6-luna',
+      reasoningEffort: 'max',
+    });
+    expect(parseNativeCodexModelSelection('Model changed to claude-opus-4-8 high')).toBeUndefined();
+  });
+
   it('signs each live input button as a bridge callback', () => {
     let n = 0;
     const card = liveInteractionCard(

@@ -69,7 +69,7 @@ var package_default = {
     vitest: "^2.1.8"
   },
   engines: {
-    node: ">=20.12.0"
+    node: ">=20.12.0 <25"
   },
   pnpm: {
     onlyBuiltDependencies: [
@@ -7982,8 +7982,6 @@ var CodexAdapter = class {
     }
     const signature = JSON.stringify({
       cwd: opts.cwd,
-      model: opts.model ?? null,
-      reasoningEffort: opts.reasoningEffort ?? null,
       sandbox,
       codexHome: envOverrides.CODEX_HOME ?? null,
       bot: this.botIdentity?.openId ?? null
@@ -8154,6 +8152,12 @@ var CODEX_MODELS = [
   { value: "gpt-5", label: "GPT-5" },
   { value: "o3", label: "o3" }
 ];
+var CODEX_MODEL_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/iu;
+function isCodexModelId(value) {
+  return Boolean(
+    value && value !== DEFAULT_MODEL && CODEX_MODEL_ID.test(value) && !value.toLowerCase().startsWith("claude-")
+  );
+}
 function supportedModels(agentKind) {
   return agentKind === "codex" ? CODEX_MODELS : CLAUDE_MODELS;
 }
@@ -8162,6 +8166,7 @@ function isDefaultModel(value) {
 }
 function normalizeModelSelection(agentKind, value) {
   if (isDefaultModel(value)) return DEFAULT_MODEL;
+  if (agentKind === "codex" && isCodexModelId(value)) return value;
   return supportedModels(agentKind).some((m) => m.value === value) ? value : DEFAULT_MODEL;
 }
 function resolveModelArg(agentKind, value) {
@@ -8365,8 +8370,16 @@ var CODEX_REASONING_OPTIONS = [
   { value: DEFAULT_REASONING_EFFORT, label: "\u8DDF\u968F\u9ED8\u8BA4\uFF08\u4E0D\u6307\u5B9A\uFF09" },
   { value: "low", label: "Low" },
   { value: "medium", label: "Medium" },
-  { value: "high", label: "High" }
+  { value: "high", label: "High" },
+  { value: "xhigh", label: "Extra high" },
+  { value: "max", label: "Max" },
+  { value: "ultra", label: "Ultra" }
 ];
+function modelsWithCurrentSelection(agentKind, model) {
+  const models = supportedModels(agentKind);
+  if (models.some((item) => item.value === model)) return models;
+  return [{ value: model, label: model }, ...models];
+}
 function collapsedAccessPanel(title, elements) {
   return {
     tag: "collapsible_panel",
@@ -8445,19 +8458,27 @@ _\u52A0 / \u5220\uFF1A_ \`/invite admin @\u67D0\u4EBA\`  \`/remove admin @\u67D0
           tag: "form",
           name: "config_form",
           elements: [
-            {
-              tag: "markdown",
-              content: "**\u6A21\u578B**\n_\u5E95\u5C42 agent \u8FD0\u884C\u4F7F\u7528\u7684\u6A21\u578B_\n_\u300C\u8DDF\u968F\u9ED8\u8BA4\u300D= \u4E0D\u6307\u5B9A,\u7531 CLI/\u8D26\u53F7\u51B3\u5B9A_"
-            },
-            {
-              tag: "select_static",
-              name: "model",
-              initial_option: opts.model,
-              options: supportedModels(opts.agentKind).map((m) => ({
-                text: { tag: "plain_text", content: m.label },
-                value: m.value
-              }))
-            },
+            ...opts.agentKind === "codex" ? [
+              {
+                tag: "markdown",
+                content: `**\u6A21\u578B**\uFF1A\`${modelLabel(opts.agentKind, opts.model)}\`
+_\u53D1\u9001 \`/model\` \u6253\u5F00 Codex CLI \u539F\u751F\u6A21\u578B\u4E0E reasoning \u9009\u9879\uFF1B\u9009\u62E9\u7ED3\u679C\u4F1A\u81EA\u52A8\u540C\u6B65\u5230\u5F53\u524D profile\u3002_`
+              }
+            ] : [
+              {
+                tag: "markdown",
+                content: "**\u6A21\u578B**\n_\u5E95\u5C42 agent \u8FD0\u884C\u4F7F\u7528\u7684\u6A21\u578B_\n_\u300C\u8DDF\u968F\u9ED8\u8BA4\u300D= \u4E0D\u6307\u5B9A,\u7531 CLI/\u8D26\u53F7\u51B3\u5B9A_"
+              },
+              {
+                tag: "select_static",
+                name: "model",
+                initial_option: opts.model,
+                options: modelsWithCurrentSelection(opts.agentKind, opts.model).map((m) => ({
+                  text: { tag: "plain_text", content: m.label },
+                  value: m.value
+                }))
+              }
+            ],
             { tag: "hr" },
             {
               tag: "markdown",
@@ -8611,7 +8632,7 @@ function modelFormCard(opts) {
           tag: "select_static",
           name: "model",
           initial_option: opts.model,
-          options: supportedModels(opts.agentKind).map((m) => ({
+          options: modelsWithCurrentSelection(opts.agentKind, opts.model).map((m) => ({
             text: { tag: "plain_text", content: m.label },
             value: m.value
           }))
@@ -9007,6 +9028,7 @@ function helpCard(agentName = "Agent") {
         "- `/ws list|save <name>|use <name>|remove <name>` \u2014 \u5DE5\u4F5C\u76EE\u5F55",
         "- `/account` \u2014 \u67E5\u770B\u5F53\u524D\u5E94\u7528\uFF1B`/account change` \u6362 appId/secret \u5E76\u91CD\u8FDE",
         "- `/config` \u2014 \u8C03\u6574\u504F\u597D\u3001\u8BBF\u95EE\u63A7\u5236\u548C lark-cli \u8EAB\u4EFD\u7B56\u7565",
+        "- `/model` \u2014 \u9009\u62E9\u6A21\u578B\uFF1BCodex \u4F7F\u7528 CLI \u539F\u751F\u6A21\u578B\u548C reasoning \u9009\u9879\u5E76\u540C\u6B65\u5230 profile",
         "- `/status` \u2014 \u5F53\u524D\u72B6\u6001",
         "- `/stop` \u2014 \u7ED3\u675F\u5F53\u524D\u6B63\u5728\u8DD1\u7684\u4EFB\u52A1\uFF08\u4E5F\u53EF\u70B9\u5361\u7247\u5E95\u90E8 \u23F9 \u7EC8\u6B62 \u6309\u94AE\uFF09",
         "- `/stop comment:<scopeHash>` \u2014 \u7BA1\u7406\u5458\u505C\u6B62\u4E91\u6587\u6863\u8BC4\u8BBA\u4EFB\u52A1",
@@ -11703,36 +11725,40 @@ async function savePreferencesConfig(ctx, preferences, requireMentionInGroup, la
   });
 }
 async function saveModelPreferencesConfig(ctx, update) {
-  await withConfigFileLock(ctx.controls.configPath, async () => {
-    const root = await loadRootConfig(ctx.controls.configPath);
+  await saveProfileModelPreferences(ctx.controls, update);
+}
+async function saveProfileModelPreferences(controls, update) {
+  await withConfigFileLock(controls.configPath, async () => {
+    const root = await loadRootConfig(controls.configPath);
     if (!root) {
       const nextPreferences2 = {
-        ...ctx.controls.cfg.preferences ?? {},
+        ...controls.cfg.preferences ?? {},
         model: update.model,
-        ...ctx.controls.profileConfig.agentKind === "codex" ? { reasoningEffort: update.reasoningEffort } : {}
+        ...controls.profileConfig.agentKind === "codex" ? { reasoningEffort: update.reasoningEffort } : {}
       };
-      ctx.controls.cfg.preferences = nextPreferences2;
-      await saveConfig(ctx.controls.cfg, ctx.controls.configPath);
+      controls.cfg.preferences = nextPreferences2;
+      controls.profileConfig.preferences = nextPreferences2;
+      await saveConfig(controls.cfg, controls.configPath);
       return;
     }
-    const profile2 = root.profiles[ctx.controls.profile];
-    if (!profile2) throw new Error(`profile not found: ${ctx.controls.profile}`);
+    const profile2 = root.profiles[controls.profile];
+    if (!profile2) throw new Error(`profile not found: ${controls.profile}`);
     const nextPreferences = {
       ...profile2.preferences,
       model: update.model,
       ...profile2.agentKind === "codex" ? { reasoningEffort: update.reasoningEffort } : {}
     };
-    root.profiles[ctx.controls.profile] = {
+    root.profiles[controls.profile] = {
       ...profile2,
       preferences: nextPreferences
     };
-    await saveRootConfig(root, ctx.controls.configPath);
-    ctx.controls.profileConfig = root.profiles[ctx.controls.profile];
-    ctx.controls.cfg = runtimeProfileConfig(root, ctx.controls.profile);
+    await saveRootConfig(root, controls.configPath);
+    controls.profileConfig = root.profiles[controls.profile];
+    controls.cfg = runtimeProfileConfig(root, controls.profile);
   });
 }
 function normalizeCodexReasoningEffort(value) {
-  return value === "minimal" || value === "low" || value === "medium" || value === "high" ? value : void 0;
+  return value === "minimal" || value === "low" || value === "medium" || value === "high" || value === "xhigh" || value === "max" || value === "ultra" ? value : void 0;
 }
 function parseCodexReasoningEffort(value, fallback) {
   if (value === DEFAULT_REASONING_EFFORT) return void 0;
@@ -13341,7 +13367,7 @@ async function startRunFlow(input) {
   };
 }
 function resolveCodexReasoningEffort(value) {
-  return value === "minimal" || value === "low" || value === "medium" || value === "high" ? value : void 0;
+  return value === "minimal" || value === "low" || value === "medium" || value === "high" || value === "xhigh" || value === "max" || value === "ultra" ? value : void 0;
 }
 function recordRunSessionEvent(input) {
   if (input.event.type !== "system") return;
@@ -15088,7 +15114,23 @@ async function intakeMessage(deps) {
     return;
   }
   const route = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
-  if (!route.forceNative) {
+  const nativeCodexModelCommand = controls.profileConfig.agentKind === "codex" && route.msg.content.trim() === "/model";
+  if (nativeCodexModelCommand && !canRunAdminCommand(controls.profileConfig, controls, msg.senderId).ok) {
+    log.info("command", "admin-deny", {
+      cmd: "/model",
+      sender: msg.senderId.slice(-6)
+    });
+    await channel.send(
+      msg.chatId,
+      { markdown: "\u274C \u6B64\u547D\u4EE4\u4EC5\u7BA1\u7406\u5458\u53EF\u7528\u3002" },
+      {
+        replyTo: msg.messageId,
+        ...chatMode === "topic" && threadId ? { replyInThread: true } : {}
+      }
+    );
+    return;
+  }
+  if (!route.forceNative && !nativeCodexModelCommand) {
     const handled = await tryHandleCommand({
       channel,
       msg: route.msg,
@@ -15119,7 +15161,11 @@ async function intakeMessage(deps) {
   }
   const pickerActive = liveInteractionByScope.has(scope);
   const nativeInputActive = pickerActive || getAgentSessionMode(controls.cfg) === "live";
-  const agentMsg = route.forceNative ? markNativeAgentCommand(route.msg, route.nativeMode ?? "command") : nativeInputActive && isNativeAgentInputText(route.msg.content, pickerActive) ? markNativeAgentCommand(
+  const forceNative = route.forceNative || nativeCodexModelCommand;
+  const agentMsg = forceNative ? markNativeAgentCommand(
+    route.msg,
+    nativeCodexModelCommand ? "command" : route.nativeMode ?? "command"
+  ) : nativeInputActive && isNativeAgentInputText(route.msg.content, pickerActive) ? markNativeAgentCommand(
     route.msg,
     route.msg.content.trimStart().startsWith("/") ? "command" : pickerActive ? "control" : void 0
   ) : route.msg;
@@ -15385,6 +15431,8 @@ async function runAgentBatch(deps) {
   const sentInteractionSignatures = /* @__PURE__ */ new Set();
   const pendingInteractionSignatures = /* @__PURE__ */ new Set();
   const interactionSends = [];
+  const modelPreferenceSaves = [];
+  const syncedNativeModelSelections = /* @__PURE__ */ new Set();
   let interactionTextBuffer = "";
   if (useLiveSession && nativeCommand && opensLivePicker(nativeCommand)) {
     const wasActive = liveInteractionByScope.has(scope);
@@ -15393,6 +15441,31 @@ async function runAgentBatch(deps) {
   }
   const observeLiveEvent = (evt, opts = {}) => {
     if (evt.type !== "text") return;
+    if (useLiveSession && nativeCommand && controls.profileConfig.agentKind === "codex") {
+      const selection = parseNativeCodexModelSelection(evt.delta);
+      if (selection) {
+        const signature = `${selection.model}:${selection.reasoningEffort ?? ""}`;
+        if (!syncedNativeModelSelections.has(signature)) {
+          syncedNativeModelSelections.add(signature);
+          const save = saveProfileModelPreferences(controls, {
+            model: selection.model,
+            reasoningEffort: selection.reasoningEffort ?? controls.profileConfig.preferences.reasoningEffort
+          }).then(() => {
+            log.info("agent-live", "model-preference-synced", {
+              scope,
+              model: selection.model,
+              ...selection.reasoningEffort ? { reasoningEffort: selection.reasoningEffort } : {}
+            });
+          }).catch((err) => {
+            log.warn("agent-live", "model-preference-sync-failed", {
+              scope,
+              err: err instanceof Error ? err.message : String(err)
+            });
+          });
+          modelPreferenceSaves.push(save);
+        }
+      }
+    }
     interactionTextBuffer = `${interactionTextBuffer}
 ${evt.delta}`.slice(-4e3);
     const pickerLike = looksLikeAgentPicker(interactionTextBuffer);
@@ -15802,6 +15875,7 @@ ${evt.delta}`.slice(-4e3);
   } finally {
     await promptBridge;
     await Promise.allSettled(interactionSends);
+    await Promise.allSettled(modelPreferenceSaves);
     if (useLiveSession && nativeCommand && closesLivePicker(nativeCommand)) {
       if (liveInteractionByScope.delete(scope)) {
         log.info("agent-live", "picker-exit", { scope, input: nativeCommand });
@@ -16262,6 +16336,28 @@ function closesLivePicker(input) {
 }
 function opensLivePicker(input) {
   return /^\/(?:model|skills|permissions|resume)(?:\s|$)/iu.test(input.trim());
+}
+function parseNativeCodexModelSelection(text) {
+  const lines = text.split("\n").reverse();
+  for (const line of lines) {
+    const match = line.trim().match(/^(?:[•*+-]\s*)?Model changed to\s+([a-z0-9][a-z0-9._-]{0,127})(?:\s+(.+?))?\s*$/iu);
+    if (!match || !isCodexModelId(match[1])) continue;
+    const rawEffort = match[2]?.trim();
+    const reasoningEffort = rawEffort ? normalizeNativeCodexReasoningEffort(rawEffort) : void 0;
+    if (rawEffort && !reasoningEffort) continue;
+    return {
+      model: match[1],
+      ...reasoningEffort ? { reasoningEffort } : {}
+    };
+  }
+  return void 0;
+}
+function normalizeNativeCodexReasoningEffort(value) {
+  const normalized = value.toLowerCase().replace(/[()]/gu, "").replace(/^reasoning\s+/u, "").replace(/[.!。]+$/u, "").trim();
+  if (normalized === "extra high" || normalized === "extra-high" || normalized === "extra_high") {
+    return "xhigh";
+  }
+  return normalized === "minimal" || normalized === "low" || normalized === "medium" || normalized === "high" || normalized === "xhigh" || normalized === "max" || normalized === "ultra" ? normalized : void 0;
 }
 function senderTypeOf(msg) {
   const raw = msg.raw;
