@@ -243,6 +243,13 @@ describe('liveInteractionCard', () => {
     expect(liveInteractionCardForText('哈喽，我在。有什么要我处理的任务，直接发我就行。')).toBeUndefined();
     expect(liveInteractionCardForText('处理结果：\n1. 已更新依赖\n2. 已运行测试')).toBeUndefined();
     expect(liveInteractionCardForText('The query will select rows from the table.')).toBeUndefined();
+    expect(
+      liveInteractionCardForText(
+        '接管后的首轮审计确认已完成。工具返回正常，我会从断点继续执行。',
+        () => 'tok',
+        'agent',
+      ),
+    ).toBeUndefined();
   });
 });
 

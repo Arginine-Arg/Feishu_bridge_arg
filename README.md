@@ -18,7 +18,7 @@ For a product walkthrough, see the [Feishu document](https://larkcommunity.feish
 - **Images and files**: send them to the bot directly, and the bridge downloads them locally for the agent.
 - **Interactive cards**: `/help`, `/ws list`, and `/status` return cards with clickable buttons.
 - **Prompt bridging**: the agent's `AskUserQuestion` / `ExitPlanMode` are auto-rendered as Lark cards with buttons — click to answer and resume the session.
-- **Long-conversation resilience**: if a streaming card is withdrawn/invalidated mid-run, output is no longer lost — it degrades to posting the final answer as a fresh message; queued messages get a one-time notice.
+- **Long-conversation resilience**: long streams roll over to a fresh card before Lark's automatic close; withdrawn/invalid cards degrade to a fresh final message, and queued-message notices are rate-limited rather than permanently silenced.
 
 ## Prerequisites
 
@@ -301,10 +301,10 @@ DMs do not require an @ mention. Groups and topic groups require `@bot` by defau
 
 Long conversations / tasks are not cut off by a fixed time limit, but two behaviors are worth knowing (optimized in this fork):
 
-- **Queued messages (looks unresponsive)**: while a run is active on the same chat/topic, a new ordinary message does **not** interrupt it — it queues for after the current run. The bridge sends a one-time "task running, queued" notice (never spammed). **Send `/stop` to interrupt now.**
-- **Streaming-card degradation**: if the streamed card is withdrawn or invalidated mid-run (Feishu `230011`), the bridge stops patching the dead card, finishes the run, and **posts the full answer as a fresh message** (never lost, never doubled).
+- **Queued messages (looks unresponsive)**: while a run is active on the same chat/topic, a new ordinary message does **not** interrupt it — it queues for after the current run. Busy notices are limited to one per 30 seconds, so later progress checks still receive a liveness reply without spamming rapid bursts. Read-only `/status` and `/session status` checks do not discard queued work. **Send `/stop` to interrupt now.**
+- **Streaming-card rollover and degradation**: Feishu/Lark automatically closes streaming cards after about 10 minutes. The bridge starts a continuation card every 8 minutes while the run is still active. If a card is withdrawn or invalidated mid-run (Feishu `230011`), the bridge keeps draining the agent and **posts the full answer as a fresh message**.
 
-**Best practices for long tasks**: have the agent write full logs/reports to project files (`report.md`, `task.log`) and only post short progress + a final summary to Lark (cards have length limits); to check progress send a fresh `@bot progress` rather than relying on an old card; use `/stop` to interrupt.
+**Best practices for long tasks**: have the agent write full logs/reports to project files (`report.md`, `task.log`) and only post short progress + a final summary to Lark (cards have length limits); use `/status` for a non-destructive liveness check; use `/stop` to interrupt.
 
 ## Reply Display and COT
 

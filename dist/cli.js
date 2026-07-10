@@ -10578,11 +10578,14 @@ async function handleSession(args, ctx) {
   const current = getAgentSessionMode(ctx.controls.cfg);
   if (!action || action === "status") {
     const label = current === "live" ? "live\uFF08\u540E\u53F0\u5E38\u9A7B CLI\uFF09" : "turn\uFF08\u6BCF\u8F6E\u77ED\u4EFB\u52A1\uFF09";
+    const active2 = ctx.activeRuns.get(ctx.scope);
+    const runStatus = active2 ? `\u8FD0\u884C\u4E2D\uFF08run \`${active2.run.runId.slice(0, 8)}\u2026\`\uFF09` : "\u65E0\u8FD0\u884C\u4EFB\u52A1";
     await reply(
       ctx,
       `\u5F53\u524D agent session \u6A21\u5F0F\uFF1A\`${label}\`
+\u5F53\u524D scope\uFF1A${runStatus}
 
-\u7528\u6CD5\uFF1A\`/session live\` \u6216 \`/session turn\`\u3002`
+\u7528\u6CD5\uFF1A\`/session live\` \u6216 \`/session turn\`\uFF1B\u5B8C\u6574\u8FD0\u884C\u72B6\u6001\u7528 \`/status\`\u3002`
     );
     return;
   }
@@ -14029,18 +14032,23 @@ async function httpProbe(domain) {
 }
 
 // src/bot/pending-queue.ts
+var DEFAULT_BUSY_ACK_COOLDOWN_MS = 3e4;
 var PendingQueue = class {
   map = /* @__PURE__ */ new Map();
   blocked = /* @__PURE__ */ new Set();
-  // Scopes that have already emitted a "run in progress, your message is
-  // queued" ack in the CURRENT blocked window. Cleared on unblock so the next
-  // busy window gets a fresh (single) ack.
-  ackedBusy = /* @__PURE__ */ new Set();
+  // Last "run in progress, your message is queued" acknowledgement per scope.
+  // Long runs may stay blocked for hours, so suppress only short bursts rather
+  // than silencing every later status request until the run ends.
+  busyAckedAt = /* @__PURE__ */ new Map();
   delayMs;
   onFlush;
-  constructor(delayMs, onFlush) {
+  busyAckCooldownMs;
+  now;
+  constructor(delayMs, onFlush, busyAckCooldownMs = DEFAULT_BUSY_ACK_COOLDOWN_MS, now = Date.now) {
     this.delayMs = delayMs;
     this.onFlush = onFlush;
+    this.busyAckCooldownMs = Math.max(0, busyAckCooldownMs);
+    this.now = now;
   }
   push(scope, msg) {
     const existing = this.map.get(scope);
@@ -14069,22 +14077,23 @@ var PendingQueue = class {
     }
     this.map.clear();
     this.blocked.clear();
-    this.ackedBusy.clear();
+    this.busyAckedAt.clear();
   }
   /** True while a run is active on this scope (debounce timer paused). */
   isBlocked(scope) {
     return this.blocked.has(scope);
   }
   /**
-   * Returns true exactly once per blocked window: when the scope is currently
-   * blocked (a run is in flight) and no busy-ack has been emitted yet. Lets the
-   * caller send a single "queued behind the active run" notice without spamming
-   * one per queued message. Reset by `unblock`.
+   * Returns true when the scope is blocked and the per-scope cooldown elapsed.
+   * This keeps rapid message bursts quiet while ensuring a later progress check
+   * during a long run always receives a liveness acknowledgement.
    */
   shouldAckBusy(scope) {
     if (!this.blocked.has(scope)) return false;
-    if (this.ackedBusy.has(scope)) return false;
-    this.ackedBusy.add(scope);
+    const now = this.now();
+    const lastAckedAt = this.busyAckedAt.get(scope);
+    if (lastAckedAt !== void 0 && now - lastAckedAt < this.busyAckCooldownMs) return false;
+    this.busyAckedAt.set(scope, now);
     return true;
   }
   /** Pause the debounce timer; pushed messages keep accumulating. */
@@ -14102,7 +14111,7 @@ var PendingQueue = class {
   unblock(scope) {
     if (!this.blocked.has(scope)) return;
     this.blocked.delete(scope);
-    this.ackedBusy.delete(scope);
+    this.busyAckedAt.delete(scope);
     const entry = this.map.get(scope);
     log.info("queue", "unblocked", { scope, queued: entry?.messages.length ?? 0 });
     if (!entry || entry.messages.length === 0) return;
@@ -14665,6 +14674,7 @@ function stringValue3(value) {
 // src/bot/channel.ts
 var DEBOUNCE_MS = 600;
 var STREAM_TERMINAL_GRACE_MS = 3e3;
+var STREAM_ROLLOVER_MS = 8 * 6e4;
 var REACTION_CLEANUP_GRACE_MS = 1e3;
 var BRIDGE_AGENT_INSTRUCTIONS = [
   "\u4F60\u5728 bridge \u8FDB\u7A0B\u4E2D\u8FD0\u884C\uFF0C\u666E\u901A lark-cli \u4F1A\u7EE7\u627F LARK_CHANNEL=1 \u5E76\u8FDB\u5165 bridge-bound \u6A21\u5F0F\u3002",
@@ -15154,8 +15164,13 @@ async function intakeMessage(deps) {
       controls
     });
     if (handled) {
-      const dropped = pending.cancel(scope);
-      log.info("intake", "command", { scope, droppedPending: dropped.length });
+      const preservePending = commandPreservesPendingMessages(route.msg.content);
+      const dropped = preservePending ? [] : pending.cancel(scope);
+      log.info("intake", "command", {
+        scope,
+        preservePending,
+        droppedPending: dropped.length
+      });
       return;
     }
   }
@@ -15174,10 +15189,16 @@ async function intakeMessage(deps) {
   if (pending.shouldAckBusy(scope)) {
     void channel.send(
       msg.chatId,
-      { text: "\u23F3 \u5F53\u524D\u4EFB\u52A1\u8FD8\u5728\u8FD0\u884C\uFF0C\u4F60\u7684\u6D88\u606F\u5DF2\u6392\u961F\uFF0C\u4F1A\u5728\u4EFB\u52A1\u7ED3\u675F\u540E\u4E00\u8D77\u5904\u7406\u3002\u60F3\u7ACB\u5373\u6253\u65AD\u8BF7\u53D1 /stop\u3002" },
+      {
+        text: `\u23F3 \u5F53\u524D\u4EFB\u52A1\u4ECD\u5728\u8FD0\u884C\uFF0C\u4F60\u7684\u6D88\u606F\u5DF2\u6392\u961F\uFF08\u5F53\u524D ${size} \u6761\uFF09\u3002\u53EF\u968F\u65F6\u53D1\u9001 /status \u68C0\u67E5\u4F1A\u8BDD\uFF1B\u60F3\u7ACB\u5373\u6253\u65AD\u8BF7\u53D1 /stop\u3002`
+      },
       { replyTo: msg.messageId }
     ).catch((err) => log.warn("intake", "busy-ack-failed", { scope, err: String(err) }));
   }
+}
+function commandPreservesPendingMessages(content) {
+  const command = content.trim().toLowerCase();
+  return /^\/(?:status|help|ps)(?:\s|$)/u.test(command) || /^\/session(?:\s+\/?status)?\s*$/u.test(command) || /^\/timeout(?:\s|$)/u.test(command);
 }
 function rewriteAgentCommandMessage(msg, agentKind) {
   const trimmed = msg.content.trimStart();
@@ -15483,6 +15504,9 @@ ${evt.delta}`.slice(-4e3);
     }
     if (opts.sendInteractionCard === false) return;
     if (!interaction || !cardRenderOptions.signCallback) return;
+    if (!useLiveSession && (sentInteractionSignatures.size > 0 || pendingInteractionSignatures.size > 0)) {
+      return;
+    }
     if (sentInteractionSignatures.has(interaction.signature) || pendingInteractionSignatures.has(interaction.signature)) {
       return;
     }
@@ -15682,7 +15706,6 @@ ${evt.delta}`.slice(-4e3);
     }
     if (replyMode === "card") {
       let latestState = initialState;
-      let producerStarted = false;
       let streamDegraded = false;
       let freshFinalPosted = false;
       let cardCtrl;
@@ -15709,7 +15732,7 @@ ${evt.delta}`.slice(-4e3);
         recordSession,
         async (state) => {
           latestState = state;
-          if (cardCtrl && !streamDegraded) {
+          if (cardCtrl) {
             try {
               await cardCtrl.update(
                 renderLiveAwareReplyCard(
@@ -15731,43 +15754,50 @@ ${evt.delta}`.slice(-4e3);
         },
         observeLiveEvent
       );
-      const streamDone = channel.stream(
-        chatId,
-        {
-          card: {
-            initial: renderLiveAwareReplyCard(initialState, cardRenderOptions, useLiveSession ? "live" : "agent"),
-            producer: async (ctrl) => {
-              producerStarted = true;
-              cardCtrl = ctrl;
-              try {
-                await ctrl.update(
-                  renderLiveAwareReplyCard(
-                    prepareStateForReply(latestState),
-                    cardRenderOptions,
-                    useLiveSession ? "live" : "agent"
-                  )
-                );
-              } catch (err) {
-                streamDegraded = true;
-                cardCtrl = void 0;
-                log.warn("stream", "patch-degraded", {
-                  scope,
-                  mode: replyMode,
-                  step: "initial",
-                  err: err instanceof Error ? err.message : String(err)
-                });
-              }
-              await renderDone;
-            }
-          }
-        },
-        sendOpts
-      );
-      await awaitRenderAwareStream({
+      await runRollingReplyStream({
         mode: replyMode,
-        streamDone,
         renderDone,
-        producerStarted: () => producerStarted,
+        startSegment: (segmentDone, markProducerStarted) => channel.stream(
+          chatId,
+          {
+            card: {
+              initial: renderLiveAwareReplyCard(
+                prepareStateForReply(latestState),
+                cardRenderOptions,
+                useLiveSession ? "live" : "agent"
+              ),
+              producer: async (ctrl) => {
+                markProducerStarted();
+                streamDegraded = false;
+                cardCtrl = ctrl;
+                try {
+                  await ctrl.update(
+                    renderLiveAwareReplyCard(
+                      prepareStateForReply(latestState),
+                      cardRenderOptions,
+                      useLiveSession ? "live" : "agent"
+                    )
+                  );
+                } catch (err) {
+                  streamDegraded = true;
+                  cardCtrl = void 0;
+                  log.warn("stream", "patch-degraded", {
+                    scope,
+                    mode: replyMode,
+                    step: "initial",
+                    err: err instanceof Error ? err.message : String(err)
+                  });
+                }
+                try {
+                  await segmentDone;
+                } finally {
+                  if (cardCtrl === ctrl) cardCtrl = void 0;
+                }
+              }
+            }
+          },
+          sendOpts
+        ),
         fallback: postFreshFinal
       });
       if (streamDegraded) {
@@ -15775,7 +15805,6 @@ ${evt.delta}`.slice(-4e3);
       }
     } else if (replyMode === "markdown") {
       let latestState = initialState;
-      let producerStarted = false;
       let streamDegraded = false;
       let freshFinalPosted = false;
       let markdownCtrl;
@@ -15795,7 +15824,7 @@ ${evt.delta}`.slice(-4e3);
         recordSession,
         async (state) => {
           latestState = state;
-          if (markdownCtrl && !streamDegraded) {
+          if (markdownCtrl) {
             try {
               await markdownCtrl.setContent(renderText(prepareStateForReply(state)));
             } catch (err) {
@@ -15811,34 +15840,37 @@ ${evt.delta}`.slice(-4e3);
         },
         observeLiveEvent
       );
-      const streamDone = channel.stream(
-        chatId,
-        {
-          markdown: async (ctrl) => {
-            producerStarted = true;
-            markdownCtrl = ctrl;
-            try {
-              await ctrl.setContent(renderText(prepareStateForReply(latestState)));
-            } catch (err) {
-              streamDegraded = true;
-              markdownCtrl = void 0;
-              log.warn("stream", "patch-degraded", {
-                scope,
-                mode: replyMode,
-                step: "initial",
-                err: err instanceof Error ? err.message : String(err)
-              });
-            }
-            await renderDone;
-          }
-        },
-        sendOpts
-      );
-      await awaitRenderAwareStream({
+      await runRollingReplyStream({
         mode: replyMode,
-        streamDone,
         renderDone,
-        producerStarted: () => producerStarted,
+        startSegment: (segmentDone, markProducerStarted) => channel.stream(
+          chatId,
+          {
+            markdown: async (ctrl) => {
+              markProducerStarted();
+              streamDegraded = false;
+              markdownCtrl = ctrl;
+              try {
+                await ctrl.setContent(renderText(prepareStateForReply(latestState)));
+              } catch (err) {
+                streamDegraded = true;
+                markdownCtrl = void 0;
+                log.warn("stream", "patch-degraded", {
+                  scope,
+                  mode: replyMode,
+                  step: "initial",
+                  err: err instanceof Error ? err.message : String(err)
+                });
+              }
+              try {
+                await segmentDone;
+              } finally {
+                if (markdownCtrl === ctrl) markdownCtrl = void 0;
+              }
+            }
+          },
+          sendOpts
+        ),
         fallback: postFreshFinal
       });
       if (streamDegraded) {
@@ -16076,53 +16108,93 @@ async function processAgentStream(handle, events, scope, idleTimeoutMs, recordSe
   }
   return state;
 }
-async function awaitRenderAwareStream(input) {
-  const streamResult = input.streamDone.then(
-    () => ({ kind: "stream", ok: true }),
-    (err) => ({ kind: "stream", ok: false, err })
-  );
+async function runRollingReplyStream(input) {
+  let renderSettled = false;
   const renderResult = input.renderDone.then(
-    (state) => ({ kind: "render", ok: true, state }),
-    (err) => ({ kind: "render", ok: false, err })
+    (state) => {
+      renderSettled = true;
+      return { kind: "render", ok: true, state };
+    },
+    (err) => {
+      renderSettled = true;
+      return { kind: "render", ok: false, err };
+    }
   );
-  const first = await Promise.race([streamResult, renderResult]);
-  if (!first.ok) {
-    if (first.kind === "stream") {
-      log.fail("stream", first.err, { mode: input.mode, step: "stream" });
-      const rendered = await renderResult;
-      if (!rendered.ok) throw rendered.err;
-      await runFallbackReply(input.mode, rendered.state, input.fallback);
+  const rolloverMs = input.rolloverMs ?? STREAM_ROLLOVER_MS;
+  let segment = 0;
+  while (true) {
+    segment += 1;
+    let producerStarted = false;
+    let rolloverTimer;
+    const rollover = new Promise((resolve2) => {
+      rolloverTimer = setTimeout(resolve2, rolloverMs);
+    });
+    const segmentDone = Promise.race([
+      renderResult.then(() => void 0),
+      rollover
+    ]);
+    const streamResult = Promise.resolve().then(() => input.startSegment(segmentDone, () => {
+      producerStarted = true;
+    })).then(
+      () => ({ kind: "stream", ok: true }),
+      (err) => ({ kind: "stream", ok: false, err })
+    );
+    const first = await Promise.race([streamResult, renderResult]);
+    if (rolloverTimer) clearTimeout(rolloverTimer);
+    if (!first.ok) {
+      if (first.kind === "stream") {
+        log.fail("stream", first.err, { mode: input.mode, step: "stream", segment });
+        const rendered = await renderResult;
+        if (!rendered.ok) throw rendered.err;
+        await runFallbackReply(input.mode, rendered.state, input.fallback);
+        return;
+      }
+      throw first.err;
+    }
+    if (first.kind === "render") {
+      if (!producerStarted) {
+        log.warn("stream", "producer-not-started-before-agent-terminal", {
+          mode: input.mode,
+          segment
+        });
+        await runFallbackReply(input.mode, first.state, input.fallback);
+        return;
+      }
+      const terminal = await Promise.race([
+        streamResult,
+        delay2(STREAM_TERMINAL_GRACE_MS).then(() => void 0)
+      ]);
+      if (!terminal) {
+        log.warn("stream", "terminal-grace-expired", {
+          mode: input.mode,
+          segment,
+          graceMs: STREAM_TERMINAL_GRACE_MS
+        });
+        void streamResult.then((result) => {
+          if (!result.ok) {
+            log.fail("stream", result.err, {
+              mode: input.mode,
+              segment,
+              step: "stream-terminal-late"
+            });
+          }
+        });
+        return;
+      }
+      if (!terminal.ok) throw terminal.err;
       return;
     }
-    throw first.err;
-  }
-  if (first.kind === "stream") {
-    const rendered = await renderResult;
-    if (!rendered.ok) throw rendered.err;
-    return;
-  }
-  if (!input.producerStarted()) {
-    log.warn("stream", "producer-not-started-before-agent-terminal", { mode: input.mode });
-    await runFallbackReply(input.mode, first.state, input.fallback);
-    return;
-  }
-  const terminal = await Promise.race([
-    streamResult,
-    delay2(STREAM_TERMINAL_GRACE_MS).then(() => void 0)
-  ]);
-  if (!terminal) {
-    log.warn("stream", "terminal-grace-expired", {
+    if (renderSettled) {
+      const rendered = await renderResult;
+      if (!rendered.ok) throw rendered.err;
+      return;
+    }
+    log.info("stream", "rollover", {
       mode: input.mode,
-      graceMs: STREAM_TERMINAL_GRACE_MS
+      segment,
+      rolloverMs
     });
-    void streamResult.then((result) => {
-      if (!result.ok) {
-        log.fail("stream", result.err, { mode: input.mode, step: "stream-terminal-late" });
-      }
-    });
-    return;
   }
-  if (!terminal.ok) throw terminal.err;
 }
 async function runFallbackReply(mode, state, fallback) {
   try {
@@ -16210,7 +16282,7 @@ function liveInputModeForBatch(batch, nativeCommand) {
 function looksLikeAgentPicker(text) {
   return /press\s+enter\s+to\s+(?:confirm|continue)/i.test(text) || /esc\s+to\s+(?:go\s+back|cancel)/i.test(text) || /\b(?:y\/n|yes\/no|no\/yes)\b/i.test(text) || /\bselect\s+(?:a\s+)?(?:model|option)\b/i.test(text) || /\bchoose an action\b/i.test(text) || /(?:^|\n)\s*(?:[›>▸*+-]\s*)?\d{1,2}[.)、:\s-]+\S/u.test(text) && /\b(?:choose|select|enable|disable|skills?|model|effort|action)\b/i.test(text) || /(?:↑|↓|up\/down|arrow keys?|use .*arrows?)/i.test(text) || /(?:do you want to|would you like to|shall i|waiting for (?:user|your) (?:input|confirmation)|requires? (?:approval|confirmation)|approve|allow).*(?:\?|proceed|continue|run|execute|apply|approve|allow)/i.test(
     text
-  ) || /(?:请选择|等待(?:你|用户).*(?:输入|选择|确认)|需要(?:你|用户).*(?:选择|确认)|确认.*(?:继续|执行)|取消|返回)/i.test(
+  ) || /(?:请选择|请(?:输入|回复).*(?:选项|编号|是|否)|等待(?:你|用户)(?:的)?(?:输入|选择|确认)|是否.*[？?]|(?:按下?|点击)回车(?:键)?.*确认)/i.test(
     text
   );
 }
@@ -16236,10 +16308,14 @@ function detectLiveInteraction(text) {
     add("yes", "yes");
     add("no", "no");
   }
-  if (/press\s+enter\s+to\s+confirm|enter\s+to\s+(?:confirm|continue)|回车|确认/i.test(prompt)) {
+  if (/press\s+enter\s+to\s+confirm|enter\s+to\s+(?:confirm|continue)|(?:按下?|点击)回车(?:键)?.*确认/i.test(
+    prompt
+  )) {
     add("enter", "enter");
   }
-  if (/esc\s+to\s+(?:go\s+back|cancel)|escape\s+to\s+cancel|取消|返回/i.test(prompt)) {
+  if (/esc\s+to\s+(?:go\s+back|cancel)|escape\s+to\s+cancel|(?:按下?|点击).*(?:esc|取消|返回)/i.test(
+    prompt
+  )) {
     add("esc", "esc");
   }
   if (hasNumberedChoices && looksLikeAgentPicker(prompt)) {

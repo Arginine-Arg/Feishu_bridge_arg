@@ -95,6 +95,7 @@ import {
 
 const DEBOUNCE_MS = 600;
 const STREAM_TERMINAL_GRACE_MS = 3000;
+const STREAM_ROLLOVER_MS = 8 * 60_000;
 const REACTION_CLEANUP_GRACE_MS = 1000;
 
 const BRIDGE_AGENT_INSTRUCTIONS = [
@@ -739,8 +740,13 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
       controls,
     });
     if (handled) {
-      const dropped = pending.cancel(scope);
-      log.info('intake', 'command', { scope, droppedPending: dropped.length });
+      const preservePending = commandPreservesPendingMessages(route.msg.content);
+      const dropped = preservePending ? [] : pending.cancel(scope);
+      log.info('intake', 'command', {
+        scope,
+        preservePending,
+        droppedPending: dropped.length,
+      });
       return;
     }
   }
@@ -781,7 +787,9 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     void channel
       .send(
         msg.chatId,
-        { text: '⏳ 当前任务还在运行，你的消息已排队，会在任务结束后一起处理。想立即打断请发 /stop。' },
+        {
+          text: `⏳ 当前任务仍在运行，你的消息已排队（当前 ${size} 条）。可随时发送 /status 检查会话；想立即打断请发 /stop。`,
+        },
         { replyTo: msg.messageId },
       )
       .catch((err) => log.warn('intake', 'busy-ack-failed', { scope, err: String(err) }));
@@ -792,6 +800,15 @@ export interface AgentCommandRoute {
   msg: NormalizedMessage;
   forceNative: boolean;
   nativeMode?: LiveInputMode;
+}
+
+export function commandPreservesPendingMessages(content: string): boolean {
+  const command = content.trim().toLowerCase();
+  return (
+    /^\/(?:status|help|ps)(?:\s|$)/u.test(command) ||
+    /^\/session(?:\s+\/?status)?\s*$/u.test(command) ||
+    /^\/timeout(?:\s|$)/u.test(command)
+  );
 }
 
 export function rewriteAgentCommandMessage(
@@ -1189,6 +1206,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     }
     if (opts.sendInteractionCard === false) return;
     if (!interaction || !cardRenderOptions.signCallback) return;
+    if (!useLiveSession && (sentInteractionSignatures.size > 0 || pendingInteractionSignatures.size > 0)) {
+      return;
+    }
     if (
       sentInteractionSignatures.has(interaction.signature) ||
       pendingInteractionSignatures.has(interaction.signature)
@@ -1426,11 +1446,10 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
 
     if (replyMode === 'card') {
       let latestState: RunState = initialState;
-      let producerStarted = false;
       // The streamed message can die mid-run (Feishu 230011 "message withdrawn",
-      // content-length limits). When a patch throws we must NOT let it abort
-      // event draining — we stop patching the dead message, finish the run, and
-      // post the final answer as a brand-new message exactly once.
+      // content-length limits, or the platform's automatic 10-minute stream
+      // close). Keep draining events, roll over before the platform deadline,
+      // and post the final answer as a fresh message if the last patch failed.
       let streamDegraded = false;
       let freshFinalPosted = false;
       let cardCtrl:
@@ -1459,7 +1478,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         recordSession,
         async (state) => {
           latestState = state;
-          if (cardCtrl && !streamDegraded) {
+          if (cardCtrl) {
             try {
               await cardCtrl.update(
                 renderLiveAwareReplyCard(
@@ -1481,43 +1500,51 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         },
         observeLiveEvent,
       );
-      const streamDone = channel.stream(
-        chatId,
-        {
-          card: {
-            initial: renderLiveAwareReplyCard(initialState, cardRenderOptions, useLiveSession ? 'live' : 'agent'),
-            producer: async (ctrl) => {
-              producerStarted = true;
-              cardCtrl = ctrl;
-              try {
-                await ctrl.update(
-                  renderLiveAwareReplyCard(
-                    prepareStateForReply(latestState),
-                    cardRenderOptions,
-                    useLiveSession ? 'live' : 'agent',
-                  ),
-                );
-              } catch (err) {
-                streamDegraded = true;
-                cardCtrl = undefined;
-                log.warn('stream', 'patch-degraded', {
-                  scope,
-                  mode: replyMode,
-                  step: 'initial',
-                  err: err instanceof Error ? err.message : String(err),
-                });
-              }
-              await renderDone;
-            },
-          },
-        },
-        sendOpts,
-      );
-      await awaitRenderAwareStream({
+      await runRollingReplyStream({
         mode: replyMode,
-        streamDone,
         renderDone,
-        producerStarted: () => producerStarted,
+        startSegment: (segmentDone, markProducerStarted) =>
+          channel.stream(
+            chatId,
+            {
+              card: {
+                initial: renderLiveAwareReplyCard(
+                  prepareStateForReply(latestState),
+                  cardRenderOptions,
+                  useLiveSession ? 'live' : 'agent',
+                ),
+                producer: async (ctrl) => {
+                  markProducerStarted();
+                  streamDegraded = false;
+                  cardCtrl = ctrl;
+                  try {
+                    await ctrl.update(
+                      renderLiveAwareReplyCard(
+                        prepareStateForReply(latestState),
+                        cardRenderOptions,
+                        useLiveSession ? 'live' : 'agent',
+                      ),
+                    );
+                  } catch (err) {
+                    streamDegraded = true;
+                    cardCtrl = undefined;
+                    log.warn('stream', 'patch-degraded', {
+                      scope,
+                      mode: replyMode,
+                      step: 'initial',
+                      err: err instanceof Error ? err.message : String(err),
+                    });
+                  }
+                  try {
+                    await segmentDone;
+                  } finally {
+                    if (cardCtrl === ctrl) cardCtrl = undefined;
+                  }
+                },
+              },
+            },
+            sendOpts,
+          ),
         fallback: postFreshFinal,
       });
       if (streamDegraded) {
@@ -1525,7 +1552,6 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       }
     } else if (replyMode === 'markdown') {
       let latestState: RunState = initialState;
-      let producerStarted = false;
       // See card branch: a withdrawn/failed patch must degrade to a fresh final
       // message instead of aborting the run and losing the answer.
       let streamDegraded = false;
@@ -1547,7 +1573,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         recordSession,
         async (state) => {
           latestState = state;
-          if (markdownCtrl && !streamDegraded) {
+          if (markdownCtrl) {
             try {
               await markdownCtrl.setContent(renderText(prepareStateForReply(state)));
             } catch (err) {
@@ -1563,34 +1589,38 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         },
         observeLiveEvent,
       );
-      const streamDone = channel.stream(
-        chatId,
-        {
-          markdown: async (ctrl) => {
-            producerStarted = true;
-            markdownCtrl = ctrl;
-            try {
-              await ctrl.setContent(renderText(prepareStateForReply(latestState)));
-            } catch (err) {
-              streamDegraded = true;
-              markdownCtrl = undefined;
-              log.warn('stream', 'patch-degraded', {
-                scope,
-                mode: replyMode,
-                step: 'initial',
-                err: err instanceof Error ? err.message : String(err),
-              });
-            }
-            await renderDone;
-          },
-        },
-        sendOpts,
-      );
-      await awaitRenderAwareStream({
+      await runRollingReplyStream({
         mode: replyMode,
-        streamDone,
         renderDone,
-        producerStarted: () => producerStarted,
+        startSegment: (segmentDone, markProducerStarted) =>
+          channel.stream(
+            chatId,
+            {
+              markdown: async (ctrl) => {
+                markProducerStarted();
+                streamDegraded = false;
+                markdownCtrl = ctrl;
+                try {
+                  await ctrl.setContent(renderText(prepareStateForReply(latestState)));
+                } catch (err) {
+                  streamDegraded = true;
+                  markdownCtrl = undefined;
+                  log.warn('stream', 'patch-degraded', {
+                    scope,
+                    mode: replyMode,
+                    step: 'initial',
+                    err: err instanceof Error ? err.message : String(err),
+                  });
+                }
+                try {
+                  await segmentDone;
+                } finally {
+                  if (markdownCtrl === ctrl) markdownCtrl = undefined;
+                }
+              },
+            },
+            sendOpts,
+          ),
         fallback: postFreshFinal,
       });
       if (streamDegraded) {
@@ -1906,62 +1936,110 @@ async function processAgentStream(
   return state;
 }
 
-async function awaitRenderAwareStream(input: {
+export async function runRollingReplyStream(input: {
   mode: 'card' | 'markdown';
-  streamDone: Promise<unknown>;
   renderDone: Promise<RunState>;
-  producerStarted: () => boolean;
+  startSegment: (
+    segmentDone: Promise<void>,
+    markProducerStarted: () => void,
+  ) => Promise<unknown>;
   fallback: (state: RunState) => Promise<void>;
+  rolloverMs?: number;
 }): Promise<void> {
-  const streamResult = input.streamDone.then(
-    () => ({ kind: 'stream' as const, ok: true as const }),
-    (err) => ({ kind: 'stream' as const, ok: false as const, err }),
-  );
+  let renderSettled = false;
   const renderResult = input.renderDone.then(
-    (state) => ({ kind: 'render' as const, ok: true as const, state }),
-    (err) => ({ kind: 'render' as const, ok: false as const, err }),
+    (state) => {
+      renderSettled = true;
+      return { kind: 'render' as const, ok: true as const, state };
+    },
+    (err) => {
+      renderSettled = true;
+      return { kind: 'render' as const, ok: false as const, err };
+    },
   );
-  const first = await Promise.race([streamResult, renderResult]);
-  if (!first.ok) {
-    if (first.kind === 'stream') {
-      log.fail('stream', first.err, { mode: input.mode, step: 'stream' });
-      const rendered = await renderResult;
-      if (!rendered.ok) throw rendered.err;
-      await runFallbackReply(input.mode, rendered.state, input.fallback);
+  const rolloverMs = input.rolloverMs ?? STREAM_ROLLOVER_MS;
+  let segment = 0;
+
+  while (true) {
+    segment += 1;
+    let producerStarted = false;
+    let rolloverTimer: NodeJS.Timeout | undefined;
+    const rollover = new Promise<void>((resolve) => {
+      rolloverTimer = setTimeout(resolve, rolloverMs);
+    });
+    const segmentDone = Promise.race([
+      renderResult.then(() => undefined),
+      rollover,
+    ]);
+    const streamResult = Promise.resolve()
+      .then(() => input.startSegment(segmentDone, () => {
+        producerStarted = true;
+      }))
+      .then(
+        () => ({ kind: 'stream' as const, ok: true as const }),
+        (err) => ({ kind: 'stream' as const, ok: false as const, err }),
+      );
+    const first = await Promise.race([streamResult, renderResult]);
+    if (rolloverTimer) clearTimeout(rolloverTimer);
+
+    if (!first.ok) {
+      if (first.kind === 'stream') {
+        log.fail('stream', first.err, { mode: input.mode, step: 'stream', segment });
+        const rendered = await renderResult;
+        if (!rendered.ok) throw rendered.err;
+        await runFallbackReply(input.mode, rendered.state, input.fallback);
+        return;
+      }
+      throw first.err;
+    }
+
+    if (first.kind === 'render') {
+      if (!producerStarted) {
+        log.warn('stream', 'producer-not-started-before-agent-terminal', {
+          mode: input.mode,
+          segment,
+        });
+        await runFallbackReply(input.mode, first.state, input.fallback);
+        return;
+      }
+
+      const terminal = await Promise.race([
+        streamResult,
+        delay(STREAM_TERMINAL_GRACE_MS).then(() => undefined),
+      ]);
+      if (!terminal) {
+        log.warn('stream', 'terminal-grace-expired', {
+          mode: input.mode,
+          segment,
+          graceMs: STREAM_TERMINAL_GRACE_MS,
+        });
+        void streamResult.then((result) => {
+          if (!result.ok) {
+            log.fail('stream', result.err, {
+              mode: input.mode,
+              segment,
+              step: 'stream-terminal-late',
+            });
+          }
+        });
+        return;
+      }
+      if (!terminal.ok) throw terminal.err;
       return;
     }
-    throw first.err;
-  }
 
-  if (first.kind === 'stream') {
-    const rendered = await renderResult;
-    if (!rendered.ok) throw rendered.err;
-    return;
-  }
+    if (renderSettled) {
+      const rendered = await renderResult;
+      if (!rendered.ok) throw rendered.err;
+      return;
+    }
 
-  if (!input.producerStarted()) {
-    log.warn('stream', 'producer-not-started-before-agent-terminal', { mode: input.mode });
-    await runFallbackReply(input.mode, first.state, input.fallback);
-    return;
-  }
-
-  const terminal = await Promise.race([
-    streamResult,
-    delay(STREAM_TERMINAL_GRACE_MS).then(() => undefined),
-  ]);
-  if (!terminal) {
-    log.warn('stream', 'terminal-grace-expired', {
+    log.info('stream', 'rollover', {
       mode: input.mode,
-      graceMs: STREAM_TERMINAL_GRACE_MS,
+      segment,
+      rolloverMs,
     });
-    void streamResult.then((result) => {
-      if (!result.ok) {
-        log.fail('stream', result.err, { mode: input.mode, step: 'stream-terminal-late' });
-      }
-    });
-    return;
   }
-  if (!terminal.ok) throw terminal.err;
 }
 
 async function runFallbackReply(
@@ -2103,7 +2181,7 @@ function looksLikeAgentPicker(text: string): boolean {
     /(?:do you want to|would you like to|shall i|waiting for (?:user|your) (?:input|confirmation)|requires? (?:approval|confirmation)|approve|allow).*(?:\?|proceed|continue|run|execute|apply|approve|allow)/i.test(
       text,
     ) ||
-    /(?:请选择|等待(?:你|用户).*(?:输入|选择|确认)|需要(?:你|用户).*(?:选择|确认)|确认.*(?:继续|执行)|取消|返回)/i.test(
+    /(?:请选择|请(?:输入|回复).*(?:选项|编号|是|否)|等待(?:你|用户)(?:的)?(?:输入|选择|确认)|是否.*[？?]|(?:按下?|点击)回车(?:键)?.*确认)/i.test(
       text,
     )
   );
@@ -2154,10 +2232,18 @@ function detectLiveInteraction(text: string): LiveInteractionPrompt | undefined 
     add('yes', 'yes');
     add('no', 'no');
   }
-  if (/press\s+enter\s+to\s+confirm|enter\s+to\s+(?:confirm|continue)|回车|确认/i.test(prompt)) {
+  if (
+    /press\s+enter\s+to\s+confirm|enter\s+to\s+(?:confirm|continue)|(?:按下?|点击)回车(?:键)?.*确认/i.test(
+      prompt,
+    )
+  ) {
     add('enter', 'enter');
   }
-  if (/esc\s+to\s+(?:go\s+back|cancel)|escape\s+to\s+cancel|取消|返回/i.test(prompt)) {
+  if (
+    /esc\s+to\s+(?:go\s+back|cancel)|escape\s+to\s+cancel|(?:按下?|点击).*(?:esc|取消|返回)/i.test(
+      prompt,
+    )
+  ) {
     add('esc', 'esc');
   }
   if (hasNumberedChoices && looksLikeAgentPicker(prompt)) {

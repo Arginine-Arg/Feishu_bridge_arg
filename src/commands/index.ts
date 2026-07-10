@@ -880,9 +880,13 @@ async function handleSession(args: string, ctx: CommandContext): Promise<void> {
   const current = getAgentSessionMode(ctx.controls.cfg);
   if (!action || action === 'status') {
     const label = current === 'live' ? 'live（后台常驻 CLI）' : 'turn（每轮短任务）';
+    const active = ctx.activeRuns.get(ctx.scope);
+    const runStatus = active
+      ? `运行中（run \`${active.run.runId.slice(0, 8)}…\`）`
+      : '无运行任务';
     await reply(
       ctx,
-      `当前 agent session 模式：\`${label}\`\n\n用法：\`/session live\` 或 \`/session turn\`。`,
+      `当前 agent session 模式：\`${label}\`\n当前 scope：${runStatus}\n\n用法：\`/session live\` 或 \`/session turn\`；完整运行状态用 \`/status\`。`,
     );
     return;
   }

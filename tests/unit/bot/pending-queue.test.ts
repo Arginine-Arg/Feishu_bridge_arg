@@ -4,21 +4,25 @@ import { PendingQueue } from '../../../src/bot/pending-queue';
 const SCOPE = 'oc_test';
 
 describe('PendingQueue busy-ack', () => {
-  it('acks once per blocked window and resets after unblock', () => {
-    const queue = new PendingQueue(10, () => {});
+  it('rate-limits busy acks and allows a later liveness acknowledgement', () => {
+    let now = 1_000;
+    const queue = new PendingQueue(10, () => {}, 30_000, () => now);
 
     // Not blocked → never ack.
     expect(queue.isBlocked(SCOPE)).toBe(false);
     expect(queue.shouldAckBusy(SCOPE)).toBe(false);
 
-    // A run starts → blocked. First queued message acks, subsequent ones don't.
+    // A run starts → blocked. The first queued message acks; a rapid burst does not.
     queue.block(SCOPE);
     expect(queue.isBlocked(SCOPE)).toBe(true);
     expect(queue.shouldAckBusy(SCOPE)).toBe(true);
     expect(queue.shouldAckBusy(SCOPE)).toBe(false);
+    now += 29_999;
     expect(queue.shouldAckBusy(SCOPE)).toBe(false);
+    now += 1;
+    expect(queue.shouldAckBusy(SCOPE)).toBe(true);
 
-    // Run ends → next busy window is allowed a fresh single ack.
+    // Run ends → the next busy window is allowed a fresh immediate ack.
     queue.unblock(SCOPE);
     expect(queue.isBlocked(SCOPE)).toBe(false);
     expect(queue.shouldAckBusy(SCOPE)).toBe(false);

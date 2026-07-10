@@ -8,6 +8,8 @@ interface PendingEntry {
 
 export type FlushHandler = (scope: string, batch: NormalizedMessage[]) => void;
 
+const DEFAULT_BUSY_ACK_COOLDOWN_MS = 30_000;
+
 /**
  * Per-scope debounce queue. `scope` is the session scope string (typically
  * `chatId` for p2p / regular group, `chatId:threadId` for topic groups).
@@ -23,16 +25,25 @@ export type FlushHandler = (scope: string, batch: NormalizedMessage[]) => void;
 export class PendingQueue {
   private readonly map = new Map<string, PendingEntry>();
   private readonly blocked = new Set<string>();
-  // Scopes that have already emitted a "run in progress, your message is
-  // queued" ack in the CURRENT blocked window. Cleared on unblock so the next
-  // busy window gets a fresh (single) ack.
-  private readonly ackedBusy = new Set<string>();
+  // Last "run in progress, your message is queued" acknowledgement per scope.
+  // Long runs may stay blocked for hours, so suppress only short bursts rather
+  // than silencing every later status request until the run ends.
+  private readonly busyAckedAt = new Map<string, number>();
   private readonly delayMs: number;
   private readonly onFlush: FlushHandler;
+  private readonly busyAckCooldownMs: number;
+  private readonly now: () => number;
 
-  constructor(delayMs: number, onFlush: FlushHandler) {
+  constructor(
+    delayMs: number,
+    onFlush: FlushHandler,
+    busyAckCooldownMs = DEFAULT_BUSY_ACK_COOLDOWN_MS,
+    now: () => number = Date.now,
+  ) {
     this.delayMs = delayMs;
     this.onFlush = onFlush;
+    this.busyAckCooldownMs = Math.max(0, busyAckCooldownMs);
+    this.now = now;
   }
 
   push(scope: string, msg: NormalizedMessage): number {
@@ -64,7 +75,7 @@ export class PendingQueue {
     }
     this.map.clear();
     this.blocked.clear();
-    this.ackedBusy.clear();
+    this.busyAckedAt.clear();
   }
 
   /** True while a run is active on this scope (debounce timer paused). */
@@ -73,15 +84,16 @@ export class PendingQueue {
   }
 
   /**
-   * Returns true exactly once per blocked window: when the scope is currently
-   * blocked (a run is in flight) and no busy-ack has been emitted yet. Lets the
-   * caller send a single "queued behind the active run" notice without spamming
-   * one per queued message. Reset by `unblock`.
+   * Returns true when the scope is blocked and the per-scope cooldown elapsed.
+   * This keeps rapid message bursts quiet while ensuring a later progress check
+   * during a long run always receives a liveness acknowledgement.
    */
   shouldAckBusy(scope: string): boolean {
     if (!this.blocked.has(scope)) return false;
-    if (this.ackedBusy.has(scope)) return false;
-    this.ackedBusy.add(scope);
+    const now = this.now();
+    const lastAckedAt = this.busyAckedAt.get(scope);
+    if (lastAckedAt !== undefined && now - lastAckedAt < this.busyAckCooldownMs) return false;
+    this.busyAckedAt.set(scope, now);
     return true;
   }
 
@@ -101,7 +113,7 @@ export class PendingQueue {
   unblock(scope: string): void {
     if (!this.blocked.has(scope)) return;
     this.blocked.delete(scope);
-    this.ackedBusy.delete(scope);
+    this.busyAckedAt.delete(scope);
     const entry = this.map.get(scope);
     log.info('queue', 'unblocked', { scope, queued: entry?.messages.length ?? 0 });
     if (!entry || entry.messages.length === 0) return;
