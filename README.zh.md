@@ -30,7 +30,7 @@
 
 ## 安装
 
-GitHub Release 是正式安装源。安装器会下载最新版本 tarball、校验 SHA256、清理失败安装留下的 npm 失效软链，并在禁用 npm lifecycle 脚本后完成全局安装：
+GitHub Release 是正式安装源。安装器会下载最新版本 tarball、校验 SHA256、清理失败安装留下的 npm 失效软链和可识别的旧版启动文件，并在禁用 npm lifecycle 脚本后完成全局安装：
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh | sh
@@ -41,7 +41,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 0.5.7
+sh /tmp/install-arg-bridge.sh --version 0.5.8
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -70,7 +70,7 @@ npm install -g --ignore-scripts --install-links=true ./arg-bridge.tgz
 
 ### 2. 旧安装留下坏链或触发 `EEXIST`
 
-npm 11 可能把 Git 全局安装链接到 `.npm/_cacache/tmp/git-clone*` 临时目录，并在安装结束后删掉该目录，表现为安装成功但命令随后失效。Release 安装器会自动清理这种坏链。如果仍有另一个有效包占用命令名，再明确卸载旧包：
+npm 11 可能把 Git 全局安装链接到 `.npm/_cacache/tmp/git-clone*` 临时目录，并在安装结束后删掉该目录，表现为安装成功但命令随后失效。更早的 bridge 安装器也可能在全局 `bin` 目录留下普通启动文件，导致 npm 以 `EEXIST` 停止。Release 安装器会自动清理失效软链以及可识别为 arg-bridge 的旧启动文件。如果仍有另一个有效包占用命令名，再明确卸载旧包：
 
 ```bash
 npm uninstall -g arg-bridge lark-channel-bridge
@@ -85,10 +85,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.5.7"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.5.8"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.5.7`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.5.8`。
 
 ### 4. Node 或 npm 全局目录错误
 

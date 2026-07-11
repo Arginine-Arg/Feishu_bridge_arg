@@ -29,7 +29,7 @@ try {
   const prefix = join(temporaryRoot, 'prefix');
   const checksum = await createChecksum(archive, temporaryRoot);
 
-  await createStaleNpmLinks(prefix, temporaryRoot, packageJson.name);
+  await createInstallConflicts(prefix, temporaryRoot, packageJson.name);
 
   execFileSync(
     'sh',
@@ -111,13 +111,17 @@ async function createChecksum(archive, destination) {
   return checksum;
 }
 
-async function createStaleNpmLinks(prefix, destination, packageName) {
+async function createInstallConflicts(prefix, destination, packageName) {
   const globalRoot = join(prefix, 'lib', 'node_modules');
   const binRoot = join(prefix, 'bin');
   const missingTarget = join(destination, 'removed-git-clone');
   await mkdir(globalRoot, { recursive: true });
   await mkdir(binRoot, { recursive: true });
   await symlink(missingTarget, join(globalRoot, packageName));
-  await symlink(missingTarget, join(binRoot, 'arg-bridge'));
+  await writeFile(
+    join(binRoot, 'arg-bridge'),
+    '#!/bin/sh\nexec node "/tmp/legacy-arg-bridge/dist/cli.js" "$@"\n',
+    { mode: 0o755 },
+  );
   await symlink(missingTarget, join(binRoot, 'lark-channel-bridge'));
 }

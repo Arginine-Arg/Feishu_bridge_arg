@@ -86,6 +86,23 @@ clean_broken_link() {
   fi
 }
 
+is_legacy_launcher() {
+  path="$1"
+  [ -f "$path" ] || return 1
+  LC_ALL=C grep -Eq 'arg-bridge|lark-channel-bridge|dist/cli\.js' "$path"
+}
+
+clean_command_path() {
+  path="$1"
+  if [ -L "$path" ]; then
+    printf 'Removing existing npm command link: %s\n' "$path"
+    rm -f "$path"
+  elif is_legacy_launcher "$path"; then
+    printf 'Removing legacy arg-bridge launcher: %s\n' "$path"
+    rm -f "$path"
+  fi
+}
+
 cleanup() {
   if [ -n "$TEMP_DIR" ] && [ -d "$TEMP_DIR" ]; then
     rm -rf "$TEMP_DIR"
@@ -183,8 +200,8 @@ else
 fi
 
 clean_broken_link "$GLOBAL_ROOT/arg-bridge"
-clean_broken_link "$GLOBAL_PREFIX/bin/arg-bridge"
-clean_broken_link "$GLOBAL_PREFIX/bin/lark-channel-bridge"
+clean_command_path "$GLOBAL_PREFIX/bin/arg-bridge"
+clean_command_path "$GLOBAL_PREFIX/bin/lark-channel-bridge"
 
 if [ -n "$PREFIX" ]; then
   npm install --global --ignore-scripts --install-links=true \

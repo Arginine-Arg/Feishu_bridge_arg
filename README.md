@@ -30,7 +30,7 @@ For a product walkthrough, see the [Feishu document](https://larkcommunity.feish
 
 ## Install
 
-GitHub Releases are the canonical installation source. The installer downloads the latest release tarball, verifies its SHA256 checksum, removes stale npm links left by failed installs, and installs with npm lifecycle scripts disabled:
+GitHub Releases are the canonical installation source. The installer downloads the latest release tarball, verifies its SHA256 checksum, removes stale npm links and recognized legacy launchers, and installs with npm lifecycle scripts disabled:
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh | sh
@@ -41,7 +41,7 @@ Install a pinned release or use a writable custom npm prefix when required:
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 0.5.7
+sh /tmp/install-arg-bridge.sh --version 0.5.8
 # Example for a machine without permission to write npm's configured global prefix:
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -70,7 +70,7 @@ npm install -g --ignore-scripts --install-links=true ./arg-bridge.tgz
 
 ### 2. Broken links or `EEXIST` from an earlier install
 
-npm 11 can report a successful Git global install while linking the package to a temporary path under `.npm/_cacache/tmp/git-clone*`. Once npm removes that clone, the command is broken. The Release installer automatically removes these stale links. If a valid installation of another package still owns the command names, remove it explicitly before reinstalling:
+npm 11 can report a successful Git global install while linking the package to a temporary path under `.npm/_cacache/tmp/git-clone*`. Once npm removes that clone, the command is broken. Older bridge installers can also leave regular launcher files in the global `bin` directory, causing npm to stop with `EEXIST`. The Release installer automatically removes stale links and launchers it recognizes as arg-bridge. If a valid installation of another package still owns the command names, remove it explicitly before reinstalling:
 
 ```bash
 npm uninstall -g arg-bridge lark-channel-bridge
@@ -85,10 +85,10 @@ Release tarballs are preferred. If a Git install is required, keep both compatib
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.5.7"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.5.8"
 ```
 
-`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.5.7`.
+`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.5.8`.
 
 ### 4. Node or npm global-prefix errors
 
