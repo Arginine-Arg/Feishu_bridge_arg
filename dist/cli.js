@@ -45,6 +45,7 @@ var package_default = {
     "test:unit": "vitest run tests/unit --passWithNoTests",
     "test:integration": "vitest run tests/integration --passWithNoTests",
     "test:process": "vitest run tests/process --passWithNoTests",
+    "test:package": "node scripts/verify-package-install.mjs",
     "ci:local": "git diff --check && pnpm test && pnpm typecheck && pnpm build",
     "ci:platform": "pnpm test && pnpm typecheck && pnpm build",
     prepublishOnly: "npm run typecheck && npm run build"

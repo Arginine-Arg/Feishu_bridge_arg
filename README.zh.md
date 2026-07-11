@@ -30,128 +30,88 @@
 
 ## 安装
 
-本 fork 的包名是 `arg-bridge`,从 GitHub 安装；主命令是 `arg-bridge`。为了迁移期兼容，仍保留 `lark-channel-bridge` 作为旧脚本别名。
+GitHub Release 是正式安装源。安装器会下载最新版本 tarball、校验 SHA256、清理失败安装留下的 npm 失效软链，并在禁用 npm lifecycle 脚本后完成全局安装：
 
 ```bash
-npm i -g git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git
-# 或(有仓库 SSH 权限时)
-npm i -g git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git
+curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh | sh
+arg-bridge --version
 ```
 
-> 仓库已内置预构建的 `dist/`,**安装即用,不需要本地构建**(需要 Node ≥ 20.12 且 < 25；推荐 Node 22 LTS)。日后若发布到 npm,可 `npm i -g arg-bridge`。
-> 从源码开发:`npm i && npm run build`。
+需要锁定版本或 npm 默认全局目录不可写时，可以这样安装：
+
+```bash
+curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
+sh /tmp/install-arg-bridge.sh --version 0.5.6
+# 无权写入 npm 默认全局目录时：
+sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+主命令是 `arg-bridge`，迁移期仍保留 `lark-channel-bridge` 兼容别名。Release 已包含预构建的 `dist/`，不再需要 clone、`git pull`、本地构建或手工猜 tarball 文件名。要求 Node.js >= 20.12 且 < 25，部署推荐 Node 22 LTS。
+
+也可以手工下载稳定资产并校验后安装：
+
+```bash
+curl -fLO https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/arg-bridge.tgz
+curl -fLO https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/arg-bridge.tgz.sha256
+sha256sum -c arg-bridge.tgz.sha256
+npm install -g --ignore-scripts --install-links=true ./arg-bridge.tgz
+```
+
+> 从源码开发：`pnpm install && pnpm build`。`npm pack` 会根据当前 checkout 的 `package.json` 版本生成文件名，必须使用它实际打印的文件名，不能假设本地已经是更新版本。
 >
 > **从原版迁移**:先用旧命令停止并注销旧服务：`lark-channel-bridge stop && lark-channel-bridge unregister`(每个 profile 都要),再按上面装本 fork,然后用 `arg-bridge start` 注册新后台服务。所有状态在 `~/.lark-channel/`,原样保留——同一个飞书 app、同一个 bot 自动重连,无需重新扫码。
 
 ## 安装排障
 
-项目打包配置本身比较直接：包名是 `arg-bridge`，主命令是 `arg-bridge`，`lark-channel-bridge` 只是迁移期兼容别名；`npm pack` 会包含 `bin/arg-bridge.mjs` 和预构建的 `dist/cli.js`。多数安装失败来自目标机器环境：SSH key、npm 半安装残留、Node/npm 版本、NAS 全局目录、`PATH` 或 shell 命令缓存。
+### 1. `npm pack` 生成了旧版本
 
-### 1. GitHub SSH permission denied
+`npm pack` 打包的是当前 checkout，不会读取下一条安装命令里写的版本。例如输出是 `arg-bridge@0.5.5` 和 `arg-bridge-0.5.5.tgz` 时，本地就没有 `arg-bridge-0.5.6.tgz`，随后安装这个不存在的文件必然得到 `ENOENT`。`git pull` 失败后源码不会自动更新。使用上面的 Release 安装器即可解除安装过程对 clone 状态和 `git pull` 网络的依赖。
 
-如果从私有 GitHub 仓库安装时报：
+### 2. 旧安装留下坏链或触发 `EEXIST`
 
-```text
-git@github.com: Permission denied (publickey).
-fatal: Could not read from remote repository.
-```
-
-先确认 SSH 使用的是正确 key：
+npm 11 可能把 Git 全局安装链接到 `.npm/_cacache/tmp/git-clone*` 临时目录，并在安装结束后删掉该目录，表现为安装成功但命令随后失效。Release 安装器会自动清理这种坏链。如果仍有另一个有效包占用命令名，再明确卸载旧包：
 
 ```bash
-ssh -T git@github.com
-ls -la ~/.ssh
-```
-
-必要时在 `~/.ssh/config` 配一个专用 key：
-
-```sshconfig
-Host github-arg
-  HostName github.com
-  User git
-  IdentityFile ~/.ssh/arg_githubkey
-  IdentitiesOnly yes
-```
-
-然后用这个 host alias 安装或 clone：
-
-```bash
-npm i -g git+ssh://git@github-arg/Arginine-Arg/Feishu_bridge_arg.git
-git clone git@github-arg:Arginine-Arg/Feishu_bridge_arg.git
-```
-
-### 2. 清理失败安装留下的全局残留
-
-npm 中途失败后，可能留下坏的命令软链或包目录：
-
-```bash
-rm -f "$(npm prefix -g)/bin/arg-bridge" "$(npm prefix -g)/bin/lark-channel-bridge"
-rm -rf "$(npm root -g)/arg-bridge" "$(npm root -g)/lark-channel-bridge"
+npm uninstall -g arg-bridge lark-channel-bridge
 hash -r
 ```
 
-然后重新安装。
+npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
-### 3. 全局安装时报 `EEXIST`
+### 3. 必须从 Git 安装时
 
-如果 npm 报 `EEXIST: file already exists`，说明旧安装已经占用了命令名。先卸载旧包：
-
-```bash
-npm uninstall -g arg-bridge
-npm uninstall -g lark-channel-bridge
-```
-
-再重新安装本 fork。
-
-### 4. npm lifecycle script `ENOENT`
-
-如果 npm 在依赖 lifecycle script 附近失败，例如：
-
-```text
-npm error syscall spawn sh
-npm error syscall spawn /bin/sh
-```
-
-通常是本机 npm/Node/全局目录问题，尤其常见于过新的 Node 版本或 NAS 挂载的全局目录。部署优先用 Node 22 LTS。临时绕过方式：
+优先使用 Release tarball。确实需要 Git 安装时，必须同时保留两个兼容参数并锁定 tag：
 
 ```bash
-npm config set script-shell /bin/sh
-npm i -g --ignore-scripts git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git
+npm install -g --ignore-scripts --install-links=true \
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.5.6"
 ```
 
-### 5. 从本地 tarball 安装
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.5.6`。
 
-如果 git-based 全局安装不稳定：
+### 4. Node 或 npm 全局目录错误
 
-```bash
-git clone git@github.com:Arginine-Arg/Feishu_bridge_arg.git
-cd Feishu_bridge_arg
-npm pack
-npm i -g --ignore-scripts ./arg-bridge-0.5.6.tgz
-hash -r
-arg-bridge --help
-arg-bridge --version
-```
-
-### 6. PATH 和 shell 缓存
-
-如果命令已经在 npm 全局 bin 目录下，但 shell 找不到：
+先确认当前 shell 调用的是预期 Node/npm：
 
 ```bash
+node --version
+npm --version
 npm prefix -g
-echo "$PATH"
-hash -r
 ```
 
-临时把 npm 全局 bin 加到 `PATH`：
+安装器会在修改全局安装前拒绝不支持的 Node 版本。npm 默认全局目录不可写时，使用 `--prefix "$HOME/.local"`。
+
+### 5. PATH 和 shell 缓存
+
+安装成功但 shell 找不到命令时，把安装器打印的 bin 目录加入 `PATH`：
 
 ```bash
 export PATH="$(npm prefix -g)/bin:$PATH"
+hash -r
 ```
 
-长期修复可以把这行，或实际 Node bin 目录，写进 `~/.bashrc`。
-
-### 7. 验证安装
+### 6. 验证安装
 
 ```bash
 command -v arg-bridge
@@ -471,7 +431,7 @@ pnpm typecheck
 pnpm build
 ```
 
-`pnpm test` 包含 unit、integration 和 process-level adapter 测试。CI 在 macOS、Ubuntu、Windows 上执行 `pnpm install --frozen-lockfile`、`pnpm test`、`pnpm typecheck` 和 `pnpm build`。
+`pnpm test` 包含 unit、integration 和 process-level adapter 测试。CI 会在 macOS、Ubuntu、Windows 上运行源码测试，并在 Node 20、22、24 下通过 `pnpm test:package` 把 release tarball 安装到隔离全局目录，验证真实安装结果。
 
 ## 可选：遥测（Telemetry）
 

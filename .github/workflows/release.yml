@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Enable pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Validate release version
+        shell: bash
+        run: |
+          package_version="$(node -p "require('./package.json').version")"
+          test "$GITHUB_REF_NAME" = "v$package_version"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify source
+        run: pnpm test && pnpm typecheck && pnpm build
+
+      - name: Build release assets
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p release
+          npm pack --ignore-scripts --pack-destination release
+          cp "release/arg-bridge-$version.tgz" release/arg-bridge.tgz
+          cp scripts/install-global.sh release/install-global.sh
+          cd release
+          sha256sum "arg-bridge-$version.tgz" > "arg-bridge-$version.tgz.sha256"
+          sha256sum arg-bridge.tgz > arg-bridge.tgz.sha256
+          sha256sum "arg-bridge-$version.tgz" arg-bridge.tgz install-global.sh > SHA256SUMS
+          sha256sum -c SHA256SUMS
+
+      - name: Verify release archive installation
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          node scripts/verify-package-install.mjs "release/arg-bridge-$version.tgz"
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" release/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" release/* \
+              --title "arg-bridge $GITHUB_REF_NAME" \
+              --generate-notes \
+              --verify-tag
+          fi

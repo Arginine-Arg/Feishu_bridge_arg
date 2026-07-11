@@ -30,127 +30,88 @@ For a product walkthrough, see the [Feishu document](https://larkcommunity.feish
 
 ## Install
 
-This fork's package name is `arg-bridge`, installed from GitHub. The primary installed command is `arg-bridge`; `lark-channel-bridge` remains as a compatibility alias for existing scripts during migration.
+GitHub Releases are the canonical installation source. The installer downloads the latest release tarball, verifies its SHA256 checksum, removes stale npm links left by failed installs, and installs with npm lifecycle scripts disabled:
 
 ```bash
-npm i -g git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git
-# or, with SSH access to the repo
-npm i -g git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git
+curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh | sh
+arg-bridge --version
 ```
 
-> The repo ships a prebuilt `dist/`, so **install works out of the box — no local build needed** (requires Node ≥ 20.12 and < 25; Node 22 LTS recommended). If later published to npm: `npm i -g arg-bridge`. Developing from source: `npm i && npm run build`.
+Install a pinned release or use a writable custom npm prefix when required:
+
+```bash
+curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
+sh /tmp/install-arg-bridge.sh --version 0.5.6
+# Example for a machine without permission to write npm's configured global prefix:
+sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+The primary command is `arg-bridge`; `lark-channel-bridge` remains as a compatibility alias. The release contains a prebuilt `dist/`, so no clone, `git pull`, local build, or guessed tarball filename is needed. Node.js >= 20.12 and < 25 is required; Node 22 LTS is recommended.
+
+For a manual install, download both stable assets and verify them before installing:
+
+```bash
+curl -fLO https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/arg-bridge.tgz
+curl -fLO https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/arg-bridge.tgz.sha256
+sha256sum -c arg-bridge.tgz.sha256
+npm install -g --ignore-scripts --install-links=true ./arg-bridge.tgz
+```
+
+> Developing from source: `pnpm install && pnpm build`. `npm pack` names the archive from the version in that checkout's `package.json`; use the filename it prints rather than assuming a newer version.
 >
 > **Migrating from upstream**: stop/unregister the old service first (`lark-channel-bridge stop && lark-channel-bridge unregister`, per profile), install this fork, then use `arg-bridge start` to register the new service. All state lives in `~/.lark-channel/` and is preserved — the same Feishu app / bot reconnects, no re-scan.
 
 ## Installation Troubleshooting
 
-The package metadata is intentionally simple: the package is named `arg-bridge`, the primary binary is `arg-bridge`, and `lark-channel-bridge` remains as a compatibility alias. `npm pack` includes `bin/arg-bridge.mjs` and the prebuilt `dist/cli.js`. Most install failures are caused by the target machine's SSH, npm, Node, global-prefix, or shell environment.
+### 1. `npm pack` produced an older version
 
-### 1. GitHub SSH permission denied
+`npm pack` packages the current checkout, not the version written in the next command. For example, if its output says `arg-bridge@0.5.5` and `arg-bridge-0.5.5.tgz`, then `arg-bridge-0.5.6.tgz` does not exist and npm correctly reports `ENOENT`. A failed `git pull` leaves the checkout unchanged. Use the Release installer above to avoid coupling installation to clone state or GitHub connectivity during `git pull`.
 
-If installing from a private GitHub repo fails with:
+### 2. Broken links or `EEXIST` from an earlier install
 
-```text
-git@github.com: Permission denied (publickey).
-fatal: Could not read from remote repository.
-```
-
-Check which key SSH is using:
+npm 11 can report a successful Git global install while linking the package to a temporary path under `.npm/_cacache/tmp/git-clone*`. Once npm removes that clone, the command is broken. The Release installer automatically removes these stale links. If a valid installation of another package still owns the command names, remove it explicitly before reinstalling:
 
 ```bash
-ssh -T git@github.com
-ls -la ~/.ssh
-```
-
-If needed, configure a dedicated key in `~/.ssh/config`:
-
-```sshconfig
-Host github-arg
-  HostName github.com
-  User git
-  IdentityFile ~/.ssh/arg_githubkey
-  IdentitiesOnly yes
-```
-
-Then install or clone through that host alias:
-
-```bash
-npm i -g git+ssh://git@github-arg/Arginine-Arg/Feishu_bridge_arg.git
-git clone git@github-arg:Arginine-Arg/Feishu_bridge_arg.git
-```
-
-### 2. Clear broken global installs
-
-If npm failed midway, it can leave broken command symlinks or package directories:
-
-```bash
-rm -f "$(npm prefix -g)/bin/arg-bridge" "$(npm prefix -g)/bin/lark-channel-bridge"
-rm -rf "$(npm root -g)/arg-bridge" "$(npm root -g)/lark-channel-bridge"
+npm uninstall -g arg-bridge lark-channel-bridge
 hash -r
 ```
 
-Then reinstall.
+Configuration and sessions under `~/.lark-channel/` are not removed by npm uninstall.
 
-### 3. `EEXIST` during global install
+### 3. Git installation fallback
 
-If npm reports `EEXIST: file already exists`, an older install already owns the command name. Remove it first:
-
-```bash
-npm uninstall -g arg-bridge
-npm uninstall -g lark-channel-bridge
-```
-
-Then reinstall this fork.
-
-### 4. npm lifecycle script `ENOENT`
-
-If npm fails around a dependency lifecycle script with messages such as:
-
-```text
-npm error syscall spawn sh
-npm error syscall spawn /bin/sh
-```
-
-this is usually a local npm/Node/global-directory issue, especially with very new Node versions or NAS-mounted global directories. Prefer Node 22 LTS for deployment. As a workaround:
+Release tarballs are preferred. If a Git install is required, keep both compatibility flags and pin a tag:
 
 ```bash
-npm config set script-shell /bin/sh
-npm i -g --ignore-scripts git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git
+npm install -g --ignore-scripts --install-links=true \
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.5.6"
 ```
 
-### 5. Install from a local tarball
+`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.5.6`.
 
-If git-based global install is unstable:
+### 4. Node or npm global-prefix errors
 
-```bash
-git clone git@github.com:Arginine-Arg/Feishu_bridge_arg.git
-cd Feishu_bridge_arg
-npm pack
-npm i -g --ignore-scripts ./arg-bridge-0.5.6.tgz
-hash -r
-arg-bridge --help
-arg-bridge --version
-```
-
-### 6. PATH and shell command cache
-
-If the command exists under npm's global bin directory but the shell cannot find it:
+Confirm the active shell uses a supported Node version and the intended npm installation:
 
 ```bash
+node --version
+npm --version
 npm prefix -g
-echo "$PATH"
-hash -r
 ```
 
-Temporarily add npm's global bin directory to `PATH`:
+The installer rejects unsupported Node versions before changing the global installation. Use `--prefix "$HOME/.local"` if npm's configured global directory is not writable.
+
+### 5. PATH and shell command cache
+
+If installation succeeds but the shell cannot find the command, add the bin directory printed by the installer:
 
 ```bash
 export PATH="$(npm prefix -g)/bin:$PATH"
+hash -r
 ```
 
-For a permanent fix, add that line or the concrete Node bin directory to `~/.bashrc`.
-
-### 7. Verify the install
+### 6. Verify the install
 
 ```bash
 command -v arg-bridge
@@ -466,7 +427,7 @@ pnpm typecheck
 pnpm build
 ```
 
-`pnpm test` includes unit, integration, and process-level adapter tests. CI runs on macOS, Ubuntu, and Windows with `pnpm install --frozen-lockfile`, `pnpm test`, `pnpm typecheck`, and `pnpm build`.
+`pnpm test` includes unit, integration, and process-level adapter tests. CI runs the source suite on macOS, Ubuntu, and Windows, then packs and globally installs the release tarball in isolated prefixes on Node 20, 22, and 24 with `pnpm test:package`.
 
 ## Optional telemetry
 

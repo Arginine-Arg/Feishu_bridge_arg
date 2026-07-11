@@ -91,6 +91,24 @@ describe('README runtime contract', () => {
     expect(docs).toContain('旧版 `sandbox`');
     expect(docs).not.toContain('"sandbox"');
   });
+
+  it('uses verified release tarballs as the canonical install path', async () => {
+    const [en, zh] = await Promise.all([
+      readFile(new URL('../../../README.md', import.meta.url), 'utf8'),
+      readFile(new URL('../../../README.zh.md', import.meta.url), 'utf8'),
+    ]);
+
+    for (const doc of [en, zh]) {
+      expect(doc).toContain(
+        'releases/latest/download/install-global.sh',
+      );
+      expect(doc).toContain('--ignore-scripts --install-links=true');
+      expect(doc).toContain('releases/latest/download/arg-bridge.tgz.sha256');
+      expect(doc).not.toContain(
+        'npm i -g --ignore-scripts ./arg-bridge-0.5.6.tgz',
+      );
+    }
+  });
 });
 
 async function readDocs(): Promise<string> {
