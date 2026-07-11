@@ -7068,6 +7068,9 @@ function stripContextCompactedNotice(input) {
   let skippingCompactWarning = false;
   for (const line of lines) {
     const trimmed = line.trim();
+    if (/^(?:cause the model to be less accurate|possible to keep threads small and targeted)/i.test(trimmed)) {
+      continue;
+    }
     if (/^•\s+Context compacted$/i.test(trimmed)) {
       skippingCompactWarning = true;
       continue;
@@ -7078,9 +7081,6 @@ function stripContextCompactedNotice(input) {
     }
     if (skippingCompactWarning) {
       if (!trimmed) continue;
-      if (/^(?:cause the model to be less accurate|possible to keep threads small and targeted)/i.test(trimmed)) {
-        continue;
-      }
       skippingCompactWarning = false;
     }
     out.push(line);

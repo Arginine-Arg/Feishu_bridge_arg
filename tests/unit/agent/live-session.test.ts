@@ -196,7 +196,7 @@ process.stdin.on('data', (chunk) => {
       process.stdout.write('• No previous message to edit.\\n');
       process.stdout.write('• Context compacted\\n');
       process.stdout.write('⚠ Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when\\n');
-      process.stdout.write('possible to keep threads small and targeted.\\n');
+      setTimeout(() => process.stdout.write('possible to keep threads small and targeted.\\n'), 20);
       process.stdout.write('/status\\n\\n');
       process.stdout.write('› Explain this codebase\\n');
       setTimeout(() => process.stdout.write('• Usage: /goal [<objective>|clear|edit|pause|resume] No goal is currently set.\\n'), 600);
