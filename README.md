@@ -126,7 +126,7 @@ If git-based global install is unstable:
 git clone git@github.com:Arginine-Arg/Feishu_bridge_arg.git
 cd Feishu_bridge_arg
 npm pack
-npm i -g --ignore-scripts ./arg-bridge-0.5.5.tgz
+npm i -g --ignore-scripts ./arg-bridge-0.5.6.tgz
 hash -r
 arg-bridge --help
 arg-bridge --version

@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.5.5",
+  version: "0.5.6",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -6201,7 +6201,7 @@ var LiveTerminalSession = class {
       if (!done) {
         this.cleaner.resetTurn();
         if (commandMode) {
-          log.info("agent-live", "command-clear", { sequence: "esc esc ctrl-a ctrl-k" });
+          log.info("agent-live", "command-clear", { sequence: "esc ctrl-a ctrl-k" });
           await this.clearPendingInput();
           this.cleaner.resetTurn();
         }
@@ -6225,6 +6225,7 @@ var LiveTerminalSession = class {
             }, CONTROL_LITERAL_CONFIRM_DELAY_MS);
           } else {
             this.write(translateLiveInput(prompt));
+            scheduleSlashCommandConfirm();
           }
         }
         if (commandMode && isKnownSilentLiveCommand(prompt)) arm(idleMs);
@@ -6245,8 +6246,6 @@ var LiveTerminalSession = class {
     }
   }
   async clearPendingInput() {
-    this.write("\x1B");
-    await delay(COMMAND_ESCAPE_SETTLE_MS);
     this.write("\x1B");
     await delay(COMMAND_ESCAPE_SETTLE_MS);
     this.write("");

@@ -393,7 +393,7 @@ export class LiveTerminalSession {
       if (!done) {
         this.cleaner.resetTurn();
         if (commandMode) {
-          log.info('agent-live', 'command-clear', { sequence: 'esc esc ctrl-a ctrl-k' });
+          log.info('agent-live', 'command-clear', { sequence: 'esc ctrl-a ctrl-k' });
           await this.clearPendingInput();
           this.cleaner.resetTurn();
         }
@@ -420,6 +420,7 @@ export class LiveTerminalSession {
             }, CONTROL_LITERAL_CONFIRM_DELAY_MS);
           } else {
             this.write(translateLiveInput(prompt));
+            scheduleSlashCommandConfirm();
           }
         }
         if (commandMode && isKnownSilentLiveCommand(prompt)) arm(idleMs);
@@ -442,8 +443,6 @@ export class LiveTerminalSession {
   }
 
   private async clearPendingInput(): Promise<void> {
-    this.write('\x1B');
-    await delay(COMMAND_ESCAPE_SETTLE_MS);
     this.write('\x1B');
     await delay(COMMAND_ESCAPE_SETTLE_MS);
     this.write('\x01');

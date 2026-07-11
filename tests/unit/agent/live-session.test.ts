@@ -414,6 +414,98 @@ setInterval(() => {}, 1000);
     expect(text).toContain('Press enter to confirm or esc to go back');
   }, 15_000);
 
+  it('presses enter again when the initial slash command submit produces no redraw', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-slash-confirm-silent-test-'));
+    const bin = join(dir, 'fake-slash-confirm-silent-agent.mjs');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+let sawModel = false;
+let submitCount = 0;
+let sent = false;
+process.stdin.on('data', (chunk) => {
+  if (chunk.includes('/model')) sawModel = true;
+  if (!sawModel) return;
+  submitCount += (chunk.match(/[\\r\\n]/g) || []).length;
+  if (!sent && submitCount >= 2) {
+    sent = true;
+    process.stdout.write('Select Model and Effort\\n');
+    process.stdout.write('› 1. gpt-5.6-sol (current)\\n');
+    process.stdout.write('Press enter to confirm or esc to go back\\n');
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('slash-confirm-silent-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'slash-confirm-silent',
+      usePty: false,
+      idleMs: 60,
+      outputFlushMs: 10,
+      startupTimeoutMs: 500,
+    });
+
+    const events = await collect(session.run('slash-confirm-silent-run', '/model', dir, 'command').events);
+    await pool.closeAll();
+
+    expect(textOf(events)).toContain('Select Model and Effort');
+  }, 15_000);
+
+  it('uses one escape before clearing pending slash-command input', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-command-clear-sequence-test-'));
+    const bin = join(dir, 'fake-command-clear-sequence-agent.mjs');
+    const traceFile = join(dir, 'input-trace.txt');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs';
+process.stdin.setEncoding('utf8');
+let sent = false;
+process.stdin.on('data', (chunk) => {
+  for (const char of chunk) {
+    if (char === '\\x1b') appendFileSync(${JSON.stringify(traceFile)}, 'esc\\n');
+    if (char === '\\x01') appendFileSync(${JSON.stringify(traceFile)}, 'home\\n');
+    if (char === '\\x0b') appendFileSync(${JSON.stringify(traceFile)}, 'kill\\n');
+  }
+  if (!sent && chunk.includes('/model')) {
+    sent = true;
+    process.stdout.write('Select Model and Effort\\n');
+    process.stdout.write('› 1. gpt-5.6-sol (current)\\n');
+    process.stdout.write('Press enter to confirm or esc to go back\\n');
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('command-clear-sequence-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'command-clear-sequence',
+      usePty: false,
+      idleMs: 60,
+      outputFlushMs: 10,
+      startupTimeoutMs: 500,
+    });
+
+    await collect(session.run('command-clear-sequence-run', '/model', dir, 'command').events);
+    await pool.closeAll();
+
+    expect((await readFile(traceFile, 'utf8')).trim().split('\n')).toEqual(['esc', 'home', 'kill']);
+  }, 15_000);
+
   tmuxIt('returns tmux attach details in live status fallback', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-status-test-'));
     const bin = join(dir, 'fake-tmux-status-empty-agent.mjs');
