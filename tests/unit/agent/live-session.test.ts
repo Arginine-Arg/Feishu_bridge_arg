@@ -148,9 +148,9 @@ process.stdin.on('data', (chunk) => {
     }
     else if (line === '/status-stale-picker') {
       process.stdout.write('Select Model and Effort\\n');
-      process.stdout.write('Access legacy models by running codex -m <model_name> or in your config.toml\\n');
-      process.stdout.write('› 1. gpt-5.5 (current)\\n');
-      process.stdout.write('Press enter to confirm or esc to go back\\n');
+      setTimeout(() => process.stdout.write('Access legacy models by running codex -m <model_name> or in your config.toml\\n'), 10);
+      setTimeout(() => process.stdout.write('› 1. gpt-5.5 (current)\\n'), 20);
+      setTimeout(() => process.stdout.write('Press enter to confirm or esc to go back\\n'), 30);
     }
     else if (line === '/model') {
       process.stdout.write('│  >_ OpenAI Codex (v0.142.5)                                                │\\n');

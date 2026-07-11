@@ -7102,9 +7102,9 @@ function stripModelChangedLines(input) {
 }
 function isStalePickerSnapshotForPrompt(text, prompt) {
   const command = prompt.trim().toLowerCase();
-  if (command === "/model") return false;
+  if (!command.startsWith("/") || command === "/model") return false;
   const compact = compactForNoiseMatch(text);
-  return compact.includes("selectmodelandeffort") && (compact.includes("accesslegacymodels") || compact.includes("pressentertoconfirmoresctogoback") || /(?:^|\n)\s*(?:[›>▸*+-]\s*)?\d{1,2}[.)、:\s-]+gpt-/iu.test(text));
+  return compact.includes("selectmodelandeffort") || compact.includes("accesslegacymodels") || compact.includes("pressentertoconfirmoresctogoback") || /(?:^|\n)\s*(?:[›>▸*+-]\s*)?\d{1,2}[.)、:\s-]+gpt-/iu.test(text);
 }
 function isStaleStatusSnapshotForPrompt(text, prompt) {
   const command = prompt.trim().toLowerCase();
