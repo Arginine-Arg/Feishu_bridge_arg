@@ -43,6 +43,7 @@ const DEFAULT_OUTPUT_FLUSH_MS = 500;
 const DEFAULT_STARTUP_TIMEOUT_MS = 15_000;
 const STARTUP_INPUT_GRACE_MS = 25;
 const COMMAND_FRESH_SESSION_GRACE_MS = 1200;
+const COMMAND_FRESH_TERMINAL_GRACE_MS = 2500;
 const CONTROL_KEY_GAP_MS = 40;
 const COMMAND_ESCAPE_SETTLE_MS = 250;
 const COMMAND_CLEAR_SETTLE_MS = 500;
@@ -454,7 +455,11 @@ export class LiveTerminalSession {
   private inputGraceMs(commandMode: boolean): number {
     if (!commandMode || !this.startedAt) return STARTUP_INPUT_GRACE_MS;
     const ageMs = Date.now() - this.startedAt;
-    return Math.max(STARTUP_INPUT_GRACE_MS, COMMAND_FRESH_SESSION_GRACE_MS - ageMs);
+    const freshSessionGraceMs =
+      this.terminalInfo?.backend === 'pipe'
+        ? COMMAND_FRESH_SESSION_GRACE_MS
+        : COMMAND_FRESH_TERMINAL_GRACE_MS;
+    return Math.max(STARTUP_INPUT_GRACE_MS, freshSessionGraceMs - ageMs);
   }
 }
 
@@ -690,7 +695,7 @@ function capture() {
     cleanup();
     process.exit(0);
   }
-  const result = tmux(['capture-pane', '-p', '-J', '-t', target]);
+  const result = tmux(['capture-pane', '-p', '-t', target]);
   if (result.status !== 0) {
     writeError('failed to capture tmux live session', result);
     cleanup();

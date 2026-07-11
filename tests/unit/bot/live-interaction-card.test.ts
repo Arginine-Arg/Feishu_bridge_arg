@@ -136,6 +136,56 @@ describe('liveInteractionCard', () => {
     }
   });
 
+  it('keeps all model choices when descriptions wrap and terminal rows are joined', () => {
+    const card = liveInteractionCardForText(
+      [
+        'old terminal output',
+        'Select Model and Effort',
+        'Access legacy models by running codex -m <model_name> or in your config.toml',
+        '› 1. gpt-5.6-sol (current)',
+        'Latest frontier agentic coding model.',
+        '2. gpt-5.6-terra',
+        'Balanced agentic coding model for everyday work.',
+        '3. gpt-5.6-luna',
+        'Fast and affordable agentic coding model.',
+        '4. gpt-5.5',
+        'Frontier model for complex coding, research, and real-world work.',
+        '5. gpt-5.4',
+        'Strong model for everyday coding.',
+        'and cost-efficient model for simpler coding tasks 6.rgpt-5.4-mini',
+        'Optimized for professional work and long-running agents 7. gpt-5.2',
+        'Press enter to confirm or esc to go back',
+      ].join('\n'),
+      () => 'wrapped-token',
+    );
+
+    expect(card).toBeDefined();
+    expect(buttonValues(card).map((value) => value.input)).toEqual([
+      '1',
+      '2',
+      '3',
+      '4',
+      '5',
+      '6',
+      '7',
+      'enter',
+      'esc',
+    ]);
+    const rendered = JSON.stringify(card);
+    for (const model of [
+      'gpt-5.6-sol',
+      'gpt-5.6-terra',
+      'gpt-5.6-luna',
+      'gpt-5.5',
+      'gpt-5.4',
+      'gpt-5.4-mini',
+      'gpt-5.2',
+    ]) {
+      expect(rendered).toContain(model);
+    }
+    expect(rendered).not.toContain('Frontier model for complex coding');
+  });
+
   it('renders skills picker text as signed live input controls', () => {
     let n = 0;
     const card = liveInteractionCardForText(

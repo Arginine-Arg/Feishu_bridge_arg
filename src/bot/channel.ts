@@ -2200,13 +2200,18 @@ interface LiveInteractionPrompt {
 
 export type LiveInteractionInputRoute = 'live' | 'agent';
 
+interface NumberedInteractionChoice {
+  input: string;
+  body: string;
+  selected: boolean;
+  model?: string;
+  state?: string;
+}
+
 function detectLiveInteraction(text: string): LiveInteractionPrompt | undefined {
-  const prompt = text
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .slice(-12)
-    .join('\n');
+  const prompt = recentLiveInteractionPrompt(text);
+  const numberedChoices = extractNumberedInteractionChoices(prompt);
+  const displayPrompt = formatLiveInteractionPrompt(prompt, numberedChoices);
   const buttons: LiveInteractionButton[] = [];
   const seenInputs = new Set<string>();
   const add = (label: string, input: string): void => {
@@ -2215,12 +2220,7 @@ function detectLiveInteraction(text: string): LiveInteractionPrompt | undefined 
     buttons.push({ label, input });
   };
 
-  for (const line of prompt.split('\n')) {
-    const match = line.match(/^(?:[›>▸*+-]\s*)?(\d{1,2})[.)、:\s-]+\S/u);
-    if (!match) continue;
-    add(match[1]!, match[1]!);
-    if (buttons.length >= 8) break;
-  }
+  for (const choice of numberedChoices.slice(0, 8)) add(choice.input, choice.input);
   const hasNumberedChoices = buttons.length > 0;
 
   if (
@@ -2259,9 +2259,101 @@ function detectLiveInteraction(text: string): LiveInteractionPrompt | undefined 
   if (buttons.length === 0) return undefined;
   return {
     signature: `${prompt}\n${buttons.map((button) => button.input).join('|')}`.slice(0, 500),
-    prompt: prompt.slice(0, 1200),
+    prompt: displayPrompt.slice(0, 1200),
     buttons,
   };
+}
+
+function recentLiveInteractionPrompt(text: string): string {
+  const lines = text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const recent = lines.slice(-40);
+  let start = -1;
+  for (let index = 0; index < recent.length; index += 1) {
+    if (isLiveInteractionPromptStart(recent[index]!)) start = index;
+  }
+  return (start >= 0 ? recent.slice(start) : recent.slice(-12)).join('\n');
+}
+
+function isLiveInteractionPromptStart(line: string): boolean {
+  return (
+    /\bselect\s+(?:a\s+)?(?:model|reasoning|option)\b/i.test(line) ||
+    /^skills?$/i.test(line) ||
+    /\bchoose an action\b/i.test(line) ||
+    /\b(?:command )?requires? (?:approval|confirmation)\b/i.test(line)
+  );
+}
+
+function extractNumberedInteractionChoices(prompt: string): NumberedInteractionChoice[] {
+  const choices = new Map<string, NumberedInteractionChoice>();
+  for (const line of prompt.split('\n')) {
+    const match = line.match(/^(?:[›>▸*+-]\s*)?(\d{1,2})[.)、:\s-]+(.+)$/u);
+    if (!match) continue;
+    addNumberedInteractionChoice(choices, match[1]!, match[2]!, /^[›>▸]/u.test(line));
+  }
+
+  if (isCodexModelPickerPrompt(prompt)) {
+    const inlineModelChoice = /(?:^|[^0-9])(?:[›>▸*+-]\s*)?(\d{1,2})\s*[.)、:]\s*[a-z]{0,3}(gpt-[a-z0-9][a-z0-9._-]*)/giu;
+    for (const match of prompt.matchAll(inlineModelChoice)) {
+      addNumberedInteractionChoice(choices, match[1]!, match[2]!, /[›>▸]/u.test(match[0]));
+    }
+  }
+
+  const out = [...choices.values()];
+  if (isCodexModelPickerPrompt(prompt)) {
+    out.sort((left, right) => Number(left.input) - Number(right.input));
+  }
+  return out;
+}
+
+function addNumberedInteractionChoice(
+  choices: Map<string, NumberedInteractionChoice>,
+  input: string,
+  body: string,
+  selected: boolean,
+): void {
+  const existing = choices.get(input);
+  const model = body.match(/\b(gpt-[a-z0-9][a-z0-9._-]*)\b/iu)?.[1];
+  const state = body.match(/\b(current|default)\b/iu)?.[1]?.toLowerCase();
+  if (existing) {
+    if (!existing.model && model) existing.model = model;
+    if (!existing.state && state) existing.state = state;
+    existing.selected ||= selected;
+    return;
+  }
+  choices.set(input, {
+    input,
+    body,
+    selected,
+    ...(model ? { model } : {}),
+    ...(state ? { state } : {}),
+  });
+}
+
+function formatLiveInteractionPrompt(
+  prompt: string,
+  choices: NumberedInteractionChoice[],
+): string {
+  if (!isCodexModelPickerPrompt(prompt)) return prompt;
+  const modelChoices = choices.filter((choice) => choice.model);
+  if (modelChoices.length === 0) return prompt;
+  const title = prompt
+    .split('\n')
+    .find((line) => /\bselect\s+(?:a\s+)?model\b/i.test(line)) ?? 'Select Model and Effort';
+  const rows = modelChoices.map((choice) => {
+    const state = choice.state ? ` (${choice.state})` : choice.selected ? ' (selected)' : '';
+    return `${choice.input}. ${choice.model}${state}`;
+  });
+  const hint = /press\s+enter\s+to\s+confirm.*esc\s+to\s+(?:go\s+back|cancel)/i.test(prompt)
+    ? 'Press enter to confirm or esc to go back'
+    : undefined;
+  return [title, ...rows, ...(hint ? [hint] : [])].join('\n');
+}
+
+function isCodexModelPickerPrompt(prompt: string): boolean {
+  return /\bselect\s+(?:a\s+)?model\b/i.test(prompt) && /\bgpt-[a-z0-9]/i.test(prompt);
 }
 
 export function liveInteractionCard(
