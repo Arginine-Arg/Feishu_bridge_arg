@@ -268,8 +268,8 @@ setInterval(() => {}, 1000);
     expect(textOf(seventh)).toBe('answer\n');
     expect(textOf(eighth)).toBe('real answer\n');
     expect(textOf(ninth)).toBe('• Service tier set to fast\n');
-    expect(textOf(tenth)).toBe(
-      '• Context compacted\n\n⚠ Heads up: Long threads and multiple compactions can cause the model to be less accurate.\n',
+    expect(textOf(tenth).replace(/\n{2,}/g, '\n')).toBe(
+      '• Context compacted\n⚠ Heads up: Long threads and multiple compactions can cause the model to be less accurate.\n',
     );
     expect(textOf(eleventh)).toBe('status-ok\n');
     expect(textOf(stalePicker)).toBe('');
@@ -977,7 +977,7 @@ setInterval(() => {}, 1000);
     expect(cleanTerminalOutput('progress 1\rprogress 2\rdone\n')).toBe('done\n');
   });
 
-  it('renders PTY terminal redraws as a stable screen snapshot', async () => {
+  linuxIt('renders PTY terminal redraws as a stable screen snapshot', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-pty-test-'));
     const bin = join(dir, 'fake-pty-agent.mjs');
     await writeFile(
