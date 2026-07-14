@@ -2120,7 +2120,9 @@ function buildPrompt(
       ? texts.join('\n\n')
       : attachments.length > 0
         ? '请看下面的附件。'
-        : '（对方发来一条没有正文的消息——通常是只 @ 了你的唤醒（ping）。请简短回应。）';
+        : quotes.length > 0
+          ? '（对方仅引用了上述消息。请围绕引用内容回答；若其中没有明确问题或任务，再简短询问其意图。）'
+          : '（对方发来一条没有正文的消息——通常是只 @ 了你的唤醒（ping）。请简短回应。）';
 
   const senderType = senderTypeOf(first);
   const mentions = mergeMentions(batch);

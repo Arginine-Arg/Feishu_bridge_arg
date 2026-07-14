@@ -113,6 +113,17 @@ describe('CodexAdapter system prompt wiring', () => {
     const stdin = await readAll(child.stdin);
     expect(stdin).toBe(prefixBridgeSystemPrompt('hi', undefined));
   });
+
+  it('does not repeat the bridge system prompt when resuming a Codex thread', async () => {
+    const child = fakeChild();
+    spawnMock.spawnProcess.mockReturnValue(child);
+    const adapter = codexAdapter();
+    adapter.setBotIdentity({ openId: 'ou_bot_self', name: 'Bridge' });
+
+    adapter.run({ runId: 'r1', prompt: 'follow-up', cwd: '/tmp', threadId: 'thread_123' });
+
+    expect(await readAll(child.stdin)).toBe('follow-up');
+  });
 });
 
 async function readAll(stream: PassThrough): Promise<string> {

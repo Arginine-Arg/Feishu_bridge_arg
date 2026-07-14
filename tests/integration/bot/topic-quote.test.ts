@@ -300,6 +300,32 @@ describe('topic message quote handling', () => {
     );
   });
 
+  it('treats a reply quote without message text as quoted context, not a ping', async () => {
+    const h = await createHarness({
+      chatMode: 'group',
+      quotedMessages: {
+        om_quote_target: 'quoted question without a follow-up message',
+      },
+    });
+
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_group_quote_only',
+        rootId: 'om_quote_target',
+        parentId: 'om_quote_target',
+        content: '',
+      }),
+    );
+    await waitFor(() => h.agent.runOptions.length === 1);
+
+    const prompt = h.agent.runOptions[0]?.prompt ?? '';
+    expect(prompt).toContain('quoted question without a follow-up message');
+    expect(prompt).toContain('对方仅引用了上述消息');
+    expect(prompt).not.toContain('通常是只 @ 了你的唤醒');
+  });
+
   it('keeps non-root reply quotes in topic chats', async () => {
     const h = await createHarness({
       quotedMessages: {

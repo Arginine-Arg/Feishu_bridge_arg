@@ -7910,7 +7910,10 @@ var CodexAdapter = class {
     child.stdin.on("error", (err) => {
       log.warn("agent", "stdin-error", { message: err.message });
     });
-    child.stdin.end(prefixBridgeSystemPrompt(opts.prompt, this.botIdentity), "utf8");
+    child.stdin.end(
+      opts.threadId ? opts.prompt : prefixBridgeSystemPrompt(opts.prompt, this.botIdentity),
+      "utf8"
+    );
     const stopGraceMs = opts.stopGraceMs ?? this.defaultStopGraceMs;
     return {
       runId: opts.runId,
@@ -16244,7 +16247,7 @@ function buildPrompt(batch, attachments, quotes = [], topicContext = [], botIden
     if (!text) return "";
     return annotate ? `${senderAnnotation(m)} ${text}` : text;
   }).filter(Boolean);
-  const userPart = texts.length > 0 ? texts.join("\n\n") : attachments.length > 0 ? "\u8BF7\u770B\u4E0B\u9762\u7684\u9644\u4EF6\u3002" : "\uFF08\u5BF9\u65B9\u53D1\u6765\u4E00\u6761\u6CA1\u6709\u6B63\u6587\u7684\u6D88\u606F\u2014\u2014\u901A\u5E38\u662F\u53EA @ \u4E86\u4F60\u7684\u5524\u9192\uFF08ping\uFF09\u3002\u8BF7\u7B80\u77ED\u56DE\u5E94\u3002\uFF09";
+  const userPart = texts.length > 0 ? texts.join("\n\n") : attachments.length > 0 ? "\u8BF7\u770B\u4E0B\u9762\u7684\u9644\u4EF6\u3002" : quotes.length > 0 ? "\uFF08\u5BF9\u65B9\u4EC5\u5F15\u7528\u4E86\u4E0A\u8FF0\u6D88\u606F\u3002\u8BF7\u56F4\u7ED5\u5F15\u7528\u5185\u5BB9\u56DE\u7B54\uFF1B\u82E5\u5176\u4E2D\u6CA1\u6709\u660E\u786E\u95EE\u9898\u6216\u4EFB\u52A1\uFF0C\u518D\u7B80\u77ED\u8BE2\u95EE\u5176\u610F\u56FE\u3002\uFF09" : "\uFF08\u5BF9\u65B9\u53D1\u6765\u4E00\u6761\u6CA1\u6709\u6B63\u6587\u7684\u6D88\u606F\u2014\u2014\u901A\u5E38\u662F\u53EA @ \u4E86\u4F60\u7684\u5524\u9192\uFF08ping\uFF09\u3002\u8BF7\u7B80\u77ED\u56DE\u5E94\u3002\uFF09";
   const senderType = senderTypeOf(first);
   const mentions = mergeMentions(batch);
   return buildAgentPrompt({
