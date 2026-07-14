@@ -1379,6 +1379,8 @@ export function scopeLiveSnapshotToPrompt(input: string, prompt: string): string
   if (commandResult !== undefined) return commandResult;
   const picker = scopeExpectedLivePickerSnapshot(lines, echo);
   if (picker !== undefined) return picker;
+  const controlPicker = scopeControlLiteralPickerSnapshot(lines, echo);
+  if (controlPicker !== undefined) return controlPicker;
   // A tmux snapshot with another prompt belongs to an earlier turn. Dropping
   // it is safer than forwarding stale conversation content as a new reply.
   return lines.some((line) => line.trimStart().startsWith('›')) ? '' : input;
@@ -1423,6 +1425,16 @@ function findLastCodexStatusPanel(lines: string[]): number {
 function scopeExpectedLivePickerSnapshot(lines: string[], prompt: string): string | undefined {
   if (!isLivePickerCommand(prompt)) return undefined;
 
+  return scopeLivePickerSnapshot(lines);
+}
+
+function scopeControlLiteralPickerSnapshot(lines: string[], prompt: string): string | undefined {
+  if (!shouldDeferControlLiteralSubmit(prompt)) return undefined;
+
+  return scopeLivePickerSnapshot(lines);
+}
+
+function scopeLivePickerSnapshot(lines: string[]): string | undefined {
   let start = -1;
   for (let index = 0; index < lines.length; index += 1) {
     if (isLivePickerStartLine(lines[index] ?? '')) start = index;

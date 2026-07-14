@@ -133,6 +133,22 @@ describe('tmux input framing and snapshots', () => {
     expect(scopeLiveSnapshotToPrompt(resumePicker, '/resume')).toBe(
       ['Resume previous conversation', 'Use arrows to choose a thread.'].join('\n'),
     );
+
+    const selectedModel = [
+      '› an earlier request',
+      'Select Model and Effort',
+      '1. gpt-5.6-sol',
+      '› 2. gpt-5.6-terra (current)',
+      'Press enter to confirm or esc to go back',
+    ].join('\n');
+    expect(scopeLiveSnapshotToPrompt(selectedModel, '2')).toBe(
+      [
+        'Select Model and Effort',
+        '1. gpt-5.6-sol',
+        '› 2. gpt-5.6-terra (current)',
+        'Press enter to confirm or esc to go back',
+      ].join('\n'),
+    );
     expect(scopeLiveSnapshotToPrompt(modelPicker, '/status')).toBe('');
   });
 
@@ -794,9 +810,10 @@ let sawChoice = false;
 process.stdin.on('data', (chunk) => {
   if (!sawChoice && chunk.includes('1')) {
     sawChoice = true;
-    process.stdout.write('Reasoning Effort\\n');
-    process.stdout.write('1. Low\\n');
-    process.stdout.write('2. Medium\\n');
+    process.stdout.write('› an earlier request\\n');
+    process.stdout.write('Select Model and Effort\\n');
+    process.stdout.write('1. gpt-5.6-sol\\n');
+    process.stdout.write('› 2. gpt-5.6-terra (current)\\n');
     process.stdout.write('Press enter to confirm or esc to go back\\n');
   }
   if (sawChoice && /[\\r\\n]/.test(chunk)) {
@@ -825,7 +842,8 @@ setInterval(() => {}, 1000);
     await pool.closeAll();
 
     const text = textOf(events);
-    expect(text).toContain('Reasoning Effort');
+    expect(text).toContain('Select Model and Effort');
+    expect(text).toContain('› 2. gpt-5.6-terra (current)');
     expect(text).toContain('Press enter to confirm or esc to go back');
     expect(text).not.toContain('confirmed-too-early');
   }, 15_000);

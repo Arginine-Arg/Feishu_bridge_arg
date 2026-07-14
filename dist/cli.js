@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.7",
+  version: "0.6.8",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -7091,6 +7091,8 @@ function scopeLiveSnapshotToPrompt(input, prompt) {
   if (commandResult !== void 0) return commandResult;
   const picker = scopeExpectedLivePickerSnapshot(lines, echo);
   if (picker !== void 0) return picker;
+  const controlPicker = scopeControlLiteralPickerSnapshot(lines, echo);
+  if (controlPicker !== void 0) return controlPicker;
   return lines.some((line) => line.trimStart().startsWith("\u203A")) ? "" : input;
 }
 function scopeKnownLiveCommandResultSnapshot(lines, prompt) {
@@ -7121,6 +7123,13 @@ function findLastCodexStatusPanel(lines) {
 }
 function scopeExpectedLivePickerSnapshot(lines, prompt) {
   if (!isLivePickerCommand(prompt)) return void 0;
+  return scopeLivePickerSnapshot(lines);
+}
+function scopeControlLiteralPickerSnapshot(lines, prompt) {
+  if (!shouldDeferControlLiteralSubmit(prompt)) return void 0;
+  return scopeLivePickerSnapshot(lines);
+}
+function scopeLivePickerSnapshot(lines) {
   let start = -1;
   for (let index = 0; index < lines.length; index += 1) {
     if (isLivePickerStartLine(lines[index] ?? "")) start = index;
