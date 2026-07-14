@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.12",
+  version: "0.6.13",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -6169,13 +6169,13 @@ var LiveTerminalSession = class {
         arm(startupTimeoutMs + Math.max(0, inputReadyAt - Date.now()));
         return;
       }
-      const terminalState = event.terminalText ?? event.text;
-      const terminalBusy = isLiveTerminalBusy(terminalState);
+      const terminalState = event.terminalText;
+      const terminalBusy = terminalState ? isLiveTerminalBusy(terminalState) : false;
       if (terminalBusy) {
         terminalWasBusy = true;
         suspendIdle();
       } else if (terminalWasBusy) {
-        if (isLiveTerminalReady(terminalState) || isLiveTerminalInteraction(terminalState)) {
+        if (terminalState && (isLiveTerminalReady(terminalState) || isLiveTerminalInteraction(terminalState))) {
           terminalWasBusy = false;
           arm(idleMs);
         } else {
@@ -7116,7 +7116,7 @@ function scopeLiveSnapshotToPrompt(input, prompt, previousSnapshot = "") {
     }
     return lines.slice(cursor).join("\n");
   }
-  if (isLiveTerminalInteraction(input)) return input;
+  if (isLiveTerminalInteraction(input) && !hasForeignTerminalPrompt(lines)) return input;
   return lines.some((line) => {
     const trimmed = line.trimStart();
     return trimmed.startsWith("\u203A") && !isTerminalChromeLine(trimmed);
@@ -7356,6 +7356,14 @@ function snapshotInformationScore(input) {
 }
 function isTerminalChromeLine(trimmed) {
   return /^Tip:/i.test(trimmed) || /^[•◦]\s+Working\s+\(\d+s\b.*\)$/i.test(trimmed) || /^tab to queue message\b.*context left$/i.test(trimmed) || /^\d+%\s+context left$/i.test(trimmed) || /^[╭╰╮╯─│\s]+$/u.test(trimmed) || /^[›❯]\s*$/.test(trimmed) || /^›\s*(?:Implement \{feature\}|Summarize recent commits|Find and fix a bug in @filename|Improve documentation in @filename|Explain this codebase|Write tests for @filename)\s*$/i.test(trimmed) || /^[A-Za-z0-9_.-]+(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?\s+·\s+.+$/.test(trimmed);
+}
+function hasForeignTerminalPrompt(lines) {
+  return lines.some((line) => {
+    const trimmed = line.trimStart();
+    if (!trimmed.startsWith("\u203A")) return false;
+    if (isTerminalChromeLine(trimmed)) return false;
+    return !/^›\s*\d{1,2}[.)、:\s-]+\S/u.test(trimmed);
+  });
 }
 function isLiveTerminalBusy(input) {
   const recent = cleanTerminalOutput(input).split("\n").slice(-12).join("\n");

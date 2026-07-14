@@ -327,8 +327,11 @@ export class LiveTerminalSession {
         arm(startupTimeoutMs + Math.max(0, inputReadyAt - Date.now()));
         return;
       }
-      const terminalState = event.terminalText ?? event.text;
-      const terminalBusy = isLiveTerminalBusy(terminalState);
+      // Only PTY/tmux screen snapshots carry terminal lifecycle state. Pipe
+      // adapters can legitimately print words such as "Working" as ordinary
+      // task output and must retain the normal idle completion behavior.
+      const terminalState = event.terminalText;
+      const terminalBusy = terminalState ? isLiveTerminalBusy(terminalState) : false;
       if (terminalBusy) {
         terminalWasBusy = true;
         suspendIdle();
@@ -337,7 +340,7 @@ export class LiveTerminalSession {
         // temporarily omits Codex's Working footer. Do not release the turn
         // (and let the next queued chat message type into the active editor)
         // until the CLI has rendered its fresh, empty input prompt.
-        if (isLiveTerminalReady(terminalState) || isLiveTerminalInteraction(terminalState)) {
+        if (terminalState && (isLiveTerminalReady(terminalState) || isLiveTerminalInteraction(terminalState))) {
           terminalWasBusy = false;
           arm(idleMs);
         } else {
@@ -1419,7 +1422,7 @@ export function scopeLiveSnapshotToPrompt(
   // prompt (for example "› 1. Yes, proceed"). They are current terminal
   // interactions, not stale conversation history, and must reach the card
   // router so the user can answer them from Lark.
-  if (isLiveTerminalInteraction(input)) return input;
+  if (isLiveTerminalInteraction(input) && !hasForeignTerminalPrompt(lines)) return input;
   // A tmux snapshot with another prompt belongs to an earlier turn. Codex also
   // renders built-in suggestion rows with the same glyph, which are terminal
   // chrome rather than user prompts and must not hide current task output.
@@ -1784,6 +1787,15 @@ function isTerminalChromeLine(trimmed: string): boolean {
     /^›\s*(?:Implement \{feature\}|Summarize recent commits|Find and fix a bug in @filename|Improve documentation in @filename|Explain this codebase|Write tests for @filename)\s*$/i.test(trimmed) ||
     /^[A-Za-z0-9_.-]+(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?\s+·\s+.+$/.test(trimmed)
   );
+}
+
+function hasForeignTerminalPrompt(lines: string[]): boolean {
+  return lines.some((line) => {
+    const trimmed = line.trimStart();
+    if (!trimmed.startsWith('›')) return false;
+    if (isTerminalChromeLine(trimmed)) return false;
+    return !/^›\s*\d{1,2}[.)、:\s-]+\S/u.test(trimmed);
+  });
 }
 
 export function isLiveTerminalBusy(input: string): boolean {

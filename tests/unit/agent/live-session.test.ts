@@ -95,6 +95,14 @@ describe('tmux input framing and snapshots', () => {
 
     const codexSuggestion = ['› Write tests for @filename', '• current task output'].join('\n');
     expect(scopeLiveSnapshotToPrompt(codexSuggestion, 'current question')).toBe(codexSuggestion);
+
+    const standaloneApproval = [
+      'Command requires approval',
+      '› 1. Yes, proceed (y)',
+      '2. No, cancel (n)',
+      '[y/n]',
+    ].join('\n');
+    expect(scopeLiveSnapshotToPrompt(standaloneApproval, 'current question')).toBe(standaloneApproval);
   });
 
   it('keeps native picker redraws for every command that opens one', () => {
@@ -422,18 +430,18 @@ setInterval(() => {}, 1000);
     await collect(secondSession.run('run-11', '/prime-buffer', dir).events);
     const eleventh = await collect(secondSession.run('run-12', '/status', dir, 'command').events);
     const stalePicker = await collect(
-      secondSession.run('run-12a', '/status-stale-picker', dir, 'command').events,
+      secondSession.run('run-12a', '/status-stale-picker', dir).events,
     );
     const modelAfterCompact = await collect(
-      secondSession.run('run-12a2', '/model', dir, 'command').events,
+      secondSession.run('run-12a2', '/model', dir).events,
     );
-    const silent = await collect(secondSession.run('run-12b', '/clear', dir, 'command').events);
-    const editNoise = await collect(secondSession.run('run-12b2', '/clear-noise', dir, 'command').events);
+    const silent = await collect(secondSession.run('run-12b', '/clear', dir).events);
+    const editNoise = await collect(secondSession.run('run-12b2', '/clear-noise', dir).events);
     await collect(secondSession.run('run-13', '/open-picker', dir).events);
     const twelfth = await collect(secondSession.run('run-14', '/fast', dir, 'command').events);
     const thirteenth = await collect(secondSession.run('run-15', '/slow-compact', dir, 'command').events);
     const fourteenth = await collect(secondSession.run('run-16', '/goal', dir, 'command').events);
-    const fifteenth = await collect(secondSession.run('run-17', '/skills', dir, 'command').events);
+    const fifteenth = await collect(secondSession.run('run-17', '/skills', dir).events);
     await pool.closeAll();
 
     expect(textOf(first)).toContain('echo:hello');
@@ -441,7 +449,7 @@ setInterval(() => {}, 1000);
     expect(textOf(third).match(/same-frame/g)).toHaveLength(1);
     expect(textOf(fourth)).toBe('clean-frame\n');
     expect(textOf(fifth)).toBe('answer\n');
-    expect(textOf(sixth)).toContain('arrow-up');
+    expect(textOf(sixth)).toContain('echo:up');
     expect(textOf(seventh)).toBe('answer\n');
     expect(textOf(eighth)).toBe('real answer\n');
     expect(textOf(ninth)).toBe('• Service tier set to fast\n');
