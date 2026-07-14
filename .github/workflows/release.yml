@@ -36,7 +36,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Verify source
-        run: pnpm test && pnpm typecheck && pnpm build
+        run: pnpm exec vitest run --reporter=default --reporter=github-actions && pnpm typecheck && pnpm build
 
       - name: Build release assets
         shell: bash
