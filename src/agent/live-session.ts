@@ -95,6 +95,7 @@ export class LiveTerminalSession {
   private primed = false;
   private startedAt = 0;
   private activeTurnCleanup: (() => void) | undefined;
+  private lastTerminalSnapshot = '';
 
   constructor(opts: LiveSessionCommand, onClose: () => void = () => {}) {
     this.opts = opts;
@@ -192,6 +193,9 @@ export class LiveTerminalSession {
 
   private emitData(chunk: Buffer): void {
     const output = this.cleaner.push(chunk.toString('utf8'));
+    if (output.mode === 'snapshot' && output.text.trim()) {
+      this.lastTerminalSnapshot = output.text;
+    }
     if (!output.text.trim()) return;
     this.emitter.emit('data', output);
   }
@@ -408,6 +412,7 @@ export class LiveTerminalSession {
       await delay(this.inputGraceMs(commandMode));
       if (!done) {
         this.cleaner.resetTurn();
+        output.setSnapshotBaseline(this.lastTerminalSnapshot);
         if (commandMode) {
           log.info('agent-live', 'command-clear', { sequence: 'esc ctrl-a ctrl-k' });
           await this.clearPendingInput();
@@ -1147,12 +1152,17 @@ class TurnOutputBuffer {
   private pending = '';
   private lastCompleteLine = '';
   private truncated = false;
+  private snapshotBaseline = '';
 
   constructor(
     private readonly maxChars: number,
     private readonly promptEcho: string = '',
     private readonly stripInputLines = false,
   ) {}
+
+  setSnapshotBaseline(snapshot: string): void {
+    this.snapshotBaseline = snapshot;
+  }
 
   append(raw: string): boolean {
     const compacted = stripPromptMismatchedLiveContent(this.compact(raw), this.promptEcho);
@@ -1170,7 +1180,7 @@ class TurnOutputBuffer {
   }
 
   replace(raw: string): boolean {
-    const scoped = scopeLiveSnapshotToPrompt(raw, this.promptEcho);
+    const scoped = scopeLiveSnapshotToPrompt(raw, this.promptEcho, this.snapshotBaseline);
     const compacted = stripPromptMismatchedLiveContent(this.compact(scoped), this.promptEcho);
     if (!compacted.trim()) return false;
     if (isStalePickerSnapshotForPrompt(compacted, this.promptEcho)) return false;
@@ -1355,7 +1365,11 @@ function stripPromptEcho(input: string, prompt: string): string {
     .trimStart();
 }
 
-export function scopeLiveSnapshotToPrompt(input: string, prompt: string): string {
+export function scopeLiveSnapshotToPrompt(
+  input: string,
+  prompt: string,
+  previousSnapshot = '',
+): string {
   const echo = prompt.trim();
   if (!echo) return input;
   const lines = input.split('\n');
@@ -1377,13 +1391,51 @@ export function scopeLiveSnapshotToPrompt(input: string, prompt: string): string
   }
   const commandResult = scopeKnownLiveCommandResultSnapshot(lines, echo);
   if (commandResult !== undefined) return commandResult;
+  const controlResult = scopeKnownLiveControlResultSnapshot(lines, echo);
+  if (controlResult !== undefined) return controlResult;
   const picker = scopeExpectedLivePickerSnapshot(lines, echo);
   if (picker !== undefined) return picker;
   const controlPicker = scopeControlLiteralPickerSnapshot(lines, echo);
   if (controlPicker !== undefined) return controlPicker;
+  const delta = scopeSnapshotDelta(lines, previousSnapshot);
+  if (delta !== undefined) return delta;
   // A tmux snapshot with another prompt belongs to an earlier turn. Dropping
   // it is safer than forwarding stale conversation content as a new reply.
   return lines.some((line) => line.trimStart().startsWith('›')) ? '' : input;
+}
+
+function scopeKnownLiveControlResultSnapshot(lines: string[], prompt: string): string | undefined {
+  if (!isLiveControlInput(prompt) && !shouldDeferControlLiteralSubmit(prompt)) return undefined;
+  const index = findLastLine(
+    lines,
+    (line) => /^(?:[•*+-]\s*)?Model changed to\b/i.test(line.trim()),
+  );
+  return index >= 0 ? lines[index]!.trim() : undefined;
+}
+
+function scopeSnapshotDelta(lines: string[], previousSnapshot: string): string | undefined {
+  const previous = previousSnapshot.trim();
+  if (!previous) return undefined;
+
+  const priorLines = previous.split('\n');
+  let prefix = 0;
+  while (prefix < priorLines.length && prefix < lines.length && priorLines[prefix] === lines[prefix]) {
+    prefix += 1;
+  }
+  if (prefix === priorLines.length && prefix < lines.length) {
+    return lines.slice(prefix).join('\n');
+  }
+
+  const maxOverlap = Math.min(priorLines.length, lines.length);
+  for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
+    const priorTail = priorLines.slice(priorLines.length - overlap);
+    const nextHead = lines.slice(0, overlap);
+    if (priorTail.every((line, index) => line === nextHead[index])) {
+      const delta = lines.slice(overlap).join('\n');
+      if (delta.trim()) return delta;
+    }
+  }
+  return undefined;
 }
 
 function scopeKnownLiveCommandResultSnapshot(lines: string[], prompt: string): string | undefined {

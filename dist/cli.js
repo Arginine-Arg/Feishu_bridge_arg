@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.8",
+  version: "0.6.9",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -5966,6 +5966,7 @@ var LiveTerminalSession = class {
   primed = false;
   startedAt = 0;
   activeTurnCleanup;
+  lastTerminalSnapshot = "";
   constructor(opts, onClose = () => {
   }) {
     this.opts = opts;
@@ -6056,6 +6057,9 @@ var LiveTerminalSession = class {
   }
   emitData(chunk) {
     const output = this.cleaner.push(chunk.toString("utf8"));
+    if (output.mode === "snapshot" && output.text.trim()) {
+      this.lastTerminalSnapshot = output.text;
+    }
     if (!output.text.trim()) return;
     this.emitter.emit("data", output);
   }
@@ -6250,6 +6254,7 @@ var LiveTerminalSession = class {
       await delay(this.inputGraceMs(commandMode));
       if (!done) {
         this.cleaner.resetTurn();
+        output.setSnapshotBaseline(this.lastTerminalSnapshot);
         if (commandMode) {
           log.info("agent-live", "command-clear", { sequence: "esc ctrl-a ctrl-k" });
           await this.clearPendingInput();
@@ -6894,6 +6899,10 @@ var TurnOutputBuffer = class {
   pending = "";
   lastCompleteLine = "";
   truncated = false;
+  snapshotBaseline = "";
+  setSnapshotBaseline(snapshot) {
+    this.snapshotBaseline = snapshot;
+  }
   append(raw) {
     const compacted = stripPromptMismatchedLiveContent(this.compact(raw), this.promptEcho);
     if (!compacted.trim()) return false;
@@ -6908,7 +6917,7 @@ var TurnOutputBuffer = class {
     return true;
   }
   replace(raw) {
-    const scoped = scopeLiveSnapshotToPrompt(raw, this.promptEcho);
+    const scoped = scopeLiveSnapshotToPrompt(raw, this.promptEcho, this.snapshotBaseline);
     const compacted = stripPromptMismatchedLiveContent(this.compact(scoped), this.promptEcho);
     if (!compacted.trim()) return false;
     if (isStalePickerSnapshotForPrompt(compacted, this.promptEcho)) return false;
@@ -7067,7 +7076,7 @@ function stripPromptEcho(input, prompt) {
 `)) return trimmed.slice(echo.length + 1);
   return input.split("\n").filter((line) => !isPromptEchoLine(line, echo)).filter((line) => !isPromptScopedTerminalChromeLine(line.trim(), echo)).join("\n").trimStart();
 }
-function scopeLiveSnapshotToPrompt(input, prompt) {
+function scopeLiveSnapshotToPrompt(input, prompt, previousSnapshot = "") {
   const echo = prompt.trim();
   if (!echo) return input;
   const lines = input.split("\n");
@@ -7089,11 +7098,45 @@ function scopeLiveSnapshotToPrompt(input, prompt) {
   }
   const commandResult = scopeKnownLiveCommandResultSnapshot(lines, echo);
   if (commandResult !== void 0) return commandResult;
+  const controlResult = scopeKnownLiveControlResultSnapshot(lines, echo);
+  if (controlResult !== void 0) return controlResult;
   const picker = scopeExpectedLivePickerSnapshot(lines, echo);
   if (picker !== void 0) return picker;
   const controlPicker = scopeControlLiteralPickerSnapshot(lines, echo);
   if (controlPicker !== void 0) return controlPicker;
+  const delta = scopeSnapshotDelta(lines, previousSnapshot);
+  if (delta !== void 0) return delta;
   return lines.some((line) => line.trimStart().startsWith("\u203A")) ? "" : input;
+}
+function scopeKnownLiveControlResultSnapshot(lines, prompt) {
+  if (!isLiveControlInput(prompt) && !shouldDeferControlLiteralSubmit(prompt)) return void 0;
+  const index = findLastLine(
+    lines,
+    (line) => /^(?:[•*+-]\s*)?Model changed to\b/i.test(line.trim())
+  );
+  return index >= 0 ? lines[index].trim() : void 0;
+}
+function scopeSnapshotDelta(lines, previousSnapshot) {
+  const previous = previousSnapshot.trim();
+  if (!previous) return void 0;
+  const priorLines = previous.split("\n");
+  let prefix = 0;
+  while (prefix < priorLines.length && prefix < lines.length && priorLines[prefix] === lines[prefix]) {
+    prefix += 1;
+  }
+  if (prefix === priorLines.length && prefix < lines.length) {
+    return lines.slice(prefix).join("\n");
+  }
+  const maxOverlap = Math.min(priorLines.length, lines.length);
+  for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
+    const priorTail = priorLines.slice(priorLines.length - overlap);
+    const nextHead = lines.slice(0, overlap);
+    if (priorTail.every((line, index) => line === nextHead[index])) {
+      const delta = lines.slice(overlap).join("\n");
+      if (delta.trim()) return delta;
+    }
+  }
+  return void 0;
 }
 function scopeKnownLiveCommandResultSnapshot(lines, prompt) {
   const command = prompt.trim().toLowerCase();

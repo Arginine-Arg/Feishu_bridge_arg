@@ -75,6 +75,17 @@ describe('tmux input framing and snapshots', () => {
     expect(scopeLiveSnapshotToPrompt(batched, 'first message\n\nsecond message')).toBe(
       '• final answer',
     );
+
+    const previousScreen = ['› earlier question', '• earlier answer'].join('\n');
+    const shortReply = [...previousScreen.split('\n'), '• short final reply'].join('\n');
+    expect(scopeLiveSnapshotToPrompt(shortReply, 'missing question', previousScreen)).toBe(
+      '• short final reply',
+    );
+
+    const scrolledReply = ['• earlier answer', '• short final reply'].join('\n');
+    expect(scopeLiveSnapshotToPrompt(scrolledReply, 'missing question', previousScreen)).toBe(
+      '• short final reply',
+    );
   });
 
   it('keeps native picker redraws for every command that opens one', () => {
@@ -148,6 +159,16 @@ describe('tmux input framing and snapshots', () => {
         '› 2. gpt-5.6-terra (current)',
         'Press enter to confirm or esc to go back',
       ].join('\n'),
+    );
+
+    const modelChanged = [
+      '› an earlier request',
+      '• earlier answer',
+      '• Model changed to gpt-5.6-terra high',
+      '› Use /skills to list available skills',
+    ].join('\n');
+    expect(scopeLiveSnapshotToPrompt(modelChanged, 'enter')).toBe(
+      '• Model changed to gpt-5.6-terra high',
     );
     expect(scopeLiveSnapshotToPrompt(modelPicker, '/status')).toBe('');
   });
@@ -1019,6 +1040,108 @@ setInterval(() => {}, 1000);
 
     expect(textOf(events)).toContain('tmux:hello\n48 120\n48x120\n');
   });
+
+  tmuxIt('keeps a short reply after a prior pane snapshot', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-snapshot-delta-test-'));
+    const bin = join(dir, 'fake-tmux-snapshot-delta-agent.mjs');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+let buf = '';
+let turn = 0;
+process.stdin.on('data', (chunk) => {
+  buf += chunk;
+  let idx;
+  while ((idx = buf.search(/[\\r\\n]/)) !== -1) {
+    const line = buf.slice(0, idx).trim();
+    buf = buf.slice(idx + 1);
+    if (!line) continue;
+    turn += 1;
+    if (turn === 1) {
+      process.stdout.write('› historic request\\n');
+      process.stdout.write('• historic answer\\n');
+    } else {
+      process.stdout.write('• short final reply\\n');
+    }
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-snapshot-delta-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-snapshot-delta',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 300,
+      outputFlushMs: 40,
+      startupTimeoutMs: 1000,
+    });
+
+    await collect(session.run('tmux-snapshot-delta-first', 'first', dir).events);
+    const second = await collect(session.run('tmux-snapshot-delta-second', 'second', dir).events);
+    await pool.closeAll();
+
+    expect(textOf(second)).toBe('• short final reply\n');
+  }, 20_000);
+
+  tmuxIt('keeps a model change confirmation after a prior pane snapshot', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-model-change-test-'));
+    const bin = join(dir, 'fake-tmux-model-change-agent.mjs');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+let input = '';
+let bootstrapped = false;
+process.stdin.on('data', (chunk) => {
+  input += chunk;
+  if (!bootstrapped && input.includes('bootstrap')) {
+    bootstrapped = true;
+    input = '';
+    process.stdout.write('› earlier request\\n');
+    process.stdout.write('• earlier answer\\n');
+    return;
+  }
+  if (/[\\r\\n]/.test(input)) {
+    process.stdout.write('• Model changed to gpt-5.6-terra high\\n');
+    input = '';
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-model-change-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-model-change',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 300,
+      outputFlushMs: 40,
+      startupTimeoutMs: 1000,
+    });
+
+    await collect(session.run('tmux-model-change-bootstrap', 'bootstrap', dir).events);
+    const confirmed = await collect(
+      session.run('tmux-model-change-confirm', 'enter', dir, 'control').events,
+    );
+    await pool.closeAll();
+
+    expect(textOf(confirmed)).toBe('• Model changed to gpt-5.6-terra high\n');
+  }, 20_000);
 
   tmuxIt('routes a full-pane native model picker as only the current picker', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-picker-test-'));
