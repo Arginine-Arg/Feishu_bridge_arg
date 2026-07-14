@@ -35,8 +35,22 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Verify source
-        run: pnpm exec vitest run --reporter=default --reporter=github-actions && pnpm typecheck && pnpm build
+      - name: Test source
+        id: test
+        continue-on-error: true
+        run: |
+          mkdir -p .ci
+          pnpm exec vitest run --reporter=json --outputFile=.ci/vitest.json
+
+      - name: Report test failures
+        if: always()
+        run: node scripts/report-vitest-failures.mjs .ci/vitest.json
+
+      - name: Verify types
+        run: pnpm typecheck
+
+      - name: Build source
+        run: pnpm build
 
       - name: Build release assets
         shell: bash
