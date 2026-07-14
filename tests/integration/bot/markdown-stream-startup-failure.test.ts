@@ -131,6 +131,7 @@ describe('markdown stream startup failures', () => {
     };
     h.controls.profileConfig.preferences = h.profileConfig.preferences;
     h.controls.cfg.preferences = h.profileConfig.preferences;
+    h.profileConfig.access.allowedChats = ['oc_dm'];
     h.agent.setEvents([
       [
         {
@@ -413,6 +414,37 @@ describe('markdown stream startup failures', () => {
       '3',
       'enter',
       'esc',
+    ]);
+  });
+
+  it('keeps rapid group messages as separate live terminal turns', async () => {
+    const h = await createHarness();
+    h.profileConfig.preferences = {
+      ...(h.profileConfig.preferences ?? {}),
+      agentSessionMode: 'live',
+      messageReply: 'text',
+      messageReplyMigrated: true,
+    };
+    h.controls.profileConfig.preferences = h.profileConfig.preferences;
+    h.controls.cfg.preferences = h.profileConfig.preferences;
+    h.agent.setEvents([
+      [{ type: 'text', delta: 'first reply\n' }, { type: 'done', terminationReason: 'normal' }],
+      [{ type: 'text', delta: 'second reply\n' }, { type: 'done', terminationReason: 'normal' }],
+      [{ type: 'text', delta: 'status reply\n' }, { type: 'done', terminationReason: 'normal' }],
+    ]);
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_group_first', 'nihao', 'group', true));
+    await h.channel.handlers.message?.(message('om_group_second', '你好', 'group', true));
+    await h.channel.handlers.message?.(message('om_group_status', '/codex /status', 'group', true));
+    await waitFor(() => h.agent.runOptions.length === 3, 4000);
+
+    expect(h.agent.runOptions.map((opts) => opts.prompt)).toEqual(['nihao', '你好', '/status']);
+    expect(h.agent.runOptions.map((opts) => opts.sessionMode)).toEqual(['live', 'live', 'live']);
+    expect(h.agent.runOptions.map((opts) => opts.liveInputMode)).toEqual([
+      undefined,
+      undefined,
+      'command',
     ]);
   });
 
@@ -736,17 +768,22 @@ function createControls(
   };
 }
 
-function message(messageId: string, content: string): NormalizedMessage {
+function message(
+  messageId: string,
+  content: string,
+  chatType: 'p2p' | 'group' = 'p2p',
+  mentionedBot = false,
+): NormalizedMessage {
   return {
     messageId,
     chatId: 'oc_dm',
-    chatType: 'p2p',
+    chatType,
     senderId: 'ou_user',
     senderName: 'User',
     content,
     rawContentType: 'text',
     resources: [],
-    mentionedBot: false,
+    mentionedBot,
     createTime: 1760000001000,
   } as unknown as NormalizedMessage;
 }

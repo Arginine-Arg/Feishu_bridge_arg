@@ -330,7 +330,14 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
             threadId: firstMsg.threadId,
           });
         }
-        const runBatches = splitNativeLiveBatches(batch);
+        // A persistent terminal has an editor, not a request protocol. Sending
+        // a debounced batch there turns separate IM messages into one multiline
+        // paste. Keep every live-mode message as its own terminal turn while
+        // preserving their FIFO order.
+        const runBatches = splitNativeLiveBatches(
+          batch,
+          getAgentSessionMode(controls.cfg) === 'live',
+        );
         if (runBatches.length > 1) {
           log.info('flush', 'split-native-live-batch', {
             scope,
@@ -872,7 +879,10 @@ function isLivePickerInput(text: string): boolean {
   return isLiveControlInput(trimmed) || /^\d{1,2}$/u.test(trimmed) || /^(?:y|yes|n|no)$/iu.test(trimmed);
 }
 
-function splitNativeLiveBatches(batch: NormalizedMessage[]): NormalizedMessage[][] {
+function splitNativeLiveBatches(
+  batch: NormalizedMessage[],
+  splitEveryMessage = false,
+): NormalizedMessage[][] {
   const out: NormalizedMessage[][] = [];
   let ordinary: NormalizedMessage[] = [];
   const flushOrdinary = (): void => {
@@ -882,7 +892,7 @@ function splitNativeLiveBatches(batch: NormalizedMessage[]): NormalizedMessage[]
   };
 
   for (const msg of batch) {
-    if (isForceLiveAgentCommandMessage(msg)) {
+    if (splitEveryMessage || isForceLiveAgentCommandMessage(msg)) {
       flushOrdinary();
       out.push([msg]);
     } else {

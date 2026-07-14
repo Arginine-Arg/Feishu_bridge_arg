@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.1",
+  version: "0.6.2",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -15073,7 +15073,10 @@ async function startChannel(deps) {
             threadId: firstMsg.threadId
           });
         }
-        const runBatches = splitNativeLiveBatches(batch);
+        const runBatches = splitNativeLiveBatches(
+          batch,
+          getAgentSessionMode(controls.cfg) === "live"
+        );
         if (runBatches.length > 1) {
           log.info("flush", "split-native-live-batch", {
             scope,
@@ -15476,7 +15479,7 @@ function isLivePickerInput(text) {
   const trimmed = text.trim();
   return isLiveControlInput(trimmed) || /^\d{1,2}$/u.test(trimmed) || /^(?:y|yes|n|no)$/iu.test(trimmed);
 }
-function splitNativeLiveBatches(batch) {
+function splitNativeLiveBatches(batch, splitEveryMessage = false) {
   const out = [];
   let ordinary = [];
   const flushOrdinary = () => {
@@ -15485,7 +15488,7 @@ function splitNativeLiveBatches(batch) {
     ordinary = [];
   };
   for (const msg of batch) {
-    if (isForceLiveAgentCommandMessage(msg)) {
+    if (splitEveryMessage || isForceLiveAgentCommandMessage(msg)) {
       flushOrdinary();
       out.push([msg]);
     } else {
