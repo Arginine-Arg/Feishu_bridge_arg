@@ -1181,6 +1181,7 @@ class TurnOutputBuffer {
 
   replace(raw: string): boolean {
     const scoped = scopeLiveSnapshotToPrompt(raw, this.promptEcho, this.snapshotBaseline);
+    this.snapshotBaseline = raw;
     const compacted = stripPromptMismatchedLiveContent(this.compact(scoped), this.promptEcho);
     if (!compacted.trim()) return false;
     if (isStalePickerSnapshotForPrompt(compacted, this.promptEcho)) return false;
@@ -1373,6 +1374,16 @@ export function scopeLiveSnapshotToPrompt(
   const echo = prompt.trim();
   if (!echo) return input;
   const lines = input.split('\n');
+  const commandResult = scopeKnownLiveCommandResultSnapshot(lines, echo);
+  if (commandResult !== undefined) return commandResult;
+  const controlResult = scopeKnownLiveControlResultSnapshot(lines, echo);
+  if (controlResult !== undefined) return controlResult;
+  const picker = scopeExpectedLivePickerSnapshot(lines, echo);
+  if (picker !== undefined) return picker;
+  const controlPicker = scopeControlLiteralPickerSnapshot(lines, echo);
+  if (controlPicker !== undefined) return controlPicker;
+  const delta = scopeSnapshotDelta(lines, previousSnapshot);
+  if (delta !== undefined) return delta;
   const promptLines = echo.split('\n');
   const anchorIndex = promptLines.findIndex((line) => line.trim().length > 0);
   const anchor = promptLines[anchorIndex]?.trim() ?? echo;
@@ -1389,16 +1400,6 @@ export function scopeLiveSnapshotToPrompt(
     }
     return lines.slice(cursor).join('\n');
   }
-  const commandResult = scopeKnownLiveCommandResultSnapshot(lines, echo);
-  if (commandResult !== undefined) return commandResult;
-  const controlResult = scopeKnownLiveControlResultSnapshot(lines, echo);
-  if (controlResult !== undefined) return controlResult;
-  const picker = scopeExpectedLivePickerSnapshot(lines, echo);
-  if (picker !== undefined) return picker;
-  const controlPicker = scopeControlLiteralPickerSnapshot(lines, echo);
-  if (controlPicker !== undefined) return controlPicker;
-  const delta = scopeSnapshotDelta(lines, previousSnapshot);
-  if (delta !== undefined) return delta;
   // A tmux snapshot with another prompt belongs to an earlier turn. Dropping
   // it is safer than forwarding stale conversation content as a new reply.
   return lines.some((line) => line.trimStart().startsWith('›')) ? '' : input;

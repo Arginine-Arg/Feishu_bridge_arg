@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.9",
+  version: "0.6.10",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -6918,6 +6918,7 @@ var TurnOutputBuffer = class {
   }
   replace(raw) {
     const scoped = scopeLiveSnapshotToPrompt(raw, this.promptEcho, this.snapshotBaseline);
+    this.snapshotBaseline = raw;
     const compacted = stripPromptMismatchedLiveContent(this.compact(scoped), this.promptEcho);
     if (!compacted.trim()) return false;
     if (isStalePickerSnapshotForPrompt(compacted, this.promptEcho)) return false;
@@ -7080,6 +7081,16 @@ function scopeLiveSnapshotToPrompt(input, prompt, previousSnapshot = "") {
   const echo = prompt.trim();
   if (!echo) return input;
   const lines = input.split("\n");
+  const commandResult = scopeKnownLiveCommandResultSnapshot(lines, echo);
+  if (commandResult !== void 0) return commandResult;
+  const controlResult = scopeKnownLiveControlResultSnapshot(lines, echo);
+  if (controlResult !== void 0) return controlResult;
+  const picker = scopeExpectedLivePickerSnapshot(lines, echo);
+  if (picker !== void 0) return picker;
+  const controlPicker = scopeControlLiteralPickerSnapshot(lines, echo);
+  if (controlPicker !== void 0) return controlPicker;
+  const delta = scopeSnapshotDelta(lines, previousSnapshot);
+  if (delta !== void 0) return delta;
   const promptLines = echo.split("\n");
   const anchorIndex = promptLines.findIndex((line) => line.trim().length > 0);
   const anchor = promptLines[anchorIndex]?.trim() ?? echo;
@@ -7096,16 +7107,6 @@ function scopeLiveSnapshotToPrompt(input, prompt, previousSnapshot = "") {
     }
     return lines.slice(cursor).join("\n");
   }
-  const commandResult = scopeKnownLiveCommandResultSnapshot(lines, echo);
-  if (commandResult !== void 0) return commandResult;
-  const controlResult = scopeKnownLiveControlResultSnapshot(lines, echo);
-  if (controlResult !== void 0) return controlResult;
-  const picker = scopeExpectedLivePickerSnapshot(lines, echo);
-  if (picker !== void 0) return picker;
-  const controlPicker = scopeControlLiteralPickerSnapshot(lines, echo);
-  if (controlPicker !== void 0) return controlPicker;
-  const delta = scopeSnapshotDelta(lines, previousSnapshot);
-  if (delta !== void 0) return delta;
   return lines.some((line) => line.trimStart().startsWith("\u203A")) ? "" : input;
 }
 function scopeKnownLiveControlResultSnapshot(lines, prompt) {

@@ -86,6 +86,12 @@ describe('tmux input framing and snapshots', () => {
     expect(scopeLiveSnapshotToPrompt(scrolledReply, 'missing question', previousScreen)).toBe(
       '• short final reply',
     );
+
+    const firstStreamingFrame = ['› current question', '• first update'].join('\n');
+    const secondStreamingFrame = [...firstStreamingFrame.split('\n'), '• second update'].join('\n');
+    expect(scopeLiveSnapshotToPrompt(secondStreamingFrame, 'current question', firstStreamingFrame)).toBe(
+      '• second update',
+    );
   });
 
   it('keeps native picker redraws for every command that opens one', () => {
@@ -1090,6 +1096,46 @@ setInterval(() => {}, 1000);
     await pool.closeAll();
 
     expect(textOf(second)).toBe('• short final reply\n');
+  }, 20_000);
+
+  tmuxIt('streams only new output from consecutive pane snapshots', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-stream-delta-test-'));
+    const bin = join(dir, 'fake-tmux-stream-delta-agent.mjs');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+let input = '';
+process.stdin.on('data', (chunk) => {
+  input += chunk;
+  if (!/[\\r\\n]/.test(input)) return;
+  input = '';
+  setTimeout(() => process.stdout.write('• first stream update\\n'), 20);
+  setTimeout(() => process.stdout.write('• second stream update\\n'), 260);
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-stream-delta-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-stream-delta',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 600,
+      outputFlushMs: 40,
+      startupTimeoutMs: 1000,
+    });
+
+    const events = await collect(session.run('tmux-stream-delta-run', 'stream', dir).events);
+    await pool.closeAll();
+
+    expect(textOf(events)).toBe('• first stream update\n• second stream update\n');
   }, 20_000);
 
   tmuxIt('keeps a model change confirmation after a prior pane snapshot', async () => {
