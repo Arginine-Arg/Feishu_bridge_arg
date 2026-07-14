@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.2",
+  version: "0.6.3",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -6166,7 +6166,7 @@ var LiveTerminalSession = class {
       if (terminalBusy) {
         terminalWasBusy = true;
         suspendIdle();
-      } else if (event.mode === "snapshot" && terminalWasBusy) {
+      } else if (terminalWasBusy) {
         terminalWasBusy = false;
         arm(idleMs);
       }

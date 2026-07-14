@@ -318,7 +318,7 @@ export class LiveTerminalSession {
       if (terminalBusy) {
         terminalWasBusy = true;
         suspendIdle();
-      } else if (event.mode === 'snapshot' && terminalWasBusy) {
+      } else if (terminalWasBusy) {
         terminalWasBusy = false;
         arm(idleMs);
       }
