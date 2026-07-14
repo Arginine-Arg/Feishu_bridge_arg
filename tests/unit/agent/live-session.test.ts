@@ -1047,6 +1047,65 @@ setInterval(() => {}, 1000);
     expect(textOf(events)).toContain('tmux:hello\n48 120\n48x120\n');
   });
 
+  tmuxIt('submits a first Chinese prompt and streams every delayed task update', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-first-prompt-test-'));
+    const bin = join(dir, 'fake-tmux-first-prompt-agent.mjs');
+    const prompt = '有一个细胞死亡和cellfate 的session帮我找找在哪里';
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+const expected = ${JSON.stringify(prompt)};
+const readyAt = Date.now() + 400;
+let draft = '';
+process.stdin.on('data', (chunk) => {
+  for (const char of chunk) {
+    if (char !== '\\r' && char !== '\\n') {
+      draft += char;
+      continue;
+    }
+    if (Date.now() < readyAt) continue;
+    if (draft !== expected) {
+      process.stdout.write('unexpected-input:' + JSON.stringify(draft) + '\\n');
+      draft = '';
+      continue;
+    }
+    draft = '';
+    setTimeout(() => process.stdout.write('• 我先检查当前 tmux 会话。\\n'), 20);
+    setTimeout(() => process.stdout.write('• Ran tmux ls\\n'), 260);
+    setTimeout(() => process.stdout.write('• 最终结论：已找到目标会话。\\n'), 520);
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-first-prompt-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-first-prompt',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 900,
+      outputFlushMs: 40,
+      startupTimeoutMs: 6000,
+    });
+
+    const events = await collect(session.run('tmux-first-prompt-run', prompt, dir).events);
+    await pool.closeAll();
+
+    expect(textOf(events)).toBe([
+      '• 我先检查当前 tmux 会话。',
+      '• Ran tmux ls',
+      '• 最终结论：已找到目标会话。',
+      '',
+    ].join('\n'));
+  }, 20_000);
+
   tmuxIt('keeps a short reply after a prior pane snapshot', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-snapshot-delta-test-'));
     const bin = join(dir, 'fake-tmux-snapshot-delta-agent.mjs');

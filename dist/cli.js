@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.10",
+  version: "0.6.11",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -5918,7 +5918,7 @@ var DEFAULT_OUTPUT_FLUSH_MS = 500;
 var DEFAULT_STARTUP_TIMEOUT_MS = 15e3;
 var STARTUP_INPUT_GRACE_MS = 25;
 var COMMAND_FRESH_SESSION_GRACE_MS = 1200;
-var COMMAND_FRESH_TERMINAL_GRACE_MS = 2500;
+var FRESH_TERMINAL_GRACE_MS = 2500;
 var CONTROL_KEY_GAP_MS = 40;
 var COMMAND_ESCAPE_SETTLE_MS = 250;
 var COMMAND_CLEAR_SETTLE_MS = 500;
@@ -6091,6 +6091,8 @@ var LiveTerminalSession = class {
     let deliveredText = false;
     let slashConfirmCount = 0;
     let terminalWasBusy = false;
+    const inputGraceMs = this.inputGraceMs(commandMode);
+    const inputReadyAt = Date.now() + inputGraceMs;
     if (commandMode) {
       log.info("agent-live", "command-start", {
         commandText: prompt,
@@ -6164,7 +6166,7 @@ var LiveTerminalSession = class {
             textPreview: previewLiveText(event.text)
           });
         }
-        arm(startupTimeoutMs);
+        arm(startupTimeoutMs + Math.max(0, inputReadyAt - Date.now()));
         return;
       }
       const terminalBusy = isLiveTerminalBusy(event.text);
@@ -6250,8 +6252,8 @@ var LiveTerminalSession = class {
     this.emitter.once("exit", onExit);
     this.emitter.once("error", onError);
     try {
-      arm(startupTimeoutMs);
-      await delay(this.inputGraceMs(commandMode));
+      arm(startupTimeoutMs + inputGraceMs);
+      await delay(inputGraceMs);
       if (!done) {
         this.cleaner.resetTurn();
         output.setSnapshotBaseline(this.lastTerminalSnapshot);
@@ -6312,9 +6314,13 @@ var LiveTerminalSession = class {
     await delay(COMMAND_CLEAR_SETTLE_MS);
   }
   inputGraceMs(commandMode) {
-    if (!commandMode || !this.startedAt) return STARTUP_INPUT_GRACE_MS;
+    if (!this.startedAt) return STARTUP_INPUT_GRACE_MS;
     const ageMs = Date.now() - this.startedAt;
-    const freshSessionGraceMs = this.terminalInfo?.backend === "pipe" ? COMMAND_FRESH_SESSION_GRACE_MS : COMMAND_FRESH_TERMINAL_GRACE_MS;
+    if (this.terminalInfo?.backend !== "pipe") {
+      return Math.max(STARTUP_INPUT_GRACE_MS, FRESH_TERMINAL_GRACE_MS - ageMs);
+    }
+    if (!commandMode) return STARTUP_INPUT_GRACE_MS;
+    const freshSessionGraceMs = COMMAND_FRESH_SESSION_GRACE_MS;
     return Math.max(STARTUP_INPUT_GRACE_MS, freshSessionGraceMs - ageMs);
   }
 };

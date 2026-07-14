@@ -43,7 +43,7 @@ const DEFAULT_OUTPUT_FLUSH_MS = 500;
 const DEFAULT_STARTUP_TIMEOUT_MS = 15_000;
 const STARTUP_INPUT_GRACE_MS = 25;
 const COMMAND_FRESH_SESSION_GRACE_MS = 1200;
-const COMMAND_FRESH_TERMINAL_GRACE_MS = 2500;
+const FRESH_TERMINAL_GRACE_MS = 2500;
 const CONTROL_KEY_GAP_MS = 40;
 const COMMAND_ESCAPE_SETTLE_MS = 250;
 const COMMAND_CLEAR_SETTLE_MS = 500;
@@ -240,6 +240,8 @@ export class LiveTerminalSession {
     let deliveredText = false;
     let slashConfirmCount = 0;
     let terminalWasBusy = false;
+    const inputGraceMs = this.inputGraceMs(commandMode);
+    const inputReadyAt = Date.now() + inputGraceMs;
 
     if (commandMode) {
       log.info('agent-live', 'command-start', {
@@ -316,7 +318,7 @@ export class LiveTerminalSession {
             textPreview: previewLiveText(event.text),
           });
         }
-        arm(startupTimeoutMs);
+        arm(startupTimeoutMs + Math.max(0, inputReadyAt - Date.now()));
         return;
       }
       const terminalBusy = isLiveTerminalBusy(event.text);
@@ -408,8 +410,8 @@ export class LiveTerminalSession {
     this.emitter.once('exit', onExit);
     this.emitter.once('error', onError);
     try {
-      arm(startupTimeoutMs);
-      await delay(this.inputGraceMs(commandMode));
+      arm(startupTimeoutMs + inputGraceMs);
+      await delay(inputGraceMs);
       if (!done) {
         this.cleaner.resetTurn();
         output.setSnapshotBaseline(this.lastTerminalSnapshot);
@@ -476,12 +478,13 @@ export class LiveTerminalSession {
   }
 
   private inputGraceMs(commandMode: boolean): number {
-    if (!commandMode || !this.startedAt) return STARTUP_INPUT_GRACE_MS;
+    if (!this.startedAt) return STARTUP_INPUT_GRACE_MS;
     const ageMs = Date.now() - this.startedAt;
-    const freshSessionGraceMs =
-      this.terminalInfo?.backend === 'pipe'
-        ? COMMAND_FRESH_SESSION_GRACE_MS
-        : COMMAND_FRESH_TERMINAL_GRACE_MS;
+    if (this.terminalInfo?.backend !== 'pipe') {
+      return Math.max(STARTUP_INPUT_GRACE_MS, FRESH_TERMINAL_GRACE_MS - ageMs);
+    }
+    if (!commandMode) return STARTUP_INPUT_GRACE_MS;
+    const freshSessionGraceMs = COMMAND_FRESH_SESSION_GRACE_MS;
     return Math.max(STARTUP_INPUT_GRACE_MS, freshSessionGraceMs - ageMs);
   }
 }
