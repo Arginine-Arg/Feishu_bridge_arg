@@ -76,6 +76,37 @@ describe('IM run flow', () => {
     });
   });
 
+  it('does not resume a legacy session when running through tmux live mode', async () => {
+    const h = await createHarness();
+    const workspaceRealpath = await realpath(h.tmp.workspace);
+    h.workspaces.setCwd('chat-1', h.tmp.workspace);
+    h.sessions.set('chat-1', 'sess-legacy', workspaceRealpath);
+
+    const result = await startRunFlow({
+      scopeId: 'chat-1',
+      scope: { source: 'im', chatId: 'chat-1', actorId: 'ou_user' },
+      prompt: 'hello',
+      sessionMode: 'live',
+      attachments: [],
+      access: { ok: true, reason: 'allowed-user' },
+      capability: claudeCapability(h.profileConfig),
+      profileConfig: h.profileConfig,
+      sessions: h.sessions,
+      workspaces: h.workspaces,
+      executor: h.executor,
+      now: 1000,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('expected run flow to start');
+    expect(result.resumeFrom).toBeUndefined();
+    expect(h.agent.runOptions[0]).toMatchObject({
+      cwd: workspaceRealpath,
+      sessionMode: 'live',
+    });
+    expect(h.agent.runOptions[0]?.sessionId).toBeUndefined();
+  });
+
   it('uses the profile default workspace when a scope has no explicit binding', async () => {
     const h = await createHarness({ defaultWorkspace: true });
     const workspaceRealpath = await realpath(h.tmp.workspace);

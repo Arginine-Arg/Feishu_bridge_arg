@@ -385,6 +385,9 @@ async function createHarness(options: {
       allowedChats: ['oc_topic_chat'],
       allowedUsers: ['ou_user'],
     },
+    preferences: {
+      agentSessionMode: 'turn',
+    },
   });
   const profileConfig = {
     ...baseProfileConfig,

@@ -12,7 +12,7 @@ For a product walkthrough, see the [Feishu document](https://larkcommunity.feish
 - **Streaming card**: text replies and tool calls update on one Lark card in real time.
 - **COT process messages**: optionally send a process message with agent progress text and tool calls, then send the final answer separately.
 - **Session continuity**: each chat, topic, or document comment thread keeps its own session.
-- **Optional live CLI sessions**: owner/admin users can switch a profile to `/session live`, keeping one background Claude/Codex CLI per chat or topic so native CLI slash commands and yes/no prompts can be answered from Lark.
+- **Persistent tmux execution**: each chat or topic runs one native Claude/Codex CLI inside tmux. Normal messages and native slash commands share that same terminal context.
 - **Queueing and batching**: messages sent in quick succession are handled together; messages sent during a run are queued for the next turn, while commands like `/new`, `/cd`, `/ws use`, and `/stop` can interrupt the current task.
 - **Multiple workspaces**: use `/cd` to switch the current project, and `/ws` to save and reuse common project directories.
 - **Images and files**: send them to the bot directly, and the bridge downloads them locally for the agent.
@@ -122,7 +122,7 @@ command -v lark-channel-bridge
 
 ## Attribution
 
-`arg-bridge` keeps the turn-mode Feishu/Lark-to-local-agent bridge contract compatible with the original lark-channel bridge work. The Arg-specific implementation adds the current live CLI mode, tmux-backed terminal session handling, Codex support hardening, long-task/card resilience, and the additional command/profile behavior documented below.
+`arg-bridge` keeps the Feishu/Lark-to-local-agent bridge contract compatible with the original lark-channel bridge work. The Arg-specific implementation separates terminal execution from message routing: Claude/Codex run natively in tmux, while the bridge only routes input, observes output, and renders Lark cards.
 
 ## First run
 
@@ -238,7 +238,7 @@ If a profile was created with the wrong agent kind, stop or unregister any match
 | `/status` | Show profile, agent, working directory, session, lark-cli identity, and run state |
 | `/config` | Adjust presentation preferences, access settings, and lark-cli identity policy |
 | `/model` | Choose the model; Codex uses its native model/reasoning picker and syncs the result to the active profile |
-| `/session [status\|live\|turn]` | Inspect or switch the agent process lifecycle. `live` reuses a background CLI session per chat/topic; `turn` keeps the default one-run-per-message behavior |
+| `/session [status\|live\|turn]` | Inspect terminal execution. tmux/live is the default; `turn` remains a legacy compatibility fallback |
 | `/invite user @name` | Allow a user to use the bot in DMs |
 | `/invite admin @name` | Add an access-control admin |
 | `/invite group` | Allow the current group to use the bot |
@@ -254,7 +254,21 @@ If a profile was created with the wrong agent kind, stop or unregister any match
 
 DMs do not require an @ mention. Groups and topic groups require `@bot` by default; `@all` is ignored. Cloud-doc comments in supported document types run when the bot is mentioned.
 
-**Using the agent's own commands**: switch to a live session with `/session live`; bridge-owned commands (`/new`, `/cd`, `/status`, …) are still handled by the bridge, while **unknown slash commands are forwarded verbatim to the current agent CLI** (e.g. Claude Code's `/compact`, `/context`). You can also target the active agent explicitly with `/claude /command` or `/codex /command`; the bridge strips the agent prefix before sending the native command to the CLI. `turn` mode (the default, one run per message) does not forward native commands.
+**Using the agent's own commands**: terminal execution is the default. Bridge-owned commands (`/new`, `/cd`, `/status`, …) stay in the bridge, while **unknown slash commands are forwarded verbatim to the current agent CLI** (for example `/compact`, `/fast`, `/skills`, and `/status`). Picker output is rendered as signed Lark choice cards. `/claude /command` and `/codex /command` explicitly target the active native CLI. `turn` mode is retained only as a compatibility fallback.
+
+## Execution and routing
+
+The terminal receives raw user text, never the bridge's XML context or formatting prompt. The Bridge Agent can optionally use an OpenAI-compatible lightweight model to classify route and presentation metadata, but its response is validated against a SHA-256 of the original input and has no field that can modify stdin.
+
+Set all three variables to enable that optional classifier:
+
+```bash
+export ARG_BRIDGE_AGENT_ENDPOINT=https://example.invalid/v1
+export ARG_BRIDGE_AGENT_MODEL=your-lightweight-model
+export ARG_BRIDGE_AGENT_API_KEY=your-api-key
+```
+
+Without them, the deterministic router provides the same safe pass-through behavior.
 
 **Interactive prompts become cards**: when the agent calls `AskUserQuestion` (pick one) or `ExitPlanMode` (approve a plan), the bridge renders it as a Lark card with buttons; click to answer and your choice resumes the session on the next turn — no hand-rolled card needed.
 

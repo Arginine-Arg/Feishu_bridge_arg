@@ -234,7 +234,7 @@ export function getMessageReplyMode(cfg: AppConfig): MessageReplyMode {
 
 export function getAgentSessionMode(cfg: AppConfig): AgentSessionMode {
   const raw = cfg.preferences?.agentSessionMode;
-  return raw === 'live' ? 'live' : 'turn';
+  return raw === 'turn' ? 'turn' : 'live';
 }
 
 /** Resolve the show-tool-calls preference with default fallback. */

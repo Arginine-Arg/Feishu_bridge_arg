@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { Readable, Writable } from 'node:stream';
 import { log } from '../../core/logger';
+import { AsyncEventQueue } from '../event-queue';
 import { mergeProcessEnv, spawnProcess, type SpawnedProcessByStdio } from '../../platform/spawn';
 import { buildBridgeSystemPrompt } from '../bridge-system-prompt';
 import { buildLarkChannelEnv, type LarkChannelEnvContext } from '../lark-channel-env';
@@ -150,6 +151,7 @@ export class ClaudeAdapter implements AgentAdapter {
     child.stdin.on('error', (err) => {
       log.warn('agent', 'stdin-error', { message: err.message });
     });
+    const events = createEventStream(child, stderrChunks, () => runtimeError);
     child.stdin.end(opts.prompt, 'utf8');
 
     // Default 5s if caller didn't specify — claude often has live
@@ -161,7 +163,7 @@ export class ClaudeAdapter implements AgentAdapter {
 
     return {
       runId: opts.runId,
-      events: createEventStream(child, stderrChunks, () => runtimeError),
+      events,
       async stop() {
         if (child.exitCode !== null || child.signalCode !== null) return;
         log.info('agent', 'stop-sigterm', { pid: child.pid ?? null, graceMs: stopGraceMs });
@@ -211,19 +213,15 @@ export class ClaudeAdapter implements AgentAdapter {
     if (!opts.cwd) {
       throw new Error('cwd is required for ClaudeAdapter.run');
     }
-    const systemPromptFile = writeSystemPromptFile(buildBridgeSystemPrompt(this.botIdentity));
     const args = [
       '--permission-mode',
       opts.permissionMode ?? CLAUDE_DEFAULT_PERMISSION_MODE,
-      '--append-system-prompt-file',
-      systemPromptFile.path,
     ];
     if (opts.model) args.push('--model', opts.model);
     const signature = JSON.stringify({
       cwd: opts.cwd,
       model: opts.model ?? null,
       permissionMode: opts.permissionMode ?? CLAUDE_DEFAULT_PERMISSION_MODE,
-      bot: this.botIdentity?.openId ?? null,
     });
     const scopeKey = opts.scopeId ?? opts.cwd;
     const session = this.liveSessions.getOrCreate(scopeKey, {
@@ -233,96 +231,87 @@ export class ClaudeAdapter implements AgentAdapter {
       env: buildLarkChannelEnv(this.larkChannel),
       signature,
       usePty: this.liveUsePty,
-      backend: this.liveTerminalBackend,
+      backend: this.liveTerminalBackend ?? 'tmux',
       idleMs: this.liveIdleMs,
-      cleanup: systemPromptFile.cleanup,
     });
     return session.run(opts.runId, opts.prompt, opts.cwd, opts.liveInputMode);
   }
 }
 
-async function* createEventStream(
+function createEventStream(
   child: ClaudeChild,
   stderrChunks: Buffer[],
   getError: () => Error | null,
-): AsyncGenerator<AgentEvent> {
+): AsyncIterable<AgentEvent> {
+  const events = new AsyncEventQueue<AgentEvent>();
   // If fork itself failed synchronously, child.pid is undefined. The 'error'
   // event (ENOENT etc.) fires in the next tick, so also check getError().
   if (!child.pid) {
     const err = getError();
-    yield {
-      type: 'error',
-      message: err ? `failed to spawn claude: ${err.message}` : 'spawn returned no pid',
-      terminationReason: 'failed',
-    };
-    return;
+    queueMicrotask(() => {
+      events.push({
+        type: 'error',
+        message: err ? `failed to spawn claude: ${err.message}` : 'spawn returned no pid',
+        terminationReason: 'failed',
+      });
+      events.close();
+    });
+    return events;
   }
 
   const rl = createInterface({ input: child.stdout, crlfDelay: Infinity });
-  let sawStdout = false;
-  let silentExitTimer: ReturnType<typeof setTimeout> | undefined;
-  const closeSilentStdout = (): void => {
-    silentExitTimer = setTimeout(() => {
-      if (!sawStdout && !child.stdout.readableEnded) child.stdout.destroy();
-    }, 50);
-  };
-  child.once('exit', closeSilentStdout);
-  try {
-    for await (const line of rl) {
-      sawStdout = true;
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(trimmed);
-      } catch {
-        continue;
-      }
-      yield* translateEvent(parsed);
+  let outputClosed = false;
+  let exitCode: number | null = null;
+  let exited = false;
+  let finalized = false;
+
+  const finalize = (): void => {
+    if (finalized || !outputClosed || !exited) return;
+    finalized = true;
+    const runtimeError = getError();
+    if (exitCode !== 0 && exitCode !== null) {
+      const stderr = Buffer.concat(stderrChunks).toString('utf8').trim();
+      const detail = stderr ? `: ${stderr.slice(0, 500)}` : '';
+      events.push({
+        type: 'error',
+        message: `claude exited with code ${exitCode}${detail}`,
+        terminationReason: 'failed',
+      });
+    } else if (runtimeError) {
+      events.push({
+        type: 'error',
+        message: `claude runtime error: ${runtimeError.message}`,
+        terminationReason: 'failed',
+      });
     }
-  } finally {
-    if (silentExitTimer) clearTimeout(silentExitTimer);
-    child.removeListener('exit', closeSilentStdout);
-    rl.close();
-  }
+    events.close();
+  };
 
-  const earlyRuntimeError = getError();
-  if (earlyRuntimeError && child.exitCode === null && child.signalCode === null) {
-    yield {
-      type: 'error',
-      message: `claude runtime error: ${earlyRuntimeError.message}`,
-      terminationReason: 'failed',
-    };
-    return;
-  }
-
-  // When the child is killed by a signal, exitCode stays null and signalCode
-  // carries the name. Both must be checked or we'll attach an 'exit' listener
-  // for an event that already fired and hang forever.
-  const exitCode = await new Promise<number | null>((resolve) => {
-    if (child.exitCode !== null || child.signalCode !== null) {
-      resolve(child.exitCode);
-    } else {
-      child.once('exit', (code) => resolve(code));
+  rl.on('line', (line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    try {
+      for (const event of translateEvent(JSON.parse(trimmed))) events.push(event);
+    } catch {
+      // Claude can emit terminal noise around stream-json output.
     }
   });
-
-  const runtimeError = getError();
-  if (exitCode !== 0 && exitCode !== null) {
-    const stderr = Buffer.concat(stderrChunks).toString('utf8').trim();
-    const detail = stderr ? `: ${stderr.slice(0, 500)}` : '';
-    yield {
-      type: 'error',
-      message: `claude exited with code ${exitCode}${detail}`,
-      terminationReason: 'failed',
-    };
-  } else if (runtimeError) {
-    yield {
-      type: 'error',
-      message: `claude runtime error: ${runtimeError.message}`,
-      terminationReason: 'failed',
-    };
-  }
+  rl.once('close', () => {
+    outputClosed = true;
+    finalize();
+  });
+  child.once('exit', (code) => {
+    exitCode = code;
+    exited = true;
+    finalize();
+  });
+  child.once('error', () => {
+    if (child.stdout.readableEnded) {
+      outputClosed = true;
+      finalize();
+    }
+  });
+  return events;
 }
 
 /**

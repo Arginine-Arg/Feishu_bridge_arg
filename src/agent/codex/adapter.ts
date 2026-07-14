@@ -3,11 +3,12 @@ import type { Readable, Writable } from 'node:stream';
 import { join } from 'node:path';
 import type { SandboxMode } from '../../config/profile-schema';
 import { log } from '../../core/logger';
+import { AsyncEventQueue } from '../event-queue';
 import { mergeProcessEnv, spawnProcess, type SpawnedProcessByStdio } from '../../platform/spawn';
 import { SpawnFailed } from '../../runtime/errors';
 import { prefixBridgeSystemPrompt } from '../bridge-system-prompt';
 import { buildLarkChannelEnv, type LarkChannelEnvContext } from '../lark-channel-env';
-import { isLiveControlInput, LiveSessionPool, type LiveTerminalBackend } from '../live-session';
+import { LiveSessionPool, type LiveTerminalBackend } from '../live-session';
 import { checkAgentAvailability, type AgentAvailability } from '../preflight';
 import type {
   AgentAdapter,
@@ -172,6 +173,7 @@ export class CodexAdapter implements AgentAdapter {
     child.stdin.on('error', (err) => {
       log.warn('agent', 'stdin-error', { message: err.message });
     });
+    const events = createEventStream(child, stderrChunks, () => runtimeError, () => stopReason);
     child.stdin.end(
       opts.threadId ? opts.prompt : prefixBridgeSystemPrompt(opts.prompt, this.botIdentity),
       'utf8',
@@ -181,7 +183,7 @@ export class CodexAdapter implements AgentAdapter {
 
     return {
       runId: opts.runId,
-      events: createEventStream(child, stderrChunks, () => runtimeError, () => stopReason),
+      events,
       async stop() {
         if (child.exitCode !== null || child.signalCode !== null) return;
         stopReason = 'interrupted';
@@ -240,10 +242,6 @@ export class CodexAdapter implements AgentAdapter {
       ...(opts.reasoningEffort
         ? ['-c', `model_reasoning_effort="${opts.reasoningEffort}"`]
         : []),
-      '-c',
-      'approval_policy="never"',
-      '-c',
-      'shell_environment_policy.inherit="all"',
       '-C',
       opts.cwd,
     ];
@@ -253,14 +251,10 @@ export class CodexAdapter implements AgentAdapter {
     } else if (!this.inheritCodexHome) {
       envOverrides.CODEX_HOME = join(this.profileStateDir, 'codex-home');
     }
-    // Native /model changes the active TUI in place and is then synced back to
-    // the profile. Excluding model/effort prevents that sync from replacing the
-    // already-updated live process on the next turn.
     const signature = JSON.stringify({
       cwd: opts.cwd,
       sandbox,
       codexHome: envOverrides.CODEX_HOME ?? null,
-      bot: this.botIdentity?.openId ?? null,
     });
     const scopeKey = opts.scopeId ?? opts.cwd;
     const session = this.liveSessions.getOrCreate(scopeKey, {
@@ -270,104 +264,88 @@ export class CodexAdapter implements AgentAdapter {
       env: envOverrides,
       signature,
       usePty: this.liveUsePty,
-      backend: this.liveTerminalBackend,
+      backend: this.liveTerminalBackend ?? 'tmux',
       idleMs: this.liveIdleMs,
     });
-    // A live session is persistent and retains context across turns, so the
-    // bridge system prompt is sent only on the first normal turn. Re-sending it
-    // every turn floods Codex's TUI (it echoes stdin) and buries the answer.
-    // Native CLI commands (e.g. /model) never carry the system prompt.
-    let prompt: string;
-    if (opts.liveInputMode || isNativeCliCommand(opts.prompt)) {
-      prompt = opts.prompt;
-    } else if (session.takePrimeSlot()) {
-      prompt = prefixBridgeSystemPrompt(opts.prompt, this.botIdentity);
-    } else {
-      prompt = opts.prompt;
-    }
-    return session.run(opts.runId, prompt, opts.cwd, opts.liveInputMode);
+    return session.run(opts.runId, opts.prompt, opts.cwd, opts.liveInputMode);
   }
 }
 
-function isNativeCliCommand(prompt: string): boolean {
-  // Slash commands and bare navigation keys are forwarded raw to the live CLI
-  // (no system-prompt prefix, no wrapping) so they reach its interactive picker.
-  return prompt.trimStart().startsWith('/') || isLiveControlInput(prompt);
-}
-
-async function* createEventStream(
+function createEventStream(
   child: CodexChild,
   stderrChunks: Buffer[],
   getError: () => Error | null,
   getStopReason: () => CodexFinishReason | undefined,
-): AsyncGenerator<AgentEvent> {
+): AsyncIterable<AgentEvent> {
+  const events = new AsyncEventQueue<AgentEvent>();
   const translator = new CodexJsonlTranslator();
   if (!child.pid) {
     const err = getError();
-    yield {
-      type: 'error',
-      message: err ? `failed to spawn codex: ${err.message}` : 'spawn returned no pid',
-      terminationReason: 'failed',
-    };
-    return;
+    queueMicrotask(() => {
+      events.push({
+        type: 'error',
+        message: err ? `failed to spawn codex: ${err.message}` : 'spawn returned no pid',
+        terminationReason: 'failed',
+      });
+      events.close();
+    });
+    return events;
   }
 
   const rl = createInterface({ input: child.stdout, crlfDelay: Infinity });
-  let sawStdout = false;
-  let silentExitTimer: ReturnType<typeof setTimeout> | undefined;
-  const closeSilentStdout = (): void => {
-    silentExitTimer = setTimeout(() => {
-      if (!sawStdout && !child.stdout.readableEnded) child.stdout.destroy();
-    }, 50);
-  };
-  child.once('exit', closeSilentStdout);
-  try {
-    for await (const line of rl) {
-      sawStdout = true;
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(trimmed);
-      } catch {
-        continue;
+  let outputClosed = false;
+  let exitCode: number | null = null;
+  let exited = false;
+  let finalized = false;
+
+  const finalize = (): void => {
+    if (finalized || !outputClosed || !exited) return;
+    finalized = true;
+    const stopReason = getStopReason();
+    if (stopReason) {
+      for (const event of translator.finish(stopReason)) events.push(event);
+    } else {
+      const runtimeError = getError();
+      if (exitCode !== 0 && exitCode !== null) {
+        if (!translator.terminalEmitted()) {
+          const stderr = Buffer.concat(stderrChunks).toString('utf8').trim();
+          const detail = stderr ? `: ${stderr.slice(0, 500)}` : '';
+          events.push(terminalError(`codex exited with code ${exitCode}${detail}`));
+        }
+      } else if (runtimeError && !translator.terminalEmitted()) {
+        events.push(terminalError(`codex runtime error: ${runtimeError.message}`));
+      } else {
+        for (const event of translator.finish()) events.push(event);
       }
-      yield* translator.translate(parsed);
     }
-  } finally {
-    if (silentExitTimer) clearTimeout(silentExitTimer);
-    child.removeListener('exit', closeSilentStdout);
-    rl.close();
-  }
+    events.close();
+  };
 
-  const earlyRuntimeError = getError();
-  if (earlyRuntimeError && child.exitCode === null && child.signalCode === null) {
-    yield terminalError(`codex runtime error: ${earlyRuntimeError.message}`);
-    return;
-  }
-
-  const exitCode = await waitForExitCode(child);
-  const stopReason = getStopReason();
-  if (stopReason) {
-    yield* translator.finish(stopReason);
-    return;
-  }
-
-  const runtimeError = getError();
-  if (exitCode !== 0 && exitCode !== null) {
-    if (!translator.terminalEmitted()) {
-      const stderr = Buffer.concat(stderrChunks).toString('utf8').trim();
-      const detail = stderr ? `: ${stderr.slice(0, 500)}` : '';
-      yield terminalError(`codex exited with code ${exitCode}${detail}`);
+  rl.on('line', (line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    try {
+      for (const event of translator.translate(JSON.parse(trimmed))) events.push(event);
+    } catch {
+      // Codex occasionally writes non-JSON terminal noise to stdout.
     }
-    return;
-  }
-  if (runtimeError && !translator.terminalEmitted()) {
-    yield terminalError(`codex runtime error: ${runtimeError.message}`);
-    return;
-  }
-
-  yield* translator.finish();
+  });
+  rl.once('close', () => {
+    outputClosed = true;
+    finalize();
+  });
+  child.once('exit', (code) => {
+    exitCode = code;
+    exited = true;
+    finalize();
+  });
+  child.once('error', () => {
+    if (child.stdout.readableEnded) {
+      outputClosed = true;
+      finalize();
+    }
+  });
+  return events;
 }
 
 function terminalError(message: string): AgentEvent {
@@ -376,15 +354,6 @@ function terminalError(message: string): AgentEvent {
     message,
     terminationReason: 'failed',
   };
-}
-
-async function waitForExitCode(child: CodexChild): Promise<number | null> {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    return child.exitCode;
-  }
-  return new Promise<number | null>((resolve) => {
-    child.once('exit', (code) => resolve(code));
-  });
 }
 
 function isWindowsCommandNotFoundLine(line: string): boolean {

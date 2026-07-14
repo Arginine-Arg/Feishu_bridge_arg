@@ -217,6 +217,44 @@ describe('liveInteractionCard', () => {
     }
   });
 
+  it('renders native permission choices as signed numeric tmux input', () => {
+    let n = 0;
+    const card = liveInteractionCardForText(
+      [
+        'Would you like to run the following command?',
+        '',
+        'Environment: local',
+        '',
+        'Reason: Allow the one-GPU CURE smoke test to initialize PyTorch\'s local TCPStore and use the local GPU.',
+        '',
+        '$ CURE_NPROC_PER_NODE=1 bash chem/runs/cure_l1000_tfe_alignment_train.sh hgraph',
+        '',
+        '› 1. Yes, proceed (y)',
+        "2. Yes, and don't ask again for commands that start with `CURE_NPROC_PER_NODE=1` (p)",
+        '3. No, and tell Codex what to do differently (esc)',
+      ].join('\n'),
+      (action) => {
+        expect(action).toBe(LIVE_INPUT_CALLBACK_ACTION);
+        return `permission-token-${n++}`;
+      },
+    );
+
+    expect(card).toBeDefined();
+    const values = buttonValues(card);
+    expect(values.map((value) => value.input)).toEqual(['1', '2', '3', 'enter', 'esc']);
+    expect(values.map((value) => value.bridge_token)).toEqual([
+      'permission-token-0',
+      'permission-token-1',
+      'permission-token-2',
+      'permission-token-3',
+      'permission-token-4',
+    ]);
+    for (const value of values) {
+      expect(value.cmd).toBe('live.input');
+      expect(value[BRIDGE_CALLBACK_MARKER]).toBe(true);
+    }
+  });
+
   it('renders picker output as controls from the main card reply path', () => {
     let n = 0;
     const card = renderLiveAwareReplyCard(

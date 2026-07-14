@@ -6,6 +6,7 @@ import type {
 import { createLarkChannel } from '@larksuite/channel';
 import { dirname, join } from 'node:path';
 import { claudeCapability, codexCapability } from '../agent/capability';
+import { BridgeAgent, createBridgeAgentFromEnvironment } from '../bridge-agent';
 import {
   isCodexModelId,
   modelLabel,
@@ -193,6 +194,7 @@ export interface BridgeChannel {
 export interface StartChannelDeps {
   cfg: AppConfig;
   agent: AgentAdapter;
+  bridgeAgent?: BridgeAgent;
   sessions: SessionStore;
   sessionCatalog?: SessionCatalog;
   workspaces: WorkspaceStore;
@@ -202,6 +204,7 @@ export interface StartChannelDeps {
 
 export async function startChannel(deps: StartChannelDeps): Promise<BridgeChannel> {
   const { cfg, agent, sessions, sessionCatalog, workspaces, controls } = deps;
+  const bridgeAgent = deps.bridgeAgent ?? createBridgeAgentFromEnvironment();
   const activeRuns = new ActiveRuns();
   // ChatModeCache stays per-bridge-instance — invalidated on restart along
   // with everything else. Topic-mode chats only need one chat.get() call ever.
@@ -339,6 +342,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           await runAgentBatch({
             channel,
             executor,
+            bridgeAgent,
             sessions,
             sessionCatalog,
             workspaces,
@@ -898,6 +902,7 @@ interface LiveInteractionState {
 interface RunBatchDeps {
   channel: LarkChannel;
   executor: RunExecutor;
+  bridgeAgent: BridgeAgent;
   sessions: SessionStore;
   sessionCatalog?: SessionCatalog;
   workspaces: WorkspaceStore;
@@ -917,6 +922,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const {
     channel,
     executor,
+    bridgeAgent,
     sessions,
     sessionCatalog,
     workspaces,
@@ -1026,11 +1032,17 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
 
   const nativeCommand = nativeAgentCommandForBatch(batch);
   const forceLiveSession = batch.some(isForceLiveAgentCommandMessage);
-  const liveInputMode = nativeCommand ? liveInputModeForBatch(batch, nativeCommand) : undefined;
-  const useLiveSession =
-    Boolean(nativeCommand) && (forceLiveSession || getAgentSessionMode(controls.cfg) === 'live');
+  const useLiveSession = forceLiveSession || getAgentSessionMode(controls.cfg) === 'live';
+  const rawTerminalInput = buildTerminalInput(batch, attachments, quotes);
+  const bridgeRoute = useLiveSession
+    ? await bridgeAgent.route({
+        userInput: nativeCommand ?? rawTerminalInput,
+        ...(nativeCommand ? { inputMode: liveInputModeForBatch(batch, nativeCommand) } : {}),
+      })
+    : undefined;
+  const liveInputMode = bridgeRoute?.inputMode;
   const prompt =
-    nativeCommand ??
+    bridgeRoute?.stdin ??
     buildPrompt(
       batch,
       attachments,
@@ -1041,7 +1053,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     );
   log.info('prompt', 'built', {
     promptChars: prompt.length,
-    nativeCommand: Boolean(nativeCommand),
+    nativeCommand: bridgeRoute?.kind === 'native-command',
     sessionMode: useLiveSession ? 'live' : 'turn',
     quotes: quotes.length,
     topicContext: topicContext.length,
@@ -1191,7 +1203,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       }
     }
     interactionTextBuffer = `${interactionTextBuffer}\n${evt.delta}`.slice(-4000);
-    const pickerLike = looksLikeAgentPicker(interactionTextBuffer);
+    const outputKind = bridgeAgent.classifyOutput(interactionTextBuffer);
+    const pickerLike = outputKind === 'picker';
     const interaction = pickerLike ? detectLiveInteraction(interactionTextBuffer) : undefined;
     if (useLiveSession && (interaction || pickerLike)) {
       const wasActive = liveInteractionByScope.has(scope);
@@ -1265,7 +1278,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   }
 
   const configuredReplyMode = getMessageReplyMode(controls.cfg);
-  const replyMode = useLiveSession && nativeCommand ? 'card' : configuredReplyMode;
+  const replyMode =
+    useLiveSession && bridgeRoute?.presentation === 'card' ? 'card' : configuredReplyMode;
   log.info('flush', 'reply-mode', {
     mode: replyMode,
     ...(replyMode !== configuredReplyMode ? { configuredMode: configuredReplyMode } : {}),
@@ -1280,7 +1294,12 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     return { ...state, blocks: state.blocks.filter((b) => b.kind !== 'tool') };
   };
   const withNativeEmptyFallback = (state: RunState): RunState => {
-    if (!useLiveSession || !nativeCommand || state.terminal !== 'done' || renderText(state).trim()) {
+    if (
+      !useLiveSession ||
+      bridgeRoute?.kind !== 'native-command' ||
+      state.terminal !== 'done' ||
+      renderText(state).trim()
+    ) {
       return state;
     }
     const observed = interactionTextBuffer.trim();
@@ -2152,6 +2171,23 @@ function buildPrompt(
   });
 }
 
+function buildTerminalInput(
+  batch: NormalizedMessage[],
+  attachments: LocalAttachment[],
+  quotes: QuotedContext[],
+): string {
+  const fileKeys = batch.flatMap((message) => message.resources.map((resource) => resource.fileKey));
+  const texts = batch
+    .map((message) => stripAttachmentRefs(message.content, fileKeys))
+    .filter((text) => text.length > 0);
+  if (texts.length > 0) return texts.join('\n\n');
+
+  const quotedText = quotes.map((quote) => quote.content).filter((text) => text.length > 0);
+  if (quotedText.length > 0) return quotedText.join('\n\n');
+
+  return attachments.map((attachment) => attachment.path).join('\n');
+}
+
 function nativeAgentCommandForBatch(batch: NormalizedMessage[]): string | undefined {
   if (batch.length !== 1) return undefined;
   const msg = batch[0];
@@ -2224,13 +2260,13 @@ function detectLiveInteraction(text: string): LiveInteractionPrompt | undefined 
 
   for (const choice of numberedChoices.slice(0, 8)) add(choice.input, choice.input);
   const hasNumberedChoices = buttons.length > 0;
-
-  if (
+  const isBinaryConfirmation =
     /\b(?:y\/n|yes\/no|no\/yes)\b|(?:\[y\/n\]|\(y\/n\))/i.test(prompt) ||
     /(?:do you want to|would you like to|shall i|requires? (?:approval|confirmation)|approve|allow).*(?:\?|proceed|continue|run|execute|apply|approve|allow)/i.test(
       prompt,
-    )
-  ) {
+    );
+
+  if (!hasNumberedChoices && isBinaryConfirmation) {
     add('yes', 'yes');
     add('no', 'no');
   }
@@ -2284,7 +2320,10 @@ function isLiveInteractionPromptStart(line: string): boolean {
     /\bselect\s+(?:a\s+)?(?:model|reasoning|option)\b/i.test(line) ||
     /^skills?$/i.test(line) ||
     /\bchoose an action\b/i.test(line) ||
-    /\b(?:command )?requires? (?:approval|confirmation)\b/i.test(line)
+    /\b(?:command )?requires? (?:approval|confirmation)\b/i.test(line) ||
+    /\b(?:do you want to|would you like to|shall i)\s+(?:proceed|continue|run|execute|apply|approve|allow)\b/i.test(
+      line,
+    )
   );
 }
 

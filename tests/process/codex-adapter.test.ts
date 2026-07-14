@@ -294,7 +294,7 @@ describe('CodexAdapter process contract', () => {
     expect(record.argv).toContain('--ignore-user-config');
   });
 
-  it('uses interactive-safe argv and raw slash stdin in live mode', async () => {
+  it('uses native argv and raw slash stdin in live mode', async () => {
     const fake = await createFakeInteractiveCodex();
     cleanup.push(fake.dir);
     const cwd = await realpath(fake.dir);
@@ -326,10 +326,6 @@ describe('CodexAdapter process contract', () => {
     expect(record.argv).toEqual([
       '--sandbox',
       'read-only',
-      '-c',
-      'approval_policy="never"',
-      '-c',
-      'shell_environment_policy.inherit="all"',
       '-C',
       cwd,
     ]);

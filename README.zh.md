@@ -12,7 +12,7 @@
 - **流式卡片**：文本回复和工具调用实时更新在同一张卡片上。
 - **COT 过程消息**：可选先发一条过程消息展示 agent 的阶段性文本和工具调用，再单独发送最终答案。
 - **会话延续**：每个聊天、话题或文档评论有自己的会话，不会互相串。
-- **可选常驻 CLI session**：owner/admin 可用 `/session live` 把 profile 切到后台常驻模式，同一 chat/topic 复用一个 Claude/Codex CLI，从飞书里继续回答原生斜杠命令和 yes/no 选择。
+- **常驻 tmux 执行**：每个 chat/topic 在 tmux 中运行一个原生 Claude/Codex CLI；普通消息和原生斜杠命令共享同一终端上下文。
 - **排队与消息合并**：短时间连续发送的消息会合并处理；任务运行中收到的普通消息会排队到下一轮，`/new`、`/cd`、`/ws use`、`/stop` 这类命令可以中断当前任务。
 - **多工作空间**：用 `/cd` 切换当前项目，用 `/ws` 保存和复用常用项目目录。
 - **图片 / 文件**：直接发给 bot，bridge 下载到本地后交给本机 agent 处理。
@@ -122,7 +122,7 @@ command -v lark-channel-bridge
 
 ## 来源说明
 
-`arg-bridge` 的 turn 模式保持与原 lark-channel bridge 的飞书/Lark 到本地 agent 桥接契约兼容，并在此基础上改造。当前 live CLI 模式、tmux 后台终端 session、Codex 适配加固、长任务/卡片稳定性以及下面记录的命令和 profile 行为，是 Arg 侧实现和维护的部分。
+`arg-bridge` 保持与原 lark-channel bridge 的飞书/Lark 到本地 agent 桥接契约兼容，并将终端执行与消息路由拆分：Claude/Codex 在 tmux 中原生运行，bridge 只负责输入路由、输出观察和飞书卡片渲染。
 
 ## 首次启动
 
@@ -238,7 +238,7 @@ arg-bridge profile export <name> --include-secrets --yes
 | `/status` | 查看 profile、agent、工作目录、会话、lark-cli 身份和运行状态 |
 | `/config` | 调整展示偏好、访问控制和 lark-cli 身份策略 |
 | `/model` | 选择模型；Codex 直接使用 CLI 原生模型/reasoning 选项，并把结果同步到当前 profile |
-| `/session [status\|live\|turn]` | 查看或切换 agent 进程生命周期。`live` 为每个 chat/topic 复用后台 CLI session；`turn` 保持默认的每条消息单独运行 |
+| `/session [status\|live\|turn]` | 查看终端执行状态。tmux/live 为默认模式；`turn` 仅作为兼容回退 |
 | `/invite user @某人` | 允许用户私聊使用 bot |
 | `/invite admin @某人` | 添加访问控制管理员 |
 | `/invite group` | 允许当前群使用 bot |
@@ -254,7 +254,21 @@ arg-bridge profile export <name> --include-secrets --yes
 
 私聊不需要 @。群和话题群默认必须 `@bot`；`@all` 会被忽略。支持的云文档评论里 @bot 就会触发回复。
 
-**直接使用 agent 自有命令**：先 `/session live` 切到常驻 session，之后 `/new`、`/cd`、`/status` 等 bridge 自己的命令仍由 bridge 处理，**未被 bridge 识别的斜杠命令会原样转发给当前 agent CLI**（如 Claude Code 的 `/compact`、`/context`）。也可以显式写 `/claude /命令` 或 `/codex /命令`，bridge 会去掉 agent 前缀后把原生命令送入 CLI。`turn` 模式（默认，每条消息独立运行）不透传原生命令。
+**直接使用 agent 自有命令**：终端执行已是默认行为。`/new`、`/cd`、`/status` 等 bridge 自己的命令仍由 bridge 处理，**未被 bridge 识别的斜杠命令会原样转发给当前 agent CLI**，包括 `/compact`、`/fast`、`/skills`、`/status`；选择器输出会变成带签名的飞书选择卡片。也可以显式写 `/claude /命令` 或 `/codex /命令`。`turn` 模式只保留给兼容回退。
+
+## 执行与路由
+
+tmux 只接收原始用户文本，不接收 bridge 的 XML 上下文或排版提示。Bridge Agent 可选调用 OpenAI 兼容的轻量模型，只生成路由和展示元数据；其输出会校验原始输入的 SHA-256，且没有改写 stdin 的字段。
+
+同时设置以下三个变量可启用该可选分类器：
+
+```bash
+export ARG_BRIDGE_AGENT_ENDPOINT=https://example.invalid/v1
+export ARG_BRIDGE_AGENT_MODEL=your-lightweight-model
+export ARG_BRIDGE_AGENT_API_KEY=your-api-key
+```
+
+未设置时使用确定性的安全直通路由。
 
 **交互式提问自动变卡片**：agent 调用 `AskUserQuestion`（多选一）或 `ExitPlanMode`（计划确认）时，bridge 会把它渲染成带按钮的飞书卡片；点按钮即可回答，你的选择会作为下一轮跟进消息续上会话。无需 agent 自己拼卡片。
 

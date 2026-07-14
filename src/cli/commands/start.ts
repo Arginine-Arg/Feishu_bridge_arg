@@ -442,12 +442,14 @@ export function createRuntimeAgent(
       ignoreRules: codex.ignoreRules !== false,
       sandbox: profileConfig.sandbox.defaultMode,
       larkChannel,
-      sessionMode: profileConfig.preferences?.agentSessionMode === 'live' ? 'live' : 'turn',
+      sessionMode: profileConfig.preferences?.agentSessionMode === 'turn' ? 'turn' : 'live',
+      liveTerminalBackend: 'tmux',
     });
   }
   return new ClaudeAdapter({
     larkChannel,
-    sessionMode: profileConfig.preferences?.agentSessionMode === 'live' ? 'live' : 'turn',
+    sessionMode: profileConfig.preferences?.agentSessionMode === 'turn' ? 'turn' : 'live',
+    liveTerminalBackend: 'tmux',
   });
 }
 

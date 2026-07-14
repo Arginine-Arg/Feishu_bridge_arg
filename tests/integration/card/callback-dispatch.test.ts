@@ -153,6 +153,23 @@ describe('signed card callback dispatch', () => {
     expect(liveInputModeForMessage(queued[0]!)).toBe('control');
   });
 
+  it('preserves a numeric native permission choice for tmux', async () => {
+    const h = await createHarness();
+
+    await h.dispatch({
+      cmd: 'live.input',
+      input: '2',
+      __bridge_cb: true,
+      bridge_token: h.token('live_input', { nonce: 'nonce-live-permission' }),
+    });
+
+    const queued = h.pending.cancel('oc_group');
+    expect(queued).toHaveLength(1);
+    expect(queued[0]?.content).toBe('2');
+    expect(isForceLiveAgentCommandMessage(queued[0]!)).toBe(true);
+    expect(liveInputModeForMessage(queued[0]!)).toBe('control');
+  });
+
   it('turns agent.input button clicks into ordinary follow-up input', async () => {
     const h = await createHarness();
 

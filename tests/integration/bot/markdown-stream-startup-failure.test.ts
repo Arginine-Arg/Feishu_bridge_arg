@@ -221,7 +221,7 @@ describe('markdown stream startup failures', () => {
     await h.channel.handlers.message?.(message('om_ordinary_turn', 'continue the task'));
     await waitFor(() => h.agent.runOptions.length === 4);
     expect(h.agent.runOptions[3]).toMatchObject({
-      sessionMode: 'turn',
+      sessionMode: 'live',
       model: 'gpt-5.6-sol',
       reasoningEffort: 'ultra',
     });

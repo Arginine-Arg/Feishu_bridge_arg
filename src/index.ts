@@ -19,3 +19,17 @@ export type {
   TelemetryEvent,
 } from './core/telemetry';
 export { reportMetric, reportError } from './core/logger';
+export {
+  BridgeAgent,
+  createBridgeAgentFromEnvironment,
+  OpenAiCompatibleBridgeClassifier,
+  BRIDGE_AGENT_SYSTEM_PROMPT,
+} from './bridge-agent';
+export type {
+  BridgeAgentClassifier,
+  BridgeAgentDecision,
+  BridgeInputKind,
+  BridgeOutputKind,
+  BridgePresentation,
+  BridgeRoute,
+} from './bridge-agent';

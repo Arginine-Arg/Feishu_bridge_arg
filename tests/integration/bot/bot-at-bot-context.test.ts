@@ -224,9 +224,29 @@ describe('sender identity in bridge_context', () => {
     expect(userInput.text).not.toContain('[User (user)]:');
     expect(userInput.text).toContain('看下这个');
   });
+
+  it('routes ordinary messages as raw input through the persistent terminal', async () => {
+    const h = await createHarness({ sessionMode: 'live' });
+    await startTestBridge(h);
+
+    const input = '图 VAE 的 KL 散度为什么没有约束到 TFE embedding？';
+    await h.channel.handlers.message?.(
+      message({
+        messageId: 'om_terminal_passthrough',
+        content: input,
+        rawSenderType: 'user',
+      }),
+    );
+    await waitFor(() => h.agent.runOptions.length === 1);
+
+    expect(h.agent.runOptions[0]).toMatchObject({
+      prompt: input,
+      sessionMode: 'live',
+    });
+  });
 });
 
-async function createHarness(): Promise<{
+async function createHarness(options: { sessionMode?: 'turn' | 'live' } = {}): Promise<{
   tmp: TmpProfile;
   channel: FakeLarkChannel & { handlers: MessageHandlerMap };
   agent: FakeAgentAdapter;
@@ -250,6 +270,7 @@ async function createHarness(): Promise<{
       allowedChats: ['oc_chat'],
       allowedUsers: ['ou_user'],
     },
+    preferences: { agentSessionMode: options.sessionMode ?? 'turn' },
   });
   const profileConfig = {
     ...baseProfileConfig,

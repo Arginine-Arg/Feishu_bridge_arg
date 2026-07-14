@@ -116,27 +116,29 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
   let resumeFrom: string | undefined;
   let sessionId: string | undefined;
   let threadId: string | undefined;
-  if (input.sessionCatalog) {
-    const catalogEntry = input.sessionCatalog.activeFor({
-      scopeId: input.scopeId,
-      agentId: input.capability.agentId,
-      cwdRealpath: workspace.cwdRealpath,
-      policyFingerprint: policy.policyFingerprint,
-    });
-    if (catalogEntry?.agentId === 'claude') {
-      sessionId = catalogEntry.sessionId;
-      resumeFrom = sessionId;
-    } else if (catalogEntry?.agentId === 'codex') {
-      threadId = catalogEntry.threadId;
-      resumeFrom = threadId;
+  if (input.sessionMode !== 'live') {
+    if (input.sessionCatalog) {
+      const catalogEntry = input.sessionCatalog.activeFor({
+        scopeId: input.scopeId,
+        agentId: input.capability.agentId,
+        cwdRealpath: workspace.cwdRealpath,
+        policyFingerprint: policy.policyFingerprint,
+      });
+      if (catalogEntry?.agentId === 'claude') {
+        sessionId = catalogEntry.sessionId;
+        resumeFrom = sessionId;
+      } else if (catalogEntry?.agentId === 'codex') {
+        threadId = catalogEntry.threadId;
+        resumeFrom = threadId;
+      }
     }
-  }
-  if (!resumeFrom && input.capability.agentId === 'claude') {
-    resumeFrom = input.sessions.resumeFor(input.scopeId, workspace.cwdRealpath);
-    sessionId = resumeFrom;
-    const stale = input.sessions.getRaw(input.scopeId);
-    if (!resumeFrom && stale?.cwd && stale.cwd !== workspace.cwdRealpath) {
-      input.sessions.clear(input.scopeId);
+    if (!resumeFrom && input.capability.agentId === 'claude') {
+      resumeFrom = input.sessions.resumeFor(input.scopeId, workspace.cwdRealpath);
+      sessionId = resumeFrom;
+      const stale = input.sessions.getRaw(input.scopeId);
+      if (!resumeFrom && stale?.cwd && stale.cwd !== workspace.cwdRealpath) {
+        input.sessions.clear(input.scopeId);
+      }
     }
   }
 
