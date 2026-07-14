@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.6",
+  version: "0.6.7",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -7087,7 +7087,57 @@ function scopeLiveSnapshotToPrompt(input, prompt) {
     }
     return lines.slice(cursor).join("\n");
   }
+  const commandResult = scopeKnownLiveCommandResultSnapshot(lines, echo);
+  if (commandResult !== void 0) return commandResult;
+  const picker = scopeExpectedLivePickerSnapshot(lines, echo);
+  if (picker !== void 0) return picker;
   return lines.some((line) => line.trimStart().startsWith("\u203A")) ? "" : input;
+}
+function scopeKnownLiveCommandResultSnapshot(lines, prompt) {
+  const command = prompt.trim().toLowerCase();
+  let start = -1;
+  if (/^\/fast(?:\s|$)/u.test(command)) {
+    start = findLastLine(lines, (line) => /^•\s+Service tier set to\b/i.test(line.trim()));
+  } else if (/^\/compact(?:\s|$)/u.test(command)) {
+    start = findLastLine(lines, (line) => /^•\s+Context compacted$/i.test(line.trim()));
+  } else if (/^\/(?:status|usage|limits)(?:\s|$)/u.test(command)) {
+    start = findLastCodexStatusPanel(lines);
+  }
+  return start >= 0 ? lines.slice(start).join("\n") : void 0;
+}
+function findLastLine(lines, predicate) {
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (predicate(lines[index] ?? "")) return index;
+  }
+  return -1;
+}
+function findLastCodexStatusPanel(lines) {
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (!/^╭[─\s]*╮?$/u.test((lines[index] ?? "").trim())) continue;
+    const panel = lines.slice(index, index + 24).join("\n");
+    if (/\b(?:OpenAI )?Codex\b/i.test(panel) && /\bToken usage:/i.test(panel)) return index;
+  }
+  return -1;
+}
+function scopeExpectedLivePickerSnapshot(lines, prompt) {
+  if (!isLivePickerCommand(prompt)) return void 0;
+  let start = -1;
+  for (let index = 0; index < lines.length; index += 1) {
+    if (isLivePickerStartLine(lines[index] ?? "")) start = index;
+  }
+  if (start < 0) return void 0;
+  const picker = lines.slice(start).join("\n");
+  return isLikelyLivePickerOutput(picker) ? picker : void 0;
+}
+function isLivePickerCommand(input) {
+  return /^\/(?:model|skills|permissions|resume)(?:\s|$)/iu.test(input.trim());
+}
+function isLivePickerStartLine(line) {
+  const trimmed = line.trim();
+  return /\bselect\s+(?:a\s+)?(?:model|reasoning|option|permission|session)\b/i.test(trimmed) || /\bchoose an action\b/i.test(trimmed) || /\bcommand requires approval\b/i.test(trimmed) || /\bresume previous conversation\b/i.test(trimmed) || /^skills?$/i.test(trimmed);
+}
+function isLikelyLivePickerOutput(text) {
+  return /press\s+enter\s+to\s+(?:confirm|continue)/i.test(text) || /esc\s+to\s+(?:go\s+back|cancel)/i.test(text) || /\b(?:y\/n|yes\/no|no\/yes)\b/i.test(text) || /(?:↑|↓|up\/down|arrow keys?|use .*arrows?)/i.test(text) || /(?:^|\n)\s*(?:[›>▸*+-]\s*)?\d{1,2}[.)、:\s-]+\S/u.test(text);
 }
 function isPromptEchoLine(line, echo) {
   const normalized = line.trim();
@@ -7205,7 +7255,7 @@ function stripModelChangedLines(input) {
 }
 function isStalePickerSnapshotForPrompt(text, prompt) {
   const command = prompt.trim().toLowerCase();
-  if (!command.startsWith("/") || command === "/model") return false;
+  if (!command.startsWith("/") || isLivePickerCommand(command)) return false;
   const compact = compactForNoiseMatch(text);
   return compact.includes("selectmodelandeffort") || compact.includes("accesslegacymodels") || compact.includes("pressentertoconfirmoresctogoback") || /(?:^|\n)\s*(?:[›>▸*+-]\s*)?\d{1,2}[.)、:\s-]+gpt-/iu.test(text);
 }

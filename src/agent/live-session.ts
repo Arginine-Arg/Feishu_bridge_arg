@@ -1375,9 +1375,87 @@ export function scopeLiveSnapshotToPrompt(input: string, prompt: string): string
     }
     return lines.slice(cursor).join('\n');
   }
+  const commandResult = scopeKnownLiveCommandResultSnapshot(lines, echo);
+  if (commandResult !== undefined) return commandResult;
+  const picker = scopeExpectedLivePickerSnapshot(lines, echo);
+  if (picker !== undefined) return picker;
   // A tmux snapshot with another prompt belongs to an earlier turn. Dropping
   // it is safer than forwarding stale conversation content as a new reply.
   return lines.some((line) => line.trimStart().startsWith('›')) ? '' : input;
+}
+
+function scopeKnownLiveCommandResultSnapshot(lines: string[], prompt: string): string | undefined {
+  const command = prompt.trim().toLowerCase();
+  let start = -1;
+
+  if (/^\/fast(?:\s|$)/u.test(command)) {
+    start = findLastLine(lines, (line) => /^•\s+Service tier set to\b/i.test(line.trim()));
+  } else if (/^\/compact(?:\s|$)/u.test(command)) {
+    start = findLastLine(lines, (line) => /^•\s+Context compacted$/i.test(line.trim()));
+  } else if (/^\/(?:status|usage|limits)(?:\s|$)/u.test(command)) {
+    start = findLastCodexStatusPanel(lines);
+  }
+
+  return start >= 0 ? lines.slice(start).join('\n') : undefined;
+}
+
+function findLastLine(lines: string[], predicate: (line: string) => boolean): number {
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (predicate(lines[index] ?? '')) return index;
+  }
+  return -1;
+}
+
+function findLastCodexStatusPanel(lines: string[]): number {
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (!/^╭[─\s]*╮?$/u.test((lines[index] ?? '').trim())) continue;
+    const panel = lines.slice(index, index + 24).join('\n');
+    if (/\b(?:OpenAI )?Codex\b/i.test(panel) && /\bToken usage:/i.test(panel)) return index;
+  }
+  return -1;
+}
+
+/**
+ * Native Codex pickers redraw the active input line in-place (for example,
+ * `› /model` becomes `› 1. gpt-...`). The command echo therefore disappears
+ * from a tmux capture even though the picker belongs to the current turn.
+ */
+function scopeExpectedLivePickerSnapshot(lines: string[], prompt: string): string | undefined {
+  if (!isLivePickerCommand(prompt)) return undefined;
+
+  let start = -1;
+  for (let index = 0; index < lines.length; index += 1) {
+    if (isLivePickerStartLine(lines[index] ?? '')) start = index;
+  }
+  if (start < 0) return undefined;
+
+  const picker = lines.slice(start).join('\n');
+  return isLikelyLivePickerOutput(picker) ? picker : undefined;
+}
+
+function isLivePickerCommand(input: string): boolean {
+  return /^\/(?:model|skills|permissions|resume)(?:\s|$)/iu.test(input.trim());
+}
+
+function isLivePickerStartLine(line: string): boolean {
+  const trimmed = line.trim();
+  return (
+    /\bselect\s+(?:a\s+)?(?:model|reasoning|option|permission|session)\b/i.test(trimmed) ||
+    /\bchoose an action\b/i.test(trimmed) ||
+    /\bcommand requires approval\b/i.test(trimmed) ||
+    /\bresume previous conversation\b/i.test(trimmed) ||
+    /^skills?$/i.test(trimmed)
+  );
+}
+
+function isLikelyLivePickerOutput(text: string): boolean {
+  return (
+    /press\s+enter\s+to\s+(?:confirm|continue)/i.test(text) ||
+    /esc\s+to\s+(?:go\s+back|cancel)/i.test(text) ||
+    /\b(?:y\/n|yes\/no|no\/yes)\b/i.test(text) ||
+    /(?:↑|↓|up\/down|arrow keys?|use .*arrows?)/i.test(text) ||
+    /(?:^|\n)\s*(?:[›>▸*+-]\s*)?\d{1,2}[.)、:\s-]+\S/u.test(text)
+  );
 }
 
 function isPromptEchoLine(line: string, echo: string): boolean {
@@ -1548,7 +1626,7 @@ function stripModelChangedLines(input: string): string {
 
 function isStalePickerSnapshotForPrompt(text: string, prompt: string): boolean {
   const command = prompt.trim().toLowerCase();
-  if (!command.startsWith('/') || command === '/model') return false;
+  if (!command.startsWith('/') || isLivePickerCommand(command)) return false;
   const compact = compactForNoiseMatch(text);
   return (
     compact.includes('selectmodelandeffort') ||

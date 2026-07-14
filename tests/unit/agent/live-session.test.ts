@@ -77,6 +77,103 @@ describe('tmux input framing and snapshots', () => {
     );
   });
 
+  it('keeps native picker redraws for every command that opens one', () => {
+    const modelPicker = [
+      '› an earlier request',
+      '• earlier answer',
+      'Select Model and Effort',
+      '› 1. gpt-5.6-sol (current)',
+      '2. gpt-5.6-terra',
+      'Press enter to confirm or esc to go back',
+    ].join('\n');
+    expect(scopeLiveSnapshotToPrompt(modelPicker, '/model')).toBe(
+      [
+        'Select Model and Effort',
+        '› 1. gpt-5.6-sol (current)',
+        '2. gpt-5.6-terra',
+        'Press enter to confirm or esc to go back',
+      ].join('\n'),
+    );
+
+    const skillsPicker = [
+      '› an earlier request',
+      'Choose an action',
+      '› 1. Enable research',
+      '2. Disable imagegen',
+      'Press enter to confirm or esc to go back',
+    ].join('\n');
+    expect(scopeLiveSnapshotToPrompt(skillsPicker, '/skills')).toBe(
+      [
+        'Choose an action',
+        '› 1. Enable research',
+        '2. Disable imagegen',
+        'Press enter to confirm or esc to go back',
+      ].join('\n'),
+    );
+
+    const permissionPicker = [
+      '› an earlier request',
+      'Command requires approval',
+      'Do you want to allow running `npm test`?',
+      '[y/n]',
+    ].join('\n');
+    expect(scopeLiveSnapshotToPrompt(permissionPicker, '/permissions')).toBe(
+      [
+        'Command requires approval',
+        'Do you want to allow running `npm test`?',
+        '[y/n]',
+      ].join('\n'),
+    );
+
+    const resumePicker = [
+      '› an earlier request',
+      'Resume previous conversation',
+      'Use arrows to choose a thread.',
+    ].join('\n');
+    expect(scopeLiveSnapshotToPrompt(resumePicker, '/resume')).toBe(
+      ['Resume previous conversation', 'Use arrows to choose a thread.'].join('\n'),
+    );
+    expect(scopeLiveSnapshotToPrompt(modelPicker, '/status')).toBe('');
+  });
+
+  it('keeps native command confirmations after a full terminal redraw', () => {
+    const fast = [
+      '› an earlier request',
+      '• earlier answer',
+      '• Service tier set to fast',
+      'gpt-5.6-sol high',
+    ].join('\n');
+    expect(scopeLiveSnapshotToPrompt(fast, '/fast')).toBe(
+      ['• Service tier set to fast', 'gpt-5.6-sol high'].join('\n'),
+    );
+
+    const compact = [
+      '› an earlier request',
+      '• earlier answer',
+      '• Context compacted',
+      '⚠ Heads up: Start a new thread when possible.',
+    ].join('\n');
+    expect(scopeLiveSnapshotToPrompt(compact, '/compact')).toBe(
+      ['• Context compacted', '⚠ Heads up: Start a new thread when possible.'].join('\n'),
+    );
+
+    const status = [
+      '› an earlier request',
+      '╭──────────────────────────╮',
+      '│ >_ OpenAI Codex          │',
+      '│ Token usage: 12K total   │',
+      '╰──────────────────────────╯',
+    ].join('\n');
+    expect(scopeLiveSnapshotToPrompt(status, '/status')).toBe(
+      [
+        '╭──────────────────────────╮',
+        '│ >_ OpenAI Codex          │',
+        '│ Token usage: 12K total   │',
+        '╰──────────────────────────╯',
+      ].join('\n'),
+    );
+  });
+
   it('recognizes a busy native terminal so incoming chat stays queued', () => {
     expect(isLiveTerminalBusy('◦ Working (14s • esc to interrupt)')).toBe(true);
     expect(isLiveTerminalBusy('tab to queue message 99% context left')).toBe(true);
@@ -221,11 +318,10 @@ process.stdin.on('data', (chunk) => {
       setTimeout(() => process.stdout.write('• Context compacted\\n'), 600);
     }
     else if (line === '/skills') {
-      process.stdout.write('• No previous message to edit.\\n');
-      process.stdout.write('• Context compacted\\n');
-      process.stdout.write('⚠ Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when\\n');
-      process.stdout.write('possible to keep threads small and targeted.\\n');
-      setTimeout(() => process.stdout.write('Available skills: research, imagegen\\n'), 20);
+      process.stdout.write('Choose an action\\n');
+      process.stdout.write('› 1. Enable research\\n');
+      process.stdout.write('2. Disable imagegen\\n');
+      process.stdout.write('Press enter to confirm or esc to go back\\n');
     }
     else if (line === '/goal') {
       process.stdout.write('• No previous message to edit.\\n');
@@ -316,7 +412,9 @@ setInterval(() => {}, 1000);
     expect(textOf(twelfth)).toBe('• Service tier set to fast\n');
     expect(textOf(thirteenth)).toBe('• Context compacted\n');
     expect(textOf(fourteenth)).toBe('• Usage: /goal [<objective>|clear|edit|pause|resume] No goal is currently set.\n');
-    expect(textOf(fifteenth)).toBe('Available skills: research, imagegen\n');
+    expect(textOf(fifteenth)).toBe(
+      'Choose an action\n› 1. Enable research\n2. Disable imagegen\nPress enter to confirm or esc to go back\n',
+    );
     expect(await readFile(countFile, 'utf8')).toBe('start\n');
   }, 70_000);
 
@@ -903,6 +1001,59 @@ setInterval(() => {}, 1000);
 
     expect(textOf(events)).toContain('tmux:hello\n48 120\n48x120\n');
   });
+
+  tmuxIt('routes a full-pane native model picker as only the current picker', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-picker-test-'));
+    const bin = join(dir, 'fake-tmux-picker-agent.mjs');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+let sent = false;
+let input = '';
+process.stdin.on('data', (chunk) => {
+  input += chunk;
+  if (sent || !input.includes('/model')) return;
+  sent = true;
+  process.stdout.write('› an earlier request\\n');
+  process.stdout.write('• earlier answer\\n');
+  process.stdout.write('Select Model and Effort\\n');
+  process.stdout.write('› 1. gpt-5.6-sol (current)\\n');
+  process.stdout.write('2. gpt-5.6-terra\\n');
+  process.stdout.write('Press enter to confirm or esc to go back\\n');
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-picker-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-picker',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 300,
+      outputFlushMs: 40,
+      startupTimeoutMs: 1000,
+    });
+
+    const events = await collect(session.run('run-tmux-picker', '/model', dir).events);
+    await pool.closeAll();
+
+    expect(textOf(events)).toBe(
+      [
+        'Select Model and Effort',
+        '› 1. gpt-5.6-sol (current)',
+        '2. gpt-5.6-terra',
+        'Press enter to confirm or esc to go back',
+        '',
+      ].join('\n'),
+    );
+  }, 20_000);
 
   tmuxIt('pastes multiline live prompts into tmux before submitting once', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-paste-test-'));
