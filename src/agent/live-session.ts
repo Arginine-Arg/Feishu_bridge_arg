@@ -49,7 +49,7 @@ const COMMAND_ESCAPE_SETTLE_MS = 250;
 const COMMAND_CLEAR_SETTLE_MS = 500;
 const COMMAND_STARTUP_TIMEOUT_MS = 25_000;
 const COMMAND_IDLE_MS = 2_500;
-const COMMAND_NO_OUTPUT_IDLE_MS = 8_000;
+const COMMAND_NO_OUTPUT_IDLE_MS = 60_000;
 const CONTROL_LITERAL_CONFIRM_DELAY_MS = 900;
 const MAX_TURN_OUTPUT_CHARS = 120_000;
 const DEFAULT_PTY_ROWS = '48';
@@ -198,7 +198,9 @@ export class LiveTerminalSession {
   private write(input: string): void {
     const child = this.child;
     if (!child || child.exitCode !== null || child.signalCode !== null) return;
-    child.stdin.write(input);
+    child.stdin.write(
+      this.terminalInfo?.backend === 'tmux' ? encodeTmuxInputFrame(input) : input,
+    );
   }
 
   private async *turnEvents(
@@ -232,6 +234,7 @@ export class LiveTerminalSession {
     let sawCommandResultOutput = false;
     let deliveredText = false;
     let slashConfirmCount = 0;
+    let terminalWasBusy = false;
 
     if (commandMode) {
       log.info('agent-live', 'command-start', {
@@ -282,6 +285,10 @@ export class LiveTerminalSession {
       if (timer) clearTimeout(timer);
       timer = setTimeout(finish, ms);
     };
+    const suspendIdle = (): void => {
+      if (timer) clearTimeout(timer);
+      timer = undefined;
+    };
     const scheduleSlashCommandConfirm = (): void => {
       if (!commandMode || slashConfirmCount >= 2 || slashConfirmTimer || sawCommandResultOutput) return;
       if (!prompt.trim().startsWith('/')) return;
@@ -307,10 +314,19 @@ export class LiveTerminalSession {
         arm(startupTimeoutMs);
         return;
       }
+      const terminalBusy = isLiveTerminalBusy(event.text);
+      if (terminalBusy) {
+        terminalWasBusy = true;
+        suspendIdle();
+      } else if (event.mode === 'snapshot' && terminalWasBusy) {
+        terminalWasBusy = false;
+        arm(idleMs);
+      }
       const text = sanitizeLiveTurnOutput(event.text, prompt);
       const beforeAppendFrame = commandMode && diagFrames < LIVE_DIAG_MAX_FRAMES;
       if (beforeAppendFrame) diagFrames += 1;
       if (!text) {
+        if (terminalBusy) return;
         if (commandMode) {
           arm(
             sawAcceptedOutput || isKnownSilentLiveCommand(prompt)
@@ -339,7 +355,7 @@ export class LiveTerminalSession {
         sawAcceptedOutput = true;
         if (resultOutput) sawCommandResultOutput = true;
         scheduleOutputFlush();
-        arm(idleMs);
+        if (!terminalBusy) arm(idleMs);
         if (commandMode && !resultOutput) scheduleSlashCommandConfirm();
       } else if (commandMode) {
         scheduleSlashCommandConfirm();
@@ -519,6 +535,10 @@ function liveCommandLine(command: string, args: string[], rows: string, columns:
     .join(' ')}`;
 }
 
+export function encodeTmuxInputFrame(input: string): string {
+  return `${Buffer.from(input, 'utf8').toString('base64')}\n`;
+}
+
 function spawnTmuxLiveProcess(
   cwd: string,
   env: NodeJS.ProcessEnv,
@@ -591,6 +611,7 @@ const target = session + ':0.0';
 const commandLine = Buffer.from(commandBase64, 'base64').toString('utf8');
 let closed = false;
 let lastSnapshot = '';
+let inputBuffer = '';
 
 function tmux(args, options = {}) {
   return spawnSync('tmux', ['-L', socketName, ...args], {
@@ -712,7 +733,20 @@ const timer = setInterval(capture, 160);
 capture();
 
 process.stdin.setEncoding('utf8');
-process.stdin.on('data', sendInput);
+process.stdin.on('data', (chunk) => {
+  inputBuffer += chunk;
+  let newline;
+  while ((newline = inputBuffer.indexOf('\n')) !== -1) {
+    const frame = inputBuffer.slice(0, newline);
+    inputBuffer = inputBuffer.slice(newline + 1);
+    if (!frame) continue;
+    try {
+      sendInput(Buffer.from(frame, 'base64').toString('utf8'));
+    } catch (error) {
+      process.stderr.write('failed to decode tmux input frame: ' + String(error) + '\n');
+    }
+  }
+});
 process.stdin.on('end', () => {
   clearInterval(timer);
   cleanup();
@@ -1123,7 +1157,8 @@ class TurnOutputBuffer {
   }
 
   replace(raw: string): boolean {
-    const compacted = stripPromptMismatchedLiveContent(this.compact(raw), this.promptEcho);
+    const scoped = scopeLiveSnapshotToPrompt(raw, this.promptEcho);
+    const compacted = stripPromptMismatchedLiveContent(this.compact(scoped), this.promptEcho);
     if (!compacted.trim()) return false;
     if (isStalePickerSnapshotForPrompt(compacted, this.promptEcho)) return false;
     if (isStaleStatusSnapshotForPrompt(compacted, this.promptEcho)) return false;
@@ -1305,6 +1340,31 @@ function stripPromptEcho(input: string, prompt: string): string {
     .filter((line) => !isPromptScopedTerminalChromeLine(line.trim(), echo))
     .join('\n')
     .trimStart();
+}
+
+export function scopeLiveSnapshotToPrompt(input: string, prompt: string): string {
+  const echo = prompt.trim();
+  if (!echo) return input;
+  const lines = input.split('\n');
+  const promptLines = echo.split('\n');
+  const anchorIndex = promptLines.findIndex((line) => line.trim().length > 0);
+  const anchor = promptLines[anchorIndex]?.trim() ?? echo;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (!isPromptEchoLine(lines[index] ?? '', anchor)) continue;
+    let cursor = index + 1;
+    for (const promptLine of promptLines.slice(anchorIndex + 1)) {
+      if (!promptLine.trim()) {
+        if (!lines[cursor]?.trim()) cursor += 1;
+        continue;
+      }
+      if (lines[cursor]?.trim() === promptLine.trim()) cursor += 1;
+      else break;
+    }
+    return lines.slice(cursor).join('\n');
+  }
+  // A tmux snapshot with another prompt belongs to an earlier turn. Dropping
+  // it is safer than forwarding stale conversation content as a new reply.
+  return lines.some((line) => line.trimStart().startsWith('›')) ? '' : input;
 }
 
 function isPromptEchoLine(line: string, echo: string): boolean {
@@ -1542,6 +1602,13 @@ function isTerminalChromeLine(trimmed: string): boolean {
     /^[╭╰╮╯─│\s]+$/u.test(trimmed) ||
     /^›\s*(?:Implement \{feature\}|Summarize recent commits|Find and fix a bug in @filename|Improve documentation in @filename|Explain this codebase)\s*$/i.test(trimmed) ||
     /^[A-Za-z0-9_.-]+(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?\s+·\s+.+$/.test(trimmed)
+  );
+}
+
+export function isLiveTerminalBusy(input: string): boolean {
+  const recent = cleanTerminalOutput(input).split('\n').slice(-12).join('\n');
+  return /(?:tab\s+to\s+queue\s+message|working\s*\([^)]*(?:esc|escape)\s+to\s+interrupt|esc(?:ape)?\s+to\s+interrupt|compacting(?:\s+context)?)/iu.test(
+    recent,
   );
 }
 

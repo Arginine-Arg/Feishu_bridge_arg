@@ -9,7 +9,10 @@ import {
   isLiveControlInput,
   LiveSessionPool,
   LiveTerminalSession,
+  isLiveTerminalBusy,
   parseLiveControlSequence,
+  encodeTmuxInputFrame,
+  scopeLiveSnapshotToPrompt,
 } from '../../../src/agent/live-session';
 
 describe('parseLiveControlSequence', () => {
@@ -46,6 +49,38 @@ describe('LiveTerminalSession prime slot', () => {
     expect(session.takePrimeSlot()).toBe(true);
     expect(session.takePrimeSlot()).toBe(false);
     expect(session.takePrimeSlot()).toBe(false);
+  });
+});
+
+describe('tmux input framing and snapshots', () => {
+  it('frames each tmux write independently so pipe chunks cannot merge prompts', () => {
+    expect(encodeTmuxInputFrame('aha\r')).toBe('YWhhDQ==\n');
+    expect(encodeTmuxInputFrame('nihao\r')).toBe('bmloYW8N\n');
+  });
+
+  it('keeps only the current prompt and its output from a pane snapshot', () => {
+    const snapshot = [
+      '› earlier question',
+      '• earlier answer',
+      '› current question',
+      '• current answer',
+    ].join('\n');
+
+    expect(scopeLiveSnapshotToPrompt(snapshot, 'current question')).toBe(
+      '• current answer',
+    );
+    expect(scopeLiveSnapshotToPrompt(snapshot, 'missing question')).toBe('');
+
+    const batched = ['› first message', 'second message', '• final answer'].join('\n');
+    expect(scopeLiveSnapshotToPrompt(batched, 'first message\n\nsecond message')).toBe(
+      '• final answer',
+    );
+  });
+
+  it('recognizes a busy native terminal so incoming chat stays queued', () => {
+    expect(isLiveTerminalBusy('◦ Working (14s • esc to interrupt)')).toBe(true);
+    expect(isLiveTerminalBusy('tab to queue message 99% context left')).toBe(true);
+    expect(isLiveTerminalBusy('› ready for the next task')).toBe(false);
   });
 });
 

@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.0",
+  version: "0.6.1",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -5924,7 +5924,7 @@ var COMMAND_ESCAPE_SETTLE_MS = 250;
 var COMMAND_CLEAR_SETTLE_MS = 500;
 var COMMAND_STARTUP_TIMEOUT_MS = 25e3;
 var COMMAND_IDLE_MS = 2500;
-var COMMAND_NO_OUTPUT_IDLE_MS = 8e3;
+var COMMAND_NO_OUTPUT_IDLE_MS = 6e4;
 var CONTROL_LITERAL_CONFIRM_DELAY_MS = 900;
 var MAX_TURN_OUTPUT_CHARS = 12e4;
 var DEFAULT_PTY_ROWS = "48";
@@ -6061,7 +6061,9 @@ var LiveTerminalSession = class {
   write(input) {
     const child = this.child;
     if (!child || child.exitCode !== null || child.signalCode !== null) return;
-    child.stdin.write(input);
+    child.stdin.write(
+      this.terminalInfo?.backend === "tmux" ? encodeTmuxInputFrame(input) : input
+    );
   }
   async *turnEvents(prompt, cwd, inputMode) {
     yield { type: "system", cwd };
@@ -6083,6 +6085,7 @@ var LiveTerminalSession = class {
     let sawCommandResultOutput = false;
     let deliveredText = false;
     let slashConfirmCount = 0;
+    let terminalWasBusy = false;
     if (commandMode) {
       log.info("agent-live", "command-start", {
         commandText: prompt,
@@ -6131,6 +6134,10 @@ var LiveTerminalSession = class {
       if (timer) clearTimeout(timer);
       timer = setTimeout(finish, ms);
     };
+    const suspendIdle = () => {
+      if (timer) clearTimeout(timer);
+      timer = void 0;
+    };
     const scheduleSlashCommandConfirm = () => {
       if (!commandMode || slashConfirmCount >= 2 || slashConfirmTimer || sawCommandResultOutput) return;
       if (!prompt.trim().startsWith("/")) return;
@@ -6155,10 +6162,19 @@ var LiveTerminalSession = class {
         arm(startupTimeoutMs);
         return;
       }
+      const terminalBusy = isLiveTerminalBusy(event.text);
+      if (terminalBusy) {
+        terminalWasBusy = true;
+        suspendIdle();
+      } else if (event.mode === "snapshot" && terminalWasBusy) {
+        terminalWasBusy = false;
+        arm(idleMs);
+      }
       const text = sanitizeLiveTurnOutput(event.text, prompt);
       const beforeAppendFrame = commandMode && diagFrames < LIVE_DIAG_MAX_FRAMES;
       if (beforeAppendFrame) diagFrames += 1;
       if (!text) {
+        if (terminalBusy) return;
         if (commandMode) {
           arm(
             sawAcceptedOutput || isKnownSilentLiveCommand(prompt) ? idleMs : Math.max(idleMs, COMMAND_NO_OUTPUT_IDLE_MS)
@@ -6185,7 +6201,7 @@ var LiveTerminalSession = class {
         sawAcceptedOutput = true;
         if (resultOutput) sawCommandResultOutput = true;
         scheduleOutputFlush();
-        arm(idleMs);
+        if (!terminalBusy) arm(idleMs);
         if (commandMode && !resultOutput) scheduleSlashCommandConfirm();
       } else if (commandMode) {
         scheduleSlashCommandConfirm();
@@ -6342,6 +6358,10 @@ function liveCommandLine(command, args, rows, columns) {
     ...args
   ].map(shellQuote).join(" ")}`;
 }
+function encodeTmuxInputFrame(input) {
+  return `${Buffer.from(input, "utf8").toString("base64")}
+`;
+}
 function spawnTmuxLiveProcess(cwd, env, commandLine, rows, columns) {
   const socketName = `lark-channel-${process.pid}-${randomUUID().replace(/-/g, "").slice(0, 16)}`;
   const sessionName = "main";
@@ -6399,6 +6419,7 @@ const target = session + ':0.0';
 const commandLine = Buffer.from(commandBase64, 'base64').toString('utf8');
 let closed = false;
 let lastSnapshot = '';
+let inputBuffer = '';
 
 function tmux(args, options = {}) {
   return spawnSync('tmux', ['-L', socketName, ...args], {
@@ -6520,7 +6541,20 @@ const timer = setInterval(capture, 160);
 capture();
 
 process.stdin.setEncoding('utf8');
-process.stdin.on('data', sendInput);
+process.stdin.on('data', (chunk) => {
+  inputBuffer += chunk;
+  let newline;
+  while ((newline = inputBuffer.indexOf('\n')) !== -1) {
+    const frame = inputBuffer.slice(0, newline);
+    inputBuffer = inputBuffer.slice(newline + 1);
+    if (!frame) continue;
+    try {
+      sendInput(Buffer.from(frame, 'base64').toString('utf8'));
+    } catch (error) {
+      process.stderr.write('failed to decode tmux input frame: ' + String(error) + '\n');
+    }
+  }
+});
 process.stdin.on('end', () => {
   clearInterval(timer);
   cleanup();
@@ -6863,7 +6897,8 @@ var TurnOutputBuffer = class {
     return true;
   }
   replace(raw) {
-    const compacted = stripPromptMismatchedLiveContent(this.compact(raw), this.promptEcho);
+    const scoped = scopeLiveSnapshotToPrompt(raw, this.promptEcho);
+    const compacted = stripPromptMismatchedLiveContent(this.compact(scoped), this.promptEcho);
     if (!compacted.trim()) return false;
     if (isStalePickerSnapshotForPrompt(compacted, this.promptEcho)) return false;
     if (isStaleStatusSnapshotForPrompt(compacted, this.promptEcho)) return false;
@@ -7021,6 +7056,28 @@ function stripPromptEcho(input, prompt) {
 `)) return trimmed.slice(echo.length + 1);
   return input.split("\n").filter((line) => !isPromptEchoLine(line, echo)).filter((line) => !isPromptScopedTerminalChromeLine(line.trim(), echo)).join("\n").trimStart();
 }
+function scopeLiveSnapshotToPrompt(input, prompt) {
+  const echo = prompt.trim();
+  if (!echo) return input;
+  const lines = input.split("\n");
+  const promptLines = echo.split("\n");
+  const anchorIndex = promptLines.findIndex((line) => line.trim().length > 0);
+  const anchor = promptLines[anchorIndex]?.trim() ?? echo;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (!isPromptEchoLine(lines[index] ?? "", anchor)) continue;
+    let cursor = index + 1;
+    for (const promptLine2 of promptLines.slice(anchorIndex + 1)) {
+      if (!promptLine2.trim()) {
+        if (!lines[cursor]?.trim()) cursor += 1;
+        continue;
+      }
+      if (lines[cursor]?.trim() === promptLine2.trim()) cursor += 1;
+      else break;
+    }
+    return lines.slice(cursor).join("\n");
+  }
+  return lines.some((line) => line.trimStart().startsWith("\u203A")) ? "" : input;
+}
 function isPromptEchoLine(line, echo) {
   const normalized = line.trim();
   const slashless = echo.startsWith("/") ? echo.slice(1) : echo;
@@ -7172,6 +7229,12 @@ function snapshotInformationScore(input) {
 }
 function isTerminalChromeLine(trimmed) {
   return /^Tip:/i.test(trimmed) || /^[•◦]\s+Working\s+\(\d+s\b.*\)$/i.test(trimmed) || /^tab to queue message\b.*context left$/i.test(trimmed) || /^\d+%\s+context left$/i.test(trimmed) || /^[╭╰╮╯─│\s]+$/u.test(trimmed) || /^›\s*(?:Implement \{feature\}|Summarize recent commits|Find and fix a bug in @filename|Improve documentation in @filename|Explain this codebase)\s*$/i.test(trimmed) || /^[A-Za-z0-9_.-]+(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?\s+·\s+.+$/.test(trimmed);
+}
+function isLiveTerminalBusy(input) {
+  const recent = cleanTerminalOutput(input).split("\n").slice(-12).join("\n");
+  return /(?:tab\s+to\s+queue\s+message|working\s*\([^)]*(?:esc|escape)\s+to\s+interrupt|esc(?:ape)?\s+to\s+interrupt|compacting(?:\s+context)?)/iu.test(
+    recent
+  );
 }
 function stripCompactNoise(input, patterns) {
   const { compact, map } = compactWithIndex(input);
