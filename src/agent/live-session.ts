@@ -49,7 +49,8 @@ const COMMAND_ESCAPE_SETTLE_MS = 250;
 const COMMAND_CLEAR_SETTLE_MS = 500;
 const COMMAND_STARTUP_TIMEOUT_MS = 25_000;
 const COMMAND_IDLE_MS = 2_500;
-const COMMAND_NO_OUTPUT_IDLE_MS = 60_000;
+const COMMAND_NO_OUTPUT_IDLE_MS = 8_000;
+const COMPACT_NO_OUTPUT_IDLE_MS = 60_000;
 const CONTROL_LITERAL_CONFIRM_DELAY_MS = 900;
 const MAX_TURN_OUTPUT_CHARS = 120_000;
 const DEFAULT_PTY_ROWS = '48';
@@ -328,11 +329,9 @@ export class LiveTerminalSession {
       if (!text) {
         if (terminalBusy) return;
         if (commandMode) {
-          arm(
-            sawAcceptedOutput || isKnownSilentLiveCommand(prompt)
-              ? idleMs
-              : Math.max(idleMs, COMMAND_NO_OUTPUT_IDLE_MS),
-          );
+          arm(isStatusLiveCommand(prompt) || sawAcceptedOutput || isKnownSilentLiveCommand(prompt)
+            ? idleMs
+            : noOutputIdleMs(prompt, idleMs));
         }
         return;
       }
@@ -359,7 +358,7 @@ export class LiveTerminalSession {
         if (commandMode && !resultOutput) scheduleSlashCommandConfirm();
       } else if (commandMode) {
         scheduleSlashCommandConfirm();
-        arm(sawAcceptedOutput ? idleMs : Math.max(idleMs, COMMAND_NO_OUTPUT_IDLE_MS));
+        arm(sawAcceptedOutput ? idleMs : noOutputIdleMs(prompt, idleMs));
       }
     };
     const onExit = (evt: { code: number | null; signal: NodeJS.Signals | null }): void => {
@@ -441,6 +440,9 @@ export class LiveTerminalSession {
           }
         }
         if (commandMode && isKnownSilentLiveCommand(prompt)) arm(idleMs);
+        else if (commandMode && isSlowSilentLiveCommand(prompt)) {
+          arm(noOutputIdleMs(prompt, idleMs));
+        }
       }
 
       while (!done || queue.length > 0) {
@@ -813,6 +815,17 @@ function shouldDeferControlLiteralSubmit(input: string): boolean {
 
 function isKnownSilentLiveCommand(input: string): boolean {
   return /^\/(?:clear|cls)\s*$/iu.test(input.trim());
+}
+
+function isSlowSilentLiveCommand(input: string): boolean {
+  return /^\/compact\s*$/iu.test(input.trim());
+}
+
+function noOutputIdleMs(input: string, idleMs: number): number {
+  return Math.max(
+    idleMs,
+    isSlowSilentLiveCommand(input) ? COMPACT_NO_OUTPUT_IDLE_MS : COMMAND_NO_OUTPUT_IDLE_MS,
+  );
 }
 
 function isStatusLiveCommand(input: string): boolean {

@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.5",
+  version: "0.6.6",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -5924,7 +5924,8 @@ var COMMAND_ESCAPE_SETTLE_MS = 250;
 var COMMAND_CLEAR_SETTLE_MS = 500;
 var COMMAND_STARTUP_TIMEOUT_MS = 25e3;
 var COMMAND_IDLE_MS = 2500;
-var COMMAND_NO_OUTPUT_IDLE_MS = 6e4;
+var COMMAND_NO_OUTPUT_IDLE_MS = 8e3;
+var COMPACT_NO_OUTPUT_IDLE_MS = 6e4;
 var CONTROL_LITERAL_CONFIRM_DELAY_MS = 900;
 var MAX_TURN_OUTPUT_CHARS = 12e4;
 var DEFAULT_PTY_ROWS = "48";
@@ -6176,9 +6177,7 @@ var LiveTerminalSession = class {
       if (!text) {
         if (terminalBusy) return;
         if (commandMode) {
-          arm(
-            sawAcceptedOutput || isKnownSilentLiveCommand(prompt) ? idleMs : Math.max(idleMs, COMMAND_NO_OUTPUT_IDLE_MS)
-          );
+          arm(isStatusLiveCommand(prompt) || sawAcceptedOutput || isKnownSilentLiveCommand(prompt) ? idleMs : noOutputIdleMs(prompt, idleMs));
         }
         return;
       }
@@ -6205,7 +6204,7 @@ var LiveTerminalSession = class {
         if (commandMode && !resultOutput) scheduleSlashCommandConfirm();
       } else if (commandMode) {
         scheduleSlashCommandConfirm();
-        arm(sawAcceptedOutput ? idleMs : Math.max(idleMs, COMMAND_NO_OUTPUT_IDLE_MS));
+        arm(sawAcceptedOutput ? idleMs : noOutputIdleMs(prompt, idleMs));
       }
     };
     const onExit = (evt) => {
@@ -6280,6 +6279,9 @@ var LiveTerminalSession = class {
           }
         }
         if (commandMode && isKnownSilentLiveCommand(prompt)) arm(idleMs);
+        else if (commandMode && isSlowSilentLiveCommand(prompt)) {
+          arm(noOutputIdleMs(prompt, idleMs));
+        }
       }
       while (!done || queue.length > 0) {
         if (queue.length === 0) {
@@ -6620,6 +6622,15 @@ function shouldDeferControlLiteralSubmit(input) {
 }
 function isKnownSilentLiveCommand(input) {
   return /^\/(?:clear|cls)\s*$/iu.test(input.trim());
+}
+function isSlowSilentLiveCommand(input) {
+  return /^\/compact\s*$/iu.test(input.trim());
+}
+function noOutputIdleMs(input, idleMs) {
+  return Math.max(
+    idleMs,
+    isSlowSilentLiveCommand(input) ? COMPACT_NO_OUTPUT_IDLE_MS : COMMAND_NO_OUTPUT_IDLE_MS
+  );
 }
 function isStatusLiveCommand(input) {
   return /^\/status\s*$/iu.test(input.trim());
