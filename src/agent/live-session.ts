@@ -13,7 +13,13 @@ import type { AgentEvent, AgentRun } from './types';
 export type LiveTerminalInputMode = 'command' | 'control';
 
 type LiveChild = SpawnedProcessByStdio<Writable, Readable, Readable>;
-type LiveOutput = { mode: 'append' | 'snapshot'; text: string };
+type LiveOutput = {
+  mode: 'append' | 'snapshot';
+  /** Cleaned content eligible for delivery to the chat. */
+  text: string;
+  /** Terminal snapshot before presentation-only chrome is stripped. */
+  terminalText?: string;
+};
 export type LiveTerminalBackend = 'auto' | 'tmux' | 'pty' | 'pipe';
 
 interface LiveTerminalInfo {
@@ -196,7 +202,7 @@ export class LiveTerminalSession {
     if (output.mode === 'snapshot' && output.text.trim()) {
       this.lastTerminalSnapshot = output.text;
     }
-    if (!output.text.trim()) return;
+    if (!output.text.trim() && !output.terminalText?.trim()) return;
     this.emitter.emit('data', output);
   }
 
@@ -321,19 +327,28 @@ export class LiveTerminalSession {
         arm(startupTimeoutMs + Math.max(0, inputReadyAt - Date.now()));
         return;
       }
-      const terminalBusy = isLiveTerminalBusy(event.text);
+      const terminalState = event.terminalText ?? event.text;
+      const terminalBusy = isLiveTerminalBusy(terminalState);
       if (terminalBusy) {
         terminalWasBusy = true;
         suspendIdle();
       } else if (terminalWasBusy) {
-        terminalWasBusy = false;
-        arm(idleMs);
+        // A full-screen terminal can publish an intermediate redraw that
+        // temporarily omits Codex's Working footer. Do not release the turn
+        // (and let the next queued chat message type into the active editor)
+        // until the CLI has rendered its fresh, empty input prompt.
+        if (isLiveTerminalReady(terminalState) || isLiveTerminalInteraction(terminalState)) {
+          terminalWasBusy = false;
+          arm(idleMs);
+        } else {
+          suspendIdle();
+        }
       }
       const text = sanitizeLiveTurnOutput(event.text, prompt);
       const beforeAppendFrame = commandMode && diagFrames < LIVE_DIAG_MAX_FRAMES;
       if (beforeAppendFrame) diagFrames += 1;
       if (!text) {
-        if (terminalBusy) return;
+        if (terminalWasBusy) return;
         if (commandMode) {
           arm(isStatusLiveCommand(prompt) || sawAcceptedOutput || isKnownSilentLiveCommand(prompt)
             ? idleMs
@@ -360,11 +375,13 @@ export class LiveTerminalSession {
         sawAcceptedOutput = true;
         if (resultOutput) sawCommandResultOutput = true;
         scheduleOutputFlush();
-        if (!terminalBusy) arm(idleMs);
+        if (!terminalWasBusy) arm(idleMs);
         if (commandMode && !resultOutput) scheduleSlashCommandConfirm();
       } else if (commandMode) {
         scheduleSlashCommandConfirm();
-        arm(sawAcceptedOutput ? idleMs : noOutputIdleMs(prompt, idleMs));
+        if (!terminalWasBusy) {
+          arm(sawAcceptedOutput ? idleMs : noOutputIdleMs(prompt, idleMs));
+        }
       }
     };
     const onExit = (evt: { code: number | null; signal: NodeJS.Signals | null }): void => {
@@ -421,7 +438,7 @@ export class LiveTerminalSession {
           this.cleaner.resetTurn();
         }
         acceptingOutput = true;
-        const controlKeys = parseLiveControlSequence(prompt);
+        const controlKeys = inputMode === 'control' ? parseLiveControlSequence(prompt) : null;
         if (controlKeys) {
           // Send each key as its own write so the tmux backend (which matches a
           // single key per stdin chunk) sees them individually; a small gap keeps
@@ -442,7 +459,7 @@ export class LiveTerminalSession {
               this.write('\r');
             }, CONTROL_LITERAL_CONFIRM_DELAY_MS);
           } else {
-            this.write(translateLiveInput(prompt));
+            this.write(`${prompt}\r`);
             scheduleSlashCommandConfirm();
           }
         }
@@ -810,12 +827,6 @@ export function isLiveControlInput(input: string): boolean {
   return parseLiveControlSequence(input) !== null;
 }
 
-function translateLiveInput(input: string): string {
-  const keys = parseLiveControlSequence(input);
-  if (keys) return keys.join('');
-  return `${input}\r`;
-}
-
 function shouldDeferControlLiteralSubmit(input: string): boolean {
   const trimmed = input.trim();
   return /^\d{1,2}$/u.test(trimmed) || /^(?:y|yes|n|no)$/iu.test(trimmed);
@@ -935,31 +946,32 @@ export function cleanTerminalOutput(input: string): string {
 class TerminalOutputCleaner {
   private carry = '';
   private screenMode = false;
-  private lastSnapshot = '';
+  private lastTerminalSnapshot = '';
   private readonly screen = new VirtualTerminalScreen();
 
   setScreenMode(enabled: boolean): void {
     this.screenMode = enabled;
     this.carry = '';
-    this.lastSnapshot = '';
+    this.lastTerminalSnapshot = '';
     this.screen.reset();
   }
 
   resetTurn(): void {
     this.carry = '';
-    this.lastSnapshot = '';
+    this.lastTerminalSnapshot = '';
     if (this.screenMode) this.screen.reset();
   }
 
   push(input: string): LiveOutput {
     if (this.screenMode) {
       this.screen.write(input);
-      const snapshot = stripKnownLiveNoise(this.screen.snapshot());
-      if (!snapshot.trim() || snapshot === this.lastSnapshot) {
+      const terminalText = this.screen.snapshot();
+      const snapshot = stripKnownLiveNoise(terminalText);
+      if (!terminalText.trim() || terminalText === this.lastTerminalSnapshot) {
         return { mode: 'snapshot', text: '' };
       }
-      this.lastSnapshot = snapshot;
-      return { mode: 'snapshot', text: snapshot };
+      this.lastTerminalSnapshot = terminalText;
+      return { mode: 'snapshot', text: snapshot, terminalText };
     }
 
     const combined = this.carry + input;
@@ -1403,9 +1415,18 @@ export function scopeLiveSnapshotToPrompt(
     }
     return lines.slice(cursor).join('\n');
   }
-  // A tmux snapshot with another prompt belongs to an earlier turn. Dropping
-  // it is safer than forwarding stale conversation content as a new reply.
-  return lines.some((line) => line.trimStart().startsWith('›')) ? '' : input;
+  // Native approval and picker rows can begin with the same arrow glyph as a
+  // prompt (for example "› 1. Yes, proceed"). They are current terminal
+  // interactions, not stale conversation history, and must reach the card
+  // router so the user can answer them from Lark.
+  if (isLiveTerminalInteraction(input)) return input;
+  // A tmux snapshot with another prompt belongs to an earlier turn. Codex also
+  // renders built-in suggestion rows with the same glyph, which are terminal
+  // chrome rather than user prompts and must not hide current task output.
+  return lines.some((line) => {
+    const trimmed = line.trimStart();
+    return trimmed.startsWith('›') && !isTerminalChromeLine(trimmed);
+  }) ? '' : input;
 }
 
 function scopeKnownLiveControlResultSnapshot(lines: string[], prompt: string): string | undefined {
@@ -1759,7 +1780,8 @@ function isTerminalChromeLine(trimmed: string): boolean {
     /^tab to queue message\b.*context left$/i.test(trimmed) ||
     /^\d+%\s+context left$/i.test(trimmed) ||
     /^[╭╰╮╯─│\s]+$/u.test(trimmed) ||
-    /^›\s*(?:Implement \{feature\}|Summarize recent commits|Find and fix a bug in @filename|Improve documentation in @filename|Explain this codebase)\s*$/i.test(trimmed) ||
+    /^[›❯]\s*$/.test(trimmed) ||
+    /^›\s*(?:Implement \{feature\}|Summarize recent commits|Find and fix a bug in @filename|Improve documentation in @filename|Explain this codebase|Write tests for @filename)\s*$/i.test(trimmed) ||
     /^[A-Za-z0-9_.-]+(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?\s+·\s+.+$/.test(trimmed)
   );
 }
@@ -1768,6 +1790,21 @@ export function isLiveTerminalBusy(input: string): boolean {
   const recent = cleanTerminalOutput(input).split('\n').slice(-12).join('\n');
   return /(?:tab\s+to\s+queue\s+message|working\s*\([^)]*(?:esc|escape)\s+to\s+interrupt|esc(?:ape)?\s+to\s+interrupt|compacting(?:\s+context)?)/iu.test(
     recent,
+  );
+}
+
+function isLiveTerminalReady(input: string): boolean {
+  const recent = cleanTerminalOutput(input).split('\n').slice(-6);
+  return recent.some((line) => /^[›❯]\s*$/.test(line.trim()));
+}
+
+function isLiveTerminalInteraction(input: string): boolean {
+  const recent = cleanTerminalOutput(input).split('\n').slice(-40).join('\n');
+  return (
+    /\b(?:select\s+(?:a\s+)?(?:model|reasoning|option|permission|session)|choose\s+an\s+action|command\s+requires?\s+(?:approval|confirmation)|resume\s+previous\s+conversation)\b/i.test(recent) ||
+    /\b(?:do\s+you\s+want\s+to|would\s+you\s+like\s+to|shall\s+i|waiting\s+for\s+(?:user|your)\s+(?:input|confirmation)|requires?\s+(?:approval|confirmation))\b/i.test(recent) ||
+    /\b(?:y\/n|yes\/no|no\/yes)\b|\[(?:y|yes)\/(?:n|no)\]|press\s+enter\s+to\s+(?:confirm|continue)|esc\s+to\s+(?:go\s+back|cancel)/i.test(recent) ||
+    /(?:请选择|请(?:输入|回复).*(?:选项|编号|是|否)|等待(?:你|用户)(?:的)?(?:输入|选择|确认)|是否.*[？?]|(?:按下?|点击)回车(?:键)?.*确认)/i.test(recent)
   );
 }
 

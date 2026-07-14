@@ -92,6 +92,9 @@ describe('tmux input framing and snapshots', () => {
     expect(scopeLiveSnapshotToPrompt(secondStreamingFrame, 'current question', firstStreamingFrame)).toBe(
       '• second update',
     );
+
+    const codexSuggestion = ['› Write tests for @filename', '• current task output'].join('\n');
+    expect(scopeLiveSnapshotToPrompt(codexSuggestion, 'current question')).toBe(codexSuggestion);
   });
 
   it('keeps native picker redraws for every command that opens one', () => {
@@ -1058,6 +1061,7 @@ process.stdin.setEncoding('utf8');
 const expected = ${JSON.stringify(prompt)};
 const readyAt = Date.now() + 400;
 let draft = '';
+process.stdout.write('old terminal status\\n');
 process.stdin.on('data', (chunk) => {
   for (const char of chunk) {
     if (char !== '\\r' && char !== '\\n') {
@@ -1071,7 +1075,7 @@ process.stdin.on('data', (chunk) => {
       continue;
     }
     draft = '';
-    setTimeout(() => process.stdout.write('• 我先检查当前 tmux 会话。\\n'), 20);
+    setTimeout(() => process.stdout.write('\\x1b[2J\\x1b[H› Write tests for @filename\\n• 我先检查当前 tmux 会话。\\n'), 20);
     setTimeout(() => process.stdout.write('• Ran tmux ls\\n'), 260);
     setTimeout(() => process.stdout.write('• 最终结论：已找到目标会话。\\n'), 520);
   }
@@ -1104,6 +1108,183 @@ setInterval(() => {}, 1000);
       '• 最终结论：已找到目标会话。',
       '',
     ].join('\n'));
+  }, 20_000);
+
+  tmuxIt('keeps a busy terminal turn open across an incomplete tmux redraw and streams its final result', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-busy-redraw-test-'));
+    const bin = join(dir, 'fake-tmux-busy-redraw-agent.mjs');
+    const prompt = '查找 cellfate 会话';
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+const expected = ${JSON.stringify(prompt)};
+let draft = '';
+let started = false;
+function screen(lines) {
+  process.stdout.write('\\x1b[2J\\x1b[H' + lines.join('\\n') + '\\n');
+}
+process.stdin.on('data', (chunk) => {
+  for (const char of chunk) {
+    if (char !== '\\r' && char !== '\\n') {
+      draft += char;
+      continue;
+    }
+    if (started) continue;
+    if (draft !== expected) {
+      process.stdout.write('unexpected-input:' + JSON.stringify(draft) + '\\n');
+      draft = '';
+      continue;
+    }
+    started = true;
+    draft = '';
+    screen(['› ' + expected, '• Working (0s • esc to interrupt)', 'tab to queue message 99% context left']);
+    setTimeout(() => screen([
+      '› ' + expected,
+      '• 我先开始检索。',
+      '• Working (1s • esc to interrupt)',
+      'tab to queue message 99% context left',
+    ]), 100);
+    // Tmux can emit a transient redraw without the footer while Codex is still working.
+    setTimeout(() => screen([
+      '› ' + expected,
+      '• 我先开始检索。',
+      '• 已扫描 2 个候选会话。',
+    ]), 500);
+    setTimeout(() => screen([
+      '› ' + expected,
+      '• 我先开始检索。',
+      '• 已扫描 2 个候选会话。',
+      '• 最终结论：已找到目标会话。',
+      '›',
+    ]), 5_000);
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-busy-redraw-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-busy-redraw',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 300,
+      outputFlushMs: 30,
+      startupTimeoutMs: 6000,
+    });
+
+    let completed = false;
+    const streamed: AgentEvent[] = [];
+    const consume = (async () => {
+      for await (const event of session.run('tmux-busy-redraw-run', prompt, dir).events) {
+        streamed.push(event);
+      }
+      completed = true;
+    })();
+
+    // The incomplete redraw arrives after the 300ms idle window. The run must
+    // still be active until Codex presents a fresh empty input prompt.
+    await testDelay(3_450);
+    expect(completed).toBe(false);
+    expect(textOf(streamed)).toContain('• 已扫描 2 个候选会话。\n');
+    expect(textOf(streamed)).not.toContain('最终结论');
+
+    await consume;
+    await pool.closeAll();
+
+    expect(textOf(streamed)).toBe([
+      '• 我先开始检索。',
+      '• 已扫描 2 个候选会话。',
+      '• 最终结论：已找到目标会话。',
+      '',
+    ].join('\n'));
+  }, 20_000);
+
+  tmuxIt('releases a busy turn for a native approval prompt and accepts its card control', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-approval-test-'));
+    const bin = join(dir, 'fake-tmux-approval-agent.mjs');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+let draft = '';
+let state = 'idle';
+function screen(lines) {
+  process.stdout.write('\\x1b[2J\\x1b[H' + lines.join('\\n') + '\\n');
+}
+process.stdin.on('data', (chunk) => {
+  for (const char of chunk) {
+    if (state === 'approval') {
+      draft += char;
+      if (draft === 'yes') {
+        state = 'selected';
+        draft = '';
+        screen(['• Approval accepted.']);
+      }
+      continue;
+    }
+    if (char !== '\\r' && char !== '\\n') {
+      draft += char;
+      continue;
+    }
+    if (state === 'idle' && draft === 'run approval task') {
+      state = 'working';
+      draft = '';
+      screen(['• Working (0s • esc to interrupt)', 'tab to queue message 99% context left']);
+      setTimeout(() => {
+        state = 'approval';
+        screen([
+          'Command requires approval',
+          'Would you like to run the following command?',
+          '› 1. Yes, proceed (y)',
+          '2. No, cancel (n)',
+          '[y/n]',
+        ]);
+      }, 120);
+      continue;
+    }
+    if (state === 'selected') process.stdout.write('unexpected-enter\\n');
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-approval-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-approval',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 200,
+      outputFlushMs: 30,
+      startupTimeoutMs: 6000,
+    });
+
+    const approval = await collect(
+      session.run('tmux-approval-run', 'run approval task', dir).events,
+    );
+    expect(textOf(approval)).toContain('Command requires approval');
+    expect(textOf(approval)).toContain('[y/n]');
+
+    const selected = await collect(
+      session.run('tmux-approval-choice', 'yes', dir, 'control').events,
+    );
+    await pool.closeAll();
+
+    expect(textOf(selected)).toContain('• Approval accepted.');
+    expect(textOf(selected)).not.toContain('unexpected-enter');
   }, 20_000);
 
   tmuxIt('keeps a short reply after a prior pane snapshot', async () => {
@@ -1351,9 +1532,13 @@ setInterval(() => {}, 1000);
     });
 
     const events = await collect(session.run('run-tmux-paste', 'alpha\nbeta', dir).events);
+    const ordinaryControlWord = await collect(
+      session.run('run-tmux-ordinary-control-word', 'yes', dir).events,
+    );
     await pool.closeAll();
 
     expect(textOf(events)).toContain('submitted:"alpha\\nbeta"\n');
+    expect(textOf(ordinaryControlWord)).toContain('submitted:"yes"\n');
   });
 
   tmuxIt('does not send enter after a tmux picker literal when the screen changes first', async () => {

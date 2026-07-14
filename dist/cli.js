@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.11",
+  version: "0.6.12",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -6060,7 +6060,7 @@ var LiveTerminalSession = class {
     if (output.mode === "snapshot" && output.text.trim()) {
       this.lastTerminalSnapshot = output.text;
     }
-    if (!output.text.trim()) return;
+    if (!output.text.trim() && !output.terminalText?.trim()) return;
     this.emitter.emit("data", output);
   }
   write(input) {
@@ -6169,19 +6169,24 @@ var LiveTerminalSession = class {
         arm(startupTimeoutMs + Math.max(0, inputReadyAt - Date.now()));
         return;
       }
-      const terminalBusy = isLiveTerminalBusy(event.text);
+      const terminalState = event.terminalText ?? event.text;
+      const terminalBusy = isLiveTerminalBusy(terminalState);
       if (terminalBusy) {
         terminalWasBusy = true;
         suspendIdle();
       } else if (terminalWasBusy) {
-        terminalWasBusy = false;
-        arm(idleMs);
+        if (isLiveTerminalReady(terminalState) || isLiveTerminalInteraction(terminalState)) {
+          terminalWasBusy = false;
+          arm(idleMs);
+        } else {
+          suspendIdle();
+        }
       }
       const text = sanitizeLiveTurnOutput(event.text, prompt);
       const beforeAppendFrame = commandMode && diagFrames < LIVE_DIAG_MAX_FRAMES;
       if (beforeAppendFrame) diagFrames += 1;
       if (!text) {
-        if (terminalBusy) return;
+        if (terminalWasBusy) return;
         if (commandMode) {
           arm(isStatusLiveCommand(prompt) || sawAcceptedOutput || isKnownSilentLiveCommand(prompt) ? idleMs : noOutputIdleMs(prompt, idleMs));
         }
@@ -6206,11 +6211,13 @@ var LiveTerminalSession = class {
         sawAcceptedOutput = true;
         if (resultOutput) sawCommandResultOutput = true;
         scheduleOutputFlush();
-        if (!terminalBusy) arm(idleMs);
+        if (!terminalWasBusy) arm(idleMs);
         if (commandMode && !resultOutput) scheduleSlashCommandConfirm();
       } else if (commandMode) {
         scheduleSlashCommandConfirm();
-        arm(sawAcceptedOutput ? idleMs : noOutputIdleMs(prompt, idleMs));
+        if (!terminalWasBusy) {
+          arm(sawAcceptedOutput ? idleMs : noOutputIdleMs(prompt, idleMs));
+        }
       }
     };
     const onExit = (evt) => {
@@ -6263,7 +6270,7 @@ var LiveTerminalSession = class {
           this.cleaner.resetTurn();
         }
         acceptingOutput = true;
-        const controlKeys = parseLiveControlSequence(prompt);
+        const controlKeys = inputMode === "control" ? parseLiveControlSequence(prompt) : null;
         if (controlKeys) {
           for (let i = 0; i < controlKeys.length; i++) {
             if (i > 0) await delay(CONTROL_KEY_GAP_MS);
@@ -6281,7 +6288,7 @@ var LiveTerminalSession = class {
               this.write("\r");
             }, CONTROL_LITERAL_CONFIRM_DELAY_MS);
           } else {
-            this.write(translateLiveInput(prompt));
+            this.write(`${prompt}\r`);
             scheduleSlashCommandConfirm();
           }
         }
@@ -6622,11 +6629,6 @@ function parseLiveControlSequence(input) {
 function isLiveControlInput(input) {
   return parseLiveControlSequence(input) !== null;
 }
-function translateLiveInput(input) {
-  const keys = parseLiveControlSequence(input);
-  if (keys) return keys.join("");
-  return `${input}\r`;
-}
 function shouldDeferControlLiteralSubmit(input) {
   const trimmed = input.trim();
   return /^\d{1,2}$/u.test(trimmed) || /^(?:y|yes|n|no)$/iu.test(trimmed);
@@ -6706,28 +6708,29 @@ function cleanTerminalOutput(input) {
 var TerminalOutputCleaner = class {
   carry = "";
   screenMode = false;
-  lastSnapshot = "";
+  lastTerminalSnapshot = "";
   screen = new VirtualTerminalScreen();
   setScreenMode(enabled) {
     this.screenMode = enabled;
     this.carry = "";
-    this.lastSnapshot = "";
+    this.lastTerminalSnapshot = "";
     this.screen.reset();
   }
   resetTurn() {
     this.carry = "";
-    this.lastSnapshot = "";
+    this.lastTerminalSnapshot = "";
     if (this.screenMode) this.screen.reset();
   }
   push(input) {
     if (this.screenMode) {
       this.screen.write(input);
-      const snapshot = stripKnownLiveNoise(this.screen.snapshot());
-      if (!snapshot.trim() || snapshot === this.lastSnapshot) {
+      const terminalText = this.screen.snapshot();
+      const snapshot = stripKnownLiveNoise(terminalText);
+      if (!terminalText.trim() || terminalText === this.lastTerminalSnapshot) {
         return { mode: "snapshot", text: "" };
       }
-      this.lastSnapshot = snapshot;
-      return { mode: "snapshot", text: snapshot };
+      this.lastTerminalSnapshot = terminalText;
+      return { mode: "snapshot", text: snapshot, terminalText };
     }
     const combined = this.carry + input;
     const splitAt = completePrefixEnd(combined);
@@ -7113,7 +7116,11 @@ function scopeLiveSnapshotToPrompt(input, prompt, previousSnapshot = "") {
     }
     return lines.slice(cursor).join("\n");
   }
-  return lines.some((line) => line.trimStart().startsWith("\u203A")) ? "" : input;
+  if (isLiveTerminalInteraction(input)) return input;
+  return lines.some((line) => {
+    const trimmed = line.trimStart();
+    return trimmed.startsWith("\u203A") && !isTerminalChromeLine(trimmed);
+  }) ? "" : input;
 }
 function scopeKnownLiveControlResultSnapshot(lines, prompt) {
   if (!isLiveControlInput(prompt) && !shouldDeferControlLiteralSubmit(prompt)) return void 0;
@@ -7348,13 +7355,21 @@ function snapshotInformationScore(input) {
   return input.split("\n").map((line) => line.trim()).filter(Boolean).filter((line) => !/^[╭╰╮╯─│\s]+$/u.test(line)).join("\n").length;
 }
 function isTerminalChromeLine(trimmed) {
-  return /^Tip:/i.test(trimmed) || /^[•◦]\s+Working\s+\(\d+s\b.*\)$/i.test(trimmed) || /^tab to queue message\b.*context left$/i.test(trimmed) || /^\d+%\s+context left$/i.test(trimmed) || /^[╭╰╮╯─│\s]+$/u.test(trimmed) || /^›\s*(?:Implement \{feature\}|Summarize recent commits|Find and fix a bug in @filename|Improve documentation in @filename|Explain this codebase)\s*$/i.test(trimmed) || /^[A-Za-z0-9_.-]+(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?\s+·\s+.+$/.test(trimmed);
+  return /^Tip:/i.test(trimmed) || /^[•◦]\s+Working\s+\(\d+s\b.*\)$/i.test(trimmed) || /^tab to queue message\b.*context left$/i.test(trimmed) || /^\d+%\s+context left$/i.test(trimmed) || /^[╭╰╮╯─│\s]+$/u.test(trimmed) || /^[›❯]\s*$/.test(trimmed) || /^›\s*(?:Implement \{feature\}|Summarize recent commits|Find and fix a bug in @filename|Improve documentation in @filename|Explain this codebase|Write tests for @filename)\s*$/i.test(trimmed) || /^[A-Za-z0-9_.-]+(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?\s+·\s+.+$/.test(trimmed);
 }
 function isLiveTerminalBusy(input) {
   const recent = cleanTerminalOutput(input).split("\n").slice(-12).join("\n");
   return /(?:tab\s+to\s+queue\s+message|working\s*\([^)]*(?:esc|escape)\s+to\s+interrupt|esc(?:ape)?\s+to\s+interrupt|compacting(?:\s+context)?)/iu.test(
     recent
   );
+}
+function isLiveTerminalReady(input) {
+  const recent = cleanTerminalOutput(input).split("\n").slice(-6);
+  return recent.some((line) => /^[›❯]\s*$/.test(line.trim()));
+}
+function isLiveTerminalInteraction(input) {
+  const recent = cleanTerminalOutput(input).split("\n").slice(-40).join("\n");
+  return /\b(?:select\s+(?:a\s+)?(?:model|reasoning|option|permission|session)|choose\s+an\s+action|command\s+requires?\s+(?:approval|confirmation)|resume\s+previous\s+conversation)\b/i.test(recent) || /\b(?:do\s+you\s+want\s+to|would\s+you\s+like\s+to|shall\s+i|waiting\s+for\s+(?:user|your)\s+(?:input|confirmation)|requires?\s+(?:approval|confirmation))\b/i.test(recent) || /\b(?:y\/n|yes\/no|no\/yes)\b|\[(?:y|yes)\/(?:n|no)\]|press\s+enter\s+to\s+(?:confirm|continue)|esc\s+to\s+(?:go\s+back|cancel)/i.test(recent) || /(?:请选择|请(?:输入|回复).*(?:选项|编号|是|否)|等待(?:你|用户)(?:的)?(?:输入|选择|确认)|是否.*[？?]|(?:按下?|点击)回车(?:键)?.*确认)/i.test(recent);
 }
 function stripCompactNoise(input, patterns) {
   const { compact, map } = compactWithIndex(input);
