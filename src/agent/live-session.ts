@@ -1241,7 +1241,10 @@ class TurnOutputBuffer {
   replace(raw: string): boolean {
     const scoped = scopeLiveSnapshotToPrompt(raw, this.promptEcho, this.snapshotBaseline);
     this.snapshotBaseline = raw;
-    const compacted = stripPromptMismatchedLiveContent(this.compact(scoped), this.promptEcho);
+    const compacted = stripPromptMismatchedLiveContent(
+      this.compact(scoped, true),
+      this.promptEcho,
+    );
     if (!compacted.trim()) return false;
     if (isStalePickerSnapshotForPrompt(compacted, this.promptEcho)) return false;
     if (isStaleStatusSnapshotForPrompt(compacted, this.promptEcho)) return false;
@@ -1261,7 +1264,7 @@ class TurnOutputBuffer {
     return out;
   }
 
-  private compact(text: string): string {
+  private compact(text: string, preserveSnapshotDuplicates = false): string {
     const withoutEcho = stripPromptEcho(cleanTerminalOutput(text), this.promptEcho);
     const normalized = this.stripInputLines
       ? stripStaleSlashEchoLines(stripLiveInputLines(withoutEcho), this.promptEcho)
@@ -1274,7 +1277,8 @@ class TurnOutputBuffer {
     for (const part of parts) {
       if (part === '\n') {
         const comparable = currentLine.trim();
-        if (!(firstCompleteLine && comparable && comparable === this.lastCompleteLine)) {
+        const repeatsLastLine = comparable && comparable === this.lastCompleteLine;
+        if (!repeatsLastLine || (preserveSnapshotDuplicates && !firstCompleteLine)) {
           out += `${currentLine}\n`;
         }
         if (comparable) this.lastCompleteLine = comparable;
