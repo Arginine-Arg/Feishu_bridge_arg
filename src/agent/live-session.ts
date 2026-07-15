@@ -1270,15 +1270,15 @@ class TurnOutputBuffer {
     const parts = normalized.split(/(\n)/);
     let out = '';
     let currentLine = '';
+    let firstCompleteLine = true;
     for (const part of parts) {
       if (part === '\n') {
         const comparable = currentLine.trim();
-        if (comparable && comparable === this.lastCompleteLine) {
-          currentLine = '';
-          continue;
+        if (!(firstCompleteLine && comparable && comparable === this.lastCompleteLine)) {
+          out += `${currentLine}\n`;
         }
-        out += `${currentLine}\n`;
         if (comparable) this.lastCompleteLine = comparable;
+        firstCompleteLine = false;
         currentLine = '';
         continue;
       }
@@ -1550,7 +1550,7 @@ function scopeSnapshotDelta(lines: string[], previousSnapshot: string): string |
   for (let priorIndex = priorLines.length - 1; priorIndex >= 0; priorIndex -= 1) {
     const candidate = priorLines[priorIndex]?.trim();
     if (!candidate) continue;
-    for (let nextIndex = lines.length - 1; nextIndex >= 0; nextIndex -= 1) {
+    for (let nextIndex = 0; nextIndex < lines.length; nextIndex += 1) {
       if (lines[nextIndex]?.trim() !== candidate) continue;
       const delta = lines.slice(nextIndex + 1).join('\n');
       if (delta.trim()) return delta;

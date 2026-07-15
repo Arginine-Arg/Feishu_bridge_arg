@@ -115,6 +115,16 @@ describe('tmux input framing and snapshots', () => {
       '• short final reply',
     );
 
+    const repeatedLineReply = [
+      '• earlier answer',
+      '• newly discovered line',
+      '• earlier answer',
+      '• final line',
+    ].join('\n');
+    expect(scopeLiveSnapshotToPrompt(repeatedLineReply, 'missing question', previousScreen)).toBe(
+      ['• newly discovered line', '• earlier answer', '• final line'].join('\n'),
+    );
+
     const codexSuggestion = ['› Write tests for @filename', '• current task output'].join('\n');
     expect(scopeLiveSnapshotToPrompt(codexSuggestion, 'current question')).toBe(codexSuggestion);
 
