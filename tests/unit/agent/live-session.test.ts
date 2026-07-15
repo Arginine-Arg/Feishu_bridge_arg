@@ -136,7 +136,13 @@ describe('tmux input framing and snapshots', () => {
       '[y/n]',
     ].join('\n');
     expect(scopeLiveSnapshotToPrompt(approvalAfterHistory, 'current question')).toBe(
-      standaloneApproval,
+      [
+        'Command requires approval',
+        'Would you like to run the following command?',
+        '› 1. Yes, proceed (y)',
+        '2. No, cancel (n)',
+        '[y/n]',
+      ].join('\n'),
     );
   });
 

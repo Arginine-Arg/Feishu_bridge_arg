@@ -1446,7 +1446,7 @@ export function scopeLiveSnapshotToPrompt(
   // A picker or approval can arrive after its originating prompt has scrolled
   // out of the pane. Keep the current interaction even when older prompts are
   // still visible above it, otherwise no Feishu card can be constructed.
-  if (isLiveTerminalInteraction(input)) {
+  if (!echo.startsWith('/') && isLiveTerminalInteraction(input)) {
     const interactionStart = findLastLine(lines, isLivePickerStartLine);
     if (interactionStart >= 0) return lines.slice(interactionStart).join('\n');
     return input;
