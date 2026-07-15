@@ -336,13 +336,12 @@ export class LiveTerminalSession {
         if (done || sawNormalSubmitProgress || normalSubmitRetried) return;
         normalSubmitRetried = true;
         // Codex can occasionally leave a plain pasted message in its editor
-        // without accepting the first submit key. Clear and resubmit once.
+        // without accepting the first submit key. Keep the existing draft and
+        // send only the missing submit key; re-pasting can turn text into a
+        // multiline draft again.
         void (async () => {
           log.warn('agent-live', 'normal-submit-retry', { promptPreview: previewLiveText(prompt) });
-          await this.clearPendingInput();
-          if (done || sawNormalSubmitProgress) return;
-          this.cleaner.resetTurn();
-          this.write(`${prompt}\r`);
+          this.write('\r');
         })().catch((err) => {
           log.warn('agent-live', 'normal-submit-retry-failed', {
             err: err instanceof Error ? err.message : String(err),

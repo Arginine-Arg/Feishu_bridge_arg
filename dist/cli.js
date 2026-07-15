@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.15",
+  version: "0.6.16",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -6180,10 +6180,7 @@ var LiveTerminalSession = class {
         normalSubmitRetried = true;
         void (async () => {
           log.warn("agent-live", "normal-submit-retry", { promptPreview: previewLiveText(prompt) });
-          await this.clearPendingInput();
-          if (done || sawNormalSubmitProgress) return;
-          this.cleaner.resetTurn();
-          this.write(`${prompt}\r`);
+          this.write("\r");
         })().catch((err) => {
           log.warn("agent-live", "normal-submit-retry-failed", {
             err: err instanceof Error ? err.message : String(err)
