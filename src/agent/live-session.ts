@@ -1522,28 +1522,31 @@ function scopeKnownLiveControlResultSnapshot(lines: string[], prompt: string): s
 }
 
 function scopeSnapshotDelta(lines: string[], previousSnapshot: string): string | undefined {
-  const previous = previousSnapshot.trim();
-  if (!previous) return undefined;
-
-  const priorLines = previous.split('\n');
+  // Codex redraws the Working/footer chrome independently of the response.
+  // Do not let a shared footer become the delta anchor, otherwise response
+  // lines inserted immediately before it look like already-delivered output.
+  const priorLines = snapshotDeltaLines(previousSnapshot);
+  const nextLines = lines.filter((line) => !isTerminalChromeLine(line.trim()));
+  if (priorLines.length === 0 && nextLines.length === 0) return '';
+  if (priorLines.length === 0) return undefined;
   let prefix = 0;
-  while (prefix < priorLines.length && prefix < lines.length && priorLines[prefix] === lines[prefix]) {
+  while (prefix < priorLines.length && prefix < nextLines.length && priorLines[prefix] === nextLines[prefix]) {
     prefix += 1;
   }
   // The terminal's volatile status/footer can change while the presentation
   // filter leaves its deliverable text unchanged. Treat equal and shrinking
   // snapshots as no output instead of falling back to the entire pane.
-  if (prefix === lines.length) return '';
-  if (prefix === priorLines.length && prefix < lines.length) {
-    return lines.slice(prefix).join('\n');
+  if (prefix === nextLines.length) return '';
+  if (prefix === priorLines.length && prefix < nextLines.length) {
+    return nextLines.slice(prefix).join('\n');
   }
 
-  const maxOverlap = Math.min(priorLines.length, lines.length);
+  const maxOverlap = Math.min(priorLines.length, nextLines.length);
   for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
     const priorTail = priorLines.slice(priorLines.length - overlap);
-    const nextHead = lines.slice(0, overlap);
+    const nextHead = nextLines.slice(0, overlap);
     if (priorTail.every((line, index) => line === nextHead[index])) {
-      const delta = lines.slice(overlap).join('\n');
+      const delta = nextLines.slice(overlap).join('\n');
       if (delta.trim()) return delta;
     }
   }
@@ -1554,14 +1557,21 @@ function scopeSnapshotDelta(lines: string[], previousSnapshot: string): string |
   for (let priorIndex = priorLines.length - 1; priorIndex >= 0; priorIndex -= 1) {
     const candidate = priorLines[priorIndex]?.trim();
     if (!candidate) continue;
-    for (let nextIndex = 0; nextIndex < lines.length; nextIndex += 1) {
-      if (lines[nextIndex]?.trim() !== candidate) continue;
-      const delta = lines.slice(nextIndex + 1).join('\n');
+    for (let nextIndex = 0; nextIndex < nextLines.length; nextIndex += 1) {
+      if (nextLines[nextIndex]?.trim() !== candidate) continue;
+      const delta = nextLines.slice(nextIndex + 1).join('\n');
       if (delta.trim()) return delta;
       return '';
     }
   }
   return undefined;
+}
+
+function snapshotDeltaLines(snapshot: string): string[] {
+  return snapshot
+    .trim()
+    .split('\n')
+    .filter((line) => !isTerminalChromeLine(line.trim()));
 }
 
 function scopeKnownLiveCommandResultSnapshot(lines: string[], prompt: string): string | undefined {

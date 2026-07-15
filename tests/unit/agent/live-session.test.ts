@@ -106,6 +106,34 @@ describe('tmux input framing and snapshots', () => {
     // stripped, the visible output can be exactly the same as the prior frame.
     expect(scopeLiveSnapshotToPrompt(firstStreamingFrame, 'current question', firstStreamingFrame)).toBe('');
 
+    // Codex redraws the Working/footer lines for every second of a long turn.
+    // Those volatile rows must not become the snapshot-delta anchor: doing so
+    // would drop the new substantive lines inserted before the shared footer.
+    const workingFrame = [
+      '› current question',
+      '• Working (0s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close',
+      'tab to queue message 99% context left',
+    ].join('\n');
+    const exploredFrame = [
+      '› current question',
+      '• 我先读取该会话的本地记录。',
+      '• Ran rg --files ~/.codex/sessions',
+      '  └ /home/wanghaoran/.codex/sessions/2026/07/10/rollout.jsonl',
+      '• Explored',
+      '  └ Read rollout.jsonl, README.md',
+      '    Search cell_fate in cell_fate_perturbmol',
+      '• Working (31s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close',
+      'tab to queue message 99% context left',
+    ].join('\n');
+    expect(scopeLiveSnapshotToPrompt(exploredFrame, 'current question', workingFrame)).toBe([
+      '• 我先读取该会话的本地记录。',
+      '• Ran rg --files ~/.codex/sessions',
+      '  └ /home/wanghaoran/.codex/sessions/2026/07/10/rollout.jsonl',
+      '• Explored',
+      '  └ Read rollout.jsonl, README.md',
+      '    Search cell_fate in cell_fate_perturbmol',
+    ].join('\n'));
+
     const shiftedReply = [
       '• retained terminal history',
       '• earlier answer',
@@ -1242,61 +1270,42 @@ setInterval(() => {}, 1000);
       `#!/usr/bin/env node
 process.stdin.setEncoding('utf8');
 const expected = ${JSON.stringify(prompt)};
-let draft = '';
-let started = false;
 function screen(lines) {
   process.stdout.write('\\x1b[2J\\x1b[H' + lines.join('\\n') + '\\n');
 }
-process.stdin.on('data', (chunk) => {
-  for (const char of chunk) {
-    if (char !== '\\r' && char !== '\\n') {
-      draft += char;
-      continue;
-    }
-    if (started) continue;
-    if (draft !== expected) {
-      process.stdout.write('unexpected-input:' + JSON.stringify(draft) + '\\n');
-      draft = '';
-      continue;
-    }
-    started = true;
-    draft = '';
-    screen([
-      '› ' + expected,
-      '• Working (0s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close',
-      'tab to queue message 99% context left',
-    ]);
-    setTimeout(() => screen([
-      '› ' + expected,
-      '• 我先开始检索。',
-      '• Working (1s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close',
-      'tab to queue message 99% context left',
-    ]), 100);
-    // Only the volatile Working timer changes here. Its filtered snapshot
-    // must not re-send the already delivered progress line.
-    setTimeout(() => screen([
-      '› ' + expected,
-      '• 我先开始检索。',
-      '• Working (2s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close',
-      'tab to queue message 99% context left',
-    ]), 250);
-    // Tmux can emit a transient redraw without the footer while Codex is still working.
-    setTimeout(() => screen([
-      '› ' + expected,
-      '• 我先开始检索。',
-      '• 已扫描 2 个候选会话。',
-    ]), 500);
-    setTimeout(() => screen([
-      '› ' + expected,
-      '• 我先开始检索。',
-      '• 已扫描 2 个候选会话。',
-      '• 最终结论：已找到目标会话。',
-      // Codex renders an empty-editor suggestion after a response. This must
-      // release the run just like a bare prompt does.
-      '› Use /skills to list available skills',
-    ]), 5_000);
-  }
-});
+// Wait for the real fresh-terminal input grace before replaying redraws.
+// Submission framing is covered separately; this test is about tmux snapshots.
+setTimeout(() => {
+  screen([
+    '› ' + expected,
+    '• Working (0s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close',
+    'tab to queue message 99% context left',
+  ]);
+  setTimeout(() => screen([
+    '› ' + expected,
+    '• 我先开始检索。',
+    '• Working (1s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close',
+    'tab to queue message 99% context left',
+  ]), 700);
+  setTimeout(() => screen([
+    '› ' + expected,
+    '• 我先开始检索。',
+    '• Working (2s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close',
+    'tab to queue message 99% context left',
+  ]), 1_500);
+  setTimeout(() => screen([
+    '› ' + expected,
+    '• 我先开始检索。',
+    '• 已扫描 2 个候选会话。',
+  ]), 2_500);
+  setTimeout(() => screen([
+    '› ' + expected,
+    '• 我先开始检索。',
+    '• 已扫描 2 个候选会话。',
+    '• 最终结论：已找到目标会话。',
+    '› Use /skills to list available skills',
+  ]), 5_000);
+}, 3_000);
 setInterval(() => {}, 1000);
 `,
       'utf8',
@@ -1327,7 +1336,7 @@ setInterval(() => {}, 1000);
 
     // The incomplete redraw arrives after the 300ms idle window. The run must
     // still be active until Codex presents a fresh empty input prompt.
-    await testDelay(3_450);
+    await testDelay(5_800);
     expect(completed).toBe(false);
     expect(textOf(streamed)).toContain('• 已扫描 2 个候选会话。\n');
     expect(textOf(streamed)).not.toContain('最终结论');
@@ -1339,6 +1348,105 @@ setInterval(() => {}, 1000);
       '• 我先开始检索。',
       '• 已扫描 2 个候选会话。',
       '• 最终结论：已找到目标会话。',
+      '',
+    ].join('\n'));
+  }, 20_000);
+
+  tmuxIt('forwards every substantive line across Codex Working redraws', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-complete-redraw-test-'));
+    const bin = join(dir, 'fake-tmux-complete-redraw-agent.mjs');
+    const prompt = '现在下一步的策略是什么';
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+const expected = ${JSON.stringify(prompt)};
+process.stdout.write('old terminal status\\n');
+function screen(lines) {
+  process.stdout.write('\\x1b[2J\\x1b[H' + lines.join('\\n') + '\\n');
+}
+function busy(seconds, lines) {
+  screen([
+    '› ' + expected,
+    ...lines,
+    '• Working (' + seconds + 's • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close',
+    'tab to queue message 99% context left',
+  ]);
+}
+// Start after the real fresh-terminal input grace. Input delivery is covered
+// by dedicated tests; this replay verifies every capture-pane output frame.
+setTimeout(() => {
+  busy(0, []);
+  setTimeout(() => busy(1, [
+    '• 我先读取该会话的本地记录，确认它停在什么工作状态。',
+  ]), 700);
+  setTimeout(() => busy(2, [
+    '• 我先读取该会话的本地记录，确认它停在什么工作状态。',
+    '• Ran rg --files ~/.codex/sessions',
+    '  └ /home/wanghaoran/.codex/sessions/2026/07/10/rollout.jsonl',
+  ]), 1_500);
+  setTimeout(() => busy(3, [
+    '• 我先读取该会话的本地记录，确认它停在什么工作状态。',
+    '• Ran rg --files ~/.codex/sessions',
+    '  └ /home/wanghaoran/.codex/sessions/2026/07/10/rollout.jsonl',
+    '• Explored',
+    '  └ Read rollout.jsonl, README.md',
+    '    Search cell_fate in cell_fate_perturbmol',
+    '    Read pretrain_cell_encoder.py, models.py, train.py',
+  ]), 2_500);
+  setTimeout(() => screen([
+    '› ' + expected,
+    '• 我先读取该会话的本地记录，确认它停在什么工作状态。',
+    '• Ran rg --files ~/.codex/sessions',
+    '  └ /home/wanghaoran/.codex/sessions/2026/07/10/rollout.jsonl',
+    '• Explored',
+    '  └ Read rollout.jsonl, README.md',
+    '    Search cell_fate in cell_fate_perturbmol',
+    '    Read pretrain_cell_encoder.py, models.py, train.py',
+    '────────────────────────────────────────',
+    '• 下一步应先完成 Stage 1 的工程闭环，再投入真实命运监督数据：',
+    '1. 修复并验证 CellSetEncoder 的 DDP。',
+    '2. 跑一次 2-GPU 的短 smoke。',
+    '3. 完成 fate-anchor 的严格整理。',
+    '4. 用 encoder checkpoint 构造训练集。',
+    '› Use /skills to list available skills',
+  ]), 5_000);
+}, 3_000);
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-complete-redraw-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-complete-redraw',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 250,
+      outputFlushMs: 30,
+      startupTimeoutMs: 6_000,
+    });
+
+    const events = await collect(session.run('tmux-complete-redraw-run', prompt, dir).events);
+    await pool.closeAll();
+
+    expect(textOf(events)).toBe([
+      '• 我先读取该会话的本地记录，确认它停在什么工作状态。',
+      '• Ran rg --files ~/.codex/sessions',
+      '  └ /home/wanghaoran/.codex/sessions/2026/07/10/rollout.jsonl',
+      '• Explored',
+      '  └ Read rollout.jsonl, README.md',
+      '    Search cell_fate in cell_fate_perturbmol',
+      '    Read pretrain_cell_encoder.py, models.py, train.py',
+      '• 下一步应先完成 Stage 1 的工程闭环，再投入真实命运监督数据：',
+      '1. 修复并验证 CellSetEncoder 的 DDP。',
+      '2. 跑一次 2-GPU 的短 smoke。',
+      '3. 完成 fate-anchor 的严格整理。',
+      '4. 用 encoder checkpoint 构造训练集。',
       '',
     ].join('\n'));
   }, 20_000);
