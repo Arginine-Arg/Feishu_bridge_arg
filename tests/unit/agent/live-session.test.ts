@@ -102,6 +102,18 @@ describe('tmux input framing and snapshots', () => {
     expect(scopeLiveSnapshotToPrompt(secondStreamingFrame, 'current question', firstStreamingFrame)).toBe(
       '• second update',
     );
+    // Codex redraws its Working timer frequently. Once terminal chrome is
+    // stripped, the visible output can be exactly the same as the prior frame.
+    expect(scopeLiveSnapshotToPrompt(firstStreamingFrame, 'current question', firstStreamingFrame)).toBe('');
+
+    const shiftedReply = [
+      '• retained terminal history',
+      '• earlier answer',
+      '• short final reply',
+    ].join('\n');
+    expect(scopeLiveSnapshotToPrompt(shiftedReply, 'missing question', previousScreen)).toBe(
+      '• short final reply',
+    );
 
     const codexSuggestion = ['› Write tests for @filename', '• current task output'].join('\n');
     expect(scopeLiveSnapshotToPrompt(codexSuggestion, 'current question')).toBe(codexSuggestion);
@@ -113,6 +125,19 @@ describe('tmux input framing and snapshots', () => {
       '[y/n]',
     ].join('\n');
     expect(scopeLiveSnapshotToPrompt(standaloneApproval, 'current question')).toBe(standaloneApproval);
+
+    const approvalAfterHistory = [
+      '› earlier question',
+      '• earlier answer',
+      'Command requires approval',
+      'Would you like to run the following command?',
+      '› 1. Yes, proceed (y)',
+      '2. No, cancel (n)',
+      '[y/n]',
+    ].join('\n');
+    expect(scopeLiveSnapshotToPrompt(approvalAfterHistory, 'current question')).toBe(
+      standaloneApproval,
+    );
   });
 
   it('keeps native picker redraws for every command that opens one', () => {
@@ -1224,6 +1249,14 @@ process.stdin.on('data', (chunk) => {
       '• Working (1s • esc to interrupt)',
       'tab to queue message 99% context left',
     ]), 100);
+    // Only the volatile Working timer changes here. Its filtered snapshot
+    // must not re-send the already delivered progress line.
+    setTimeout(() => screen([
+      '› ' + expected,
+      '• 我先开始检索。',
+      '• Working (2s • esc to interrupt)',
+      'tab to queue message 99% context left',
+    ]), 250);
     // Tmux can emit a transient redraw without the footer while Codex is still working.
     setTimeout(() => screen([
       '› ' + expected,

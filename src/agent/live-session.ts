@@ -1443,6 +1443,14 @@ export function scopeLiveSnapshotToPrompt(
   if (controlPicker !== undefined) return controlPicker;
   const delta = scopeSnapshotDelta(lines, previousSnapshot);
   if (delta !== undefined) return delta;
+  // A picker or approval can arrive after its originating prompt has scrolled
+  // out of the pane. Keep the current interaction even when older prompts are
+  // still visible above it, otherwise no Feishu card can be constructed.
+  if (isLiveTerminalInteraction(input)) {
+    const interactionStart = findLastLine(lines, isLivePickerStartLine);
+    if (interactionStart >= 0) return lines.slice(interactionStart).join('\n');
+    return input;
+  }
   const promptLines = echo.split('\n');
   const anchorIndex = promptLines.findIndex((line) => line.trim().length > 0);
   const anchor = promptLines[anchorIndex]?.trim() ?? echo;
@@ -1461,11 +1469,6 @@ export function scopeLiveSnapshotToPrompt(
   }
   const wrappedPromptEnd = findWrappedPromptEnd(lines, echo);
   if (wrappedPromptEnd !== undefined) return lines.slice(wrappedPromptEnd).join('\n');
-  // Native approval and picker rows can begin with the same arrow glyph as a
-  // prompt (for example "› 1. Yes, proceed"). They are current terminal
-  // interactions, not stale conversation history, and must reach the card
-  // router so the user can answer them from Lark.
-  if (isLiveTerminalInteraction(input) && !hasForeignTerminalPrompt(lines)) return input;
   // A tmux snapshot with another prompt belongs to an earlier turn. Codex also
   // renders built-in suggestion rows with the same glyph, which are terminal
   // chrome rather than user prompts and must not hide current task output.
@@ -1523,6 +1526,10 @@ function scopeSnapshotDelta(lines: string[], previousSnapshot: string): string |
   while (prefix < priorLines.length && prefix < lines.length && priorLines[prefix] === lines[prefix]) {
     prefix += 1;
   }
+  // The terminal's volatile status/footer can change while the presentation
+  // filter leaves its deliverable text unchanged. Treat equal and shrinking
+  // snapshots as no output instead of falling back to the entire pane.
+  if (prefix === lines.length) return '';
   if (prefix === priorLines.length && prefix < lines.length) {
     return lines.slice(prefix).join('\n');
   }
@@ -1534,6 +1541,20 @@ function scopeSnapshotDelta(lines: string[], previousSnapshot: string): string |
     if (priorTail.every((line, index) => line === nextHead[index])) {
       const delta = lines.slice(overlap).join('\n');
       if (delta.trim()) return delta;
+    }
+  }
+
+  // A scrolling pane may prepend retained history before the current turn,
+  // which defeats a strict tail-to-head overlap. Anchor at the newest shared
+  // visible line and only forward the material that follows it.
+  for (let priorIndex = priorLines.length - 1; priorIndex >= 0; priorIndex -= 1) {
+    const candidate = priorLines[priorIndex]?.trim();
+    if (!candidate) continue;
+    for (let nextIndex = lines.length - 1; nextIndex >= 0; nextIndex -= 1) {
+      if (lines[nextIndex]?.trim() !== candidate) continue;
+      const delta = lines.slice(nextIndex + 1).join('\n');
+      if (delta.trim()) return delta;
+      return '';
     }
   }
   return undefined;
@@ -1866,15 +1887,6 @@ function isTerminalSuggestionLine(trimmed: string): boolean {
   return /^›\s*(?:Use\s+\/[a-z][\w-]*(?:\s+.*)?|Implement \{feature\}|Summarize recent commits|Find and fix a bug in @filename|Improve documentation in @filename|Explain this codebase|Write tests for @filename|Run \/review on my current changes)\s*$/i.test(
     trimmed,
   );
-}
-
-function hasForeignTerminalPrompt(lines: string[]): boolean {
-  return lines.some((line) => {
-    const trimmed = line.trimStart();
-    if (!trimmed.startsWith('›')) return false;
-    if (isTerminalChromeLine(trimmed)) return false;
-    return !/^›\s*\d{1,2}[.)、:\s-]+\S/u.test(trimmed);
-  });
 }
 
 export function isLiveTerminalBusy(input: string): boolean {
