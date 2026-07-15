@@ -87,6 +87,16 @@ describe('tmux input framing and snapshots', () => {
       '• short final reply',
     );
 
+    const wrappedPrompt = '有一个细胞死亡和cellfate 的session帮我找找在哪里';
+    const wrappedScreen = [
+      '› 有一个细胞死亡和cellfate 的session',
+      '  帮我找找在哪里',
+      '• 我先开始检索会话记录。',
+    ].join('\n');
+    expect(scopeLiveSnapshotToPrompt(wrappedScreen, wrappedPrompt)).toBe(
+      '• 我先开始检索会话记录。',
+    );
+
     const firstStreamingFrame = ['› current question', '• first update'].join('\n');
     const secondStreamingFrame = [...firstStreamingFrame.split('\n'), '• second update'].join('\n');
     expect(scopeLiveSnapshotToPrompt(secondStreamingFrame, 'current question', firstStreamingFrame)).toBe(
@@ -1117,6 +1127,67 @@ setInterval(() => {}, 1000);
       '',
     ].join('\n'));
   }, 20_000);
+
+  tmuxIt('retries an ordinary prompt once when its initial submit is left as a draft', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-normal-submit-retry-test-'));
+    const bin = join(dir, 'fake-tmux-normal-submit-retry-agent.mjs');
+    const prompt = '你好，帮我确认普通消息已经提交';
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+const expected = ${JSON.stringify(prompt)};
+let draft = '';
+let submits = 0;
+function screen(lines) {
+  process.stdout.write('\\x1b[2J\\x1b[H' + lines.join('\\n') + '\\n');
+}
+process.stdin.on('data', (chunk) => {
+  for (const char of chunk) {
+    if (char === '\\x1b' || char === '\\x01') continue;
+    if (char === '\\x0b') {
+      draft = '';
+      continue;
+    }
+    if (char !== '\\r' && char !== '\\n') {
+      draft += char;
+      continue;
+    }
+    submits += 1;
+    if (submits === 1) {
+      // The first Enter only leaves a draft in the TUI.
+      screen(['› ' + draft]);
+      continue;
+    }
+    if (draft === expected) screen(['› ' + expected, '• ordinary-submit-confirmed', '›']);
+    else screen(['unexpected:' + JSON.stringify(draft)]);
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-normal-submit-retry-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-normal-submit-retry',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 250,
+      outputFlushMs: 30,
+      startupTimeoutMs: 6_000,
+    });
+
+    const events = await collect(session.run('tmux-normal-submit-retry-run', prompt, dir).events);
+    await pool.closeAll();
+
+    expect(textOf(events)).toBe('• ordinary-submit-confirmed\n');
+  }, 15_000);
 
   tmuxIt('keeps a busy terminal turn open across an incomplete tmux redraw and streams its final result', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-busy-redraw-test-'));

@@ -58,6 +58,7 @@ const COMMAND_IDLE_MS = 2_500;
 const COMMAND_NO_OUTPUT_IDLE_MS = 8_000;
 const COMPACT_NO_OUTPUT_IDLE_MS = 60_000;
 const CONTROL_LITERAL_CONFIRM_DELAY_MS = 900;
+const NORMAL_SUBMIT_RETRY_DELAY_MS = 1_200;
 const MAX_TURN_OUTPUT_CHARS = 120_000;
 const DEFAULT_PTY_ROWS = '48';
 const DEFAULT_PTY_COLUMNS = '120';
@@ -239,6 +240,7 @@ export class LiveTerminalSession {
     let outputTimer: ReturnType<typeof setTimeout> | undefined;
     let slashConfirmTimer: ReturnType<typeof setTimeout> | undefined;
     let controlLiteralConfirmTimer: ReturnType<typeof setTimeout> | undefined;
+    let normalSubmitRetryTimer: ReturnType<typeof setTimeout> | undefined;
     let acceptingOutput = false;
     let diagFrames = 0;
     let sawAcceptedOutput = false;
@@ -246,6 +248,8 @@ export class LiveTerminalSession {
     let deliveredText = false;
     let slashConfirmCount = 0;
     let terminalWasBusy = false;
+    let sawNormalSubmitProgress = false;
+    let normalSubmitRetried = false;
     const inputGraceMs = this.inputGraceMs(commandMode);
     const inputReadyAt = Date.now() + inputGraceMs;
 
@@ -282,12 +286,23 @@ export class LiveTerminalSession {
       if (outputTimer) return;
       outputTimer = setTimeout(flushOutput, outputFlushMs);
     };
+    const cancelNormalSubmitRetry = (): void => {
+      if (!normalSubmitRetryTimer) return;
+      clearTimeout(normalSubmitRetryTimer);
+      normalSubmitRetryTimer = undefined;
+    };
+    const markNormalSubmitProgress = (): void => {
+      if (commandMode || inputMode === 'control') return;
+      sawNormalSubmitProgress = true;
+      cancelNormalSubmitRetry();
+    };
     const finish = (): void => {
       if (done) return;
       done = true;
       if (commandMode) log.info('agent-live', 'command-finish', { reason: 'idle-or-startup' });
       if (timer) clearTimeout(timer);
       if (controlLiteralConfirmTimer) clearTimeout(controlLiteralConfirmTimer);
+      cancelNormalSubmitRetry();
       flushOutput();
       if (commandMode && !deliveredText && isStatusLiveCommand(prompt)) {
         push({ type: 'text', delta: buildLiveStatusFallback(this.opts, cwd, this.terminalInfo) });
@@ -314,6 +329,27 @@ export class LiveTerminalSession {
         if (isStatusLiveCommand(prompt) && slashConfirmCount >= 2) arm(idleMs);
       }, 200);
     };
+    const scheduleNormalSubmitRetry = (): void => {
+      if (commandMode || inputMode === 'control' || normalSubmitRetried || normalSubmitRetryTimer) return;
+      normalSubmitRetryTimer = setTimeout(() => {
+        normalSubmitRetryTimer = undefined;
+        if (done || sawNormalSubmitProgress || normalSubmitRetried) return;
+        normalSubmitRetried = true;
+        // Codex can occasionally leave a plain pasted message in its editor
+        // without accepting the first submit key. Clear and resubmit once.
+        void (async () => {
+          log.warn('agent-live', 'normal-submit-retry', { promptPreview: previewLiveText(prompt) });
+          await this.clearPendingInput();
+          if (done || sawNormalSubmitProgress) return;
+          this.cleaner.resetTurn();
+          this.write(`${prompt}\r`);
+        })().catch((err) => {
+          log.warn('agent-live', 'normal-submit-retry-failed', {
+            err: err instanceof Error ? err.message : String(err),
+          });
+        });
+      }, NORMAL_SUBMIT_RETRY_DELAY_MS);
+    };
 
     const onData = (event: LiveOutput): void => {
       if (!acceptingOutput) {
@@ -332,6 +368,9 @@ export class LiveTerminalSession {
       // task output and must retain the normal idle completion behavior.
       const terminalState = event.terminalText;
       const terminalBusy = terminalState ? isLiveTerminalBusy(terminalState) : false;
+      if (terminalBusy || (terminalState && isLiveTerminalInteraction(terminalState))) {
+        markNormalSubmitProgress();
+      }
       if (terminalBusy) {
         terminalWasBusy = true;
         suspendIdle();
@@ -369,6 +408,7 @@ export class LiveTerminalSession {
         });
       }
       if (accepted) {
+        markNormalSubmitProgress();
         const resultOutput = isLiveCommandResultOutput(text, prompt);
         if (controlLiteralConfirmTimer) {
           clearTimeout(controlLiteralConfirmTimer);
@@ -417,6 +457,7 @@ export class LiveTerminalSession {
       if (outputTimer) clearTimeout(outputTimer);
       if (slashConfirmTimer) clearTimeout(slashConfirmTimer);
       if (controlLiteralConfirmTimer) clearTimeout(controlLiteralConfirmTimer);
+      cancelNormalSubmitRetry();
       this.emitter.off('data', onData);
       this.emitter.off('exit', onExit);
       this.emitter.off('error', onError);
@@ -464,6 +505,7 @@ export class LiveTerminalSession {
           } else {
             this.write(`${prompt}\r`);
             scheduleSlashCommandConfirm();
+            scheduleNormalSubmitRetry();
           }
         }
         if (commandMode && isKnownSilentLiveCommand(prompt)) arm(idleMs);
@@ -1418,6 +1460,8 @@ export function scopeLiveSnapshotToPrompt(
     }
     return lines.slice(cursor).join('\n');
   }
+  const wrappedPromptEnd = findWrappedPromptEnd(lines, echo);
+  if (wrappedPromptEnd !== undefined) return lines.slice(wrappedPromptEnd).join('\n');
   // Native approval and picker rows can begin with the same arrow glyph as a
   // prompt (for example "› 1. Yes, proceed"). They are current terminal
   // interactions, not stale conversation history, and must reach the card
@@ -1430,6 +1474,36 @@ export function scopeLiveSnapshotToPrompt(
     const trimmed = line.trimStart();
     return trimmed.startsWith('›') && !isTerminalChromeLine(trimmed);
   }) ? '' : input;
+}
+
+function findWrappedPromptEnd(lines: string[], prompt: string): number | undefined {
+  const compactPrompt = compactTerminalPrompt(prompt);
+  if (!compactPrompt) return undefined;
+
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const first = (lines[index] ?? '').trimStart();
+    if (!/^[›❯]\s*/u.test(first)) continue;
+    let rendered = compactTerminalPrompt(first.replace(/^[›❯]\s*/u, ''));
+    if (!rendered || !compactPrompt.startsWith(rendered)) continue;
+
+    let cursor = index + 1;
+    while (rendered.length < compactPrompt.length && cursor < lines.length) {
+      const continuation = lines[cursor] ?? '';
+      if (!continuation.trim()) {
+        cursor += 1;
+        continue;
+      }
+      rendered += compactTerminalPrompt(continuation);
+      if (!compactPrompt.startsWith(rendered)) break;
+      cursor += 1;
+    }
+    if (rendered === compactPrompt) return cursor;
+  }
+  return undefined;
+}
+
+function compactTerminalPrompt(input: string): string {
+  return input.replace(/\s+/gu, '');
 }
 
 function scopeKnownLiveControlResultSnapshot(lines: string[], prompt: string): string | undefined {

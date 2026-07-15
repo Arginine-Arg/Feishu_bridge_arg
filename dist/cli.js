@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.14",
+  version: "0.6.15",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -5927,6 +5927,7 @@ var COMMAND_IDLE_MS = 2500;
 var COMMAND_NO_OUTPUT_IDLE_MS = 8e3;
 var COMPACT_NO_OUTPUT_IDLE_MS = 6e4;
 var CONTROL_LITERAL_CONFIRM_DELAY_MS = 900;
+var NORMAL_SUBMIT_RETRY_DELAY_MS = 1200;
 var MAX_TURN_OUTPUT_CHARS = 12e4;
 var DEFAULT_PTY_ROWS = "48";
 var DEFAULT_PTY_COLUMNS = "120";
@@ -6084,6 +6085,7 @@ var LiveTerminalSession = class {
     let outputTimer;
     let slashConfirmTimer;
     let controlLiteralConfirmTimer;
+    let normalSubmitRetryTimer;
     let acceptingOutput = false;
     let diagFrames = 0;
     let sawAcceptedOutput = false;
@@ -6091,6 +6093,8 @@ var LiveTerminalSession = class {
     let deliveredText = false;
     let slashConfirmCount = 0;
     let terminalWasBusy = false;
+    let sawNormalSubmitProgress = false;
+    let normalSubmitRetried = false;
     const inputGraceMs = this.inputGraceMs(commandMode);
     const inputReadyAt = Date.now() + inputGraceMs;
     if (commandMode) {
@@ -6125,12 +6129,23 @@ var LiveTerminalSession = class {
       if (outputTimer) return;
       outputTimer = setTimeout(flushOutput, outputFlushMs);
     };
+    const cancelNormalSubmitRetry = () => {
+      if (!normalSubmitRetryTimer) return;
+      clearTimeout(normalSubmitRetryTimer);
+      normalSubmitRetryTimer = void 0;
+    };
+    const markNormalSubmitProgress = () => {
+      if (commandMode || inputMode === "control") return;
+      sawNormalSubmitProgress = true;
+      cancelNormalSubmitRetry();
+    };
     const finish = () => {
       if (done) return;
       done = true;
       if (commandMode) log.info("agent-live", "command-finish", { reason: "idle-or-startup" });
       if (timer) clearTimeout(timer);
       if (controlLiteralConfirmTimer) clearTimeout(controlLiteralConfirmTimer);
+      cancelNormalSubmitRetry();
       flushOutput();
       if (commandMode && !deliveredText && isStatusLiveCommand(prompt)) {
         push({ type: "text", delta: buildLiveStatusFallback(this.opts, cwd, this.terminalInfo) });
@@ -6157,6 +6172,25 @@ var LiveTerminalSession = class {
         if (isStatusLiveCommand(prompt) && slashConfirmCount >= 2) arm(idleMs);
       }, 200);
     };
+    const scheduleNormalSubmitRetry = () => {
+      if (commandMode || inputMode === "control" || normalSubmitRetried || normalSubmitRetryTimer) return;
+      normalSubmitRetryTimer = setTimeout(() => {
+        normalSubmitRetryTimer = void 0;
+        if (done || sawNormalSubmitProgress || normalSubmitRetried) return;
+        normalSubmitRetried = true;
+        void (async () => {
+          log.warn("agent-live", "normal-submit-retry", { promptPreview: previewLiveText(prompt) });
+          await this.clearPendingInput();
+          if (done || sawNormalSubmitProgress) return;
+          this.cleaner.resetTurn();
+          this.write(`${prompt}\r`);
+        })().catch((err) => {
+          log.warn("agent-live", "normal-submit-retry-failed", {
+            err: err instanceof Error ? err.message : String(err)
+          });
+        });
+      }, NORMAL_SUBMIT_RETRY_DELAY_MS);
+    };
     const onData = (event) => {
       if (!acceptingOutput) {
         if (commandMode && diagFrames < LIVE_DIAG_MAX_FRAMES) {
@@ -6171,6 +6205,9 @@ var LiveTerminalSession = class {
       }
       const terminalState = event.terminalText;
       const terminalBusy = terminalState ? isLiveTerminalBusy(terminalState) : false;
+      if (terminalBusy || terminalState && isLiveTerminalInteraction(terminalState)) {
+        markNormalSubmitProgress();
+      }
       if (terminalBusy) {
         terminalWasBusy = true;
         suspendIdle();
@@ -6202,6 +6239,7 @@ var LiveTerminalSession = class {
         });
       }
       if (accepted) {
+        markNormalSubmitProgress();
         const resultOutput = isLiveCommandResultOutput(text, prompt);
         if (controlLiteralConfirmTimer) {
           clearTimeout(controlLiteralConfirmTimer);
@@ -6247,6 +6285,7 @@ var LiveTerminalSession = class {
       if (outputTimer) clearTimeout(outputTimer);
       if (slashConfirmTimer) clearTimeout(slashConfirmTimer);
       if (controlLiteralConfirmTimer) clearTimeout(controlLiteralConfirmTimer);
+      cancelNormalSubmitRetry();
       this.emitter.off("data", onData);
       this.emitter.off("exit", onExit);
       this.emitter.off("error", onError);
@@ -6290,6 +6329,7 @@ var LiveTerminalSession = class {
           } else {
             this.write(`${prompt}\r`);
             scheduleSlashCommandConfirm();
+            scheduleNormalSubmitRetry();
           }
         }
         if (commandMode && isKnownSilentLiveCommand(prompt)) arm(idleMs);
@@ -7116,11 +7156,39 @@ function scopeLiveSnapshotToPrompt(input, prompt, previousSnapshot = "") {
     }
     return lines.slice(cursor).join("\n");
   }
+  const wrappedPromptEnd = findWrappedPromptEnd(lines, echo);
+  if (wrappedPromptEnd !== void 0) return lines.slice(wrappedPromptEnd).join("\n");
   if (isLiveTerminalInteraction(input) && !hasForeignTerminalPrompt(lines)) return input;
   return lines.some((line) => {
     const trimmed = line.trimStart();
     return trimmed.startsWith("\u203A") && !isTerminalChromeLine(trimmed);
   }) ? "" : input;
+}
+function findWrappedPromptEnd(lines, prompt) {
+  const compactPrompt = compactTerminalPrompt(prompt);
+  if (!compactPrompt) return void 0;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const first = (lines[index] ?? "").trimStart();
+    if (!/^[›❯]\s*/u.test(first)) continue;
+    let rendered = compactTerminalPrompt(first.replace(/^[›❯]\s*/u, ""));
+    if (!rendered || !compactPrompt.startsWith(rendered)) continue;
+    let cursor = index + 1;
+    while (rendered.length < compactPrompt.length && cursor < lines.length) {
+      const continuation = lines[cursor] ?? "";
+      if (!continuation.trim()) {
+        cursor += 1;
+        continue;
+      }
+      rendered += compactTerminalPrompt(continuation);
+      if (!compactPrompt.startsWith(rendered)) break;
+      cursor += 1;
+    }
+    if (rendered === compactPrompt) return cursor;
+  }
+  return void 0;
+}
+function compactTerminalPrompt(input) {
+  return input.replace(/\s+/gu, "");
 }
 function scopeKnownLiveControlResultSnapshot(lines, prompt) {
   if (!isLiveControlInput(prompt) && !shouldDeferControlLiteralSubmit(prompt)) return void 0;
