@@ -1164,7 +1164,9 @@ process.stdin.on('data', (chunk) => {
       '• 我先开始检索。',
       '• 已扫描 2 个候选会话。',
       '• 最终结论：已找到目标会话。',
-      '›',
+      // Codex renders a default suggestion inside its fresh, empty input
+      // field. This must release the run just like a bare prompt does.
+      '› Run /review on my current changes',
     ]), 5_000);
   }
 });

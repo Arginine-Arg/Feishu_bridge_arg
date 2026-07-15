@@ -1784,8 +1784,14 @@ function isTerminalChromeLine(trimmed: string): boolean {
     /^\d+%\s+context left$/i.test(trimmed) ||
     /^[╭╰╮╯─│\s]+$/u.test(trimmed) ||
     /^[›❯]\s*$/.test(trimmed) ||
-    /^›\s*(?:Implement \{feature\}|Summarize recent commits|Find and fix a bug in @filename|Improve documentation in @filename|Explain this codebase|Write tests for @filename)\s*$/i.test(trimmed) ||
+    isTerminalSuggestionLine(trimmed) ||
     /^[A-Za-z0-9_.-]+(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?\s+·\s+.+$/.test(trimmed)
+  );
+}
+
+function isTerminalSuggestionLine(trimmed: string): boolean {
+  return /^›\s*(?:Implement \{feature\}|Summarize recent commits|Find and fix a bug in @filename|Improve documentation in @filename|Explain this codebase|Write tests for @filename|Run \/review on my current changes)\s*$/i.test(
+    trimmed,
   );
 }
 
@@ -1807,7 +1813,10 @@ export function isLiveTerminalBusy(input: string): boolean {
 
 function isLiveTerminalReady(input: string): boolean {
   const recent = cleanTerminalOutput(input).split('\n').slice(-6);
-  return recent.some((line) => /^[›❯]\s*$/.test(line.trim()));
+  return recent.some((line) => {
+    const trimmed = line.trim();
+    return /^[›❯]\s*$/.test(trimmed) || isTerminalSuggestionLine(trimmed);
+  });
 }
 
 function isLiveTerminalInteraction(input: string): boolean {

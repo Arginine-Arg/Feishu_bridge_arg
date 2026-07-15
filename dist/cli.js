@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.13",
+  version: "0.6.14",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -7355,7 +7355,12 @@ function snapshotInformationScore(input) {
   return input.split("\n").map((line) => line.trim()).filter(Boolean).filter((line) => !/^[╭╰╮╯─│\s]+$/u.test(line)).join("\n").length;
 }
 function isTerminalChromeLine(trimmed) {
-  return /^Tip:/i.test(trimmed) || /^[•◦]\s+Working\s+\(\d+s\b.*\)$/i.test(trimmed) || /^tab to queue message\b.*context left$/i.test(trimmed) || /^\d+%\s+context left$/i.test(trimmed) || /^[╭╰╮╯─│\s]+$/u.test(trimmed) || /^[›❯]\s*$/.test(trimmed) || /^›\s*(?:Implement \{feature\}|Summarize recent commits|Find and fix a bug in @filename|Improve documentation in @filename|Explain this codebase|Write tests for @filename)\s*$/i.test(trimmed) || /^[A-Za-z0-9_.-]+(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?\s+·\s+.+$/.test(trimmed);
+  return /^Tip:/i.test(trimmed) || /^[•◦]\s+Working\s+\(\d+s\b.*\)$/i.test(trimmed) || /^tab to queue message\b.*context left$/i.test(trimmed) || /^\d+%\s+context left$/i.test(trimmed) || /^[╭╰╮╯─│\s]+$/u.test(trimmed) || /^[›❯]\s*$/.test(trimmed) || isTerminalSuggestionLine(trimmed) || /^[A-Za-z0-9_.-]+(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?\s+·\s+.+$/.test(trimmed);
+}
+function isTerminalSuggestionLine(trimmed) {
+  return /^›\s*(?:Implement \{feature\}|Summarize recent commits|Find and fix a bug in @filename|Improve documentation in @filename|Explain this codebase|Write tests for @filename|Run \/review on my current changes)\s*$/i.test(
+    trimmed
+  );
 }
 function hasForeignTerminalPrompt(lines) {
   return lines.some((line) => {
@@ -7373,7 +7378,10 @@ function isLiveTerminalBusy(input) {
 }
 function isLiveTerminalReady(input) {
   const recent = cleanTerminalOutput(input).split("\n").slice(-6);
-  return recent.some((line) => /^[›❯]\s*$/.test(line.trim()));
+  return recent.some((line) => {
+    const trimmed = line.trim();
+    return /^[›❯]\s*$/.test(trimmed) || isTerminalSuggestionLine(trimmed);
+  });
 }
 function isLiveTerminalInteraction(input) {
   const recent = cleanTerminalOutput(input).split("\n").slice(-40).join("\n");
