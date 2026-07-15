@@ -281,6 +281,9 @@ describe('tmux input framing and snapshots', () => {
 
   it('recognizes a busy native terminal so incoming chat stays queued', () => {
     expect(isLiveTerminalBusy('◦ Working (14s • esc to interrupt)')).toBe(true);
+    expect(
+      isLiveTerminalBusy('• Working (14s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close'),
+    ).toBe(true);
     expect(isLiveTerminalBusy('tab to queue message 99% context left')).toBe(true);
     expect(isLiveTerminalBusy('› ready for the next task')).toBe(false);
   });
@@ -1258,11 +1261,15 @@ process.stdin.on('data', (chunk) => {
     }
     started = true;
     draft = '';
-    screen(['› ' + expected, '• Working (0s • esc to interrupt)', 'tab to queue message 99% context left']);
+    screen([
+      '› ' + expected,
+      '• Working (0s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close',
+      'tab to queue message 99% context left',
+    ]);
     setTimeout(() => screen([
       '› ' + expected,
       '• 我先开始检索。',
-      '• Working (1s • esc to interrupt)',
+      '• Working (1s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close',
       'tab to queue message 99% context left',
     ]), 100);
     // Only the volatile Working timer changes here. Its filtered snapshot
@@ -1270,7 +1277,7 @@ process.stdin.on('data', (chunk) => {
     setTimeout(() => screen([
       '› ' + expected,
       '• 我先开始检索。',
-      '• Working (2s • esc to interrupt)',
+      '• Working (2s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close',
       'tab to queue message 99% context left',
     ]), 250);
     // Tmux can emit a transient redraw without the footer while Codex is still working.
