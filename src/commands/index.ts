@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { lstat, readFile, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute } from 'node:path';
+import { basename, dirname, isAbsolute, relative, sep } from 'node:path';
 import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
 import { claudeCapability, codexCapability } from '../agent/capability';
 import { DEFAULT_MODEL, normalizeModelSelection, supportedModels } from '../agent/models';
@@ -177,6 +177,7 @@ const handlers: Record<string, Handler> = {
   '/ws': handleWs,
   '/resume': handleResume,
   '/status': handleStatus,
+  '/sendfile': handleSendFile,
   '/help': handleHelp,
   '/account': handleAccount,
   '/config': handleConfig,
@@ -209,6 +210,7 @@ const ADMIN_COMMANDS = new Set([
   '/session',
   '/cd',
   '/ws',
+  '/sendfile',
   '/invite',
   '/remove',
 ]);
@@ -324,6 +326,88 @@ function expandTilde(p: string): string {
 
 function isAbsoluteOrTilde(p: string): boolean {
   return isAbsolute(p) || p === '~' || p.startsWith('~/');
+}
+
+async function handleSendFile(args: string, ctx: CommandContext): Promise<void> {
+  const input = args.trim();
+  if (!input || !isAbsoluteOrTilde(input)) {
+    await reply(ctx, '用法：`/sendfile <绝对路径或 ~/ 路径>`');
+    return;
+  }
+
+  const requestedPath = expandTilde(input);
+  let entry;
+  try {
+    entry = await lstat(requestedPath);
+  } catch {
+    await reply(ctx, '文件不存在或不可访问。');
+    return;
+  }
+  if (entry.isSymbolicLink()) {
+    await reply(ctx, '不允许发送符号链接，请指定实际文件。');
+    return;
+  }
+  if (!entry.isFile()) {
+    await reply(ctx, '只能发送普通文件。');
+    return;
+  }
+
+  const resolvedPath = await realpath(requestedPath).catch(() => undefined);
+  if (!resolvedPath) {
+    await reply(ctx, '文件不存在或不可访问。');
+    return;
+  }
+
+  const allowedRoots = await resolveSendFileRoots(ctx);
+  if (!allowedRoots.some((root) => isPathWithinRoot(resolvedPath, root))) {
+    await reply(ctx, '文件必须位于当前工作目录或桥接媒体目录内。');
+    return;
+  }
+
+  const maxFileBytes = ctx.controls.profileConfig.attachments.maxFileBytes;
+  if (entry.size > maxFileBytes) {
+    await reply(ctx, `文件超过发送上限（${formatByteLimit(maxFileBytes)}）。`);
+    return;
+  }
+
+  try {
+    await ctx.channel.send(
+      ctx.msg.chatId,
+      { file: { source: resolvedPath, fileName: basename(resolvedPath) } },
+      commandReplyOptions(ctx),
+    );
+    log.info('command', 'send-file', {
+      profile: ctx.controls.profile,
+      size: entry.size,
+      fileName: basename(resolvedPath),
+    });
+  } catch (err) {
+    log.fail('command', err, { step: 'send-file' });
+    reportMetric('command_fail', 1, { step: 'send-file' });
+    await reply(ctx, '文件发送失败，请检查飞书应用的文件权限后重试。');
+  }
+}
+
+async function resolveSendFileRoots(ctx: CommandContext): Promise<string[]> {
+  const candidates = [effectiveWorkspaceCwd(ctx), commandProfilePaths(ctx).mediaDir].filter(
+    (path): path is string => Boolean(path),
+  );
+  const roots = await Promise.all(candidates.map((path) => realpath(path).catch(() => undefined)));
+  return [...new Set(roots.filter((path): path is string => Boolean(path)))];
+}
+
+function isPathWithinRoot(path: string, root: string): boolean {
+  const pathRelative = relative(root, path);
+  return (
+    pathRelative === '' ||
+    (pathRelative !== '..' && !pathRelative.startsWith(`..${sep}`) && !isAbsolute(pathRelative))
+  );
+}
+
+function formatByteLimit(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${Math.floor(bytes / (1024 * 1024))} MiB`;
+  if (bytes >= 1024) return `${Math.floor(bytes / 1024)} KiB`;
+  return `${bytes} B`;
 }
 
 async function handleNew(args: string, ctx: CommandContext): Promise<void> {

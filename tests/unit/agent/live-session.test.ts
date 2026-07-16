@@ -111,7 +111,7 @@ describe('tmux input framing and snapshots', () => {
     // would drop the new substantive lines inserted before the shared footer.
     const workingFrame = [
       '› current question',
-      '• Working (0s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close',
+      '• Working (59s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close',
       'tab to queue message 99% context left',
     ].join('\n');
     const exploredFrame = [
@@ -122,7 +122,7 @@ describe('tmux input framing and snapshots', () => {
       '• Explored',
       '  └ Read rollout.jsonl, README.md',
       '    Search cell_fate in cell_fate_perturbmol',
-      '• Working (31s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close',
+      '• Working (1m 00s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close',
       'tab to queue message 99% context left',
     ].join('\n');
     expect(scopeLiveSnapshotToPrompt(exploredFrame, 'current question', workingFrame)).toBe([
@@ -1365,27 +1365,27 @@ process.stdout.write('old terminal status\\n');
 function screen(lines) {
   process.stdout.write('\\x1b[2J\\x1b[H' + lines.join('\\n') + '\\n');
 }
-function busy(seconds, lines) {
+function busy(elapsed, lines) {
   screen([
     '› ' + expected,
     ...lines,
-    '• Working (' + seconds + 's • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close',
+    '• Working (' + elapsed + ' • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close',
     'tab to queue message 99% context left',
   ]);
 }
 // Start after the real fresh-terminal input grace. Input delivery is covered
 // by dedicated tests; this replay verifies every capture-pane output frame.
 setTimeout(() => {
-  busy(0, []);
-  setTimeout(() => busy(1, [
+  busy('0s', []);
+  setTimeout(() => busy('59s', [
     '• 我先读取该会话的本地记录，确认它停在什么工作状态。',
   ]), 700);
-  setTimeout(() => busy(2, [
+  setTimeout(() => busy('1m 00s', [
     '• 我先读取该会话的本地记录，确认它停在什么工作状态。',
     '• Ran rg --files ~/.codex/sessions',
     '  └ /home/wanghaoran/.codex/sessions/2026/07/10/rollout.jsonl',
   ]), 1_500);
-  setTimeout(() => busy(3, [
+  setTimeout(() => busy('1h 02m 03s', [
     '• 我先读取该会话的本地记录，确认它停在什么工作状态。',
     '• Ran rg --files ~/.codex/sessions',
     '  └ /home/wanghaoran/.codex/sessions/2026/07/10/rollout.jsonl',

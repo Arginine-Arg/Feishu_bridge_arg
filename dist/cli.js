@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.16",
+  version: "0.6.24",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -6965,7 +6965,10 @@ var TurnOutputBuffer = class {
   replace(raw) {
     const scoped = scopeLiveSnapshotToPrompt(raw, this.promptEcho, this.snapshotBaseline);
     this.snapshotBaseline = raw;
-    const compacted = stripPromptMismatchedLiveContent(this.compact(scoped), this.promptEcho);
+    const compacted = stripPromptMismatchedLiveContent(
+      this.compact(scoped, true),
+      this.promptEcho
+    );
     if (!compacted.trim()) return false;
     if (isStalePickerSnapshotForPrompt(compacted, this.promptEcho)) return false;
     if (isStaleStatusSnapshotForPrompt(compacted, this.promptEcho)) return false;
@@ -6984,23 +6987,24 @@ var TurnOutputBuffer = class {
     this.pending = "";
     return out;
   }
-  compact(text) {
+  compact(text, preserveSnapshotDuplicates = false) {
     const withoutEcho = stripPromptEcho(cleanTerminalOutput(text), this.promptEcho);
     const normalized = this.stripInputLines ? stripStaleSlashEchoLines(stripLiveInputLines(withoutEcho), this.promptEcho) : withoutEcho;
     if (!normalized.trim()) return "";
     const parts = normalized.split(/(\n)/);
     let out = "";
     let currentLine = "";
+    let firstCompleteLine = true;
     for (const part of parts) {
       if (part === "\n") {
         const comparable = currentLine.trim();
-        if (comparable && comparable === this.lastCompleteLine) {
-          currentLine = "";
-          continue;
-        }
-        out += `${currentLine}
+        const repeatsLastLine = comparable && comparable === this.lastCompleteLine;
+        if (!repeatsLastLine || preserveSnapshotDuplicates && !firstCompleteLine) {
+          out += `${currentLine}
 `;
+        }
         if (comparable) this.lastCompleteLine = comparable;
+        firstCompleteLine = false;
         currentLine = "";
         continue;
       }
@@ -7137,6 +7141,11 @@ function scopeLiveSnapshotToPrompt(input, prompt, previousSnapshot = "") {
   if (controlPicker !== void 0) return controlPicker;
   const delta = scopeSnapshotDelta(lines, previousSnapshot);
   if (delta !== void 0) return delta;
+  if (!echo.startsWith("/") && isLiveTerminalInteraction(input)) {
+    const interactionStart = findLastLine(lines, isLivePickerStartLine);
+    if (interactionStart >= 0) return lines.slice(interactionStart).join("\n");
+    return input;
+  }
   const promptLines = echo.split("\n");
   const anchorIndex = promptLines.findIndex((line) => line.trim().length > 0);
   const anchor = promptLines[anchorIndex]?.trim() ?? echo;
@@ -7155,7 +7164,6 @@ function scopeLiveSnapshotToPrompt(input, prompt, previousSnapshot = "") {
   }
   const wrappedPromptEnd = findWrappedPromptEnd(lines, echo);
   if (wrappedPromptEnd !== void 0) return lines.slice(wrappedPromptEnd).join("\n");
-  if (isLiveTerminalInteraction(input) && !hasForeignTerminalPrompt(lines)) return input;
   return lines.some((line) => {
     const trimmed = line.trimStart();
     return trimmed.startsWith("\u203A") && !isTerminalChromeLine(trimmed);
@@ -7196,26 +7204,41 @@ function scopeKnownLiveControlResultSnapshot(lines, prompt) {
   return index >= 0 ? lines[index].trim() : void 0;
 }
 function scopeSnapshotDelta(lines, previousSnapshot) {
-  const previous = previousSnapshot.trim();
-  if (!previous) return void 0;
-  const priorLines = previous.split("\n");
+  const priorLines = snapshotDeltaLines(previousSnapshot);
+  const nextLines = lines.filter((line) => !isTerminalChromeLine(line.trim()));
+  if (priorLines.length === 0 && nextLines.length === 0) return "";
+  if (priorLines.length === 0) return void 0;
   let prefix = 0;
-  while (prefix < priorLines.length && prefix < lines.length && priorLines[prefix] === lines[prefix]) {
+  while (prefix < priorLines.length && prefix < nextLines.length && priorLines[prefix] === nextLines[prefix]) {
     prefix += 1;
   }
-  if (prefix === priorLines.length && prefix < lines.length) {
-    return lines.slice(prefix).join("\n");
+  if (prefix === nextLines.length) return "";
+  if (prefix === priorLines.length && prefix < nextLines.length) {
+    return nextLines.slice(prefix).join("\n");
   }
-  const maxOverlap = Math.min(priorLines.length, lines.length);
+  const maxOverlap = Math.min(priorLines.length, nextLines.length);
   for (let overlap = maxOverlap; overlap > 0; overlap -= 1) {
     const priorTail = priorLines.slice(priorLines.length - overlap);
-    const nextHead = lines.slice(0, overlap);
+    const nextHead = nextLines.slice(0, overlap);
     if (priorTail.every((line, index) => line === nextHead[index])) {
-      const delta = lines.slice(overlap).join("\n");
+      const delta = nextLines.slice(overlap).join("\n");
       if (delta.trim()) return delta;
     }
   }
+  for (let priorIndex = priorLines.length - 1; priorIndex >= 0; priorIndex -= 1) {
+    const candidate = priorLines[priorIndex]?.trim();
+    if (!candidate) continue;
+    for (let nextIndex = 0; nextIndex < nextLines.length; nextIndex += 1) {
+      if (nextLines[nextIndex]?.trim() !== candidate) continue;
+      const delta = nextLines.slice(nextIndex + 1).join("\n");
+      if (delta.trim()) return delta;
+      return "";
+    }
+  }
   return void 0;
+}
+function snapshotDeltaLines(snapshot) {
+  return snapshot.trim().split("\n").filter((line) => !isTerminalChromeLine(line.trim()));
 }
 function scopeKnownLiveCommandResultSnapshot(lines, prompt) {
   const command = prompt.trim().toLowerCase();
@@ -7420,20 +7443,12 @@ function snapshotInformationScore(input) {
   return input.split("\n").map((line) => line.trim()).filter(Boolean).filter((line) => !/^[╭╰╮╯─│\s]+$/u.test(line)).join("\n").length;
 }
 function isTerminalChromeLine(trimmed) {
-  return /^Tip:/i.test(trimmed) || /^[•◦]\s+Working\s+\(\d+s\b.*\)$/i.test(trimmed) || /^tab to queue message\b.*context left$/i.test(trimmed) || /^\d+%\s+context left$/i.test(trimmed) || /^[╭╰╮╯─│\s]+$/u.test(trimmed) || /^[›❯]\s*$/.test(trimmed) || isTerminalSuggestionLine(trimmed) || /^[A-Za-z0-9_.-]+(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?\s+·\s+.+$/.test(trimmed);
+  return /^Tip:/i.test(trimmed) || /^[•◦]\s+Working\s+\((?:\d+h\s+)?(?:\d+m\s+)?\d+s\b.*\)(?:\s+·\s+.*)?$/i.test(trimmed) || /^tab to queue message\b.*context left$/i.test(trimmed) || /^\d+%\s+context left$/i.test(trimmed) || /^[╭╰╮╯─│\s]+$/u.test(trimmed) || /^[›❯]\s*$/.test(trimmed) || isTerminalSuggestionLine(trimmed) || /^[A-Za-z0-9_.-]+(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?\s+·\s+.+$/.test(trimmed);
 }
 function isTerminalSuggestionLine(trimmed) {
-  return /^›\s*(?:Implement \{feature\}|Summarize recent commits|Find and fix a bug in @filename|Improve documentation in @filename|Explain this codebase|Write tests for @filename|Run \/review on my current changes)\s*$/i.test(
+  return /^›\s*(?:Use\s+\/[a-z][\w-]*(?:\s+.*)?|Implement \{feature\}|Summarize recent commits|Find and fix a bug in @filename|Improve documentation in @filename|Explain this codebase|Write tests for @filename|Run \/review on my current changes)\s*$/i.test(
     trimmed
   );
-}
-function hasForeignTerminalPrompt(lines) {
-  return lines.some((line) => {
-    const trimmed = line.trimStart();
-    if (!trimmed.startsWith("\u203A")) return false;
-    if (isTerminalChromeLine(trimmed)) return false;
-    return !/^›\s*\d{1,2}[.)、:\s-]+\S/u.test(trimmed);
-  });
 }
 function isLiveTerminalBusy(input) {
   const recent = cleanTerminalOutput(input).split("\n").slice(-12).join("\n");
@@ -8633,9 +8648,9 @@ function safeJsonStringify(value) {
 
 // src/commands/index.ts
 import { randomUUID as randomUUID2 } from "crypto";
-import { readFile as readFile11 } from "fs/promises";
+import { lstat, readFile as readFile11, realpath as realpath4 } from "fs/promises";
 import { homedir as homedir6 } from "os";
-import { dirname as dirname14, isAbsolute as isAbsolute2 } from "path";
+import { basename as basename4, dirname as dirname14, isAbsolute as isAbsolute2, relative, sep } from "path";
 
 // src/card/account-cards.ts
 function maskAppId(id) {
@@ -9458,6 +9473,7 @@ function helpCard(agentName = "Agent") {
         "- `/config` \u2014 \u8C03\u6574\u504F\u597D\u3001\u8BBF\u95EE\u63A7\u5236\u548C lark-cli \u8EAB\u4EFD\u7B56\u7565",
         "- `/model` \u2014 \u9009\u62E9\u6A21\u578B\uFF1BCodex \u4F7F\u7528 CLI \u539F\u751F\u6A21\u578B\u548C reasoning \u9009\u9879\u5E76\u540C\u6B65\u5230 profile",
         "- `/status` \u2014 \u5F53\u524D\u72B6\u6001",
+        "- `/sendfile <path>` \u2014 \u7BA1\u7406\u5458\u76F4\u63A5\u56DE\u590D\u5F53\u524D\u6D88\u606F\u53D1\u9001\u5DE5\u4F5C\u76EE\u5F55\u5185\u7684\u6587\u4EF6",
         "- `/stop` \u2014 \u7ED3\u675F\u5F53\u524D\u6B63\u5728\u8DD1\u7684\u4EFB\u52A1\uFF08\u4E5F\u53EF\u70B9\u5361\u7247\u5E95\u90E8 \u23F9 \u7EC8\u6B62 \u6309\u94AE\uFF09",
         "- `/stop comment:<scopeHash>` \u2014 \u7BA1\u7406\u5458\u505C\u6B62\u4E91\u6587\u6863\u8BC4\u8BBA\u4EFB\u52A1",
         "- `/timeout [N|off|default]` \u2014 \u5F53\u524D session \u7684\u63A2\u6D3B\u5206\u949F\u6570,`/config` \u6539\u5168\u5C40\u9ED8\u8BA4",
@@ -10434,6 +10450,7 @@ var handlers = {
   "/ws": handleWs,
   "/resume": handleResume,
   "/status": handleStatus,
+  "/sendfile": handleSendFile,
   "/help": handleHelp,
   "/account": handleAccount,
   "/config": handleConfig,
@@ -10460,6 +10477,7 @@ var ADMIN_COMMANDS = /* @__PURE__ */ new Set([
   "/session",
   "/cd",
   "/ws",
+  "/sendfile",
   "/invite",
   "/remove"
 ]);
@@ -10548,6 +10566,76 @@ function expandTilde(p3) {
 }
 function isAbsoluteOrTilde(p3) {
   return isAbsolute2(p3) || p3 === "~" || p3.startsWith("~/");
+}
+async function handleSendFile(args, ctx) {
+  const input = args.trim();
+  if (!input || !isAbsoluteOrTilde(input)) {
+    await reply(ctx, "\u7528\u6CD5\uFF1A`/sendfile <\u7EDD\u5BF9\u8DEF\u5F84\u6216 ~/ \u8DEF\u5F84>`");
+    return;
+  }
+  const requestedPath = expandTilde(input);
+  let entry;
+  try {
+    entry = await lstat(requestedPath);
+  } catch {
+    await reply(ctx, "\u6587\u4EF6\u4E0D\u5B58\u5728\u6216\u4E0D\u53EF\u8BBF\u95EE\u3002");
+    return;
+  }
+  if (entry.isSymbolicLink()) {
+    await reply(ctx, "\u4E0D\u5141\u8BB8\u53D1\u9001\u7B26\u53F7\u94FE\u63A5\uFF0C\u8BF7\u6307\u5B9A\u5B9E\u9645\u6587\u4EF6\u3002");
+    return;
+  }
+  if (!entry.isFile()) {
+    await reply(ctx, "\u53EA\u80FD\u53D1\u9001\u666E\u901A\u6587\u4EF6\u3002");
+    return;
+  }
+  const resolvedPath = await realpath4(requestedPath).catch(() => void 0);
+  if (!resolvedPath) {
+    await reply(ctx, "\u6587\u4EF6\u4E0D\u5B58\u5728\u6216\u4E0D\u53EF\u8BBF\u95EE\u3002");
+    return;
+  }
+  const allowedRoots = await resolveSendFileRoots(ctx);
+  if (!allowedRoots.some((root) => isPathWithinRoot(resolvedPath, root))) {
+    await reply(ctx, "\u6587\u4EF6\u5FC5\u987B\u4F4D\u4E8E\u5F53\u524D\u5DE5\u4F5C\u76EE\u5F55\u6216\u6865\u63A5\u5A92\u4F53\u76EE\u5F55\u5185\u3002");
+    return;
+  }
+  const maxFileBytes = ctx.controls.profileConfig.attachments.maxFileBytes;
+  if (entry.size > maxFileBytes) {
+    await reply(ctx, `\u6587\u4EF6\u8D85\u8FC7\u53D1\u9001\u4E0A\u9650\uFF08${formatByteLimit(maxFileBytes)}\uFF09\u3002`);
+    return;
+  }
+  try {
+    await ctx.channel.send(
+      ctx.msg.chatId,
+      { file: { source: resolvedPath, fileName: basename4(resolvedPath) } },
+      commandReplyOptions(ctx)
+    );
+    log.info("command", "send-file", {
+      profile: ctx.controls.profile,
+      size: entry.size,
+      fileName: basename4(resolvedPath)
+    });
+  } catch (err) {
+    log.fail("command", err, { step: "send-file" });
+    reportMetric("command_fail", 1, { step: "send-file" });
+    await reply(ctx, "\u6587\u4EF6\u53D1\u9001\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u98DE\u4E66\u5E94\u7528\u7684\u6587\u4EF6\u6743\u9650\u540E\u91CD\u8BD5\u3002");
+  }
+}
+async function resolveSendFileRoots(ctx) {
+  const candidates = [effectiveWorkspaceCwd(ctx), commandProfilePaths(ctx).mediaDir].filter(
+    (path) => Boolean(path)
+  );
+  const roots = await Promise.all(candidates.map((path) => realpath4(path).catch(() => void 0)));
+  return [...new Set(roots.filter((path) => Boolean(path)))];
+}
+function isPathWithinRoot(path, root) {
+  const pathRelative = relative(root, path);
+  return pathRelative === "" || pathRelative !== ".." && !pathRelative.startsWith(`..${sep}`) && !isAbsolute2(pathRelative);
+}
+function formatByteLimit(bytes) {
+  if (bytes >= 1024 * 1024) return `${Math.floor(bytes / (1024 * 1024))} MiB`;
+  if (bytes >= 1024) return `${Math.floor(bytes / 1024)} KiB`;
+  return `${bytes} B`;
 }
 async function handleNew(args, ctx) {
   const trimmed = args.trim();
@@ -14135,23 +14223,12 @@ async function fetchCommentContext(channel, target, evt) {
   const fetched = await channel.comments.fetch(target, evt.commentId);
   const replies = fetched?.replies ?? [];
   const parsed = extractCommentQuestionFromReplies({ replyId: evt.replyId, replies });
-  const targetIdx = parsed?.targetReplyId ? replies.findIndex((reply2) => reply2.reply_id === parsed.targetReplyId) : replies.length - 1;
-  const priorReplies = (targetIdx > 0 ? replies.slice(0, targetIdx) : []).map(replyElementsToText).filter((text) => text.length > 0);
   return {
     question: parsed?.question ?? "",
     quote: fetched?.quote,
     isWhole: Boolean(fetched?.isWhole),
-    targetReplyId: parsed?.targetReplyId,
-    priorReplies
+    targetReplyId: parsed?.targetReplyId
   };
-}
-function replyElementsToText(reply2) {
-  const elements = reply2.content?.elements ?? [];
-  return elements.map((el) => {
-    if (el.type === "text_run") return el.text_run?.text ?? "";
-    if (el.type === "docs_link") return el.docs_link?.url ?? "";
-    return "";
-  }).join("").trim();
 }
 function extractCommentQuestionFromReplies(input) {
   let targetReply;
@@ -14160,7 +14237,12 @@ function extractCommentQuestionFromReplies(input) {
   }
   targetReply ??= input.replies.at(-1);
   if (!targetReply) return null;
-  const question = replyElementsToText(targetReply);
+  const elements = targetReply.content?.elements ?? [];
+  const question = elements.map((el) => {
+    if (el.type === "text_run") return el.text_run?.text ?? "";
+    if (el.type === "docs_link") return el.docs_link?.url ?? "";
+    return "";
+  }).join("").trim();
   return { question, targetReplyId: targetReply.reply_id };
 }
 function buildCommentPrompt(target, ctx) {
@@ -14177,13 +14259,6 @@ function buildCommentPrompt(target, ctx) {
     parts.push("");
     parts.push(`\u7528\u6237\u9009\u4E2D\u7684\u539F\u6587\uFF1A
 > ${ctx.quote.replace(/\n/g, "\n> ")}`);
-  }
-  if (ctx.priorReplies.length > 0) {
-    parts.push("");
-    parts.push("\u8FD9\u6761\u8BC4\u8BBA thread \u91CC\u6B64\u524D\u7684\u8BA8\u8BBA\uFF08\u6309\u65F6\u95F4\u987A\u5E8F\uFF0C@\u4F60\u7684\u90A3\u6761\u4E0D\u5728\u5176\u4E2D\uFF09\uFF1A");
-    ctx.priorReplies.forEach((text, i) => {
-      parts.push(`${i + 1}. ${text}`);
-    });
   }
   parts.push("");
   parts.push(`\u7528\u6237\u7684\u95EE\u9898\uFF1A${ctx.question}`);
@@ -14781,7 +14856,6 @@ var ENDPOINTS2 = {
 var COT_UPDATE_THROTTLE_MS = 600;
 var COT_TOOL_OUTPUT_MAX = 1200;
 var COT_TEXT_MAX = 1200;
-var COT_REQUEST_TIMEOUT_MS = 15e3;
 var CotClient = class {
   baseUrl;
   appId;
@@ -14799,8 +14873,7 @@ var CotClient = class {
     const resp = await fetch(`${this.baseUrl}/open-apis/auth/v3/tenant_access_token/internal`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ app_id: this.appId, app_secret: this.appSecret }),
-      signal: AbortSignal.timeout(COT_REQUEST_TIMEOUT_MS)
+      body: JSON.stringify({ app_id: this.appId, app_secret: this.appSecret })
     });
     if (!resp.ok) throw new Error(`tenant token HTTP ${resp.status}`);
     const data = await resp.json();
@@ -14815,7 +14888,6 @@ var CotClient = class {
   async request(path, init = {}) {
     const token = await this.tenantToken();
     const resp = await fetch(`${this.baseUrl}${path}`, {
-      signal: AbortSignal.timeout(COT_REQUEST_TIMEOUT_MS),
       ...init,
       headers: {
         "Content-Type": "application/json;charset=utf-8",
@@ -14832,11 +14904,13 @@ var CotClient = class {
     }
     return data.data ?? data;
   }
-  async create(chatId, originMessageId) {
-    return this.request("/open-apis/im/v1/message_cot?receive_id_type=chat_id", {
+  async create(chatId, originMessageId, threadId) {
+    const receiveIdType = threadId ? "thread_id" : "chat_id";
+    const receiveId = threadId ?? chatId;
+    return this.request(`/open-apis/im/v1/message_cot?receive_id_type=${receiveIdType}`, {
       method: "POST",
       body: JSON.stringify({
-        receive_id: chatId,
+        receive_id: receiveId,
         ...originMessageId ? { origin_message_id: originMessageId } : {}
       })
     });
@@ -14864,6 +14938,7 @@ var CotClient = class {
 var CotPublisher = class {
   client;
   chatId;
+  threadId;
   originMessageId;
   runId;
   scope;
@@ -14877,40 +14952,35 @@ var CotPublisher = class {
   constructor(opts) {
     this.client = opts.client;
     this.chatId = opts.chatId;
+    this.threadId = opts.threadId;
     this.originMessageId = opts.originMessageId;
     this.runId = opts.runId;
     this.scope = opts.scope;
     this.inputPreview = opts.inputPreview;
   }
   async start() {
-    let created;
     try {
-      created = await this.client.create(this.chatId, this.originMessageId);
+      const created = await this.client.create(this.chatId, this.originMessageId, this.threadId);
+      const cotId = stringValue3(created.cot_id ?? created.cotId);
+      const messageId = stringValue3(created.message_id ?? created.messageId);
+      if (!cotId || !messageId) {
+        throw new Error(`CreateCOT missing ids: ${JSON.stringify(created).slice(0, 200)}`);
+      }
+      this.ref = { cotId, messageId };
+      log.info("cot", "created", { cotId, messageId });
+      this.enqueue("RUN_STARTED", {
+        threadId: this.scope,
+        runId: this.runId,
+        input: { query: this.inputPreview }
+      });
+      this.enqueue("STEP_STARTED", {
+        stepId: `step-understand-${this.runId}`,
+        stepName: "\u7406\u89E3\u7528\u6237\u95EE\u9898"
+      });
     } catch (err) {
       this.disabled = true;
       log.warn("cot", "create-failed", { err: err instanceof Error ? err.message : String(err) });
-      return;
     }
-    const cotId = stringValue3(created.cot_id ?? created.cotId);
-    const messageId = stringValue3(created.message_id ?? created.messageId);
-    if (!cotId || !messageId) {
-      this.disabled = true;
-      log.warn("cot", "create-failed", {
-        err: `CreateCOT missing ids: ${JSON.stringify(created).slice(0, 200)}`
-      });
-      return;
-    }
-    this.ref = { cotId, messageId };
-    log.info("cot", "created", { cotId, messageId });
-    this.enqueue("RUN_STARTED", {
-      threadId: this.scope,
-      runId: this.runId,
-      input: { query: this.inputPreview }
-    });
-    this.enqueue("STEP_STARTED", {
-      stepId: `step-understand-${this.runId}`,
-      stepName: "\u7406\u89E3\u7528\u6237\u95EE\u9898"
-    });
   }
   enqueue(eventType, content) {
     if (this.disabled || !this.ref) return;
@@ -16112,10 +16182,10 @@ ${evt.delta}`.slice(-4e3);
       const cotPublisher = new CotPublisher({
         client: cotClient,
         chatId,
-        // The CoT bubble follows this origin message's thread. In a topic the
-        // triggering message is itself in-topic, so the bubble lands in the
-        // topic; message_cot has no thread_id receive type, so origin is the
-        // only lever we have (see CotClient.create).
+        // Mirror sendOpts.replyInThread: in topic groups the CoT bubble must be
+        // addressed to the thread so it lands inside the topic, not at the
+        // group top level.
+        ...mode === "topic" && threadId ? { threadId } : {},
         originMessageId: lastMsg.messageId,
         runId: execution.runId,
         scope,

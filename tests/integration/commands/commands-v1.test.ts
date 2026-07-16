@@ -1,4 +1,4 @@
-import { mkdir, realpath, writeFile } from 'node:fs/promises';
+import { mkdir, realpath, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { NormalizedMessage } from '@larksuite/channel';
@@ -236,6 +236,50 @@ describe('Bridge command contracts', () => {
     expect(status).not.toContain('workspace-write/workspace-write');
     expect(status).toContain('owner');
     expect(status).toContain(jsonStringFragment(await realpath(h.tmp.workspace)));
+  });
+
+  it('sends an allowed workspace file as a direct reply without starting an agent run', async () => {
+    const h = await createHarness();
+    const report = join(h.tmp.workspace, 'report.md');
+    const reportRealpath = await realpath(h.tmp.workspace).then((workspace) => join(workspace, 'report.md'));
+    await writeFile(report, '# Report\n', 'utf8');
+
+    await expect(h.run(`/sendfile ${report}`)).resolves.toBe(true);
+
+    expect(h.agent.runOptions).toHaveLength(0);
+    expect(lastContent(h.channel)).toEqual({
+      file: { source: reportRealpath, fileName: 'report.md' },
+    });
+    expect(h.channel.sent.at(-1)?.options).toEqual(
+      expect.objectContaining({ replyTo: expect.stringMatching(/^om-/) }),
+    );
+  });
+
+  it('rejects sendfile paths outside its permitted roots and symbolic links', async () => {
+    const h = await createHarness();
+    const outside = join(h.tmp.root, 'outside.md');
+    const linked = join(h.tmp.workspace, 'linked-report.md');
+    await writeFile(outside, 'outside', 'utf8');
+    await symlink(outside, linked);
+
+    await expect(h.run(`/sendfile ${outside}`)).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('当前工作目录或桥接媒体目录');
+
+    await expect(h.run(`/sendfile ${linked}`)).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('不允许发送符号链接');
+  });
+
+  it('keeps direct file sending admin-only and enforces the attachment limit', async () => {
+    const h = await createHarness();
+    const report = join(h.tmp.workspace, 'large-report.md');
+    await writeFile(report, 'too large', 'utf8');
+    h.controls.profileConfig.attachments.maxFileBytes = 3;
+
+    await expect(h.run(`/sendfile ${report}`, { senderId: 'ou-not-admin' })).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('仅管理员可用');
+
+    await expect(h.run(`/sendfile ${report}`)).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('文件超过发送上限（3 B）');
   });
 
   it('shows workspace paths in group-visible /status replies', async () => {

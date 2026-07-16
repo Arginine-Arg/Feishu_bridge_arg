@@ -193,6 +193,7 @@ export function helpCard(agentName = 'Agent'): object {
         '- `/config` — 调整偏好、访问控制和 lark-cli 身份策略',
         '- `/model` — 选择模型；Codex 使用 CLI 原生模型和 reasoning 选项并同步到 profile',
         '- `/status` — 当前状态',
+        '- `/sendfile <path>` — 管理员直接回复当前消息发送工作目录内的文件',
         '- `/stop` — 结束当前正在跑的任务（也可点卡片底部 ⏹ 终止 按钮）',
         '- `/stop comment:<scopeHash>` — 管理员停止云文档评论任务',
         '- `/timeout [N|off|default]` — 当前 session 的探活分钟数,`/config` 改全局默认',

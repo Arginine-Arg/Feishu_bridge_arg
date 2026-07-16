@@ -1887,7 +1887,7 @@ function snapshotInformationScore(input: string): number {
 function isTerminalChromeLine(trimmed: string): boolean {
   return (
     /^Tip:/i.test(trimmed) ||
-    /^[•◦]\s+Working\s+\(\d+s\b.*\)(?:\s+·\s+.*)?$/i.test(trimmed) ||
+    /^[•◦]\s+Working\s+\((?:\d+h\s+)?(?:\d+m\s+)?\d+s\b.*\)(?:\s+·\s+.*)?$/i.test(trimmed) ||
     /^tab to queue message\b.*context left$/i.test(trimmed) ||
     /^\d+%\s+context left$/i.test(trimmed) ||
     /^[╭╰╮╯─│\s]+$/u.test(trimmed) ||
