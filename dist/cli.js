@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.24",
+  version: "0.6.25",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -5997,7 +5997,7 @@ var LiveTerminalSession = class {
       runId,
       events,
       stop: async () => {
-        this.write("");
+        this.write("\x1B");
       },
       waitForExit: async () => true
     };

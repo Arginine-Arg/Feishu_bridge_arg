@@ -814,6 +814,108 @@ setInterval(() => {}, 1000);
     expect(text).toMatch(/Attach command: tmux -L lark-channel-[^ ]+ attach -t main/);
   }, 15_000);
 
+  tmuxIt('interrupts a turn without destroying the tmux session or its history', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-stop-test-'));
+    const bin = join(dir, 'fake-tmux-stop-agent.mjs');
+    const inputTrace = join(dir, 'input-trace.txt');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs';
+process.stdin.setEncoding('utf8');
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+let draft = '';
+let state = 'idle';
+function screen(lines) {
+  process.stdout.write('\\x1b[2J\\x1b[H' + lines.join('\\n') + '\\n');
+}
+process.stdin.on('data', (chunk) => {
+  for (const char of chunk) {
+    if (char === '\\x1b' || char === '\\x01' || char === '\\x0b') {
+      if (state === 'working' && char === '\\x1b') {
+        appendFileSync(${JSON.stringify(inputTrace)}, 'esc\\n');
+        state = 'ready';
+        screen(['• Interrupted current task.', '› ']);
+      }
+      continue;
+    }
+    if (char !== '\\r' && char !== '\\n') {
+      draft += char;
+      continue;
+    }
+    const input = draft;
+    draft = '';
+    if (state === 'idle' && input === 'start long task') {
+      state = 'working';
+      screen(['PERSISTED_TMUX_HISTORY', '• Working (0s • esc to interrupt)', 'tab to queue message 99% context left']);
+    } else if (state === 'ready' && input === '/status') {
+      // A native command echo moves the command path from its startup timer
+      // to its normal idle timer, which then produces the bridge status
+      // fallback used below.
+      screen(['› /status']);
+    } else if (state === 'ready' && input === 'follow up') {
+      screen(['• Follow-up used the preserved tmux session.', '› ']);
+    }
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const options = {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-stop-preserves-session',
+      usePty: true,
+      backend: 'tmux' as const,
+      idleMs: 250,
+      outputFlushMs: 30,
+      startupTimeoutMs: 1000,
+    };
+    const session = pool.getOrCreate('tmux-stop-preserves-session', options);
+
+    try {
+      const interruptedTurn = session.run('tmux-stop-active-run', 'start long task', dir);
+      const interruptedIterator = interruptedTurn.events[Symbol.asyncIterator]();
+      expect((await interruptedIterator.next()).value).toMatchObject({ type: 'system' });
+      expect((await interruptedIterator.next()).value).toMatchObject({ type: 'text' });
+      await interruptedTurn.stop();
+      await testDelay(250);
+      await interruptedIterator.return?.();
+      expect(await readFile(inputTrace, 'utf8')).toContain('esc');
+      expect(session.isAlive()).toBe(true);
+
+      const status = await collect(session.run('tmux-stop-status', '/status', dir, 'command').events);
+      const statusText = textOf(status);
+      const socket = statusText.match(/Tmux socket: (lark-channel-[^\n]+)/)?.[1];
+      const target = statusText.match(/Tmux target: ([^\n]+)/)?.[1];
+      expect(socket).toBeTruthy();
+      expect(target).toBe('main:0.0');
+
+      const reused = pool.getOrCreate('tmux-stop-preserves-session', options);
+      expect(reused).toBe(session);
+      expect(textOf(await collect(reused.run('tmux-stop-follow-up', 'follow up', dir).events))).toContain(
+        'Follow-up used the preserved tmux session.',
+      );
+
+      const hasSession = spawnSync('tmux', ['-L', socket!, 'has-session', '-t', target!], {
+        encoding: 'utf8',
+      });
+      expect(hasSession.status).toBe(0);
+      const history = spawnSync('tmux', ['-L', socket!, 'capture-pane', '-p', '-S', '-100', '-t', target!], {
+        encoding: 'utf8',
+      });
+      expect(history.status).toBe(0);
+      expect(history.stdout).toContain('PERSISTED_TMUX_HISTORY');
+    } finally {
+      await pool.closeAll();
+    }
+  }, 20_000);
+
   it('ignores stale status panels for other commands and strips stale goal usage from status', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-stale-status-panel-test-'));
     const bin = join(dir, 'fake-stale-status-panel-agent.mjs');

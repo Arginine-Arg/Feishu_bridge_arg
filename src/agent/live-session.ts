@@ -135,7 +135,10 @@ export class LiveTerminalSession {
       runId,
       events,
       stop: async () => {
-        this.write('\x03');
+        // `Ctrl-C` terminates the interactive TUI itself, which also closes
+        // its tmux pane. The TUI's native interrupt key cancels only the
+        // active turn and keeps the persistent session available.
+        this.write('\x1b');
       },
       waitForExit: async () => true,
     };
