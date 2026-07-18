@@ -53,6 +53,10 @@ export interface AttachmentConfig {
   cacheMaxBytes: number;
 }
 
+export interface OutboundConfig {
+  allowedFileDirs: string[];
+}
+
 export type CommentConfig = Record<string, never>;
 
 export type LarkCliIdentityPreset = 'bot-only' | 'user-default';
@@ -91,6 +95,7 @@ export interface ProfileConfig {
   permissionSource?: PermissionSource;
   codex?: CodexConfig;
   attachments: AttachmentConfig;
+  outbound: OutboundConfig;
   comments: CommentConfig;
   larkCli: LarkCliConfig;
 }
@@ -151,6 +156,9 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     permissions?: Partial<PermissionConfig>;
     codex?: CodexConfig & { flags?: unknown };
     attachments?: Partial<AttachmentConfig>;
+    outbound?: {
+      allowedFileDirs?: unknown;
+    };
     comments?: unknown;
     larkCli?: unknown;
   };
@@ -199,6 +207,9 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
       imageMaxBytes: numberOr(raw.attachments?.imageMaxBytes, 25 * 1024 * 1024),
       cacheTtlMs: numberOr(raw.attachments?.cacheTtlMs, 24 * 60 * 60 * 1000),
       cacheMaxBytes: numberOr(raw.attachments?.cacheMaxBytes, 512 * 1024 * 1024),
+    },
+    outbound: {
+      allowedFileDirs: stringArray(raw.outbound?.allowedFileDirs),
     },
     comments,
     larkCli,

@@ -4,6 +4,7 @@ import type {
   NormalizedMessage,
 } from '@larksuite/channel';
 import { createLarkChannel } from '@larksuite/channel';
+import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { claudeCapability, codexCapability } from '../agent/capability';
 import { BridgeAgent, createBridgeAgentFromEnvironment } from '../bridge-agent';
@@ -61,6 +62,7 @@ import {
   toPromptAttachment,
 } from '../media/attachment';
 import { canRunAdminCommand, canUseDm, canUseGroup } from '../policy/access';
+import { resolveWorkingDirectory } from '../policy/workspace';
 import type { ScopeContext } from '../policy/run-policy';
 import { createOwnerRefreshController } from '../policy/owner';
 import { RunExecutor } from '../runtime/run-executor';
@@ -186,6 +188,11 @@ function stringifyArgs(args: unknown[]): string {
     .join(' ');
 }
 
+function expandHomeDirectory(path: string): string {
+  if (path === '~') return homedir();
+  return path.startsWith('~/') ? join(homedir(), path.slice(2)) : path;
+}
+
 export interface BridgeChannel {
   channel: LarkChannel;
   disconnect(): Promise<void>;
@@ -254,6 +261,30 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     log.warn('chat', 'mode-overridden-by-thread', fields);
   };
 
+  // @larksuite/channel defaults local path uploads to deny. Keep one mutable
+  // array because chat workspaces can change through /cd after channel startup.
+  const allowedFileDirs: string[] = [];
+  const allowLocalFileRoot = async (candidate: string): Promise<boolean> => {
+    const result = await resolveWorkingDirectory(expandHomeDirectory(candidate));
+    if (!result.ok) {
+      log.warn('channel', 'local-file-root-rejected', { reason: result.reason });
+      return false;
+    }
+    if (!allowedFileDirs.includes(result.cwdRealpath)) {
+      allowedFileDirs.push(result.cwdRealpath);
+      log.info('channel', 'local-file-root-allowed', { root: result.cwdRealpath });
+    }
+    return true;
+  };
+  const initialFileRoots = [
+    deps.appPaths?.mediaDir,
+    controls.profileConfig.workspaces.default,
+    ...Object.values(workspaces.listCwds()),
+    ...Object.values(workspaces.listNamed()),
+    ...controls.profileConfig.outbound.allowedFileDirs,
+  ].filter((root): root is string => Boolean(root));
+  await Promise.all(initialFileRoots.map((root) => allowLocalFileRoot(root)));
+
   const opts: LarkChannelOptions = {
     appId: cfg.accounts.app.id,
     appSecret,
@@ -278,6 +309,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     includeRawEvent: true,
     outbound: {
       streamThrottleMs: 400,
+      allowedFileDirs,
     },
     // SDK 1.65.0-alpha.3+ knobs.
     wsConfig: {
@@ -395,6 +427,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           executor,
           pool,
           liveInteractionByScope,
+          allowLocalFileRoot,
         }),
       ).catch((err) => log.fail('intake', err));
     },
@@ -594,6 +627,7 @@ interface IntakeDeps {
   executor: RunExecutor;
   pool: ProcessPool;
   liveInteractionByScope: Map<string, LiveInteractionState>;
+  allowLocalFileRoot: (root: string) => Promise<boolean>;
 }
 
 type LogThreadModeOverride = (input: {
@@ -618,6 +652,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     executor,
     pool,
     liveInteractionByScope,
+    allowLocalFileRoot,
   } = deps;
   const preview = msg.content.length > 80 ? `${msg.content.slice(0, 80)}…` : msg.content;
   // Resolve scope (and underlying chat mode) once at intake — every
@@ -749,6 +784,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
       runExecutor: executor,
       processPool: pool,
       controls,
+      allowLocalFileRoot,
     });
     if (handled) {
       const preservePending = commandPreservesPendingMessages(route.msg.content);

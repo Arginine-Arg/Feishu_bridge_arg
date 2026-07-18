@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.25",
+  version: "0.6.26",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -592,6 +592,9 @@ function normalizeProfileConfig(input) {
       imageMaxBytes: numberOr(raw.attachments?.imageMaxBytes, 25 * 1024 * 1024),
       cacheTtlMs: numberOr(raw.attachments?.cacheTtlMs, 24 * 60 * 60 * 1e3),
       cacheMaxBytes: numberOr(raw.attachments?.cacheMaxBytes, 512 * 1024 * 1024)
+    },
+    outbound: {
+      allowedFileDirs: stringArray(raw.outbound?.allowedFileDirs)
     },
     comments,
     larkCli
@@ -1631,6 +1634,7 @@ function serializeProfileConfig(profile2) {
     permissions: profile2.permissions,
     ...profile2.codex ? { codex: profile2.codex } : {},
     attachments: profile2.attachments,
+    outbound: profile2.outbound,
     comments: {},
     larkCli: profile2.larkCli
   };
@@ -5931,6 +5935,8 @@ var NORMAL_SUBMIT_RETRY_DELAY_MS = 1200;
 var MAX_TURN_OUTPUT_CHARS = 12e4;
 var DEFAULT_PTY_ROWS = "48";
 var DEFAULT_PTY_COLUMNS = "120";
+var TMUX_CAPTURE_HISTORY_LINES = 1e3;
+var TMUX_HISTORY_FRAME_PREFIX = "\x1B]777;arg-bridge-history=";
 var LIVE_DIAG_PREVIEW_CHARS = 800;
 var LIVE_DIAG_MAX_FRAMES = 8;
 var LiveSessionPool = class {
@@ -5968,6 +5974,7 @@ var LiveTerminalSession = class {
   startedAt = 0;
   activeTurnCleanup;
   lastTerminalSnapshot = "";
+  lastTerminalHistory = "";
   constructor(opts, onClose = () => {
   }) {
     this.opts = opts;
@@ -6061,6 +6068,7 @@ var LiveTerminalSession = class {
     if (output.mode === "snapshot" && output.text.trim()) {
       this.lastTerminalSnapshot = output.text;
     }
+    if (output.historyText?.trim()) this.lastTerminalHistory = output.historyText;
     if (!output.text.trim() && !output.terminalText?.trim()) return;
     this.emitter.emit("data", output);
   }
@@ -6216,7 +6224,8 @@ var LiveTerminalSession = class {
           suspendIdle();
         }
       }
-      const text = sanitizeLiveTurnOutput(event.text, prompt);
+      const useHistory = Boolean(event.historyText);
+      const text = useHistory ? event.historyText : sanitizeLiveTurnOutput(event.text, prompt);
       const beforeAppendFrame = commandMode && diagFrames < LIVE_DIAG_MAX_FRAMES;
       if (beforeAppendFrame) diagFrames += 1;
       if (!text) {
@@ -6226,7 +6235,7 @@ var LiveTerminalSession = class {
         }
         return;
       }
-      const accepted = event.mode === "snapshot" ? output.replace(text) : output.append(text);
+      const accepted = event.mode === "snapshot" ? output.replace(text, useHistory) : output.append(text);
       if (beforeAppendFrame) {
         log.info("agent-live", "command-output", {
           mode: event.mode,
@@ -6300,6 +6309,7 @@ var LiveTerminalSession = class {
       if (!done) {
         this.cleaner.resetTurn();
         output.setSnapshotBaseline(this.lastTerminalSnapshot);
+        output.setHistoryBaseline(this.lastTerminalHistory);
         if (commandMode) {
           log.info("agent-live", "command-clear", { sequence: "esc ctrl-a ctrl-k" });
           await this.clearPendingInput();
@@ -6581,16 +6591,21 @@ function capture() {
     cleanup();
     process.exit(0);
   }
-  const result = tmux(['capture-pane', '-p', '-t', target]);
+  const result = tmux(['capture-pane', '-p', '-S', '-${TMUX_CAPTURE_HISTORY_LINES}', '-t', target]);
   if (result.status !== 0) {
     writeError('failed to capture tmux live session', result);
     cleanup();
     process.exit(1);
   }
-  const snapshot = result.stdout.replace(/\s+$/u, '');
+  const captured = result.stdout.replace(/\n$/u, '');
+  const capturedLines = captured.split('\n');
+  const visibleRows = Number.parseInt(rows, 10) || 48;
+  const snapshot = capturedLines.slice(-visibleRows).join('\n').replace(/\s+$/u, '');
+  const history = captured.replace(/\s+$/u, '');
   if (snapshot && snapshot !== lastSnapshot) {
     lastSnapshot = snapshot;
-    process.stdout.write('\x1b[2J\x1b[H' + snapshot);
+    const historyFrame = '\x1b]777;arg-bridge-history=' + Buffer.from(history, 'utf8').toString('base64') + '\x07';
+    process.stdout.write(historyFrame + '\x1b[2J\x1b[H' + snapshot);
   }
 }
 
@@ -6739,42 +6754,87 @@ function previewLiveText(input) {
   return input.replace(/\x1B/g, "<ESC>").replace(/\r/g, "<CR>").replace(/\t/g, "<TAB>").slice(0, LIVE_DIAG_PREVIEW_CHARS);
 }
 function cleanTerminalOutput(input) {
-  const withoutAnsi = input.replace(/\x1B\][^\x07]*(?:\x07|\x1B\\)/g, "").replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "").replace(/\x1B[@-Z\\-_]/g, "").replace(/(^|[\r\n])\d{1,4}G(?=\S)/g, "$1").replace(/(\S)78\s+(?=\S)/g, "$1").replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "").replace(/\r\n/g, "\n");
+  const withoutAnsi = input.replace(/\x1B\][^\x07]*(?:\x07|\x1B\\)/g, "").replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "").replace(/\x1B[@-Z\\-_]/g, "").replace(/(^|[\r\n])\d{1,4}G(?=\S)/g, "$1").replace(/(\S)78[ \t]+(?=\S)/g, "$1").replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "").replace(/\r\n/g, "\n");
   return normalizeScatteredCursorLines(collapseCarriageReturns(withoutAnsi)).replace(/\n{4,}/g, "\n\n\n");
 }
 var TerminalOutputCleaner = class {
   carry = "";
   screenMode = false;
   lastTerminalSnapshot = "";
+  transportCarry = "";
+  lastHistorySnapshot = "";
   screen = new VirtualTerminalScreen();
   setScreenMode(enabled) {
     this.screenMode = enabled;
     this.carry = "";
     this.lastTerminalSnapshot = "";
+    this.transportCarry = "";
+    this.lastHistorySnapshot = "";
     this.screen.reset();
   }
   resetTurn() {
     this.carry = "";
     this.lastTerminalSnapshot = "";
+    this.transportCarry = "";
+    this.lastHistorySnapshot = "";
     if (this.screenMode) this.screen.reset();
   }
   push(input) {
     if (this.screenMode) {
-      this.screen.write(input);
+      this.screen.write(this.extractHistoryFrames(input));
       const terminalText = this.screen.snapshot();
       const snapshot = stripKnownLiveNoise(terminalText);
       if (!terminalText.trim() || terminalText === this.lastTerminalSnapshot) {
         return { mode: "snapshot", text: "" };
       }
       this.lastTerminalSnapshot = terminalText;
-      return { mode: "snapshot", text: snapshot, terminalText };
+      return {
+        mode: "snapshot",
+        text: snapshot,
+        terminalText,
+        ...this.lastHistorySnapshot ? { historyText: this.lastHistorySnapshot } : {}
+      };
     }
     const combined = this.carry + input;
     const splitAt = completePrefixEnd(combined);
     this.carry = combined.slice(splitAt);
     return { mode: "append", text: cleanTerminalOutput(combined.slice(0, splitAt)) };
   }
+  extractHistoryFrames(input) {
+    let combined = this.transportCarry + input;
+    this.transportCarry = "";
+    let terminal = "";
+    while (combined) {
+      const start = combined.indexOf(TMUX_HISTORY_FRAME_PREFIX);
+      if (start < 0) {
+        const carryLength = matchingPrefixSuffixLength(combined, TMUX_HISTORY_FRAME_PREFIX);
+        terminal += combined.slice(0, combined.length - carryLength);
+        this.transportCarry = combined.slice(combined.length - carryLength);
+        break;
+      }
+      terminal += combined.slice(0, start);
+      const payloadStart = start + TMUX_HISTORY_FRAME_PREFIX.length;
+      const end = combined.indexOf("\x07", payloadStart);
+      if (end < 0) {
+        this.transportCarry = combined.slice(start);
+        break;
+      }
+      this.lastHistorySnapshot = Buffer.from(
+        combined.slice(payloadStart, end),
+        "base64"
+      ).toString("utf8");
+      combined = combined.slice(end + 1);
+    }
+    return terminal;
+  }
 };
+function matchingPrefixSuffixLength(input, prefix) {
+  const max = Math.min(input.length, prefix.length - 1);
+  for (let length = max; length > 0; length -= 1) {
+    if (input.endsWith(prefix.slice(0, length))) return length;
+  }
+  return 0;
+}
 var VirtualTerminalScreen = class {
   width;
   height;
@@ -6946,8 +7006,12 @@ var TurnOutputBuffer = class {
   lastCompleteLine = "";
   truncated = false;
   snapshotBaseline = "";
+  historyBaseline = "";
   setSnapshotBaseline(snapshot) {
     this.snapshotBaseline = snapshot;
+  }
+  setHistoryBaseline(snapshot) {
+    this.historyBaseline = snapshot;
   }
   append(raw) {
     const compacted = stripPromptMismatchedLiveContent(this.compact(raw), this.promptEcho);
@@ -6962,9 +7026,16 @@ var TurnOutputBuffer = class {
     this.enforceLimit();
     return true;
   }
-  replace(raw) {
-    const scoped = scopeLiveSnapshotToPrompt(raw, this.promptEcho, this.snapshotBaseline);
-    this.snapshotBaseline = raw;
+  replace(raw, preferPromptAnchor = false) {
+    const hasPromptAnchor = preferPromptAnchor && snapshotHasPromptAnchor(raw, this.promptEcho);
+    const scoped = scopeLiveSnapshotToPrompt(
+      raw,
+      this.promptEcho,
+      preferPromptAnchor ? this.historyBaseline : this.snapshotBaseline,
+      preferPromptAnchor
+    );
+    if (preferPromptAnchor) this.historyBaseline = raw;
+    else this.snapshotBaseline = raw;
     const compacted = stripPromptMismatchedLiveContent(
       this.compact(scoped, true),
       this.promptEcho
@@ -6974,6 +7045,25 @@ var TurnOutputBuffer = class {
     if (isStaleStatusSnapshotForPrompt(compacted, this.promptEcho)) return false;
     if (isStaleGoalUsageSnapshotForPrompt(compacted, this.promptEcho)) return false;
     if (isSlashCompletionSnapshotForPrompt(compacted, this.promptEcho)) return false;
+    if (preferPromptAnchor) {
+      const deliverable = stripKnownLiveNoise(compacted, this.promptEcho);
+      if (!deliverable.trim()) return false;
+      const normalized = deliverable.endsWith("\n") ? deliverable : `${deliverable}
+`;
+      if (hasPromptAnchor) {
+        const nextPending = undeliveredSnapshotSuffix(this.emitted, normalized);
+        if (this.pending === nextPending) return false;
+        if (shouldKeepRicherSnapshot(this.pending, nextPending)) return false;
+        this.pending = nextPending;
+      } else {
+        const existing = this.emitted + this.pending;
+        const suffix = undeliveredSnapshotSuffix(existing, normalized);
+        if (!suffix) return false;
+        this.pending += suffix;
+      }
+      this.enforceLimit();
+      return Boolean(this.pending);
+    }
     if (this.pending === compacted || this.emitted.endsWith(compacted)) return false;
     if (shouldKeepRicherSnapshot(this.pending, compacted)) return false;
     this.pending = compacted.endsWith("\n") ? compacted : `${compacted}
@@ -7029,6 +7119,16 @@ ${this.pending}`;
     }
   }
 };
+function undeliveredSnapshotSuffix(emitted, snapshot) {
+  if (!emitted) return snapshot;
+  if (snapshot.startsWith(emitted)) return snapshot.slice(emitted.length);
+  if (emitted.endsWith(snapshot)) return "";
+  const max = Math.min(emitted.length, snapshot.length);
+  for (let overlap = max; overlap > 0; overlap -= 1) {
+    if (emitted.endsWith(snapshot.slice(0, overlap))) return snapshot.slice(overlap);
+  }
+  return snapshot;
+}
 function collapseCarriageReturns(input) {
   let out = "";
   let line = "";
@@ -7127,7 +7227,7 @@ function stripPromptEcho(input, prompt) {
 `)) return trimmed.slice(echo.length + 1);
   return input.split("\n").filter((line) => !isPromptEchoLine(line, echo)).filter((line) => !isPromptScopedTerminalChromeLine(line.trim(), echo)).join("\n").trimStart();
 }
-function scopeLiveSnapshotToPrompt(input, prompt, previousSnapshot = "") {
+function scopeLiveSnapshotToPrompt(input, prompt, previousSnapshot = "", preferPromptAnchor = false) {
   const echo = prompt.trim();
   if (!echo) return input;
   const lines = input.split("\n");
@@ -7139,6 +7239,8 @@ function scopeLiveSnapshotToPrompt(input, prompt, previousSnapshot = "") {
   if (picker !== void 0) return picker;
   const controlPicker = scopeControlLiteralPickerSnapshot(lines, echo);
   if (controlPicker !== void 0) return controlPicker;
+  const promptScoped = scopeSnapshotAfterPrompt(lines, echo);
+  if (preferPromptAnchor && promptScoped !== void 0) return promptScoped;
   const delta = scopeSnapshotDelta(lines, previousSnapshot);
   if (delta !== void 0) return delta;
   if (!echo.startsWith("/") && isLiveTerminalInteraction(input)) {
@@ -7146,9 +7248,20 @@ function scopeLiveSnapshotToPrompt(input, prompt, previousSnapshot = "") {
     if (interactionStart >= 0) return lines.slice(interactionStart).join("\n");
     return input;
   }
-  const promptLines = echo.split("\n");
+  if (promptScoped !== void 0) return promptScoped;
+  return lines.some((line) => {
+    const trimmed = line.trimStart();
+    return trimmed.startsWith("\u203A") && !isTerminalChromeLine(trimmed);
+  }) ? "" : input;
+}
+function snapshotHasPromptAnchor(input, prompt) {
+  const echo = prompt.trim();
+  return Boolean(echo) && scopeSnapshotAfterPrompt(input.split("\n"), echo) !== void 0;
+}
+function scopeSnapshotAfterPrompt(lines, prompt) {
+  const promptLines = prompt.split("\n");
   const anchorIndex = promptLines.findIndex((line) => line.trim().length > 0);
-  const anchor = promptLines[anchorIndex]?.trim() ?? echo;
+  const anchor = promptLines[anchorIndex]?.trim() ?? prompt;
   for (let index = lines.length - 1; index >= 0; index -= 1) {
     if (!isPromptEchoLine(lines[index] ?? "", anchor)) continue;
     let cursor = index + 1;
@@ -7162,12 +7275,8 @@ function scopeLiveSnapshotToPrompt(input, prompt, previousSnapshot = "") {
     }
     return lines.slice(cursor).join("\n");
   }
-  const wrappedPromptEnd = findWrappedPromptEnd(lines, echo);
-  if (wrappedPromptEnd !== void 0) return lines.slice(wrappedPromptEnd).join("\n");
-  return lines.some((line) => {
-    const trimmed = line.trimStart();
-    return trimmed.startsWith("\u203A") && !isTerminalChromeLine(trimmed);
-  }) ? "" : input;
+  const wrappedPromptEnd = findWrappedPromptEnd(lines, prompt);
+  return wrappedPromptEnd !== void 0 ? lines.slice(wrappedPromptEnd).join("\n") : void 0;
 }
 function findWrappedPromptEnd(lines, prompt) {
   const compactPrompt = compactTerminalPrompt(prompt);
@@ -8399,6 +8508,7 @@ function isWindowsCommandNotFoundLine2(line) {
 
 // src/bot/channel.ts
 import { createLarkChannel } from "@larksuite/channel";
+import { homedir as homedir7 } from "os";
 import { dirname as dirname16, join as join21 } from "path";
 
 // src/agent/capability.ts
@@ -10595,13 +10705,18 @@ async function handleSendFile(args, ctx) {
     return;
   }
   const allowedRoots = await resolveSendFileRoots(ctx);
-  if (!allowedRoots.some((root) => isPathWithinRoot(resolvedPath, root))) {
-    await reply(ctx, "\u6587\u4EF6\u5FC5\u987B\u4F4D\u4E8E\u5F53\u524D\u5DE5\u4F5C\u76EE\u5F55\u6216\u6865\u63A5\u5A92\u4F53\u76EE\u5F55\u5185\u3002");
+  const matchingRoot = allowedRoots.find((root) => isPathWithinRoot(resolvedPath, root));
+  if (!matchingRoot) {
+    await reply(ctx, "\u6587\u4EF6\u5FC5\u987B\u4F4D\u4E8E\u5F53\u524D\u5DE5\u4F5C\u76EE\u5F55\u6216\u6865\u63A5\u5A92\u4F53\u76EE\u5F55\uFF0C\u6216 `outbound.allowedFileDirs` \u5185\u3002");
     return;
   }
   const maxFileBytes = ctx.controls.profileConfig.attachments.maxFileBytes;
   if (entry.size > maxFileBytes) {
     await reply(ctx, `\u6587\u4EF6\u8D85\u8FC7\u53D1\u9001\u4E0A\u9650\uFF08${formatByteLimit(maxFileBytes)}\uFF09\u3002`);
+    return;
+  }
+  if (ctx.allowLocalFileRoot && !await ctx.allowLocalFileRoot(matchingRoot)) {
+    await reply(ctx, "\u6587\u4EF6\u8DEF\u5F84\u672A\u88AB\u5141\u8BB8\uFF0C\u8BF7\u68C0\u67E5 `outbound.allowedFileDirs`\u3002");
     return;
   }
   try {
@@ -10618,15 +10733,24 @@ async function handleSendFile(args, ctx) {
   } catch (err) {
     log.fail("command", err, { step: "send-file" });
     reportMetric("command_fail", 1, { step: "send-file" });
-    await reply(ctx, "\u6587\u4EF6\u53D1\u9001\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u98DE\u4E66\u5E94\u7528\u7684\u6587\u4EF6\u6743\u9650\u540E\u91CD\u8BD5\u3002");
+    await reply(ctx, sendFileFailureMessage(err));
   }
 }
 async function resolveSendFileRoots(ctx) {
-  const candidates = [effectiveWorkspaceCwd(ctx), commandProfilePaths(ctx).mediaDir].filter(
-    (path) => Boolean(path)
-  );
+  const candidates = [
+    effectiveWorkspaceCwd(ctx),
+    commandProfilePaths(ctx).mediaDir,
+    ...ctx.controls.profileConfig.outbound.allowedFileDirs.map(expandTilde)
+  ].filter((path) => Boolean(path));
   const roots = await Promise.all(candidates.map((path) => realpath4(path).catch(() => void 0)));
   return [...new Set(roots.filter((path) => Boolean(path)))];
+}
+function sendFileFailureMessage(err) {
+  const message = err instanceof Error ? err.message : String(err);
+  if (/allowedFileDirs|outside allowed directories|file path is not allowed/i.test(message)) {
+    return "\u6587\u4EF6\u8DEF\u5F84\u672A\u88AB\u5141\u8BB8\uFF0C\u8BF7\u68C0\u67E5 `outbound.allowedFileDirs`\u3002";
+  }
+  return "\u6587\u4EF6\u4E0A\u4F20\u5230\u98DE\u4E66\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u5E94\u7528\u6743\u9650\u3001token \u548C\u7F51\u7EDC\u540E\u91CD\u8BD5\u3002";
 }
 function isPathWithinRoot(path, root) {
   const pathRelative = relative(root, path);
@@ -15265,6 +15389,10 @@ function stringifyArgs(args) {
     }
   }).join(" ");
 }
+function expandHomeDirectory(path) {
+  if (path === "~") return homedir7();
+  return path.startsWith("~/") ? join21(homedir7(), path.slice(2)) : path;
+}
 async function startChannel(deps) {
   const { cfg, agent, sessions, sessionCatalog, workspaces, controls } = deps;
   const bridgeAgent = deps.bridgeAgent ?? createBridgeAgentFromEnvironment();
@@ -15297,6 +15425,27 @@ async function startChannel(deps) {
     threadModeOverrideWarnedChats.add(chatId);
     log.warn("chat", "mode-overridden-by-thread", fields);
   };
+  const allowedFileDirs = [];
+  const allowLocalFileRoot = async (candidate) => {
+    const result = await resolveWorkingDirectory(expandHomeDirectory(candidate));
+    if (!result.ok) {
+      log.warn("channel", "local-file-root-rejected", { reason: result.reason });
+      return false;
+    }
+    if (!allowedFileDirs.includes(result.cwdRealpath)) {
+      allowedFileDirs.push(result.cwdRealpath);
+      log.info("channel", "local-file-root-allowed", { root: result.cwdRealpath });
+    }
+    return true;
+  };
+  const initialFileRoots = [
+    deps.appPaths?.mediaDir,
+    controls.profileConfig.workspaces.default,
+    ...Object.values(workspaces.listCwds()),
+    ...Object.values(workspaces.listNamed()),
+    ...controls.profileConfig.outbound.allowedFileDirs
+  ].filter((root) => Boolean(root));
+  await Promise.all(initialFileRoots.map((root) => allowLocalFileRoot(root)));
   const opts = {
     appId: cfg.accounts.app.id,
     appSecret,
@@ -15317,7 +15466,8 @@ async function startChannel(deps) {
     // the normalizer drops (e.g. action.form_value on CardKit 2.0 form submits).
     includeRawEvent: true,
     outbound: {
-      streamThrottleMs: 400
+      streamThrottleMs: 400,
+      allowedFileDirs
     },
     // SDK 1.65.0-alpha.3+ knobs.
     wsConfig: {
@@ -15417,7 +15567,8 @@ async function startChannel(deps) {
           logThreadModeOverride,
           executor,
           pool,
-          liveInteractionByScope
+          liveInteractionByScope,
+          allowLocalFileRoot
         })
       ).catch((err) => log.fail("intake", err));
     },
@@ -15591,7 +15742,8 @@ async function intakeMessage(deps) {
     logThreadModeOverride,
     executor,
     pool,
-    liveInteractionByScope
+    liveInteractionByScope,
+    allowLocalFileRoot
   } = deps;
   const preview2 = msg.content.length > 80 ? `${msg.content.slice(0, 80)}\u2026` : msg.content;
   const resolvedMode = await chatModeCache.resolve(channel, msg.chatId);
@@ -15684,7 +15836,8 @@ async function intakeMessage(deps) {
       }),
       runExecutor: executor,
       processPool: pool,
-      controls
+      controls,
+      allowLocalFileRoot
     });
     if (handled) {
       const preservePending = commandPreservesPendingMessages(route.msg.content);

@@ -18,6 +18,7 @@ interface RunOverrides {
   chatId?: string;
   chatMode?: CommandContext['chatMode'];
   mentions?: NormalizedMessage['mentions'];
+  allowLocalFileRoot?: CommandContext['allowLocalFileRoot'];
 }
 
 interface Harness {
@@ -255,6 +256,58 @@ describe('Bridge command contracts', () => {
     );
   });
 
+  it('registers the verified workspace root before sending a local file', async () => {
+    const h = await createHarness();
+    const report = join(h.tmp.workspace, 'report.md');
+    await writeFile(report, '# Report\n', 'utf8');
+    const allowLocalFileRoot = vi.fn(async () => true);
+
+    await expect(h.run(`/sendfile ${report}`, { allowLocalFileRoot })).resolves.toBe(true);
+
+    expect(allowLocalFileRoot).toHaveBeenCalledWith(await realpath(h.tmp.workspace));
+  });
+
+  it('reports a local allowlist registration failure without blaming Feishu permissions', async () => {
+    const h = await createHarness();
+    const report = join(h.tmp.workspace, 'report.md');
+    await writeFile(report, '# Report\n', 'utf8');
+
+    await expect(
+      h.run(`/sendfile ${report}`, { allowLocalFileRoot: async () => false }),
+    ).resolves.toBe(true);
+
+    expect(lastMarkdown(h.channel)).toContain('outbound.allowedFileDirs');
+    expect(lastMarkdown(h.channel)).not.toContain('飞书应用的文件权限');
+  });
+
+  it('allows files under an explicit outbound directory and classifies SDK allowlist errors', async () => {
+    const h = await createHarness();
+    const exportsDir = join(h.tmp.root, 'exports');
+    const report = join(exportsDir, 'report.md');
+    await mkdir(exportsDir, { recursive: true });
+    await writeFile(report, '# Report\n', 'utf8');
+    h.controls.profileConfig.outbound.allowedFileDirs = [exportsDir];
+    vi.spyOn(h.channel, 'send').mockRejectedValueOnce(
+      new Error('local file source requires `outbound.allowedFileDirs` to be configured'),
+    );
+
+    await expect(h.run(`/sendfile ${report}`)).resolves.toBe(true);
+
+    expect(lastMarkdown(h.channel)).toContain('outbound.allowedFileDirs');
+  });
+
+  it('classifies non-local send failures as Feishu API, token, or network errors', async () => {
+    const h = await createHarness();
+    const report = join(h.tmp.workspace, 'report.md');
+    await writeFile(report, '# Report\n', 'utf8');
+    vi.spyOn(h.channel, 'send').mockRejectedValueOnce(new Error('request timed out'));
+
+    await expect(h.run(`/sendfile ${report}`)).resolves.toBe(true);
+
+    expect(lastMarkdown(h.channel)).toContain('应用权限、token 和网络');
+    expect(lastMarkdown(h.channel)).not.toContain('outbound.allowedFileDirs');
+  });
+
   it('rejects sendfile paths outside its permitted roots and symbolic links', async () => {
     const h = await createHarness();
     const outside = join(h.tmp.root, 'outside.md');
@@ -401,6 +454,7 @@ async function createHarness(): Promise<Harness> {
       agent,
       activeRuns,
       controls,
+      allowLocalFileRoot: overrides.allowLocalFileRoot,
     });
   };
 

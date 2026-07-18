@@ -19,6 +19,8 @@ type LiveOutput = {
   text: string;
   /** Terminal snapshot before presentation-only chrome is stripped. */
   terminalText?: string;
+  /** Bounded tmux history used to recover output above the visible pane. */
+  historyText?: string;
 };
 export type LiveTerminalBackend = 'auto' | 'tmux' | 'pty' | 'pipe';
 
@@ -62,6 +64,8 @@ const NORMAL_SUBMIT_RETRY_DELAY_MS = 1_200;
 const MAX_TURN_OUTPUT_CHARS = 120_000;
 const DEFAULT_PTY_ROWS = '48';
 const DEFAULT_PTY_COLUMNS = '120';
+const TMUX_CAPTURE_HISTORY_LINES = 1000;
+const TMUX_HISTORY_FRAME_PREFIX = '\x1B]777;arg-bridge-history=';
 const LIVE_DIAG_PREVIEW_CHARS = 800;
 const LIVE_DIAG_MAX_FRAMES = 8;
 
@@ -103,6 +107,7 @@ export class LiveTerminalSession {
   private startedAt = 0;
   private activeTurnCleanup: (() => void) | undefined;
   private lastTerminalSnapshot = '';
+  private lastTerminalHistory = '';
 
   constructor(opts: LiveSessionCommand, onClose: () => void = () => {}) {
     this.opts = opts;
@@ -206,6 +211,7 @@ export class LiveTerminalSession {
     if (output.mode === 'snapshot' && output.text.trim()) {
       this.lastTerminalSnapshot = output.text;
     }
+    if (output.historyText?.trim()) this.lastTerminalHistory = output.historyText;
     if (!output.text.trim() && !output.terminalText?.trim()) return;
     this.emitter.emit('data', output);
   }
@@ -388,7 +394,13 @@ export class LiveTerminalSession {
           suspendIdle();
         }
       }
-      const text = sanitizeLiveTurnOutput(event.text, prompt);
+      const useHistory = Boolean(event.historyText);
+      // Tmux history must retain prompt echoes until TurnOutputBuffer scopes
+      // the capture to the latest turn. Current-pane snapshots are already
+      // scoped through their rolling baseline and can be sanitized eagerly.
+      const text = useHistory
+        ? event.historyText!
+        : sanitizeLiveTurnOutput(event.text, prompt);
       const beforeAppendFrame = commandMode && diagFrames < LIVE_DIAG_MAX_FRAMES;
       if (beforeAppendFrame) diagFrames += 1;
       if (!text) {
@@ -400,7 +412,9 @@ export class LiveTerminalSession {
         }
         return;
       }
-      const accepted = event.mode === 'snapshot' ? output.replace(text) : output.append(text);
+      const accepted = event.mode === 'snapshot'
+        ? output.replace(text, useHistory)
+        : output.append(text);
       if (beforeAppendFrame) {
         log.info('agent-live', 'command-output', {
           mode: event.mode,
@@ -478,6 +492,7 @@ export class LiveTerminalSession {
       if (!done) {
         this.cleaner.resetTurn();
         output.setSnapshotBaseline(this.lastTerminalSnapshot);
+        output.setHistoryBaseline(this.lastTerminalHistory);
         if (commandMode) {
           log.info('agent-live', 'command-clear', { sequence: 'esc ctrl-a ctrl-k' });
           await this.clearPendingInput();
@@ -790,16 +805,21 @@ function capture() {
     cleanup();
     process.exit(0);
   }
-  const result = tmux(['capture-pane', '-p', '-t', target]);
+  const result = tmux(['capture-pane', '-p', '-S', '-${TMUX_CAPTURE_HISTORY_LINES}', '-t', target]);
   if (result.status !== 0) {
     writeError('failed to capture tmux live session', result);
     cleanup();
     process.exit(1);
   }
-  const snapshot = result.stdout.replace(/\s+$/u, '');
+  const captured = result.stdout.replace(/\n$/u, '');
+  const capturedLines = captured.split('\n');
+  const visibleRows = Number.parseInt(rows, 10) || 48;
+  const snapshot = capturedLines.slice(-visibleRows).join('\n').replace(/\s+$/u, '');
+  const history = captured.replace(/\s+$/u, '');
   if (snapshot && snapshot !== lastSnapshot) {
     lastSnapshot = snapshot;
-    process.stdout.write('\x1b[2J\x1b[H' + snapshot);
+    const historyFrame = '\x1b]777;arg-bridge-history=' + Buffer.from(history, 'utf8').toString('base64') + '\x07';
+    process.stdout.write(historyFrame + '\x1b[2J\x1b[H' + snapshot);
   }
 }
 
@@ -984,7 +1004,7 @@ export function cleanTerminalOutput(input: string): string {
     .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
     .replace(/\x1B[@-Z\\-_]/g, '')
     .replace(/(^|[\r\n])\d{1,4}G(?=\S)/g, '$1')
-    .replace(/(\S)78\s+(?=\S)/g, '$1')
+    .replace(/(\S)78[ \t]+(?=\S)/g, '$1')
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
     .replace(/\r\n/g, '\n');
   return normalizeScatteredCursorLines(collapseCarriageReturns(withoutAnsi)).replace(/\n{4,}/g, '\n\n\n');
@@ -994,31 +1014,44 @@ class TerminalOutputCleaner {
   private carry = '';
   private screenMode = false;
   private lastTerminalSnapshot = '';
+  private transportCarry = '';
+  private lastHistorySnapshot = '';
   private readonly screen = new VirtualTerminalScreen();
 
   setScreenMode(enabled: boolean): void {
     this.screenMode = enabled;
     this.carry = '';
     this.lastTerminalSnapshot = '';
+    this.transportCarry = '';
+    this.lastHistorySnapshot = '';
     this.screen.reset();
   }
 
   resetTurn(): void {
     this.carry = '';
     this.lastTerminalSnapshot = '';
+    this.transportCarry = '';
+    this.lastHistorySnapshot = '';
     if (this.screenMode) this.screen.reset();
   }
 
   push(input: string): LiveOutput {
     if (this.screenMode) {
-      this.screen.write(input);
+      this.screen.write(this.extractHistoryFrames(input));
       const terminalText = this.screen.snapshot();
       const snapshot = stripKnownLiveNoise(terminalText);
       if (!terminalText.trim() || terminalText === this.lastTerminalSnapshot) {
         return { mode: 'snapshot', text: '' };
       }
       this.lastTerminalSnapshot = terminalText;
-      return { mode: 'snapshot', text: snapshot, terminalText };
+      return {
+        mode: 'snapshot',
+        text: snapshot,
+        terminalText,
+        ...(this.lastHistorySnapshot
+          ? { historyText: this.lastHistorySnapshot }
+          : {}),
+      };
     }
 
     const combined = this.carry + input;
@@ -1026,6 +1059,44 @@ class TerminalOutputCleaner {
     this.carry = combined.slice(splitAt);
     return { mode: 'append', text: cleanTerminalOutput(combined.slice(0, splitAt)) };
   }
+
+  private extractHistoryFrames(input: string): string {
+    let combined = this.transportCarry + input;
+    this.transportCarry = '';
+    let terminal = '';
+
+    while (combined) {
+      const start = combined.indexOf(TMUX_HISTORY_FRAME_PREFIX);
+      if (start < 0) {
+        const carryLength = matchingPrefixSuffixLength(combined, TMUX_HISTORY_FRAME_PREFIX);
+        terminal += combined.slice(0, combined.length - carryLength);
+        this.transportCarry = combined.slice(combined.length - carryLength);
+        break;
+      }
+      terminal += combined.slice(0, start);
+      const payloadStart = start + TMUX_HISTORY_FRAME_PREFIX.length;
+      const end = combined.indexOf('\x07', payloadStart);
+      if (end < 0) {
+        this.transportCarry = combined.slice(start);
+        break;
+      }
+      this.lastHistorySnapshot = Buffer.from(
+        combined.slice(payloadStart, end),
+        'base64',
+      ).toString('utf8');
+      combined = combined.slice(end + 1);
+    }
+
+    return terminal;
+  }
+}
+
+function matchingPrefixSuffixLength(input: string, prefix: string): number {
+  const max = Math.min(input.length, prefix.length - 1);
+  for (let length = max; length > 0; length -= 1) {
+    if (input.endsWith(prefix.slice(0, length))) return length;
+  }
+  return 0;
 }
 
 class VirtualTerminalScreen {
@@ -1215,6 +1286,7 @@ class TurnOutputBuffer {
   private lastCompleteLine = '';
   private truncated = false;
   private snapshotBaseline = '';
+  private historyBaseline = '';
 
   constructor(
     private readonly maxChars: number,
@@ -1224,6 +1296,10 @@ class TurnOutputBuffer {
 
   setSnapshotBaseline(snapshot: string): void {
     this.snapshotBaseline = snapshot;
+  }
+
+  setHistoryBaseline(snapshot: string): void {
+    this.historyBaseline = snapshot;
   }
 
   append(raw: string): boolean {
@@ -1241,9 +1317,16 @@ class TurnOutputBuffer {
     return true;
   }
 
-  replace(raw: string): boolean {
-    const scoped = scopeLiveSnapshotToPrompt(raw, this.promptEcho, this.snapshotBaseline);
-    this.snapshotBaseline = raw;
+  replace(raw: string, preferPromptAnchor = false): boolean {
+    const hasPromptAnchor = preferPromptAnchor && snapshotHasPromptAnchor(raw, this.promptEcho);
+    const scoped = scopeLiveSnapshotToPrompt(
+      raw,
+      this.promptEcho,
+      preferPromptAnchor ? this.historyBaseline : this.snapshotBaseline,
+      preferPromptAnchor,
+    );
+    if (preferPromptAnchor) this.historyBaseline = raw;
+    else this.snapshotBaseline = raw;
     const compacted = stripPromptMismatchedLiveContent(
       this.compact(scoped, true),
       this.promptEcho,
@@ -1253,6 +1336,24 @@ class TurnOutputBuffer {
     if (isStaleStatusSnapshotForPrompt(compacted, this.promptEcho)) return false;
     if (isStaleGoalUsageSnapshotForPrompt(compacted, this.promptEcho)) return false;
     if (isSlashCompletionSnapshotForPrompt(compacted, this.promptEcho)) return false;
+    if (preferPromptAnchor) {
+      const deliverable = stripKnownLiveNoise(compacted, this.promptEcho);
+      if (!deliverable.trim()) return false;
+      const normalized = deliverable.endsWith('\n') ? deliverable : `${deliverable}\n`;
+      if (hasPromptAnchor) {
+        const nextPending = undeliveredSnapshotSuffix(this.emitted, normalized);
+        if (this.pending === nextPending) return false;
+        if (shouldKeepRicherSnapshot(this.pending, nextPending)) return false;
+        this.pending = nextPending;
+      } else {
+        const existing = this.emitted + this.pending;
+        const suffix = undeliveredSnapshotSuffix(existing, normalized);
+        if (!suffix) return false;
+        this.pending += suffix;
+      }
+      this.enforceLimit();
+      return Boolean(this.pending);
+    }
     if (this.pending === compacted || this.emitted.endsWith(compacted)) return false;
     if (shouldKeepRicherSnapshot(this.pending, compacted)) return false;
     this.pending = compacted.endsWith('\n') ? compacted : `${compacted}\n`;
@@ -1309,6 +1410,17 @@ class TurnOutputBuffer {
       this.pending = `[live output truncated to ${this.maxChars} chars]\n${this.pending}`;
     }
   }
+}
+
+function undeliveredSnapshotSuffix(emitted: string, snapshot: string): string {
+  if (!emitted) return snapshot;
+  if (snapshot.startsWith(emitted)) return snapshot.slice(emitted.length);
+  if (emitted.endsWith(snapshot)) return '';
+  const max = Math.min(emitted.length, snapshot.length);
+  for (let overlap = max; overlap > 0; overlap -= 1) {
+    if (emitted.endsWith(snapshot.slice(0, overlap))) return snapshot.slice(overlap);
+  }
+  return snapshot;
 }
 
 function collapseCarriageReturns(input: string): string {
@@ -1436,6 +1548,7 @@ export function scopeLiveSnapshotToPrompt(
   input: string,
   prompt: string,
   previousSnapshot = '',
+  preferPromptAnchor = false,
 ): string {
   const echo = prompt.trim();
   if (!echo) return input;
@@ -1448,6 +1561,8 @@ export function scopeLiveSnapshotToPrompt(
   if (picker !== undefined) return picker;
   const controlPicker = scopeControlLiteralPickerSnapshot(lines, echo);
   if (controlPicker !== undefined) return controlPicker;
+  const promptScoped = scopeSnapshotAfterPrompt(lines, echo);
+  if (preferPromptAnchor && promptScoped !== undefined) return promptScoped;
   const delta = scopeSnapshotDelta(lines, previousSnapshot);
   if (delta !== undefined) return delta;
   // A picker or approval can arrive after its originating prompt has scrolled
@@ -1458,9 +1573,25 @@ export function scopeLiveSnapshotToPrompt(
     if (interactionStart >= 0) return lines.slice(interactionStart).join('\n');
     return input;
   }
-  const promptLines = echo.split('\n');
+  if (promptScoped !== undefined) return promptScoped;
+  // A tmux snapshot with another prompt belongs to an earlier turn. Codex also
+  // renders built-in suggestion rows with the same glyph, which are terminal
+  // chrome rather than user prompts and must not hide current task output.
+  return lines.some((line) => {
+    const trimmed = line.trimStart();
+    return trimmed.startsWith('›') && !isTerminalChromeLine(trimmed);
+  }) ? '' : input;
+}
+
+function snapshotHasPromptAnchor(input: string, prompt: string): boolean {
+  const echo = prompt.trim();
+  return Boolean(echo) && scopeSnapshotAfterPrompt(input.split('\n'), echo) !== undefined;
+}
+
+function scopeSnapshotAfterPrompt(lines: string[], prompt: string): string | undefined {
+  const promptLines = prompt.split('\n');
   const anchorIndex = promptLines.findIndex((line) => line.trim().length > 0);
-  const anchor = promptLines[anchorIndex]?.trim() ?? echo;
+  const anchor = promptLines[anchorIndex]?.trim() ?? prompt;
   for (let index = lines.length - 1; index >= 0; index -= 1) {
     if (!isPromptEchoLine(lines[index] ?? '', anchor)) continue;
     let cursor = index + 1;
@@ -1474,15 +1605,8 @@ export function scopeLiveSnapshotToPrompt(
     }
     return lines.slice(cursor).join('\n');
   }
-  const wrappedPromptEnd = findWrappedPromptEnd(lines, echo);
-  if (wrappedPromptEnd !== undefined) return lines.slice(wrappedPromptEnd).join('\n');
-  // A tmux snapshot with another prompt belongs to an earlier turn. Codex also
-  // renders built-in suggestion rows with the same glyph, which are terminal
-  // chrome rather than user prompts and must not hide current task output.
-  return lines.some((line) => {
-    const trimmed = line.trimStart();
-    return trimmed.startsWith('›') && !isTerminalChromeLine(trimmed);
-  }) ? '' : input;
+  const wrappedPromptEnd = findWrappedPromptEnd(lines, prompt);
+  return wrappedPromptEnd !== undefined ? lines.slice(wrappedPromptEnd).join('\n') : undefined;
 }
 
 function findWrappedPromptEnd(lines: string[], prompt: string): number | undefined {

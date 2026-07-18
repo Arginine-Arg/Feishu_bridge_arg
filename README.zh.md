@@ -236,7 +236,7 @@ arg-bridge profile export <name> --include-secrets --yes
 | `/ws remove <name>` | 删除命名工作空间 |
 | `/resume` | 恢复同 agent、工作目录、权限模式兼容的历史会话 |
 | `/status` | 查看 profile、agent、工作目录、会话、lark-cli 身份和运行状态 |
-| `/sendfile <绝对路径>` | 仅管理员：直接回复当前消息发送当前工作目录或 bridge 媒体缓存内的普通文件，不调用 agent |
+| `/sendfile <绝对路径>` | 仅管理员：直接回复发送当前工作目录、bridge 媒体缓存或显式允许目录内的普通文件，不调用 agent |
 | `/config` | 调整展示偏好、访问控制和 lark-cli 身份策略 |
 | `/model` | 选择模型；Codex 直接使用 CLI 原生模型/reasoning 选项，并把结果同步到当前 profile |
 | `/session [status\|live\|turn]` | 查看终端执行状态。tmux/live 为默认模式；`turn` 仅作为兼容回退 |
@@ -317,6 +317,20 @@ export ARG_BRIDGE_AGENT_API_KEY=your-api-key
 ```
 
 bridge 会检查所选目录存在、是目录，并且不是 `/`、Home 根、系统目录或临时目录根这类范围过大的位置。工作目录只是 agent run 的当前目录，不是文件系统 sandbox；agent 实际能访问哪些文件仍取决于本机 agent 进程及其权限模式。
+
+### 本地文件发送
+
+`/sendfile` 会自动允许当前、默认和命名工作目录，以及当前 profile 的媒体缓存目录。还可以在对应 profile 中增加范围明确的目录；显式目录会与自动目录合并：
+
+```json
+{
+  "outbound": {
+    "allowedFileDirs": ["/Users/me/reports/exports"]
+  }
+}
+```
+
+每个目录都会经过与工作目录相同的宽泛根目录检查。bridge 和 channel SDK 仍会执行普通文件、符号链接、realpath 目录归属及 `attachments.maxFileBytes` 双重校验。不要加入 `/`、Home 根或整个共享磁盘。
 
 ## 权限模式
 

@@ -1242,6 +1242,57 @@ setInterval(() => {}, 1000);
     expect(textOf(events)).toContain('tmux:hello\n48 120\n48x120\n');
   });
 
+  tmuxIt('preserves a final answer that is longer than the tmux viewport', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-long-answer-test-'));
+    const bin = join(dir, 'fake-tmux-long-answer-agent.mjs');
+    const prompt = 'produce long report';
+    const expectedLines = Array.from(
+      { length: 120 },
+      (_, index) => `• report line ${String(index + 1).padStart(3, '0')}`,
+    );
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+let draft = '';
+process.stdout.write('› \\n');
+process.stdin.on('data', (chunk) => {
+  for (const char of chunk) {
+    if (char !== '\\r' && char !== '\\n') {
+      draft += char;
+      continue;
+    }
+    if (draft !== ${JSON.stringify(prompt)}) continue;
+    draft = '';
+    const lines = ${JSON.stringify(expectedLines)};
+    process.stdout.write('› ${prompt}\\n' + lines.join('\\n') + '\\n› \\n');
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-long-answer-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-long-answer',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 250,
+      outputFlushMs: 30,
+      startupTimeoutMs: 6000,
+    });
+
+    const events = await collect(session.run('tmux-long-answer-run', prompt, dir).events);
+    await pool.closeAll();
+
+    expect(textOf(events)).toBe(`${expectedLines.join('\n')}\n`);
+  }, 15_000);
+
   tmuxIt('submits a first Chinese prompt and streams every delayed task update', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-first-prompt-test-'));
     const bin = join(dir, 'fake-tmux-first-prompt-agent.mjs');
@@ -1406,7 +1457,7 @@ setTimeout(() => {
     '• 已扫描 2 个候选会话。',
     '• 最终结论：已找到目标会话。',
     '› Use /skills to list available skills',
-  ]), 5_000);
+  ]), 6_500);
 }, 3_000);
 setInterval(() => {}, 1000);
 `,
@@ -1438,7 +1489,7 @@ setInterval(() => {}, 1000);
 
     // The incomplete redraw arrives after the 300ms idle window. The run must
     // still be active until Codex presents a fresh empty input prompt.
-    await testDelay(5_800);
+    await waitForEventText(streamed, '• 已扫描 2 个候选会话。\n', 7_500);
     expect(completed).toBe(false);
     expect(textOf(streamed)).toContain('• 已扫描 2 个候选会话。\n');
     expect(textOf(streamed)).not.toContain('最终结论');
@@ -1981,6 +2032,12 @@ setInterval(() => {}, 1000);
     expect(cleanTerminalOutput('78Gclean\n')).toBe('clean\n');
   });
 
+  it('does not merge report lines that end and begin around 78', () => {
+    expect(cleanTerminalOutput('report line 078\nreport line 079\n')).toBe(
+      'report line 078\nreport line 079\n',
+    );
+  });
+
   it('reassembles cursor-scattered warning text', () => {
     expect(cleanTerminalOutput('⚠\nI\n\n78 g\n\n78 n\n\n78 o\n\n78 r\n\n78 i\n\n78 n\n\n78 g\n')).toBe(
       '⚠Ignoring',
@@ -2007,4 +2064,16 @@ function hasTmux(): boolean {
 
 function testDelay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForEventText(
+  events: AgentEvent[],
+  expected: string,
+  timeoutMs: number,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!textOf(events).includes(expected)) {
+    if (Date.now() >= deadline) throw new Error(`timed out waiting for live text: ${expected}`);
+    await testDelay(25);
+  }
 }

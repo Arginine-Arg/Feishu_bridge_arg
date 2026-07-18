@@ -244,6 +244,19 @@ describe('profile schema', () => {
     });
   });
 
+  it('normalizes outbound local file directories', () => {
+    const cfg = normalizeProfileConfig({
+      schemaVersion: 2,
+      agentKind: 'claude',
+      accounts: { app },
+      outbound: {
+        allowedFileDirs: ['/repo/reports', 42, '/repo/exports'],
+      },
+    });
+
+    expect(cfg.outbound.allowedFileDirs).toEqual(['/repo/reports', '/repo/exports']);
+  });
+
   it('keeps legacy Codex binary metadata and user-home defaults without keeping public flags', () => {
     const cfg = normalizeProfileConfig({
       schemaVersion: 2,

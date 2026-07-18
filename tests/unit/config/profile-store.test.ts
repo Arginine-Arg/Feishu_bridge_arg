@@ -73,6 +73,9 @@ describe('profile store canonical serialization', () => {
         cacheTtlMs: 60_000,
         cacheMaxBytes: 2048,
       },
+      outbound: {
+        allowedFileDirs: ['/repo/reports'],
+      },
       comments: {},
       larkCli: {
         identityPreset: 'user-default' as const,
@@ -122,6 +125,7 @@ describe('profile store canonical serialization', () => {
     expect(savedProfile.workspaces).toEqual(profile.workspaces);
     expect(savedProfile.codex).toEqual(profile.codex);
     expect(savedProfile.attachments).toEqual(profile.attachments);
+    expect(savedProfile.outbound).toEqual(profile.outbound);
     expect(savedProfile.comments).toEqual(profile.comments);
     expect(savedProfile.larkCli).toEqual(profile.larkCli);
     expect(savedProfile.permissions).toEqual({

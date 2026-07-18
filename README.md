@@ -236,7 +236,7 @@ If a profile was created with the wrong agent kind, stop or unregister any match
 | `/ws remove <name>` | Delete a named workspace |
 | `/resume` | Resume compatible history for the same agent, working directory, and permission mode |
 | `/status` | Show profile, agent, working directory, session, lark-cli identity, and run state |
-| `/sendfile <absolute-path>` | Admin-only: reply to the current message with a regular file from the current workspace or bridge media cache, without invoking the agent |
+| `/sendfile <absolute-path>` | Admin-only: reply with a regular file from the current workspace, bridge media cache, or an explicitly allowed outbound directory, without invoking the agent |
 | `/config` | Adjust presentation preferences, access settings, and lark-cli identity policy |
 | `/model` | Choose the model; Codex uses its native model/reasoning picker and syncs the result to the active profile |
 | `/session [status\|live\|turn]` | Inspect terminal execution. tmux/live is the default; `turn` remains a legacy compatibility fallback |
@@ -313,6 +313,20 @@ This is a profile-field snippet. Do not replace the whole `config.json` with it;
 ```
 
 The bridge checks that a selected directory exists, is a directory, and is not an overly broad location such as `/`, the home root, a system directory, or a temp root. The working directory is only the current directory for an agent run. It is not a filesystem sandbox; actual file access still depends on the local agent process and its permission mode.
+
+### Local file uploads
+
+`/sendfile` automatically allows the current/default/named workspaces and the profile media cache. Additional narrow directories can be added to the matching profile; explicit entries are merged with those automatic roots:
+
+```json
+{
+  "outbound": {
+    "allowedFileDirs": ["/Users/me/reports/exports"]
+  }
+}
+```
+
+Every directory is resolved through the same broad-root policy as a workspace. Files remain subject to regular-file, symlink, realpath containment, and `attachments.maxFileBytes` checks in both the bridge and channel SDK. Do not add `/`, the home root, or an entire shared volume.
 
 ## Permission modes
 

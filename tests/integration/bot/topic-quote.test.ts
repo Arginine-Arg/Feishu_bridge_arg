@@ -1,5 +1,5 @@
-import type { NormalizedMessage } from '@larksuite/channel';
-import { realpath } from 'node:fs/promises';
+import type { LarkChannelOptions, NormalizedMessage } from '@larksuite/channel';
+import { mkdir, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema.js';
@@ -10,7 +10,7 @@ import { createTmpProfile, type TmpProfile } from '../../helpers/tmp-profile.js'
 
 const sdkMock = vi.hoisted(() => ({
   channel: undefined as FakeLarkChannel | undefined,
-  createLarkChannel: vi.fn(() => {
+  createLarkChannel: vi.fn((_opts?: unknown) => {
     if (!sdkMock.channel) throw new Error('fake channel not configured');
     return sdkMock.channel;
   }),
@@ -70,6 +70,32 @@ afterEach(async () => {
 });
 
 describe('topic message quote handling', () => {
+  it('passes safe configured and stored workspace roots to local file uploads', async () => {
+    const h = await createHarness();
+    const configured = join(h.tmp.root, 'configured-exports');
+    const named = join(h.tmp.root, 'named-exports');
+    const media = join(h.tmp.profile, 'media');
+    await Promise.all([
+      mkdir(configured, { recursive: true }),
+      mkdir(named, { recursive: true }),
+      mkdir(media, { recursive: true }),
+    ]);
+    h.profileConfig.outbound.allowedFileDirs = [configured];
+    h.workspaces.saveNamed('exports', named);
+
+    await startTestBridge(h, media);
+
+    const opts = sdkMock.createLarkChannel.mock.calls.at(-1)?.[0] as LarkChannelOptions | undefined;
+    expect(opts?.outbound?.allowedFileDirs).toEqual(
+      expect.arrayContaining([
+        await realpath(h.tmp.workspace),
+        await realpath(configured),
+        await realpath(named),
+        await realpath(media),
+      ]),
+    );
+  });
+
   it('does not quote the topic root when a user directly mentions the bot inside the topic', async () => {
     const h = await createHarness();
 
@@ -420,18 +446,28 @@ async function createHarness(options: {
 }
 
 async function startTestBridge(h: {
+  tmp: TmpProfile;
   profileConfig: ReturnType<typeof createDefaultProfileConfig>;
   agent: FakeAgentAdapter;
   sessions: SessionStore;
   workspaces: WorkspaceStore;
   controls: ReturnType<typeof createControls>;
-}): Promise<void> {
+}, mediaDir?: string): Promise<void> {
   const bridge = await startChannel({
     cfg: h.profileConfig,
     agent: h.agent,
     sessions: h.sessions,
     workspaces: h.workspaces,
     controls: h.controls,
+    ...(mediaDir
+      ? {
+          appPaths: {
+            mediaDir,
+            secretsFile: join(h.tmp.profile, 'secrets.json'),
+            keystoreSaltFile: join(h.tmp.profile, 'keystore-salt'),
+          },
+        }
+      : {}),
   });
   cleanups.push(() => bridge.disconnect());
 }

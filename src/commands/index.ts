@@ -145,6 +145,8 @@ export interface CommandContext {
     options: ListCodexThreadHistoryOptions,
   ) => Promise<CodexThreadHistoryEntry[]>;
   claudeHistoryProvider?: (cwd: string, limit: number) => Promise<SessionSummary[]>;
+  /** Registers a verified root with the channel SDK before a local file upload. */
+  allowLocalFileRoot?: (root: string) => Promise<boolean>;
   /** Set when invoked from a CardKit 2.0 form submit. Keys are input `name`s. */
   formValue?: Record<string, unknown>;
   /** True when this invocation came from a card button click rather than a
@@ -359,14 +361,20 @@ async function handleSendFile(args: string, ctx: CommandContext): Promise<void> 
   }
 
   const allowedRoots = await resolveSendFileRoots(ctx);
-  if (!allowedRoots.some((root) => isPathWithinRoot(resolvedPath, root))) {
-    await reply(ctx, '文件必须位于当前工作目录或桥接媒体目录内。');
+  const matchingRoot = allowedRoots.find((root) => isPathWithinRoot(resolvedPath, root));
+  if (!matchingRoot) {
+    await reply(ctx, '文件必须位于当前工作目录或桥接媒体目录，或 `outbound.allowedFileDirs` 内。');
     return;
   }
 
   const maxFileBytes = ctx.controls.profileConfig.attachments.maxFileBytes;
   if (entry.size > maxFileBytes) {
     await reply(ctx, `文件超过发送上限（${formatByteLimit(maxFileBytes)}）。`);
+    return;
+  }
+
+  if (ctx.allowLocalFileRoot && !(await ctx.allowLocalFileRoot(matchingRoot))) {
+    await reply(ctx, '文件路径未被允许，请检查 `outbound.allowedFileDirs`。');
     return;
   }
 
@@ -384,16 +392,26 @@ async function handleSendFile(args: string, ctx: CommandContext): Promise<void> 
   } catch (err) {
     log.fail('command', err, { step: 'send-file' });
     reportMetric('command_fail', 1, { step: 'send-file' });
-    await reply(ctx, '文件发送失败，请检查飞书应用的文件权限后重试。');
+    await reply(ctx, sendFileFailureMessage(err));
   }
 }
 
 async function resolveSendFileRoots(ctx: CommandContext): Promise<string[]> {
-  const candidates = [effectiveWorkspaceCwd(ctx), commandProfilePaths(ctx).mediaDir].filter(
-    (path): path is string => Boolean(path),
-  );
+  const candidates = [
+    effectiveWorkspaceCwd(ctx),
+    commandProfilePaths(ctx).mediaDir,
+    ...ctx.controls.profileConfig.outbound.allowedFileDirs.map(expandTilde),
+  ].filter((path): path is string => Boolean(path));
   const roots = await Promise.all(candidates.map((path) => realpath(path).catch(() => undefined)));
   return [...new Set(roots.filter((path): path is string => Boolean(path)))];
+}
+
+function sendFileFailureMessage(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  if (/allowedFileDirs|outside allowed directories|file path is not allowed/i.test(message)) {
+    return '文件路径未被允许，请检查 `outbound.allowedFileDirs`。';
+  }
+  return '文件上传到飞书失败，请检查应用权限、token 和网络后重试。';
 }
 
 function isPathWithinRoot(path: string, root: string): boolean {
