@@ -11,6 +11,7 @@ import { WorkspaceStore } from '../../../src/workspace/store.js';
 import { createFakeAgent } from '../../helpers/fake-agent.js';
 import { createFakeChannel, type FakeChannel } from '../../helpers/fake-channel.js';
 import { createTmpProfile, type TmpProfile } from '../../helpers/tmp-profile.js';
+import type { TmuxBindingStatus } from '../../../src/agent/tmux-control.js';
 
 interface RunOverrides {
   scope?: string;
@@ -343,6 +344,29 @@ describe('Bridge command contracts', () => {
     const status = JSON.stringify(lastContent(h.channel));
     expect(status).toContain(jsonStringFragment(await realpath(h.tmp.workspace)));
     expect(status).toContain('chat-1');
+  });
+
+  it('shows the exact tmux attach command in /session status', async () => {
+    const h = await createHarness();
+    const status: TmuxBindingStatus = {
+      state: 'managed',
+      terminal: {
+        socketPath: '/tmp/tmux-2103/default',
+        target: 'argbridge-claude-abcd:0.0',
+        attachCommand: 'tmux -S /tmp/tmux-2103/default attach -t argbridge-claude-abcd:0.0',
+        ownership: 'managed',
+      },
+    };
+    h.agent.tmux = {
+      list: vi.fn(async () => []),
+      bind: vi.fn(),
+      unbind: vi.fn(async () => false),
+      status: vi.fn(async () => status),
+    };
+
+    await expect(h.run('/session status')).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain(status.terminal!.attachCommand);
+    expect(lastMarkdown(h.channel)).toContain('bridge 托管');
   });
 
   it('rejects admin-only commands for non owner/admin users', async () => {

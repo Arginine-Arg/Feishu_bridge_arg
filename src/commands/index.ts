@@ -6,6 +6,7 @@ import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
 import { claudeCapability, codexCapability } from '../agent/capability';
 import { DEFAULT_MODEL, normalizeModelSelection, supportedModels } from '../agent/models';
 import type { AgentAdapter } from '../agent/types';
+import { tmuxTargetKey, type TmuxBindingStatus, type TmuxPaneTarget } from '../agent/tmux-control';
 import type { ActiveRuns } from '../bot/active-runs';
 import {
   accountCurrentCard,
@@ -186,6 +187,7 @@ const handlers: Record<string, Handler> = {
   '/model': handleModel,
   '/stop': handleStop,
   '/session': handleSession,
+  '/tmux': handleTmux,
   '/timeout': handleTimeout,
   '/ps': handlePs,
   '/exit': handleExit,
@@ -210,6 +212,7 @@ const ADMIN_COMMANDS = new Set([
   '/reconnect',
   '/doctor',
   '/session',
+  '/tmux',
   '/cd',
   '/ws',
   '/sendfile',
@@ -986,9 +989,11 @@ async function handleSession(args: string, ctx: CommandContext): Promise<void> {
     const runStatus = active
       ? `运行中（run \`${active.run.runId.slice(0, 8)}…\`）`
       : '无运行任务';
+    const terminal = await ctx.agent.tmux?.status(ctx.scope);
+    const terminalText = formatTmuxStatus(terminal);
     await reply(
       ctx,
-      `当前 agent session 模式：\`${label}\`\n当前 scope：${runStatus}\n\n用法：\`/session live\` 或 \`/session turn\`；完整运行状态用 \`/status\`。`,
+      `当前 agent session 模式：\`${label}\`\n当前 scope：${runStatus}${terminalText ? `\n\n${terminalText}` : ''}\n\n用法：\`/session live\` 或 \`/session turn\`；完整运行状态用 \`/status\`。`,
     );
     return;
   }
@@ -1022,6 +1027,124 @@ async function handleSession(args: string, ctx: CommandContext): Promise<void> {
       : '已切换到 turn 模式，正在重连。之后恢复每轮短任务执行。',
   );
   await ctx.controls.restart();
+}
+
+async function handleTmux(args: string, ctx: CommandContext): Promise<void> {
+  const tmux = ctx.agent.tmux;
+  if (!tmux) {
+    await reply(ctx, '当前 agent 不支持 tmux 控制。');
+    return;
+  }
+  const [action = 'status', ...rest] = args.trim().split(/\s+/).filter(Boolean);
+  const value = rest.join(' ');
+  try {
+    if (action === 'list') {
+      const socket = parseTmuxSocketArgument(rest);
+      if (socket === null) {
+        await reply(ctx, '用法：`/tmux list [绝对 socket 路径|-S <路径>|-L <名称>]`');
+        return;
+      }
+      const panes = await tmux.list(socket || undefined);
+      if (panes.length === 0) {
+        await reply(ctx, '没有发现正在运行的 Codex/Claude tmux pane。普通 shell 不会列出。');
+        return;
+      }
+      await reply(ctx, formatTmuxList(panes));
+      return;
+    }
+    if (action === 'bind') {
+      if (!value) {
+        await reply(ctx, '用法：`/tmux bind <编号|pane id|socket::pane id>`');
+        return;
+      }
+      if (ctx.activeRuns.get(ctx.scope)) {
+        await reply(ctx, '当前 scope 有运行中的任务，请先 `/stop`，等待任务结束后再绑定。');
+        return;
+      }
+      const target = await tmux.bind(ctx.scope, value);
+      ctx.workspaces.setCwd(ctx.scope, target.paneCurrentPath);
+      ctx.sessions.clear(ctx.scope);
+      await reply(
+        ctx,
+        [
+          `已绑定 ${target.agentKind} pane \`${target.paneId}\`。`,
+          `cwd：\`${target.paneCurrentPath}\``,
+          `socket：\`${target.socketPath}\``,
+          `监督命令：\`${target.attachCommand}\``,
+          '',
+          'bridge 只连接该 pane，不会在 `/stop`、解绑、重启或退出时删除它。',
+        ].join('\n'),
+      );
+      return;
+    }
+    if (action === 'status') {
+      const status = await tmux.status(ctx.scope);
+      await reply(ctx, formatTmuxStatus(status) || '当前 scope 尚未创建或绑定 tmux terminal。');
+      return;
+    }
+    if (action === 'unbind') {
+      if (ctx.activeRuns.get(ctx.scope)) {
+        await reply(ctx, '当前 scope 有运行中的任务，请先 `/stop`，等待任务结束后再解绑。');
+        return;
+      }
+      const removed = await tmux.unbind(ctx.scope);
+      await reply(
+        ctx,
+        removed
+          ? '已解除外部 tmux 绑定。目标 pane/session/server 保持运行；下一次任务会创建 bridge 托管 session。'
+          : '当前 scope 没有外部 tmux 绑定。',
+      );
+      return;
+    }
+    await reply(ctx, '用法：`/tmux [list|bind <编号或 id>|status|unbind]`');
+  } catch (err) {
+    await reply(ctx, `tmux 操作失败：${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+function parseTmuxSocketArgument(parts: string[]): string | null {
+  if (parts.length === 0) return '';
+  if (parts.length === 1) return isAbsolute(parts[0]!) ? parts[0]! : null;
+  if (parts.length === 2 && parts[0] === '-L') return parts[1]!;
+  if (parts.length === 2 && parts[0] === '-S') return isAbsolute(parts[1]!) ? parts[1]! : null;
+  return null;
+}
+
+function formatTmuxList(panes: TmuxPaneTarget[]): string {
+  return [
+    '可绑定的本机 tmux agent panes：',
+    '',
+    ...panes.flatMap((pane, index) => [
+      `${index + 1}. ${pane.agentKind} \`${pane.paneId}\` (${pane.ownership})`,
+      `   cwd: \`${pane.paneCurrentPath}\``,
+      `   id: \`${tmuxTargetKey(pane)}\``,
+      `   attach: \`${pane.attachCommand}\``,
+    ]),
+    '',
+    '使用 `/tmux bind <编号>` 绑定当前 scope。编号按本次列表计算。',
+  ].join('\n');
+}
+
+function formatTmuxStatus(status: TmuxBindingStatus | undefined): string {
+  if (!status || status.state === 'none') return '';
+  if (status.state === 'invalid') {
+    return `tmux 绑定状态：失效（${status.message ?? '目标不可用'}）\n请运行 \`/tmux unbind\`。`;
+  }
+  const terminal = status.terminal ?? (status.target
+    ? {
+        socketPath: status.target.socketPath,
+        target: status.target.paneId,
+        attachCommand: status.target.attachCommand,
+        ownership: status.target.ownership,
+      }
+    : undefined);
+  if (!terminal) return `tmux 状态：${status.state}`;
+  return [
+    `tmux 状态：${status.state === 'external' ? '外部绑定' : 'bridge 托管'}`,
+    `socket：\`${terminal.socketPath}\``,
+    `target：\`${terminal.target}\``,
+    `监督命令：\`${terminal.attachCommand}\``,
+  ].join('\n');
 }
 
 // ────────────── /model — lightweight model form ──────────────

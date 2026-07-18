@@ -5,6 +5,7 @@ import type {
   AgentRun,
   AgentRunOptions,
 } from '../../src/agent/types.js';
+import type { AgentTmuxControl } from '../../src/agent/tmux-control.js';
 
 export interface FakeAgentRun extends AgentRun {
   readonly opts: AgentRunOptions;
@@ -66,6 +67,7 @@ export class FakeAgentAdapter implements AgentAdapter {
   readonly runs: FakeAgentRun[] = [];
   readonly runOptions: AgentRunOptions[] = [];
   botIdentity: AgentBotIdentity | undefined;
+  tmux: AgentTmuxControl | undefined;
   #available: boolean;
   #eventRuns: AgentEvent[][];
   #waitForExitResults: boolean[];
@@ -76,12 +78,14 @@ export class FakeAgentAdapter implements AgentAdapter {
     available?: boolean;
     events?: FakeAgentEvents;
     waitForExit?: boolean | readonly boolean[];
+    tmux?: AgentTmuxControl;
   } = {}) {
     this.id = options.id ?? 'fake-agent';
     this.displayName = options.displayName ?? 'Fake Agent';
     this.#available = options.available ?? true;
     this.#eventRuns = normalizeEventRuns(options.events ?? []);
     this.#waitForExitResults = normalizeWaitForExitResults(options.waitForExit);
+    this.tmux = options.tmux;
   }
 
   async isAvailable(): Promise<boolean> {

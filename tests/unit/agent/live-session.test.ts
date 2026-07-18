@@ -1,8 +1,8 @@
-import { chmod, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import type { AgentEvent } from '../../../src/agent/types';
 import {
   cleanTerminalOutput,
@@ -14,6 +14,13 @@ import {
   encodeTmuxInputFrame,
   scopeLiveSnapshotToPrompt,
 } from '../../../src/agent/live-session';
+
+beforeAll(async () => {
+  if (!process.env.TMUX_TMPDIR || typeof process.getuid !== 'function') return;
+  const socketDir = join(process.env.TMUX_TMPDIR, `tmux-${process.getuid()}`);
+  await mkdir(socketDir, { recursive: true });
+  await chmod(socketDir, 0o700);
+});
 
 describe('parseLiveControlSequence', () => {
   it('maps single and multi-key navigation words to terminal keys', () => {
@@ -809,9 +816,48 @@ setInterval(() => {}, 1000);
     const text = textOf(events);
     expect(text).toContain('Codex live session status');
     expect(text).toContain('Terminal backend: tmux');
-    expect(text).toMatch(/Tmux socket: lark-channel-/);
-    expect(text).toContain('Tmux target: main:0.0');
-    expect(text).toMatch(/Attach command: tmux -L lark-channel-[^ ]+ attach -t main/);
+    expect(text).toMatch(/Tmux socket: \/.+\/tmux-\d+\/default/);
+    expect(text).toMatch(/Tmux target: argbridge-[^\n]+:0\.0/);
+    expect(text).toMatch(/Attach command: tmux -S .+\/tmux-\d+\/default attach -t argbridge-/);
+  }, 15_000);
+
+  tmuxIt('appends exactly one attach footer when native /status has output', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-status-native-test-'));
+    const bin = join(dir, 'fake-tmux-native-status-agent.mjs');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => {
+  if (chunk.includes('/status')) {
+    process.stdout.write('Codex native status panel\\nModel: gpt-test\\n');
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-status-native-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-status-native',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 250,
+      outputFlushMs: 20,
+      startupTimeoutMs: 1000,
+    });
+
+    const events = await collect(session.run('tmux-status-native-run', '/status', dir, 'command').events);
+    await pool.closeAll();
+    const text = textOf(events);
+    expect(text).toContain('Codex native status panel');
+    expect((text.match(/Attach command:/g) ?? []).length).toBe(1);
+    expect(text).toMatch(/Attach command: tmux -S .+\/tmux-\d+\/default attach -t argbridge-/);
   }, 15_000);
 
   tmuxIt('interrupts a turn without destroying the tmux session or its history', async () => {
@@ -891,10 +937,10 @@ setInterval(() => {}, 1000);
 
       const status = await collect(session.run('tmux-stop-status', '/status', dir, 'command').events);
       const statusText = textOf(status);
-      const socket = statusText.match(/Tmux socket: (lark-channel-[^\n]+)/)?.[1];
+      const socket = statusText.match(/Tmux socket: ([^\n]+)/)?.[1];
       const target = statusText.match(/Tmux target: ([^\n]+)/)?.[1];
       expect(socket).toBeTruthy();
-      expect(target).toBe('main:0.0');
+      expect(target).toMatch(/^argbridge-[^:]+:0\.0$/);
 
       const reused = pool.getOrCreate('tmux-stop-preserves-session', options);
       expect(reused).toBe(session);
@@ -902,11 +948,11 @@ setInterval(() => {}, 1000);
         'Follow-up used the preserved tmux session.',
       );
 
-      const hasSession = spawnSync('tmux', ['-L', socket!, 'has-session', '-t', target!], {
+      const hasSession = spawnSync('tmux', ['-S', socket!, 'has-session', '-t', target!], {
         encoding: 'utf8',
       });
       expect(hasSession.status).toBe(0);
-      const history = spawnSync('tmux', ['-L', socket!, 'capture-pane', '-p', '-S', '-100', '-t', target!], {
+      const history = spawnSync('tmux', ['-S', socket!, 'capture-pane', '-p', '-S', '-100', '-t', target!], {
         encoding: 'utf8',
       });
       expect(history.status).toBe(0);
@@ -1237,7 +1283,17 @@ setInterval(() => {}, 1000);
     });
 
     const events = await collect(session.run('run-tmux', 'hello', dir).events);
+    const terminal = pool.terminalInfo('tmux-scope');
+    expect(terminal?.ownership).toBe('managed');
+    expect(terminal?.socketPath).toBeTruthy();
+    expect(
+      spawnSync('tmux', ['list-sessions', '-F', '#{session_name}'], { encoding: 'utf8' }).stdout,
+    ).toContain(terminal?.sessionName);
     await pool.closeAll();
+
+    expect(
+      spawnSync('tmux', ['list-sessions', '-F', '#{session_name}'], { encoding: 'utf8' }).stdout,
+    ).not.toContain(terminal?.sessionName);
 
     expect(textOf(events)).toContain('tmux:hello\n48 120\n48x120\n');
   });

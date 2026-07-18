@@ -114,7 +114,7 @@ export function configFormCard(opts: ConfigFormOpts): object {
       content:
         `**管理员**（共 ${opts.admins.length} 人）\n` +
         `${atMentionLine(opts.admins)}\n\n` +
-        '_可以跑敏感命令：`/account` `/config` `/exit` `/reconnect` `/doctor` `/cd` `/ws` `/invite` `/remove`。管理员也自动获得私聊权限，并可在未白名单群里管理访问控制。_\n\n' +
+        '_可以跑敏感命令：`/account` `/config` `/exit` `/reconnect` `/doctor` `/cd` `/ws` `/tmux` `/invite` `/remove`。管理员也自动获得私聊权限，并可在未白名单群里管理访问控制。_\n\n' +
         '_加 / 删：_ `/invite admin @某人`  `/remove admin @某人`',
     },
   ];

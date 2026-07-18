@@ -9,6 +9,7 @@ import { mergeProcessEnv, spawnProcess, type SpawnedProcessByStdio } from '../..
 import { buildBridgeSystemPrompt } from '../bridge-system-prompt';
 import { buildLarkChannelEnv, type LarkChannelEnvContext } from '../lark-channel-env';
 import { LiveSessionPool, type LiveTerminalBackend } from '../live-session';
+import { TmuxBindingController, type AgentTmuxControl } from '../tmux-control';
 import { checkAgentAvailability, type AgentAvailability } from '../preflight';
 import {
   CLAUDE_DEFAULT_PERMISSION_MODE,
@@ -22,6 +23,7 @@ import { translateEvent } from './stream-json';
 
 export interface ClaudeAdapterOptions {
   binary?: string;
+  profileStateDir?: string;
   larkChannel?: LarkChannelEnvContext;
   sessionMode?: 'turn' | 'live';
   liveUsePty?: boolean;
@@ -34,6 +36,7 @@ type ClaudeChild = SpawnedProcessByStdio<Writable, Readable, Readable>;
 export class ClaudeAdapter implements AgentAdapter {
   readonly id = 'claude';
   readonly displayName = 'Claude Code';
+  readonly tmux: AgentTmuxControl;
 
   private readonly binary: string;
   private readonly larkChannel: LarkChannelEnvContext | undefined;
@@ -42,6 +45,7 @@ export class ClaudeAdapter implements AgentAdapter {
   private readonly liveTerminalBackend: LiveTerminalBackend | undefined;
   private readonly liveIdleMs: number | undefined;
   private readonly liveSessions = new LiveSessionPool();
+  private readonly tmuxBindings: TmuxBindingController;
   private botIdentity: AgentBotIdentity | undefined;
 
   constructor(opts: ClaudeAdapterOptions = {}) {
@@ -51,6 +55,40 @@ export class ClaudeAdapter implements AgentAdapter {
     this.liveUsePty = opts.liveUsePty;
     this.liveTerminalBackend = opts.liveTerminalBackend;
     this.liveIdleMs = opts.liveIdleMs;
+    const profileStateDir = opts.profileStateDir ?? join(tmpdir(), `arg-bridge-${process.pid}-claude`);
+    this.tmuxBindings = new TmuxBindingController(
+      profileStateDir,
+      opts.larkChannel?.profile ?? 'claude',
+      'claude',
+    );
+    this.tmux = {
+      list: (socket) => this.tmuxBindings.list(socket),
+      bind: async (scopeId, selector) => {
+        const target = await this.tmuxBindings.bind(scopeId, selector);
+        await this.liveSessions.close(scopeId, 'tmux-bind');
+        return target;
+      },
+      unbind: async (scopeId) => {
+        const removed = await this.tmuxBindings.unbind(scopeId);
+        if (removed) await this.liveSessions.close(scopeId, 'tmux-unbind');
+        return removed;
+      },
+      status: async (scopeId) => {
+        const binding = await this.tmuxBindings.status(scopeId);
+        if (binding.state !== 'none') return binding;
+        const terminal = this.liveSessions.terminalInfo(scopeId);
+        if (!terminal?.attachCommand || !terminal.socketPath || !terminal.target) return binding;
+        return {
+          state: terminal.ownership === 'external' ? 'external' as const : 'managed' as const,
+          terminal: {
+            socketPath: terminal.socketPath,
+            target: terminal.target,
+            attachCommand: terminal.attachCommand,
+            ownership: terminal.ownership ?? 'managed',
+          },
+        };
+      },
+    };
   }
 
   setBotIdentity(identity: AgentBotIdentity): void {
@@ -224,15 +262,20 @@ export class ClaudeAdapter implements AgentAdapter {
       permissionMode: opts.permissionMode ?? CLAUDE_DEFAULT_PERMISSION_MODE,
     });
     const scopeKey = opts.scopeId ?? opts.cwd;
+    const tmuxTarget = this.tmuxBindings.bindingFor(scopeKey, opts.cwd);
     const session = this.liveSessions.getOrCreate(scopeKey, {
       command: this.binary,
       args,
       cwd: opts.cwd,
       env: buildLarkChannelEnv(this.larkChannel),
-      signature,
+      signature: `${signature}:${tmuxTarget ? `${tmuxTarget.socketPath}:${tmuxTarget.paneId}` : 'managed'}`,
       usePty: this.liveUsePty,
       backend: this.liveTerminalBackend ?? 'tmux',
       idleMs: this.liveIdleMs,
+      tmuxSessionName: this.tmuxBindings.managedSessionName(scopeKey),
+      tmuxProfile: this.larkChannel?.profile ?? 'claude',
+      tmuxScopeId: scopeKey,
+      tmuxTarget,
     });
     return session.run(opts.runId, opts.prompt, opts.cwd, opts.liveInputMode);
   }

@@ -854,6 +854,7 @@ export function commandPreservesPendingMessages(content: string): boolean {
   return (
     /^\/(?:status|help|ps)(?:\s|$)/u.test(command) ||
     /^\/session(?:\s+\/?status)?\s*$/u.test(command) ||
+    /^\/tmux(?:\s+(?:list|status))?(?:\s|$)/u.test(command) ||
     /^\/timeout(?:\s|$)/u.test(command)
   );
 }

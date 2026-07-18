@@ -1,6 +1,7 @@
 import type { AgentAvailability } from './preflight';
 import type { ClaudePermissionMode, CodexSandboxMode } from '../config/permissions';
 import type { CodexReasoningEffort } from '../config/schema';
+import type { AgentTmuxControl } from './tmux-control';
 
 export type { ClaudePermissionMode } from '../config/permissions';
 
@@ -87,6 +88,7 @@ export interface AgentAdapter {
   checkAvailability?(): Promise<AgentAvailability>;
   prepareRun?(opts: AgentRunOptions): Promise<void>;
   run(opts: AgentRunOptions): AgentRun;
+  tmux?: AgentTmuxControl;
   /**
    * Late-bound identity injection: the adapter is constructed before the
    * channel connects, so the channel calls this once botIdentity is known.

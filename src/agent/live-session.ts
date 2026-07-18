@@ -9,6 +9,12 @@ import {
   type SpawnedProcessByStdio,
 } from '../platform/spawn';
 import type { AgentEvent, AgentRun } from './types';
+import {
+  defaultTmuxSocketPath,
+  tmuxAttachCommand,
+  type TmuxOwnership,
+  type TmuxPaneTarget,
+} from './tmux-control';
 
 export type LiveTerminalInputMode = 'command' | 'control';
 
@@ -24,12 +30,14 @@ type LiveOutput = {
 };
 export type LiveTerminalBackend = 'auto' | 'tmux' | 'pty' | 'pipe';
 
-interface LiveTerminalInfo {
+export interface LiveTerminalInfo {
   backend: 'tmux' | 'pty' | 'pipe';
   socketName?: string;
+  socketPath?: string;
   sessionName?: string;
   target?: string;
   attachCommand?: string;
+  ownership?: TmuxOwnership;
 }
 
 export interface LiveSessionCommand {
@@ -43,6 +51,10 @@ export interface LiveSessionCommand {
   idleMs?: number;
   outputFlushMs?: number;
   startupTimeoutMs?: number;
+  tmuxSessionName?: string;
+  tmuxProfile?: string;
+  tmuxScopeId?: string;
+  tmuxTarget?: TmuxPaneTarget;
   cleanup?: () => void;
 }
 
@@ -66,6 +78,7 @@ const DEFAULT_PTY_ROWS = '48';
 const DEFAULT_PTY_COLUMNS = '120';
 const TMUX_CAPTURE_HISTORY_LINES = 1000;
 const TMUX_HISTORY_FRAME_PREFIX = '\x1B]777;arg-bridge-history=';
+const TMUX_READY_FRAME = '\x1B]777;arg-bridge-ready\x07';
 const LIVE_DIAG_PREVIEW_CHARS = 800;
 const LIVE_DIAG_MAX_FRAMES = 8;
 
@@ -91,6 +104,17 @@ export class LiveSessionPool {
     this.sessions.clear();
     await Promise.allSettled(sessions.map((session) => session.close('shutdown')));
   }
+
+  async close(key: string, reason = 'close'): Promise<void> {
+    const session = this.sessions.get(key);
+    if (!session) return;
+    this.sessions.delete(key);
+    await session.close(reason);
+  }
+
+  terminalInfo(key: string): LiveTerminalInfo | undefined {
+    return this.sessions.get(key)?.getTerminalInfo();
+  }
 }
 
 export class LiveTerminalSession {
@@ -108,6 +132,8 @@ export class LiveTerminalSession {
   private activeTurnCleanup: (() => void) | undefined;
   private lastTerminalSnapshot = '';
   private lastTerminalHistory = '';
+  private terminalReady: Promise<void> = Promise.resolve();
+  private resolveTerminalReady: (() => void) | undefined;
 
   constructor(opts: LiveSessionCommand, onClose: () => void = () => {}) {
     this.opts = opts;
@@ -117,6 +143,10 @@ export class LiveTerminalSession {
 
   isAlive(): boolean {
     return Boolean(this.child?.pid && this.child.exitCode === null && this.child.signalCode === null);
+  }
+
+  getTerminalInfo(): LiveTerminalInfo | undefined {
+    return this.terminalInfo ? { ...this.terminalInfo } : undefined;
   }
 
   /**
@@ -176,8 +206,12 @@ export class LiveTerminalSession {
     if (this.closed) throw new Error('live session is closed');
 
     const spawned = spawnLiveProcess(this.opts);
+    this.terminalReady = new Promise<void>((resolve) => {
+      this.resolveTerminalReady = resolve;
+    });
     this.child = spawned.child;
     this.terminalInfo = spawned.terminal;
+    if (spawned.terminal.backend !== 'tmux') this.resolveTerminalReady?.();
     this.startedAt = Date.now();
     const child = spawned.child;
     log.info('agent-live', 'spawn', {
@@ -207,7 +241,12 @@ export class LiveTerminalSession {
   }
 
   private emitData(chunk: Buffer): void {
-    const output = this.cleaner.push(chunk.toString('utf8'));
+    const raw = chunk.toString('utf8');
+    if (raw.includes(TMUX_READY_FRAME)) {
+      this.resolveTerminalReady?.();
+      this.resolveTerminalReady = undefined;
+    }
+    const output = this.cleaner.push(raw);
     if (output.mode === 'snapshot' && output.text.trim()) {
       this.lastTerminalSnapshot = output.text;
     }
@@ -313,8 +352,13 @@ export class LiveTerminalSession {
       if (controlLiteralConfirmTimer) clearTimeout(controlLiteralConfirmTimer);
       cancelNormalSubmitRetry();
       flushOutput();
-      if (commandMode && !deliveredText && isStatusLiveCommand(prompt)) {
-        push({ type: 'text', delta: buildLiveStatusFallback(this.opts, cwd, this.terminalInfo) });
+      if (commandMode && isStatusLiveCommand(prompt)) {
+        push({
+          type: 'text',
+          delta: deliveredText
+            ? buildLiveTerminalFooter(this.terminalInfo)
+            : buildLiveStatusFallback(this.opts, cwd, this.terminalInfo),
+        });
       }
       push({ type: 'done', terminationReason: 'normal' });
     };
@@ -488,7 +532,7 @@ export class LiveTerminalSession {
     this.emitter.once('error', onError);
     try {
       arm(startupTimeoutMs + inputGraceMs);
-      await delay(inputGraceMs);
+      await this.waitForInputReady(inputGraceMs);
       if (!done) {
         this.cleaner.resetTurn();
         output.setSnapshotBaseline(this.lastTerminalSnapshot);
@@ -525,7 +569,8 @@ export class LiveTerminalSession {
             scheduleNormalSubmitRetry();
           }
         }
-        if (commandMode && isKnownSilentLiveCommand(prompt)) arm(idleMs);
+        if (commandMode && isStatusLiveCommand(prompt)) arm(idleMs);
+        else if (commandMode && isKnownSilentLiveCommand(prompt)) arm(idleMs);
         else if (commandMode && isSlowSilentLiveCommand(prompt)) {
           arm(noOutputIdleMs(prompt, idleMs));
         }
@@ -566,6 +611,19 @@ export class LiveTerminalSession {
     const freshSessionGraceMs = COMMAND_FRESH_SESSION_GRACE_MS;
     return Math.max(STARTUP_INPUT_GRACE_MS, freshSessionGraceMs - ageMs);
   }
+
+  private async waitForInputReady(inputGraceMs: number): Promise<void> {
+    if (this.terminalInfo?.backend !== 'tmux') {
+      await delay(inputGraceMs);
+      return;
+    }
+    await Promise.race([
+      this.terminalReady,
+      delay(Math.max(DEFAULT_STARTUP_TIMEOUT_MS, inputGraceMs)),
+    ]);
+    await delay(inputGraceMs);
+  }
+
 }
 
 function spawnLiveProcess(opts: LiveSessionCommand): {
@@ -587,7 +645,7 @@ function spawnLiveProcess(opts: LiveSessionCommand): {
   if (backend !== 'pipe' && process.platform === 'linux') {
     const commandLine = liveCommandLine(opts.command, opts.args, ptyRows, ptyColumns);
     if ((backend === 'auto' || backend === 'tmux') && isTmuxAvailable()) {
-      return spawnTmuxLiveProcess(opts.cwd, env, commandLine, ptyRows, ptyColumns);
+      return spawnTmuxLiveProcess(opts, env, commandLine, ptyRows, ptyColumns);
     }
     if (backend === 'tmux') {
       log.warn('agent-live', 'tmux-unavailable-fallback', { fallback: 'pty' });
@@ -616,7 +674,7 @@ function spawnLiveProcess(opts: LiveSessionCommand): {
 }
 
 function liveCommandLine(command: string, args: string[], rows: string, columns: string): string {
-  return `stty rows ${shellQuote(rows)} cols ${shellQuote(columns)} -echo 2>/dev/null; ${[
+  return `stty rows ${shellQuote(rows)} cols ${shellQuote(columns)} -echo 2>/dev/null; COLUMNS=${shellQuote(columns)} LINES=${shellQuote(rows)} ${[
     command,
     ...args,
   ]
@@ -629,7 +687,7 @@ export function encodeTmuxInputFrame(input: string): string {
 }
 
 function spawnTmuxLiveProcess(
-  cwd: string,
+  opts: LiveSessionCommand,
   env: NodeJS.ProcessEnv,
   commandLine: string,
   rows: string,
@@ -640,22 +698,36 @@ function spawnTmuxLiveProcess(
   pty: boolean;
   terminal: LiveTerminalInfo;
 } {
-  const socketName = `lark-channel-${process.pid}-${randomUUID().replace(/-/g, '').slice(0, 16)}`;
-  const sessionName = 'main';
-  const target = `${sessionName}:0.0`;
+  const external = opts.tmuxTarget;
+  const socketPath = external?.socketPath ?? defaultTmuxSocketPath(env);
+  const sessionName = external?.sessionName ?? opts.tmuxSessionName ??
+    `argbridge-${process.pid}-${randomUUID().replace(/-/g, '').slice(0, 8)}`;
+  const target = external?.paneId ?? `${sessionName}:0.0`;
+  const attachTarget = external ?? {
+    socketPath,
+    sessionName,
+    windowIndex: '0',
+    paneIndex: '0',
+  };
   const child = spawnProcess(
     process.execPath,
     [
       '-e',
       TMUX_BRIDGE_HELPER,
-      socketName,
+      external ? 'external' : 'managed',
+      socketPath,
+      sessionName,
+      target,
       Buffer.from(commandLine, 'utf8').toString('base64'),
-      cwd,
+      opts.cwd,
       rows,
       columns,
+      opts.tmuxProfile ?? '',
+      opts.tmuxScopeId ?? '',
+      String(process.pid),
     ],
     {
-      cwd,
+      cwd: opts.cwd,
       env,
       stdio: ['pipe', 'pipe', 'pipe'],
     },
@@ -665,10 +737,12 @@ function spawnTmuxLiveProcess(
     pty: true,
     terminal: {
       backend: 'tmux',
-      socketName,
+      socketName: socketPath,
+      socketPath,
       sessionName,
       target,
-      attachCommand: `tmux -L ${shellQuote(socketName)} attach -t ${shellQuote(sessionName)}`,
+      attachCommand: tmuxAttachCommand(attachTarget),
+      ownership: external ? 'external' : 'managed',
     },
     child,
   };
@@ -694,16 +768,16 @@ function shellQuote(value: string): string {
 const TMUX_BRIDGE_HELPER = String.raw`
 const { spawnSync } = require('node:child_process');
 
-const [socketName, commandBase64, cwd, rows, columns] = process.argv.slice(1);
-const session = 'main';
-const target = session + ':0.0';
+const [mode, socketPath, session, requestedTarget, commandBase64, cwd, rows, columns, profile, scope, ownerPid] = process.argv.slice(1);
+const managed = mode === 'managed';
+const target = managed ? session + ':0.0' : requestedTarget;
 const commandLine = Buffer.from(commandBase64, 'base64').toString('utf8');
 let closed = false;
 let lastSnapshot = '';
 let inputBuffer = '';
 
 function tmux(args, options = {}) {
-  return spawnSync('tmux', ['-L', socketName, ...args], {
+  return spawnSync('tmux', ['-S', socketPath, ...args], {
     cwd,
     env: process.env,
     encoding: 'utf8',
@@ -720,25 +794,37 @@ function writeError(prefix, result) {
 function cleanup() {
   if (closed) return;
   closed = true;
-  tmux(['kill-server'], { stdio: 'ignore' });
+  if (managed) tmux(['kill-session', '-t', session], { stdio: 'ignore' });
 }
 
-const created = tmux([
-  'new-session',
-  '-d',
-  '-x',
-  columns,
-  '-y',
-  rows,
-  '-s',
-  session,
-  '-c',
-  cwd,
-  commandLine,
-]);
-if (created.status !== 0) {
-  writeError('failed to start tmux live session', created);
-  process.exit(1);
+if (managed) {
+  const created = tmux([
+    'new-session',
+    '-d',
+    '-x',
+    columns,
+    '-y',
+    rows,
+    '-s',
+    session,
+    '-c',
+    cwd,
+    commandLine,
+  ]);
+  if (created.status !== 0) {
+    writeError('failed to start tmux live session', created);
+    process.exit(1);
+  }
+  tmux(['set-option', '-t', session, '@argbridge_managed', '1'], { stdio: 'ignore' });
+  tmux(['set-option', '-t', session, '@argbridge_owner_pid', ownerPid], { stdio: 'ignore' });
+  tmux(['set-option', '-t', session, '@argbridge_profile', profile], { stdio: 'ignore' });
+  tmux(['set-option', '-t', session, '@argbridge_scope', scope], { stdio: 'ignore' });
+} else {
+  const exists = tmux(['display-message', '-p', '-t', target, '#{pane_id}'], { stdio: 'ignore' });
+  if (exists.status !== 0) {
+    writeError('external tmux pane is unavailable', exists);
+    process.exit(1);
+  }
 }
 
 function sendKeys(args) {
@@ -800,8 +886,8 @@ function sendInput(input) {
 
 function capture() {
   if (closed) return;
-  const hasSession = tmux(['has-session', '-t', session], { stdio: 'ignore' });
-  if (hasSession.status !== 0) {
+  const available = tmux(['display-message', '-p', '-t', target, '#{pane_id}'], { stdio: 'ignore' });
+  if (available.status !== 0) {
     cleanup();
     process.exit(0);
   }
@@ -825,6 +911,7 @@ function capture() {
 
 const timer = setInterval(capture, 160);
 capture();
+process.stdout.write('\x1b]777;arg-bridge-ready\x07');
 
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (chunk) => {
@@ -835,7 +922,8 @@ process.stdin.on('data', (chunk) => {
     inputBuffer = inputBuffer.slice(newline + 1);
     if (!frame) continue;
     try {
-      sendInput(Buffer.from(frame, 'base64').toString('utf8'));
+      const decoded = Buffer.from(frame, 'base64').toString('utf8');
+      sendInput(decoded);
     } catch (error) {
       process.stderr.write('failed to decode tmux input frame: ' + String(error) + '\n');
     }
@@ -961,8 +1049,9 @@ function buildLiveStatusFallback(
     `Terminal backend: ${terminal?.backend ?? 'unknown'}`,
     ...(terminal?.attachCommand
       ? [
-          `Tmux socket: ${terminal.socketName}`,
+          `Tmux socket: ${terminal.socketPath ?? terminal.socketName}`,
           `Tmux target: ${terminal.target}`,
+          `Tmux ownership: ${terminal.ownership ?? 'unknown'}`,
           `Attach command: ${terminal.attachCommand}`,
         ]
       : []),
@@ -970,6 +1059,19 @@ function buildLiveStatusFallback(
     '',
   ];
   return lines.join('\n');
+}
+
+function buildLiveTerminalFooter(terminal?: LiveTerminalInfo): string {
+  if (!terminal?.attachCommand) return '';
+  return [
+    '',
+    'Bridge terminal',
+    `Tmux socket: ${terminal.socketPath ?? terminal.socketName}`,
+    `Tmux target: ${terminal.target}`,
+    `Tmux ownership: ${terminal.ownership ?? 'unknown'}`,
+    `Attach command: ${terminal.attachCommand}`,
+    '',
+  ].join('\n');
 }
 
 function argValue(args: string[], name: string): string | undefined {

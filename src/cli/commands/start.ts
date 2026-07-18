@@ -447,6 +447,7 @@ export function createRuntimeAgent(
     });
   }
   return new ClaudeAdapter({
+    profileStateDir: appPaths.profileDir,
     larkChannel,
     sessionMode: profileConfig.preferences?.agentSessionMode === 'turn' ? 'turn' : 'live',
     liveTerminalBackend: 'tmux',

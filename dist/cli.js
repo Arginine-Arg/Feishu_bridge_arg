@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.26",
+  version: "0.6.27",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -135,7 +135,7 @@ async function checkAgentVersion(input) {
   const args = input.args ?? ["--version"];
   const timeoutMs = input.timeoutMs ?? 5e3;
   const executable = input.realpath ?? input.binaryPath;
-  return new Promise((resolve2, reject4) => {
+  return new Promise((resolve3, reject4) => {
     let settled = false;
     let stdout = "";
     let stderr = "";
@@ -240,7 +240,7 @@ async function checkAgentVersion(input) {
           );
           return;
         }
-        resolve2(version);
+        resolve3(version);
       });
     });
   });
@@ -880,7 +880,7 @@ function codexBootstrapBinaryErrorCode(errno) {
 import { createInterface } from "readline";
 import { Writable } from "stream";
 async function promptLine(prompt) {
-  return new Promise((resolve2) => {
+  return new Promise((resolve3) => {
     const rl = createInterface({
       input: process.stdin,
       output: process.stdout,
@@ -888,13 +888,13 @@ async function promptLine(prompt) {
     });
     rl.question(prompt, (answer) => {
       rl.close();
-      resolve2(answer.trim());
+      resolve3(answer.trim());
     });
   });
 }
 async function promptPassword(prompt) {
   const isTTY = Boolean(process.stdin.isTTY);
-  return new Promise((resolve2) => {
+  return new Promise((resolve3) => {
     const muted = new Writable({
       write(_chunk, _enc, cb) {
         cb();
@@ -909,7 +909,7 @@ async function promptPassword(prompt) {
     rl.question("", (answer) => {
       rl.close();
       process.stdout.write("\n");
-      resolve2(answer.trim());
+      resolve3(answer.trim());
     });
   });
 }
@@ -1079,7 +1079,7 @@ async function fsyncDir(path) {
   }
 }
 function sleep(ms) {
-  return new Promise((resolve2) => setTimeout(resolve2, ms));
+  return new Promise((resolve3) => setTimeout(resolve3, ms));
 }
 
 // src/runtime/locks.ts
@@ -2631,13 +2631,13 @@ async function listSecretProfiles(rootDir) {
 }
 async function readAllStdin() {
   if (process.stdin.isTTY) return "";
-  return new Promise((resolve2, reject4) => {
+  return new Promise((resolve3, reject4) => {
     let data = "";
     process.stdin.setEncoding("utf8");
     process.stdin.on("data", (chunk) => {
       data += chunk;
     });
-    process.stdin.on("end", () => resolve2(data));
+    process.stdin.on("end", () => resolve3(data));
     process.stdin.on("error", reject4);
   });
 }
@@ -2736,7 +2736,7 @@ async function spawnExecProvider(pc, ref) {
   const timeoutMs = pc.noOutputTimeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
   const maxOutput = pc.maxOutputBytes ?? DEFAULT_EXEC_MAX_OUTPUT;
   const providerName = ref.provider ?? DEFAULT_PROVIDER;
-  return new Promise((resolve2, reject4) => {
+  return new Promise((resolve3, reject4) => {
     const env = {};
     if (pc.passEnv) {
       for (const k of pc.passEnv) {
@@ -2794,7 +2794,7 @@ async function spawnExecProvider(pc, ref) {
         const parsed = JSON.parse(stdout);
         const value = parsed.values?.[ref.id];
         if (typeof value === "string") {
-          resolve2(value);
+          resolve3(value);
           return;
         }
         const err = parsed.errors?.[ref.id]?.message;
@@ -2821,7 +2821,7 @@ import * as p from "@clack/prompts";
 import { registerApp } from "@larksuite/channel";
 import qrcode from "qrcode-terminal";
 async function requestScopeGrantLink(opts) {
-  return new Promise((resolve2, reject4) => {
+  return new Promise((resolve3, reject4) => {
     let urlDelivered = false;
     const completion = registerApp({
       source: "arg-bridge",
@@ -2830,7 +2830,7 @@ async function requestScopeGrantLink(opts) {
       ...opts.signal ? { signal: opts.signal } : {},
       onQRCodeReady: (info) => {
         urlDelivered = true;
-        resolve2({ url: info.url, expireIn: info.expireIn, completion });
+        resolve3({ url: info.url, expireIn: info.expireIn, completion });
       }
     }).then(() => void 0);
     completion.catch((err) => {
@@ -4800,7 +4800,7 @@ async function applyLarkCliIdentityPolicy(context, identityPreset) {
 }
 async function runQuiet(cmd, args, env) {
   let timedOut = false;
-  const exitCode = await new Promise((resolve2) => {
+  const exitCode = await new Promise((resolve3) => {
     const child = spawnProcess(cmd, args, {
       env: mergeProcessEnv(process.env, env),
       stdio: ["ignore", "ignore", "ignore"]
@@ -4811,11 +4811,11 @@ async function runQuiet(cmd, args, env) {
     }, POLICY_TIMEOUT_MS);
     child.once("error", () => {
       clearTimeout(timer);
-      resolve2(null);
+      resolve3(null);
     });
     child.once("exit", (code) => {
       clearTimeout(timer);
-      resolve2(code);
+      resolve3(code);
     });
   });
   return !timedOut && exitCode === 0;
@@ -5396,7 +5396,7 @@ function isLarkCliInstalled() {
 async function runCapture(cmd, args, timeoutMs, env) {
   let captured = "";
   let timedOut = false;
-  const exitCode = await new Promise((resolve2) => {
+  const exitCode = await new Promise((resolve3) => {
     const child = spawnProcess(cmd, args, {
       env: env ? mergeProcessEnv(process.env, env) : void 0,
       stdio: ["ignore", "pipe", "pipe"]
@@ -5413,11 +5413,11 @@ async function runCapture(cmd, args, timeoutMs, env) {
     }, timeoutMs);
     child.once("error", () => {
       clearTimeout(timer);
-      resolve2(null);
+      resolve3(null);
     });
     child.once("exit", (code) => {
       clearTimeout(timer);
-      resolve2(code);
+      resolve3(code);
     });
   });
   return { success: !timedOut && exitCode === 0, output: captured };
@@ -5520,7 +5520,7 @@ async function confirmStopRuntimeLockProcess() {
   const rl = createInterface2({ input: process.stdin, output: process.stdout });
   try {
     const answer = await new Promise(
-      (resolve2) => rl.question("\u662F\u5426\u505C\u6B62\u65E7\u8FDB\u7A0B\u5E76\u7EE7\u7EED\u542F\u52A8\u540E\u53F0\u670D\u52A1? [y/N]: ", resolve2)
+      (resolve3) => rl.question("\u662F\u5426\u505C\u6B62\u65E7\u8FDB\u7A0B\u5E76\u7EE7\u7EED\u542F\u52A8\u540E\u53F0\u670D\u52A1? [y/N]: ", resolve3)
     );
     const normalized = answer.trim().toLowerCase();
     return normalized === "y" || normalized === "yes";
@@ -5724,8 +5724,8 @@ import { createInterface as createInterface7 } from "readline";
 
 // src/agent/claude/adapter.ts
 import { mkdtempSync, rmSync, writeFileSync as writeFileSync2 } from "fs";
-import { tmpdir as tmpdir2 } from "os";
-import { join as join16 } from "path";
+import { tmpdir as tmpdir3 } from "os";
+import { join as join17 } from "path";
 import { createInterface as createInterface3 } from "readline";
 
 // src/agent/event-queue.ts
@@ -5755,7 +5755,7 @@ var AsyncEventQueue = class {
         const value = this.values.shift();
         if (value !== void 0) return Promise.resolve({ value, done: false });
         if (this.closed) return Promise.resolve({ value: void 0, done: true });
-        return new Promise((resolve2) => this.waiters.push(resolve2));
+        return new Promise((resolve3) => this.waiters.push(resolve3));
       }
     };
   }
@@ -5916,7 +5916,356 @@ ${prompt}`;
 
 // src/agent/live-session.ts
 import { EventEmitter } from "events";
-import { randomUUID } from "crypto";
+import { randomUUID as randomUUID2 } from "crypto";
+
+// src/agent/tmux-control.ts
+import { createHash, randomUUID } from "crypto";
+import {
+  lstatSync,
+  readFileSync as readFileSync2,
+  readdirSync,
+  unlinkSync as unlinkSync2
+} from "fs";
+import { basename as basename4, dirname as dirname14, isAbsolute as isAbsolute2, join as join16, resolve as resolve2 } from "path";
+import { tmpdir as tmpdir2 } from "os";
+var BINDINGS_FILE = "tmux-bindings.json";
+var TMUX_FORMAT = [
+  "#{session_name}",
+  "#{window_index}",
+  "#{pane_index}",
+  "#{pane_id}",
+  "#{pane_pid}",
+  "#{pane_current_command}",
+  "#{pane_current_path}",
+  "#{@argbridge_managed}"
+].join("	");
+var TmuxBindingController = class {
+  constructor(profileStateDir, profile2, agentKind) {
+    this.profileStateDir = profileStateDir;
+    this.profile = profile2;
+    this.agentKind = agentKind;
+    this.file = join16(profileStateDir, BINDINGS_FILE);
+    this.bindings = loadBindings(this.file);
+  }
+  profileStateDir;
+  profile;
+  agentKind;
+  file;
+  bindings;
+  managedSessionName(scopeId) {
+    const profile2 = safeTmuxName(this.profile).slice(0, 24) || this.agentKind;
+    const scopeHash = createHash("sha256").update(scopeId).digest("hex").slice(0, 12);
+    const instance = randomUUID().replace(/-/g, "").slice(0, 8);
+    return `argbridge-${profile2}-${scopeHash}-${process.pid}-${instance}`.slice(0, 96);
+  }
+  async list(socket) {
+    return listTmuxAgentPanes(socket);
+  }
+  async bind(scopeId, selector) {
+    const explicitSocket = selector.includes("::") ? selector.slice(0, selector.lastIndexOf("::")) : void 0;
+    const candidates = await this.list(explicitSocket);
+    const target = selectTmuxTarget(candidates, selector);
+    if (!target) {
+      throw new Error(`\u672A\u627E\u5230 tmux pane\uFF1A${selector}\u3002\u5148\u8FD0\u884C /tmux list\u3002`);
+    }
+    if (target.ownership !== "external") {
+      throw new Error("\u4E0D\u80FD\u7ED1\u5B9A bridge \u6258\u7BA1\u7684 tmux pane\u3002");
+    }
+    if (target.agentKind !== this.agentKind) {
+      throw new Error(
+        `\u5F53\u524D profile \u662F ${this.agentKind}\uFF0C\u4E0D\u80FD\u7ED1\u5B9A ${target.agentKind} pane\u3002`
+      );
+    }
+    const workspace = await resolveWorkingDirectory(target.paneCurrentPath);
+    if (!workspace.ok) throw new Error(workspace.userVisible);
+    const existingScope = this.findBoundScope(target);
+    if (existingScope && existingScope !== scopeId) {
+      throw new Error(`\u8BE5 pane \u5DF2\u7ED1\u5B9A\u5230 scope ${existingScope}\u3002`);
+    }
+    const crossProfile = findCrossProfileBinding(this.profileStateDir, target, scopeId);
+    if (crossProfile) {
+      throw new Error(`\u8BE5 pane \u5DF2\u88AB profile ${crossProfile} \u7ED1\u5B9A\u3002`);
+    }
+    const binding = {
+      ...target,
+      paneCurrentPath: workspace.cwdRealpath
+    };
+    this.bindings[scopeId] = binding;
+    await this.flush();
+    return binding;
+  }
+  async unbind(scopeId) {
+    if (!this.bindings[scopeId]) return false;
+    delete this.bindings[scopeId];
+    await this.flush();
+    return true;
+  }
+  async status(scopeId) {
+    const saved = this.bindings[scopeId];
+    if (!saved) return { state: "none" };
+    try {
+      const target = revalidateTmuxTarget(saved, this.agentKind);
+      return { state: "external", target };
+    } catch (err) {
+      return {
+        state: "invalid",
+        target: saved,
+        message: err instanceof Error ? err.message : String(err)
+      };
+    }
+  }
+  bindingFor(scopeId, cwd) {
+    const saved = this.bindings[scopeId];
+    if (!saved) return void 0;
+    let target;
+    try {
+      target = revalidateTmuxTarget(saved, this.agentKind);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      throw new Error(`tmux \u7ED1\u5B9A\u5DF2\u5931\u6548\uFF1A${detail}\u3002\u8BF7\u8FD0\u884C /tmux unbind\u3002`);
+    }
+    if (resolve2(target.paneCurrentPath) !== resolve2(cwd)) {
+      throw new Error(
+        `tmux pane cwd (${target.paneCurrentPath}) \u4E0E\u5F53\u524D workspace (${cwd}) \u4E0D\u4E00\u81F4\u3002\u8BF7\u8FD0\u884C /tmux unbind \u6216 /cd\u3002`
+      );
+    }
+    return target;
+  }
+  findBoundScope(target) {
+    return Object.entries(this.bindings).find(([, item]) => samePane(item, target))?.[0];
+  }
+  async flush() {
+    const content = { version: 1, bindings: this.bindings };
+    await writeFileAtomic(this.file, `${JSON.stringify(content, null, 2)}
+`, { mode: 384 });
+  }
+};
+function defaultTmuxSocketPath(env = process.env) {
+  const current = env.TMUX?.split(",")[0];
+  if (current && isAbsolute2(current)) return current;
+  const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+  return join16(env.TMUX_TMPDIR || tmpdir2(), `tmux-${uid}`, "default");
+}
+function tmuxAttachCommand(target) {
+  const pane = `${target.sessionName}:${target.windowIndex}.${target.paneIndex}`;
+  return `tmux -S ${shellQuote(target.socketPath)} attach -t ${shellQuote(pane)}`;
+}
+function listTmuxAgentPanes(socket) {
+  const sockets = socket ? [resolveSocketSelector(socket)] : discoverTmuxSockets();
+  const panes = [];
+  for (const socketPath of sockets) {
+    if (!isSafeTmuxSocket(socketPath)) continue;
+    panes.push(...listPanesOnSocket(socketPath));
+  }
+  return panes.sort(
+    (a, b) => `${a.socketPath}\0${a.sessionName}\0${a.windowIndex}\0${a.paneIndex}`.localeCompare(
+      `${b.socketPath}\0${b.sessionName}\0${b.windowIndex}\0${b.paneIndex}`
+    )
+  );
+}
+function discoverTmuxSockets() {
+  const found = /* @__PURE__ */ new Set();
+  found.add(defaultTmuxSocketPath());
+  const current = process.env.TMUX?.split(",")[0];
+  if (current && isAbsolute2(current)) found.add(current);
+  if (process.platform === "linux") {
+    try {
+      const standardDir2 = dirname14(defaultTmuxSocketPath({ ...process.env, TMUX: void 0 }));
+      const lines = readFileSync2("/proc/net/unix", "utf8").split("\n");
+      for (const line of lines) {
+        const path = line.trim().split(/\s+/).at(-1);
+        if (path?.startsWith(`${standardDir2}/`)) found.add(path);
+      }
+    } catch {
+    }
+  }
+  const standardDir = dirname14(defaultTmuxSocketPath({ ...process.env, TMUX: void 0 }));
+  try {
+    for (const name of readdirSync(standardDir)) found.add(join16(standardDir, name));
+  } catch {
+  }
+  for (const path of [...found]) {
+    if (!basename4(path).startsWith("lark-channel-")) continue;
+    if (!isSafeTmuxSocket(path) || tmuxServerAlive(path)) continue;
+    try {
+      unlinkSync2(path);
+      found.delete(path);
+    } catch {
+    }
+  }
+  return [...found].filter(isSafeTmuxSocket).sort();
+}
+function tmuxServerAlive(socketPath) {
+  const result = spawnProcessSync("tmux", ["-S", socketPath, "list-sessions", "-F", "#{session_name}"], {
+    stdio: "ignore"
+  });
+  return result.status === 0;
+}
+function isSafeTmuxSocket(path) {
+  if (!isAbsolute2(path)) return false;
+  try {
+    const info = lstatSync(path);
+    if (info.isSymbolicLink() || !info.isSocket()) return false;
+    return typeof process.getuid !== "function" || info.uid === process.getuid();
+  } catch {
+    return false;
+  }
+}
+function tmuxTargetKey(target) {
+  return `${target.socketPath}::${target.paneId}`;
+}
+function resolveSocketSelector(selector) {
+  const trimmed = selector.trim();
+  if (isAbsolute2(trimmed)) return trimmed;
+  if (/^[A-Za-z0-9_.-]+$/.test(trimmed)) {
+    return join16(dirname14(defaultTmuxSocketPath({ ...process.env, TMUX: void 0 })), trimmed);
+  }
+  return trimmed;
+}
+function listPanesOnSocket(socketPath) {
+  const result = spawnProcessSync("tmux", ["-S", socketPath, "list-panes", "-a", "-F", TMUX_FORMAT], {
+    encoding: "utf8",
+    maxBuffer: 1024 * 1024
+  });
+  if (result.status !== 0 || typeof result.stdout !== "string") return [];
+  const processAgents = linuxProcessAgents();
+  const out = [];
+  for (const line of result.stdout.split("\n")) {
+    if (!line.trim()) continue;
+    const [sessionName, windowIndex, paneIndex, paneId, rawPid, command, cwd, managed] = line.split("	");
+    if (!sessionName || !windowIndex || !paneIndex || !paneId || !rawPid || !command || !cwd) continue;
+    const panePid = Number.parseInt(rawPid, 10);
+    if (!Number.isSafeInteger(panePid) || panePid <= 0) continue;
+    const agentKind = detectTmuxAgent(command, panePid, processAgents);
+    if (!agentKind) continue;
+    const target = {
+      socketPath,
+      sessionName,
+      windowIndex,
+      paneIndex,
+      paneId,
+      panePid,
+      paneCurrentCommand: command,
+      paneCurrentPath: cwd,
+      agentKind,
+      ownership: managed === "1" ? "managed" : "external",
+      attachCommand: ""
+    };
+    target.attachCommand = tmuxAttachCommand(target);
+    out.push(target);
+  }
+  return out;
+}
+function detectTmuxAgent(paneCommand, panePid, processAgents) {
+  const direct = agentFromCommand(paneCommand);
+  if (direct) return direct;
+  if (process.platform !== "linux") return void 0;
+  const descendants = /* @__PURE__ */ new Set([panePid]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [pid, item] of processAgents) {
+      if (!descendants.has(pid) && descendants.has(item.ppid)) {
+        descendants.add(pid);
+        changed = true;
+      }
+    }
+  }
+  for (const pid of descendants) {
+    const agent = processAgents.get(pid)?.agent;
+    if (agent) return agent;
+  }
+  return void 0;
+}
+function linuxProcessAgents() {
+  const out = /* @__PURE__ */ new Map();
+  if (process.platform !== "linux") return out;
+  const result = spawnProcessSync("ps", ["-eo", "pid=,ppid=,comm=,args="], {
+    encoding: "utf8",
+    maxBuffer: 4 * 1024 * 1024
+  });
+  if (result.status !== 0 || typeof result.stdout !== "string") return out;
+  for (const line of result.stdout.split("\n")) {
+    const match = /^\s*(\d+)\s+(\d+)\s+(\S+)\s*(.*)$/u.exec(line);
+    if (!match) continue;
+    const pid = Number.parseInt(match[1], 10);
+    const ppid = Number.parseInt(match[2], 10);
+    const comm = match[3];
+    const args = match[4] ?? "";
+    out.set(pid, { ppid, agent: agentFromCommand(comm) ?? agentFromArgv(args) });
+  }
+  return out;
+}
+function agentFromCommand(command) {
+  const base = command.toLowerCase().split("/").at(-1)?.replace(/\.(?:exe|cmd)$/u, "");
+  if (base === "codex") return "codex";
+  if (base === "claude") return "claude";
+  return void 0;
+}
+function agentFromArgv(args) {
+  const words = args.trim().split(/\s+/).slice(0, 3);
+  for (const word of words) {
+    const agent = agentFromCommand(word.replace(/^['"]|['"]$/g, ""));
+    if (agent) return agent;
+  }
+  return void 0;
+}
+function selectTmuxTarget(candidates, selector) {
+  const trimmed = selector.trim();
+  if (/^[1-9]\d*$/.test(trimmed)) return candidates[Number.parseInt(trimmed, 10) - 1];
+  const exact = candidates.filter(
+    (item) => tmuxTargetKey(item) === trimmed || item.paneId === trimmed
+  );
+  if (exact.length === 1) return exact[0];
+  return void 0;
+}
+function revalidateTmuxTarget(saved, expectedAgent) {
+  if (!isSafeTmuxSocket(saved.socketPath)) throw new Error("socket \u4E0D\u5B58\u5728\u6216\u4E0D\u5B89\u5168");
+  const current = listPanesOnSocket(saved.socketPath).find((item) => item.paneId === saved.paneId);
+  if (!current) throw new Error(`pane ${saved.paneId} \u4E0D\u5B58\u5728`);
+  if (current.ownership !== "external") throw new Error("\u76EE\u6807\u73B0\u5728\u662F bridge \u6258\u7BA1 pane");
+  if (current.agentKind !== expectedAgent) {
+    throw new Error(`\u76EE\u6807 agent \u5DF2\u53D8\u4E3A ${current.agentKind}`);
+  }
+  return current;
+}
+function loadBindings(file) {
+  try {
+    const parsed = JSON.parse(readFileSync2(file, "utf8"));
+    if (parsed.version !== 1 || !parsed.bindings || typeof parsed.bindings !== "object") return {};
+    return parsed.bindings;
+  } catch {
+    return {};
+  }
+}
+function findCrossProfileBinding(profileStateDir, target, scopeId) {
+  const profilesDir = dirname14(profileStateDir);
+  try {
+    for (const profile2 of readdirSync(profilesDir)) {
+      const dir = join16(profilesDir, profile2);
+      if (resolve2(dir) === resolve2(profileStateDir)) continue;
+      const bindings = loadBindings(join16(dir, BINDINGS_FILE));
+      if (Object.entries(bindings).some(([scope, item]) => scope !== scopeId && samePane(item, target))) {
+        return profile2;
+      }
+    }
+  } catch {
+    return void 0;
+  }
+  return void 0;
+}
+function samePane(a, b) {
+  return resolve2(a.socketPath) === resolve2(b.socketPath) && a.paneId === b.paneId;
+}
+function safeTmuxName(value) {
+  return value.replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
+}
+function shellQuote(value) {
+  if (/^[A-Za-z0-9_/:=.,@%+-]+$/.test(value)) return value;
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+// src/agent/live-session.ts
 var DEFAULT_IDLE_MS = 3500;
 var DEFAULT_OUTPUT_FLUSH_MS = 500;
 var DEFAULT_STARTUP_TIMEOUT_MS = 15e3;
@@ -5937,6 +6286,7 @@ var DEFAULT_PTY_ROWS = "48";
 var DEFAULT_PTY_COLUMNS = "120";
 var TMUX_CAPTURE_HISTORY_LINES = 1e3;
 var TMUX_HISTORY_FRAME_PREFIX = "\x1B]777;arg-bridge-history=";
+var TMUX_READY_FRAME = "\x1B]777;arg-bridge-ready\x07";
 var LIVE_DIAG_PREVIEW_CHARS = 800;
 var LIVE_DIAG_MAX_FRAMES = 8;
 var LiveSessionPool = class {
@@ -5960,6 +6310,15 @@ var LiveSessionPool = class {
     this.sessions.clear();
     await Promise.allSettled(sessions.map((session) => session.close("shutdown")));
   }
+  async close(key, reason = "close") {
+    const session = this.sessions.get(key);
+    if (!session) return;
+    this.sessions.delete(key);
+    await session.close(reason);
+  }
+  terminalInfo(key) {
+    return this.sessions.get(key)?.getTerminalInfo();
+  }
 };
 var LiveTerminalSession = class {
   signature;
@@ -5975,6 +6334,8 @@ var LiveTerminalSession = class {
   activeTurnCleanup;
   lastTerminalSnapshot = "";
   lastTerminalHistory = "";
+  terminalReady = Promise.resolve();
+  resolveTerminalReady;
   constructor(opts, onClose = () => {
   }) {
     this.opts = opts;
@@ -5983,6 +6344,9 @@ var LiveTerminalSession = class {
   }
   isAlive() {
     return Boolean(this.child?.pid && this.child.exitCode === null && this.child.signalCode === null);
+  }
+  getTerminalInfo() {
+    return this.terminalInfo ? { ...this.terminalInfo } : void 0;
   }
   /**
    * Returns true exactly once per session (the first call), false afterwards.
@@ -6016,14 +6380,14 @@ var LiveTerminalSession = class {
     if (child && child.exitCode === null && child.signalCode === null) {
       log.info("agent-live", "close", { pid: child.pid ?? null, reason });
       child.kill("SIGTERM");
-      await new Promise((resolve2) => {
+      await new Promise((resolve3) => {
         const timer = setTimeout(() => {
           if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-          resolve2();
+          resolve3();
         }, 2e3);
         child.once("exit", () => {
           clearTimeout(timer);
-          resolve2();
+          resolve3();
         });
       });
     }
@@ -6034,8 +6398,12 @@ var LiveTerminalSession = class {
     if (this.isAlive()) return;
     if (this.closed) throw new Error("live session is closed");
     const spawned = spawnLiveProcess(this.opts);
+    this.terminalReady = new Promise((resolve3) => {
+      this.resolveTerminalReady = resolve3;
+    });
     this.child = spawned.child;
     this.terminalInfo = spawned.terminal;
+    if (spawned.terminal.backend !== "tmux") this.resolveTerminalReady?.();
     this.startedAt = Date.now();
     const child = spawned.child;
     log.info("agent-live", "spawn", {
@@ -6064,7 +6432,12 @@ var LiveTerminalSession = class {
     });
   }
   emitData(chunk) {
-    const output = this.cleaner.push(chunk.toString("utf8"));
+    const raw = chunk.toString("utf8");
+    if (raw.includes(TMUX_READY_FRAME)) {
+      this.resolveTerminalReady?.();
+      this.resolveTerminalReady = void 0;
+    }
+    const output = this.cleaner.push(raw);
     if (output.mode === "snapshot" && output.text.trim()) {
       this.lastTerminalSnapshot = output.text;
     }
@@ -6155,8 +6528,11 @@ var LiveTerminalSession = class {
       if (controlLiteralConfirmTimer) clearTimeout(controlLiteralConfirmTimer);
       cancelNormalSubmitRetry();
       flushOutput();
-      if (commandMode && !deliveredText && isStatusLiveCommand(prompt)) {
-        push({ type: "text", delta: buildLiveStatusFallback(this.opts, cwd, this.terminalInfo) });
+      if (commandMode && isStatusLiveCommand(prompt)) {
+        push({
+          type: "text",
+          delta: deliveredText ? buildLiveTerminalFooter(this.terminalInfo) : buildLiveStatusFallback(this.opts, cwd, this.terminalInfo)
+        });
       }
       push({ type: "done", terminationReason: "normal" });
     };
@@ -6305,7 +6681,7 @@ var LiveTerminalSession = class {
     this.emitter.once("error", onError);
     try {
       arm(startupTimeoutMs + inputGraceMs);
-      await delay(inputGraceMs);
+      await this.waitForInputReady(inputGraceMs);
       if (!done) {
         this.cleaner.resetTurn();
         output.setSnapshotBaseline(this.lastTerminalSnapshot);
@@ -6339,15 +6715,16 @@ var LiveTerminalSession = class {
             scheduleNormalSubmitRetry();
           }
         }
-        if (commandMode && isKnownSilentLiveCommand(prompt)) arm(idleMs);
+        if (commandMode && isStatusLiveCommand(prompt)) arm(idleMs);
+        else if (commandMode && isKnownSilentLiveCommand(prompt)) arm(idleMs);
         else if (commandMode && isSlowSilentLiveCommand(prompt)) {
           arm(noOutputIdleMs(prompt, idleMs));
         }
       }
       while (!done || queue.length > 0) {
         if (queue.length === 0) {
-          await new Promise((resolve2) => {
-            wake = resolve2;
+          await new Promise((resolve3) => {
+            wake = resolve3;
           });
           wake = void 0;
           continue;
@@ -6377,6 +6754,17 @@ var LiveTerminalSession = class {
     const freshSessionGraceMs = COMMAND_FRESH_SESSION_GRACE_MS;
     return Math.max(STARTUP_INPUT_GRACE_MS, freshSessionGraceMs - ageMs);
   }
+  async waitForInputReady(inputGraceMs) {
+    if (this.terminalInfo?.backend !== "tmux") {
+      await delay(inputGraceMs);
+      return;
+    }
+    await Promise.race([
+      this.terminalReady,
+      delay(Math.max(DEFAULT_STARTUP_TIMEOUT_MS, inputGraceMs))
+    ]);
+    await delay(inputGraceMs);
+  }
 };
 function spawnLiveProcess(opts) {
   const ptyRows = positiveIntString(opts.env?.LINES) ?? DEFAULT_PTY_ROWS;
@@ -6392,7 +6780,7 @@ function spawnLiveProcess(opts) {
   if (backend !== "pipe" && process.platform === "linux") {
     const commandLine = liveCommandLine(opts.command, opts.args, ptyRows, ptyColumns);
     if ((backend === "auto" || backend === "tmux") && isTmuxAvailable()) {
-      return spawnTmuxLiveProcess(opts.cwd, env, commandLine, ptyRows, ptyColumns);
+      return spawnTmuxLiveProcess(opts, env, commandLine, ptyRows, ptyColumns);
     }
     if (backend === "tmux") {
       log.warn("agent-live", "tmux-unavailable-fallback", { fallback: "pty" });
@@ -6420,32 +6808,45 @@ function spawnLiveProcess(opts) {
   };
 }
 function liveCommandLine(command, args, rows, columns) {
-  return `stty rows ${shellQuote(rows)} cols ${shellQuote(columns)} -echo 2>/dev/null; ${[
+  return `stty rows ${shellQuote2(rows)} cols ${shellQuote2(columns)} -echo 2>/dev/null; COLUMNS=${shellQuote2(columns)} LINES=${shellQuote2(rows)} ${[
     command,
     ...args
-  ].map(shellQuote).join(" ")}`;
+  ].map(shellQuote2).join(" ")}`;
 }
 function encodeTmuxInputFrame(input) {
   return `${Buffer.from(input, "utf8").toString("base64")}
 `;
 }
-function spawnTmuxLiveProcess(cwd, env, commandLine, rows, columns) {
-  const socketName = `lark-channel-${process.pid}-${randomUUID().replace(/-/g, "").slice(0, 16)}`;
-  const sessionName = "main";
-  const target = `${sessionName}:0.0`;
+function spawnTmuxLiveProcess(opts, env, commandLine, rows, columns) {
+  const external = opts.tmuxTarget;
+  const socketPath = external?.socketPath ?? defaultTmuxSocketPath(env);
+  const sessionName = external?.sessionName ?? opts.tmuxSessionName ?? `argbridge-${process.pid}-${randomUUID2().replace(/-/g, "").slice(0, 8)}`;
+  const target = external?.paneId ?? `${sessionName}:0.0`;
+  const attachTarget = external ?? {
+    socketPath,
+    sessionName,
+    windowIndex: "0",
+    paneIndex: "0"
+  };
   const child = spawnProcess(
     process.execPath,
     [
       "-e",
       TMUX_BRIDGE_HELPER,
-      socketName,
+      external ? "external" : "managed",
+      socketPath,
+      sessionName,
+      target,
       Buffer.from(commandLine, "utf8").toString("base64"),
-      cwd,
+      opts.cwd,
       rows,
-      columns
+      columns,
+      opts.tmuxProfile ?? "",
+      opts.tmuxScopeId ?? "",
+      String(process.pid)
     ],
     {
-      cwd,
+      cwd: opts.cwd,
       env,
       stdio: ["pipe", "pipe", "pipe"]
     }
@@ -6455,10 +6856,12 @@ function spawnTmuxLiveProcess(cwd, env, commandLine, rows, columns) {
     pty: true,
     terminal: {
       backend: "tmux",
-      socketName,
+      socketName: socketPath,
+      socketPath,
       sessionName,
       target,
-      attachCommand: `tmux -L ${shellQuote(socketName)} attach -t ${shellQuote(sessionName)}`
+      attachCommand: tmuxAttachCommand(attachTarget),
+      ownership: external ? "external" : "managed"
     },
     child
   };
@@ -6473,23 +6876,23 @@ function positiveIntString(value) {
   if (!Number.isSafeInteger(parsed) || parsed <= 0) return void 0;
   return String(parsed);
 }
-function shellQuote(value) {
+function shellQuote2(value) {
   if (/^[A-Za-z0-9_/:=.,@%+-]+$/.test(value)) return value;
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 var TMUX_BRIDGE_HELPER = String.raw`
 const { spawnSync } = require('node:child_process');
 
-const [socketName, commandBase64, cwd, rows, columns] = process.argv.slice(1);
-const session = 'main';
-const target = session + ':0.0';
+const [mode, socketPath, session, requestedTarget, commandBase64, cwd, rows, columns, profile, scope, ownerPid] = process.argv.slice(1);
+const managed = mode === 'managed';
+const target = managed ? session + ':0.0' : requestedTarget;
 const commandLine = Buffer.from(commandBase64, 'base64').toString('utf8');
 let closed = false;
 let lastSnapshot = '';
 let inputBuffer = '';
 
 function tmux(args, options = {}) {
-  return spawnSync('tmux', ['-L', socketName, ...args], {
+  return spawnSync('tmux', ['-S', socketPath, ...args], {
     cwd,
     env: process.env,
     encoding: 'utf8',
@@ -6506,25 +6909,37 @@ function writeError(prefix, result) {
 function cleanup() {
   if (closed) return;
   closed = true;
-  tmux(['kill-server'], { stdio: 'ignore' });
+  if (managed) tmux(['kill-session', '-t', session], { stdio: 'ignore' });
 }
 
-const created = tmux([
-  'new-session',
-  '-d',
-  '-x',
-  columns,
-  '-y',
-  rows,
-  '-s',
-  session,
-  '-c',
-  cwd,
-  commandLine,
-]);
-if (created.status !== 0) {
-  writeError('failed to start tmux live session', created);
-  process.exit(1);
+if (managed) {
+  const created = tmux([
+    'new-session',
+    '-d',
+    '-x',
+    columns,
+    '-y',
+    rows,
+    '-s',
+    session,
+    '-c',
+    cwd,
+    commandLine,
+  ]);
+  if (created.status !== 0) {
+    writeError('failed to start tmux live session', created);
+    process.exit(1);
+  }
+  tmux(['set-option', '-t', session, '@argbridge_managed', '1'], { stdio: 'ignore' });
+  tmux(['set-option', '-t', session, '@argbridge_owner_pid', ownerPid], { stdio: 'ignore' });
+  tmux(['set-option', '-t', session, '@argbridge_profile', profile], { stdio: 'ignore' });
+  tmux(['set-option', '-t', session, '@argbridge_scope', scope], { stdio: 'ignore' });
+} else {
+  const exists = tmux(['display-message', '-p', '-t', target, '#{pane_id}'], { stdio: 'ignore' });
+  if (exists.status !== 0) {
+    writeError('external tmux pane is unavailable', exists);
+    process.exit(1);
+  }
 }
 
 function sendKeys(args) {
@@ -6586,8 +7001,8 @@ function sendInput(input) {
 
 function capture() {
   if (closed) return;
-  const hasSession = tmux(['has-session', '-t', session], { stdio: 'ignore' });
-  if (hasSession.status !== 0) {
+  const available = tmux(['display-message', '-p', '-t', target, '#{pane_id}'], { stdio: 'ignore' });
+  if (available.status !== 0) {
     cleanup();
     process.exit(0);
   }
@@ -6611,6 +7026,7 @@ function capture() {
 
 const timer = setInterval(capture, 160);
 capture();
+process.stdout.write('\x1b]777;arg-bridge-ready\x07');
 
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', (chunk) => {
@@ -6621,7 +7037,8 @@ process.stdin.on('data', (chunk) => {
     inputBuffer = inputBuffer.slice(newline + 1);
     if (!frame) continue;
     try {
-      sendInput(Buffer.from(frame, 'base64').toString('utf8'));
+      const decoded = Buffer.from(frame, 'base64').toString('utf8');
+      sendInput(decoded);
     } catch (error) {
       process.stderr.write('failed to decode tmux input frame: ' + String(error) + '\n');
     }
@@ -6725,14 +7142,27 @@ function buildLiveStatusFallback(opts, cwd, terminal) {
     `Backend: ${opts.backend ?? (opts.usePty === false ? "pipe" : "auto")}`,
     `Terminal backend: ${terminal?.backend ?? "unknown"}`,
     ...terminal?.attachCommand ? [
-      `Tmux socket: ${terminal.socketName}`,
+      `Tmux socket: ${terminal.socketPath ?? terminal.socketName}`,
       `Tmux target: ${terminal.target}`,
+      `Tmux ownership: ${terminal.ownership ?? "unknown"}`,
       `Attach command: ${terminal.attachCommand}`
     ] : [],
     "Token usage: unavailable from Codex TUI fallback",
     ""
   ];
   return lines.join("\n");
+}
+function buildLiveTerminalFooter(terminal) {
+  if (!terminal?.attachCommand) return "";
+  return [
+    "",
+    "Bridge terminal",
+    `Tmux socket: ${terminal.socketPath ?? terminal.socketName}`,
+    `Tmux target: ${terminal.target}`,
+    `Tmux ownership: ${terminal.ownership ?? "unknown"}`,
+    `Attach command: ${terminal.attachCommand}`,
+    ""
+  ].join("\n");
 }
 function argValue(args, name) {
   const idx = args.indexOf(name);
@@ -7645,7 +8075,7 @@ function isIncompleteEscapeSequence(seq) {
   return false;
 }
 function delay(ms) {
-  return new Promise((resolve2) => setTimeout(resolve2, ms));
+  return new Promise((resolve3) => setTimeout(resolve3, ms));
 }
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -7714,6 +8144,7 @@ function* translateEvent(raw) {
 var ClaudeAdapter = class {
   id = "claude";
   displayName = "Claude Code";
+  tmux;
   binary;
   larkChannel;
   sessionMode;
@@ -7721,6 +8152,7 @@ var ClaudeAdapter = class {
   liveTerminalBackend;
   liveIdleMs;
   liveSessions = new LiveSessionPool();
+  tmuxBindings;
   botIdentity;
   constructor(opts = {}) {
     this.binary = opts.binary ?? "claude";
@@ -7729,6 +8161,40 @@ var ClaudeAdapter = class {
     this.liveUsePty = opts.liveUsePty;
     this.liveTerminalBackend = opts.liveTerminalBackend;
     this.liveIdleMs = opts.liveIdleMs;
+    const profileStateDir = opts.profileStateDir ?? join17(tmpdir3(), `arg-bridge-${process.pid}-claude`);
+    this.tmuxBindings = new TmuxBindingController(
+      profileStateDir,
+      opts.larkChannel?.profile ?? "claude",
+      "claude"
+    );
+    this.tmux = {
+      list: (socket) => this.tmuxBindings.list(socket),
+      bind: async (scopeId, selector) => {
+        const target = await this.tmuxBindings.bind(scopeId, selector);
+        await this.liveSessions.close(scopeId, "tmux-bind");
+        return target;
+      },
+      unbind: async (scopeId) => {
+        const removed = await this.tmuxBindings.unbind(scopeId);
+        if (removed) await this.liveSessions.close(scopeId, "tmux-unbind");
+        return removed;
+      },
+      status: async (scopeId) => {
+        const binding = await this.tmuxBindings.status(scopeId);
+        if (binding.state !== "none") return binding;
+        const terminal = this.liveSessions.terminalInfo(scopeId);
+        if (!terminal?.attachCommand || !terminal.socketPath || !terminal.target) return binding;
+        return {
+          state: terminal.ownership === "external" ? "external" : "managed",
+          terminal: {
+            socketPath: terminal.socketPath,
+            target: terminal.target,
+            attachCommand: terminal.attachCommand,
+            ownership: terminal.ownership ?? "managed"
+          }
+        };
+      }
+    };
   }
   setBotIdentity(identity) {
     this.botIdentity = identity;
@@ -7817,7 +8283,7 @@ var ClaudeAdapter = class {
         if (child.exitCode !== null || child.signalCode !== null) return;
         log.info("agent", "stop-sigterm", { pid: child.pid ?? null, graceMs: stopGraceMs });
         child.kill("SIGTERM");
-        await new Promise((resolve2) => {
+        await new Promise((resolve3) => {
           const timer = setTimeout(() => {
             if (child.exitCode === null && child.signalCode === null) {
               log.warn("agent", "stop-sigkill", {
@@ -7827,11 +8293,11 @@ var ClaudeAdapter = class {
               });
               child.kill("SIGKILL");
             }
-            resolve2();
+            resolve3();
           }, stopGraceMs);
           child.once("exit", () => {
             clearTimeout(timer);
-            resolve2();
+            resolve3();
           });
         });
       },
@@ -7839,14 +8305,14 @@ var ClaudeAdapter = class {
         if (child.exitCode !== null || child.signalCode !== null) {
           return Promise.resolve(true);
         }
-        return new Promise((resolve2) => {
+        return new Promise((resolve3) => {
           const onExit = () => {
             clearTimeout(timer);
-            resolve2(true);
+            resolve3(true);
           };
           const timer = setTimeout(() => {
             child.removeListener("exit", onExit);
-            resolve2(false);
+            resolve3(false);
           }, timeoutMs);
           child.once("exit", onExit);
         });
@@ -7871,15 +8337,20 @@ var ClaudeAdapter = class {
       permissionMode: opts.permissionMode ?? CLAUDE_DEFAULT_PERMISSION_MODE
     });
     const scopeKey = opts.scopeId ?? opts.cwd;
+    const tmuxTarget = this.tmuxBindings.bindingFor(scopeKey, opts.cwd);
     const session = this.liveSessions.getOrCreate(scopeKey, {
       command: this.binary,
       args,
       cwd: opts.cwd,
       env: buildLarkChannelEnv(this.larkChannel),
-      signature,
+      signature: `${signature}:${tmuxTarget ? `${tmuxTarget.socketPath}:${tmuxTarget.paneId}` : "managed"}`,
       usePty: this.liveUsePty,
       backend: this.liveTerminalBackend ?? "tmux",
-      idleMs: this.liveIdleMs
+      idleMs: this.liveIdleMs,
+      tmuxSessionName: this.tmuxBindings.managedSessionName(scopeKey),
+      tmuxProfile: this.larkChannel?.profile ?? "claude",
+      tmuxScopeId: scopeKey,
+      tmuxTarget
     });
     return session.run(opts.runId, opts.prompt, opts.cwd, opts.liveInputMode);
   }
@@ -7950,8 +8421,8 @@ function createEventStream(child, stderrChunks, getError) {
   return events;
 }
 function writeSystemPromptFile(content) {
-  const dir = mkdtempSync(join16(tmpdir2(), "lark-claude-"));
-  const path = join16(dir, "append-system-prompt.md");
+  const dir = mkdtempSync(join17(tmpdir3(), "lark-claude-"));
+  const path = join17(dir, "append-system-prompt.md");
   writeFileSync2(path, content, "utf8");
   return {
     path,
@@ -7969,7 +8440,7 @@ function isWindowsCommandNotFoundLine(line) {
 
 // src/agent/codex/adapter.ts
 import { createInterface as createInterface4 } from "readline";
-import { join as join17 } from "path";
+import { join as join18 } from "path";
 
 // src/runtime/errors.ts
 var RunRejected = class extends Error {
@@ -8216,6 +8687,7 @@ function truncate(value, max) {
 var CodexAdapter = class {
   id = "codex";
   displayName = "Codex CLI";
+  tmux;
   binary;
   profileStateDir;
   codexHome;
@@ -8230,6 +8702,7 @@ var CodexAdapter = class {
   liveTerminalBackend;
   liveIdleMs;
   liveSessions = new LiveSessionPool();
+  tmuxBindings;
   botIdentity;
   constructor(opts) {
     this.binary = opts.binary;
@@ -8245,6 +8718,39 @@ var CodexAdapter = class {
     this.liveUsePty = opts.liveUsePty;
     this.liveTerminalBackend = opts.liveTerminalBackend;
     this.liveIdleMs = opts.liveIdleMs;
+    this.tmuxBindings = new TmuxBindingController(
+      opts.profileStateDir,
+      opts.larkChannel?.profile ?? "codex",
+      "codex"
+    );
+    this.tmux = {
+      list: (socket) => this.tmuxBindings.list(socket),
+      bind: async (scopeId, selector) => {
+        const target = await this.tmuxBindings.bind(scopeId, selector);
+        await this.liveSessions.close(scopeId, "tmux-bind");
+        return target;
+      },
+      unbind: async (scopeId) => {
+        const removed = await this.tmuxBindings.unbind(scopeId);
+        if (removed) await this.liveSessions.close(scopeId, "tmux-unbind");
+        return removed;
+      },
+      status: async (scopeId) => {
+        const binding = await this.tmuxBindings.status(scopeId);
+        if (binding.state !== "none") return binding;
+        const terminal = this.liveSessions.terminalInfo(scopeId);
+        if (!terminal?.attachCommand || !terminal.socketPath || !terminal.target) return binding;
+        return {
+          state: terminal.ownership === "external" ? "external" : "managed",
+          terminal: {
+            socketPath: terminal.socketPath,
+            target: terminal.target,
+            attachCommand: terminal.attachCommand,
+            ownership: terminal.ownership ?? "managed"
+          }
+        };
+      }
+    };
   }
   setBotIdentity(identity) {
     this.botIdentity = identity;
@@ -8293,7 +8799,7 @@ var CodexAdapter = class {
     if (this.codexHome) {
       envOverrides.CODEX_HOME = this.codexHome;
     } else if (!this.inheritCodexHome) {
-      envOverrides.CODEX_HOME = join17(this.profileStateDir, "codex-home");
+      envOverrides.CODEX_HOME = join18(this.profileStateDir, "codex-home");
     }
     const child = spawnProcess(this.binary, args, {
       cwd: opts.cwd,
@@ -8351,7 +8857,7 @@ var CodexAdapter = class {
         stopReason = "interrupted";
         log.info("agent", "stop-sigterm", { pid: child.pid ?? null, graceMs: stopGraceMs });
         child.kill("SIGTERM");
-        await new Promise((resolve2) => {
+        await new Promise((resolve3) => {
           const timer = setTimeout(() => {
             if (child.exitCode === null && child.signalCode === null) {
               log.warn("agent", "stop-sigkill", {
@@ -8361,11 +8867,11 @@ var CodexAdapter = class {
               });
               child.kill("SIGKILL");
             }
-            resolve2();
+            resolve3();
           }, stopGraceMs);
           child.once("exit", () => {
             clearTimeout(timer);
-            resolve2();
+            resolve3();
           });
         });
       },
@@ -8373,14 +8879,14 @@ var CodexAdapter = class {
         if (child.exitCode !== null || child.signalCode !== null) {
           return Promise.resolve(true);
         }
-        return new Promise((resolve2) => {
+        return new Promise((resolve3) => {
           const onExit = () => {
             clearTimeout(timer);
-            resolve2(true);
+            resolve3(true);
           };
           const timer = setTimeout(() => {
             child.removeListener("exit", onExit);
-            resolve2(false);
+            resolve3(false);
           }, timeoutMs);
           child.once("exit", onExit);
         });
@@ -8407,7 +8913,7 @@ var CodexAdapter = class {
     if (this.codexHome) {
       envOverrides.CODEX_HOME = this.codexHome;
     } else if (!this.inheritCodexHome) {
-      envOverrides.CODEX_HOME = join17(this.profileStateDir, "codex-home");
+      envOverrides.CODEX_HOME = join18(this.profileStateDir, "codex-home");
     }
     const signature = JSON.stringify({
       cwd: opts.cwd,
@@ -8415,15 +8921,20 @@ var CodexAdapter = class {
       codexHome: envOverrides.CODEX_HOME ?? null
     });
     const scopeKey = opts.scopeId ?? opts.cwd;
+    const tmuxTarget = this.tmuxBindings.bindingFor(scopeKey, opts.cwd);
     const session = this.liveSessions.getOrCreate(scopeKey, {
       command: this.binary,
       args,
       cwd: opts.cwd,
       env: envOverrides,
-      signature,
+      signature: `${signature}:${tmuxTarget ? `${tmuxTarget.socketPath}:${tmuxTarget.paneId}` : "managed"}`,
       usePty: this.liveUsePty,
       backend: this.liveTerminalBackend ?? "tmux",
-      idleMs: this.liveIdleMs
+      idleMs: this.liveIdleMs,
+      tmuxSessionName: this.tmuxBindings.managedSessionName(scopeKey),
+      tmuxProfile: this.larkChannel?.profile ?? "codex",
+      tmuxScopeId: scopeKey,
+      tmuxTarget
     });
     return session.run(opts.runId, opts.prompt, opts.cwd, opts.liveInputMode);
   }
@@ -8509,7 +9020,7 @@ function isWindowsCommandNotFoundLine2(line) {
 // src/bot/channel.ts
 import { createLarkChannel } from "@larksuite/channel";
 import { homedir as homedir7 } from "os";
-import { dirname as dirname16, join as join21 } from "path";
+import { dirname as dirname17, join as join22 } from "path";
 
 // src/agent/capability.ts
 function claudeCapability(profile2) {
@@ -8548,7 +9059,7 @@ function codexCapability(profile2) {
 }
 
 // src/bridge-agent/router.ts
-import { createHash } from "crypto";
+import { createHash as createHash2 } from "crypto";
 
 // src/bridge-agent/prompt.ts
 var BRIDGE_AGENT_SYSTEM_PROMPT = `
@@ -8684,7 +9195,7 @@ function looksLikeTerminalPicker(text) {
   );
 }
 function sha256(value) {
-  return createHash("sha256").update(value).digest("hex");
+  return createHash2("sha256").update(value).digest("hex");
 }
 
 // src/agent/models.ts
@@ -8757,10 +9268,10 @@ function safeJsonStringify(value) {
 }
 
 // src/commands/index.ts
-import { randomUUID as randomUUID2 } from "crypto";
+import { randomUUID as randomUUID3 } from "crypto";
 import { lstat, readFile as readFile11, realpath as realpath4 } from "fs/promises";
 import { homedir as homedir6 } from "os";
-import { basename as basename4, dirname as dirname14, isAbsolute as isAbsolute2, relative, sep } from "path";
+import { basename as basename5, dirname as dirname15, isAbsolute as isAbsolute3, relative, sep } from "path";
 
 // src/card/account-cards.ts
 function maskAppId(id) {
@@ -8992,7 +9503,7 @@ _\u52A0 / \u5220\uFF08\u5728\u76EE\u6807\u7FA4\u91CC\u53D1\uFF09\uFF1A_ \`/invit
       content: `**\u7BA1\u7406\u5458**\uFF08\u5171 ${opts.admins.length} \u4EBA\uFF09
 ${atMentionLine(opts.admins)}
 
-_\u53EF\u4EE5\u8DD1\u654F\u611F\u547D\u4EE4\uFF1A\`/account\` \`/config\` \`/exit\` \`/reconnect\` \`/doctor\` \`/cd\` \`/ws\` \`/invite\` \`/remove\`\u3002\u7BA1\u7406\u5458\u4E5F\u81EA\u52A8\u83B7\u5F97\u79C1\u804A\u6743\u9650\uFF0C\u5E76\u53EF\u5728\u672A\u767D\u540D\u5355\u7FA4\u91CC\u7BA1\u7406\u8BBF\u95EE\u63A7\u5236\u3002_
+_\u53EF\u4EE5\u8DD1\u654F\u611F\u547D\u4EE4\uFF1A\`/account\` \`/config\` \`/exit\` \`/reconnect\` \`/doctor\` \`/cd\` \`/ws\` \`/tmux\` \`/invite\` \`/remove\`\u3002\u7BA1\u7406\u5458\u4E5F\u81EA\u52A8\u83B7\u5F97\u79C1\u804A\u6743\u9650\uFF0C\u5E76\u53EF\u5728\u672A\u767D\u540D\u5355\u7FA4\u91CC\u7BA1\u7406\u8BBF\u95EE\u63A7\u5236\u3002_
 
 _\u52A0 / \u5220\uFF1A_ \`/invite admin @\u67D0\u4EBA\`  \`/remove admin @\u67D0\u4EBA\``
     }
@@ -9583,6 +10094,8 @@ function helpCard(agentName = "Agent") {
         "- `/config` \u2014 \u8C03\u6574\u504F\u597D\u3001\u8BBF\u95EE\u63A7\u5236\u548C lark-cli \u8EAB\u4EFD\u7B56\u7565",
         "- `/model` \u2014 \u9009\u62E9\u6A21\u578B\uFF1BCodex \u4F7F\u7528 CLI \u539F\u751F\u6A21\u578B\u548C reasoning \u9009\u9879\u5E76\u540C\u6B65\u5230 profile",
         "- `/status` \u2014 \u5F53\u524D\u72B6\u6001",
+        "- `/session` \u2014 \u67E5\u770B\u6216\u5207\u6362\u540E\u53F0 agent session \u6A21\u5F0F",
+        "- `/tmux list|bind <\u7F16\u53F7\u6216 pane id>|status|unbind` \u2014 \u7BA1\u7406\u5458\u67E5\u770B\u548C\u7ED1\u5B9A\u672C\u673A tmux agent pane",
         "- `/sendfile <path>` \u2014 \u7BA1\u7406\u5458\u76F4\u63A5\u56DE\u590D\u5F53\u524D\u6D88\u606F\u53D1\u9001\u5DE5\u4F5C\u76EE\u5F55\u5185\u7684\u6587\u4EF6",
         "- `/stop` \u2014 \u7ED3\u675F\u5F53\u524D\u6B63\u5728\u8DD1\u7684\u4EFB\u52A1\uFF08\u4E5F\u53EF\u70B9\u5361\u7247\u5E95\u90E8 \u23F9 \u7EC8\u6B62 \u6309\u94AE\uFF09",
         "- `/stop comment:<scopeHash>` \u2014 \u7BA1\u7406\u5458\u505C\u6B62\u4E91\u6587\u6863\u8BC4\u8BBA\u4EFB\u52A1",
@@ -9614,7 +10127,7 @@ function escapeCode(s) {
 }
 
 // src/policy/fingerprint.ts
-import { createHash as createHash2 } from "crypto";
+import { createHash as createHash3 } from "crypto";
 
 // src/session/jcs.ts
 function canonicalizeJcs(value) {
@@ -9677,7 +10190,7 @@ function attachmentPolicyConfigDigest(input) {
   });
 }
 function digestCanonical(value) {
-  return createHash2("sha256").update(canonicalizeJcs(value)).digest().subarray(0, 16).toString("base64url");
+  return createHash3("sha256").update(canonicalizeJcs(value)).digest().subarray(0, 16).toString("base64url");
 }
 
 // src/policy/access.ts
@@ -10110,7 +10623,7 @@ function finalizeIfRunning(state) {
 import { createReadStream } from "fs";
 import { readdir as readdir4, stat as stat6 } from "fs/promises";
 import { homedir as homedir5 } from "os";
-import { join as join18 } from "path";
+import { join as join19 } from "path";
 import { createInterface as createInterface5 } from "readline";
 
 // src/session/preview.ts
@@ -10149,7 +10662,7 @@ function encodeCwd(cwd) {
   return cwd.replace(/[^A-Za-z0-9]/g, "-");
 }
 function claudeProjectDir(cwd) {
-  return join18(homedir5(), ".claude", "projects", encodeCwd(cwd));
+  return join19(homedir5(), ".claude", "projects", encodeCwd(cwd));
 }
 async function listRecentSessions(cwd, limit = 5) {
   const dir = claudeProjectDir(cwd);
@@ -10163,7 +10676,7 @@ async function listRecentSessions(cwd, limit = 5) {
   const jsonls = files.filter((f) => f.endsWith(".jsonl"));
   const withStats = await Promise.all(
     jsonls.map(async (f) => {
-      const path = join18(dir, f);
+      const path = join19(dir, f);
       try {
         const st = await stat6(path);
         return { file: f, path, mtime: st.mtimeMs };
@@ -10234,7 +10747,7 @@ function formatRelTime(mtime) {
 
 // src/session/codex-history.ts
 import { createInterface as createInterface6 } from "readline";
-import { join as join19 } from "path";
+import { join as join20 } from "path";
 var CodexHistoryError = class extends Error {
   code;
   constructor(code, message, options) {
@@ -10256,7 +10769,7 @@ async function listCodexThreadHistory(options) {
   const timeoutMs = options.timeoutMs ?? DEFAULT_HISTORY_TIMEOUT_MS;
   const stderrChunks = [];
   let settled = false;
-  const result = await new Promise((resolve2, reject4) => {
+  const result = await new Promise((resolve3, reject4) => {
     const rl = createInterface6({ input: child.stdout, crlfDelay: Infinity });
     let timer;
     const fail = (err) => {
@@ -10313,7 +10826,7 @@ async function listCodexThreadHistory(options) {
         cleanup({ kill: true });
         return;
       }
-      resolve2(parsed.entries);
+      resolve3(parsed.entries);
       cleanup({ kill: true });
     });
     child.once("exit", (code) => {
@@ -10349,7 +10862,7 @@ function spawnCodexAppServer(options) {
   if (options.codexHome) {
     envOverrides.CODEX_HOME = options.codexHome;
   } else if (options.inheritCodexHome === false) {
-    envOverrides.CODEX_HOME = join19(options.profileStateDir, "codex-home");
+    envOverrides.CODEX_HOME = join20(options.profileStateDir, "codex-home");
   }
   return spawnProcess(options.binary, ["app-server", "--listen", "stdio://"], {
     env: mergeProcessEnv(process.env, envOverrides),
@@ -10419,14 +10932,14 @@ function normalizeThread(input) {
 }
 async function waitForChildExit(child, timeoutMs) {
   if (child.exitCode !== null || child.signalCode !== null) return;
-  await new Promise((resolve2) => {
+  await new Promise((resolve3) => {
     const timer = setTimeout(() => {
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
-      resolve2();
+      resolve3();
     }, timeoutMs);
     child.once("exit", () => {
       clearTimeout(timer);
-      resolve2();
+      resolve3();
     });
   });
 }
@@ -10567,6 +11080,7 @@ var handlers = {
   "/model": handleModel,
   "/stop": handleStop,
   "/session": handleSession,
+  "/tmux": handleTmux,
   "/timeout": handleTimeout,
   "/ps": handlePs,
   "/exit": handleExit,
@@ -10585,6 +11099,7 @@ var ADMIN_COMMANDS = /* @__PURE__ */ new Set([
   "/reconnect",
   "/doctor",
   "/session",
+  "/tmux",
   "/cd",
   "/ws",
   "/sendfile",
@@ -10675,7 +11190,7 @@ function expandTilde(p3) {
   return p3;
 }
 function isAbsoluteOrTilde(p3) {
-  return isAbsolute2(p3) || p3 === "~" || p3.startsWith("~/");
+  return isAbsolute3(p3) || p3 === "~" || p3.startsWith("~/");
 }
 async function handleSendFile(args, ctx) {
   const input = args.trim();
@@ -10722,13 +11237,13 @@ async function handleSendFile(args, ctx) {
   try {
     await ctx.channel.send(
       ctx.msg.chatId,
-      { file: { source: resolvedPath, fileName: basename4(resolvedPath) } },
+      { file: { source: resolvedPath, fileName: basename5(resolvedPath) } },
       commandReplyOptions(ctx)
     );
     log.info("command", "send-file", {
       profile: ctx.controls.profile,
       size: entry.size,
-      fileName: basename4(resolvedPath)
+      fileName: basename5(resolvedPath)
     });
   } catch (err) {
     log.fail("command", err, { step: "send-file" });
@@ -10754,7 +11269,7 @@ function sendFileFailureMessage(err) {
 }
 function isPathWithinRoot(path, root) {
   const pathRelative = relative(root, path);
-  return pathRelative === "" || pathRelative !== ".." && !pathRelative.startsWith(`..${sep}`) && !isAbsolute2(pathRelative);
+  return pathRelative === "" || pathRelative !== ".." && !pathRelative.startsWith(`..${sep}`) && !isAbsolute3(pathRelative);
 }
 function formatByteLimit(bytes) {
   if (bytes >= 1024 * 1024) return `${Math.floor(bytes / (1024 * 1024))} MiB`;
@@ -11072,8 +11587,8 @@ async function applyResume(sessionId, ctx) {
 }
 function issueResumeCandidate(identity, target) {
   pruneResumeCandidates();
-  let nonce = randomUUID2().slice(0, 12);
-  while (resumeCandidates.has(nonce)) nonce = randomUUID2().slice(0, 12);
+  let nonce = randomUUID3().slice(0, 12);
+  while (resumeCandidates.has(nonce)) nonce = randomUUID3().slice(0, 12);
   resumeCandidates.set(nonce, {
     scopeId: identity.scopeId,
     agentId: identity.agentId,
@@ -11220,10 +11735,14 @@ async function handleSession(args, ctx) {
     const label = current === "live" ? "live\uFF08\u540E\u53F0\u5E38\u9A7B CLI\uFF09" : "turn\uFF08\u6BCF\u8F6E\u77ED\u4EFB\u52A1\uFF09";
     const active2 = ctx.activeRuns.get(ctx.scope);
     const runStatus = active2 ? `\u8FD0\u884C\u4E2D\uFF08run \`${active2.run.runId.slice(0, 8)}\u2026\`\uFF09` : "\u65E0\u8FD0\u884C\u4EFB\u52A1";
+    const terminal = await ctx.agent.tmux?.status(ctx.scope);
+    const terminalText = formatTmuxStatus(terminal);
     await reply(
       ctx,
       `\u5F53\u524D agent session \u6A21\u5F0F\uFF1A\`${label}\`
-\u5F53\u524D scope\uFF1A${runStatus}
+\u5F53\u524D scope\uFF1A${runStatus}${terminalText ? `
+
+${terminalText}` : ""}
 
 \u7528\u6CD5\uFF1A\`/session live\` \u6216 \`/session turn\`\uFF1B\u5B8C\u6574\u8FD0\u884C\u72B6\u6001\u7528 \`/status\`\u3002`
     );
@@ -11250,6 +11769,117 @@ async function handleSession(args, ctx) {
     next === "live" ? "\u5DF2\u5207\u6362\u5230 live \u6A21\u5F0F\uFF0C\u6B63\u5728\u91CD\u8FDE\u3002\u4E4B\u540E\u540C\u4E00 chat/topic \u4F1A\u590D\u7528\u540E\u53F0 CLI session\u3002" : "\u5DF2\u5207\u6362\u5230 turn \u6A21\u5F0F\uFF0C\u6B63\u5728\u91CD\u8FDE\u3002\u4E4B\u540E\u6062\u590D\u6BCF\u8F6E\u77ED\u4EFB\u52A1\u6267\u884C\u3002"
   );
   await ctx.controls.restart();
+}
+async function handleTmux(args, ctx) {
+  const tmux = ctx.agent.tmux;
+  if (!tmux) {
+    await reply(ctx, "\u5F53\u524D agent \u4E0D\u652F\u6301 tmux \u63A7\u5236\u3002");
+    return;
+  }
+  const [action = "status", ...rest] = args.trim().split(/\s+/).filter(Boolean);
+  const value = rest.join(" ");
+  try {
+    if (action === "list") {
+      const socket = parseTmuxSocketArgument(rest);
+      if (socket === null) {
+        await reply(ctx, "\u7528\u6CD5\uFF1A`/tmux list [\u7EDD\u5BF9 socket \u8DEF\u5F84|-S <\u8DEF\u5F84>|-L <\u540D\u79F0>]`");
+        return;
+      }
+      const panes = await tmux.list(socket || void 0);
+      if (panes.length === 0) {
+        await reply(ctx, "\u6CA1\u6709\u53D1\u73B0\u6B63\u5728\u8FD0\u884C\u7684 Codex/Claude tmux pane\u3002\u666E\u901A shell \u4E0D\u4F1A\u5217\u51FA\u3002");
+        return;
+      }
+      await reply(ctx, formatTmuxList(panes));
+      return;
+    }
+    if (action === "bind") {
+      if (!value) {
+        await reply(ctx, "\u7528\u6CD5\uFF1A`/tmux bind <\u7F16\u53F7|pane id|socket::pane id>`");
+        return;
+      }
+      if (ctx.activeRuns.get(ctx.scope)) {
+        await reply(ctx, "\u5F53\u524D scope \u6709\u8FD0\u884C\u4E2D\u7684\u4EFB\u52A1\uFF0C\u8BF7\u5148 `/stop`\uFF0C\u7B49\u5F85\u4EFB\u52A1\u7ED3\u675F\u540E\u518D\u7ED1\u5B9A\u3002");
+        return;
+      }
+      const target = await tmux.bind(ctx.scope, value);
+      ctx.workspaces.setCwd(ctx.scope, target.paneCurrentPath);
+      ctx.sessions.clear(ctx.scope);
+      await reply(
+        ctx,
+        [
+          `\u5DF2\u7ED1\u5B9A ${target.agentKind} pane \`${target.paneId}\`\u3002`,
+          `cwd\uFF1A\`${target.paneCurrentPath}\``,
+          `socket\uFF1A\`${target.socketPath}\``,
+          `\u76D1\u7763\u547D\u4EE4\uFF1A\`${target.attachCommand}\``,
+          "",
+          "bridge \u53EA\u8FDE\u63A5\u8BE5 pane\uFF0C\u4E0D\u4F1A\u5728 `/stop`\u3001\u89E3\u7ED1\u3001\u91CD\u542F\u6216\u9000\u51FA\u65F6\u5220\u9664\u5B83\u3002"
+        ].join("\n")
+      );
+      return;
+    }
+    if (action === "status") {
+      const status = await tmux.status(ctx.scope);
+      await reply(ctx, formatTmuxStatus(status) || "\u5F53\u524D scope \u5C1A\u672A\u521B\u5EFA\u6216\u7ED1\u5B9A tmux terminal\u3002");
+      return;
+    }
+    if (action === "unbind") {
+      if (ctx.activeRuns.get(ctx.scope)) {
+        await reply(ctx, "\u5F53\u524D scope \u6709\u8FD0\u884C\u4E2D\u7684\u4EFB\u52A1\uFF0C\u8BF7\u5148 `/stop`\uFF0C\u7B49\u5F85\u4EFB\u52A1\u7ED3\u675F\u540E\u518D\u89E3\u7ED1\u3002");
+        return;
+      }
+      const removed = await tmux.unbind(ctx.scope);
+      await reply(
+        ctx,
+        removed ? "\u5DF2\u89E3\u9664\u5916\u90E8 tmux \u7ED1\u5B9A\u3002\u76EE\u6807 pane/session/server \u4FDD\u6301\u8FD0\u884C\uFF1B\u4E0B\u4E00\u6B21\u4EFB\u52A1\u4F1A\u521B\u5EFA bridge \u6258\u7BA1 session\u3002" : "\u5F53\u524D scope \u6CA1\u6709\u5916\u90E8 tmux \u7ED1\u5B9A\u3002"
+      );
+      return;
+    }
+    await reply(ctx, "\u7528\u6CD5\uFF1A`/tmux [list|bind <\u7F16\u53F7\u6216 id>|status|unbind]`");
+  } catch (err) {
+    await reply(ctx, `tmux \u64CD\u4F5C\u5931\u8D25\uFF1A${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+function parseTmuxSocketArgument(parts) {
+  if (parts.length === 0) return "";
+  if (parts.length === 1) return isAbsolute3(parts[0]) ? parts[0] : null;
+  if (parts.length === 2 && parts[0] === "-L") return parts[1];
+  if (parts.length === 2 && parts[0] === "-S") return isAbsolute3(parts[1]) ? parts[1] : null;
+  return null;
+}
+function formatTmuxList(panes) {
+  return [
+    "\u53EF\u7ED1\u5B9A\u7684\u672C\u673A tmux agent panes\uFF1A",
+    "",
+    ...panes.flatMap((pane, index) => [
+      `${index + 1}. ${pane.agentKind} \`${pane.paneId}\` (${pane.ownership})`,
+      `   cwd: \`${pane.paneCurrentPath}\``,
+      `   id: \`${tmuxTargetKey(pane)}\``,
+      `   attach: \`${pane.attachCommand}\``
+    ]),
+    "",
+    "\u4F7F\u7528 `/tmux bind <\u7F16\u53F7>` \u7ED1\u5B9A\u5F53\u524D scope\u3002\u7F16\u53F7\u6309\u672C\u6B21\u5217\u8868\u8BA1\u7B97\u3002"
+  ].join("\n");
+}
+function formatTmuxStatus(status) {
+  if (!status || status.state === "none") return "";
+  if (status.state === "invalid") {
+    return `tmux \u7ED1\u5B9A\u72B6\u6001\uFF1A\u5931\u6548\uFF08${status.message ?? "\u76EE\u6807\u4E0D\u53EF\u7528"}\uFF09
+\u8BF7\u8FD0\u884C \`/tmux unbind\`\u3002`;
+  }
+  const terminal = status.terminal ?? (status.target ? {
+    socketPath: status.target.socketPath,
+    target: status.target.paneId,
+    attachCommand: status.target.attachCommand,
+    ownership: status.target.ownership
+  } : void 0);
+  if (!terminal) return `tmux \u72B6\u6001\uFF1A${status.state}`;
+  return [
+    `tmux \u72B6\u6001\uFF1A${status.state === "external" ? "\u5916\u90E8\u7ED1\u5B9A" : "bridge \u6258\u7BA1"}`,
+    `socket\uFF1A\`${terminal.socketPath}\``,
+    `target\uFF1A\`${terminal.target}\``,
+    `\u76D1\u7763\u547D\u4EE4\uFF1A\`${terminal.attachCommand}\``
+  ].join("\n");
 }
 async function handleModel(args, ctx) {
   const sub = args.trim().split(/\s+/)[0] ?? "";
@@ -12289,7 +12919,7 @@ function configFailureMessage(step, rollbackFailed, larkCliPolicyApplied) {
 }
 function commandProfilePaths(ctx) {
   return resolveAppPaths({
-    rootDir: dirname14(ctx.controls.configPath),
+    rootDir: dirname15(ctx.controls.configPath),
     profile: ctx.controls.profile
   });
 }
@@ -13119,10 +13749,10 @@ function footerLine(status) {
 }
 
 // src/media/cache.ts
-import { createHash as createHash3 } from "crypto";
+import { createHash as createHash4 } from "crypto";
 import { createReadStream as createReadStream2 } from "fs";
 import { mkdir as mkdir13, readdir as readdir5, rename as rename4, rm as rm11, stat as stat7 } from "fs/promises";
-import { join as join20 } from "path";
+import { join as join21 } from "path";
 
 // src/media/attachment.ts
 var DEFAULT_POLICY = {
@@ -13258,7 +13888,7 @@ var MediaCache = class {
       return null;
     }
     const kind = r.type;
-    const tmpPath = join20(
+    const tmpPath = join21(
       this.rootDir,
       `.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`
     );
@@ -13272,7 +13902,7 @@ var MediaCache = class {
     const hash = await hashFile(tmpPath);
     const mime = contentType ?? defaultMime(kind);
     const ext = safeExtensionForMime(mime);
-    const absPath = join20(this.rootDir, `${hash}.${ext}`);
+    const absPath = join21(this.rootDir, `${hash}.${ext}`);
     try {
       await stat7(absPath);
       await rm11(tmpPath, { force: true });
@@ -13335,7 +13965,7 @@ async function listFiles(root) {
   const out = [];
   const entries = await readdir5(root, { withFileTypes: true }).catch(() => []);
   for (const entry of entries) {
-    const full = join20(root, entry.name);
+    const full = join21(root, entry.name);
     if (entry.isDirectory()) {
       out.push(...await listFiles(full));
     } else if (entry.isFile()) {
@@ -13345,7 +13975,7 @@ async function listFiles(root) {
   return out;
 }
 async function hashFile(path) {
-  const hash = createHash3("sha256");
+  const hash = createHash4("sha256");
   for await (const chunk of createReadStream2(path)) {
     hash.update(chunk);
   }
@@ -13417,7 +14047,7 @@ async function fetchOwnerId(source) {
 }
 
 // src/runtime/run-executor.ts
-import { randomUUID as randomUUID3 } from "crypto";
+import { randomUUID as randomUUID4 } from "crypto";
 
 // src/bot/active-runs.ts
 var ActiveRuns = class {
@@ -13520,7 +14150,7 @@ var ProcessPool = class {
     }
     log.info("pool", "wait", { active: this.active, cap: this.cap(), waiting: this.waiters.length + 1 });
     reportMetric("pool_waiting", this.waiters.length + 1);
-    await new Promise((resolve2) => this.waiters.push(resolve2));
+    await new Promise((resolve3) => this.waiters.push(resolve3));
     this.active++;
     log.info("pool", "acquired", { active: this.active, cap: this.cap() });
     reportMetric("pool_active", this.active);
@@ -13562,7 +14192,7 @@ var RunExecutor = class {
     this.agent = deps.agent;
     this.pool = deps.pool;
     this.activeRuns = deps.activeRuns;
-    this.createRunId = deps.createRunId ?? randomUUID3;
+    this.createRunId = deps.createRunId ?? randomUUID4;
     this.now = deps.now ?? Date.now;
     this.postDoneExitGraceMs = deps.postDoneExitGraceMs ?? DEFAULT_POST_DONE_EXIT_GRACE_MS;
   }
@@ -13805,11 +14435,11 @@ var EventFanout = class {
             }
             if (this.error) throw this.error;
             if (this.done) return { done: true, value: void 0 };
-            await new Promise((resolve2) => {
+            await new Promise((resolve3) => {
               waiter = () => {
                 if (waiter) this.waiters.delete(waiter);
                 waiter = void 0;
-                resolve2();
+                resolve3();
               };
               this.waiters.add(waiter);
             });
@@ -13906,9 +14536,9 @@ var ChatModeCache = class {
 };
 
 // src/bot/comments.ts
-import { randomUUID as randomUUID4 } from "crypto";
+import { randomUUID as randomUUID5 } from "crypto";
 import { mkdir as mkdir14 } from "fs/promises";
-import { dirname as dirname15 } from "path";
+import { dirname as dirname16 } from "path";
 
 // src/bot/run-flow.ts
 async function startRunFlow(input) {
@@ -14040,9 +14670,9 @@ function recordRunSessionEvent(input) {
 }
 
 // src/bot/comment-resource.ts
-import { createHash as createHash4 } from "crypto";
+import { createHash as createHash5 } from "crypto";
 function commentTokenDigest(token) {
-  return createHash4("sha256").update(token).digest("hex").slice(0, 16);
+  return createHash5("sha256").update(token).digest("hex").slice(0, 16);
 }
 function commentDocumentScopeId(fileToken) {
   return `comment-doc:${commentTokenDigest(fileToken)}`;
@@ -14415,7 +15045,7 @@ function commentRunRejectedReply(code) {
   }
 }
 function commentExecutionScopeId(commentThreadScopeId) {
-  return `${commentThreadScopeId}:${randomUUID4().slice(0, 12)}`;
+  return `${commentThreadScopeId}:${randomUUID5().slice(0, 12)}`;
 }
 function commentDocumentSessionScopeId(fileToken) {
   return `doc:${commentTokenDigest(fileToken)}`;
@@ -14518,7 +15148,7 @@ async function resolveManagedCommentWorkingDirectory(managedFallbackCwd, fallbac
 }
 function managedDefaultWorkspaceForComments(controls) {
   return resolveAppPaths({
-    rootDir: dirname15(controls.configPath),
+    rootDir: dirname16(controls.configPath),
     profile: controls.profile
   }).defaultWorkspaceDir;
 }
@@ -14563,8 +15193,8 @@ async function nextCommentEvent(iterator, expiresAt) {
   try {
     return await Promise.race([
       iterator.next(),
-      new Promise((resolve2) => {
-        timer = setTimeout(() => resolve2("expired"), delayMs);
+      new Promise((resolve3) => {
+        timer = setTimeout(() => resolve3("expired"), delayMs);
       })
     ]);
   } finally {
@@ -15391,7 +16021,7 @@ function stringifyArgs(args) {
 }
 function expandHomeDirectory(path) {
   if (path === "~") return homedir7();
-  return path.startsWith("~/") ? join21(homedir7(), path.slice(2)) : path;
+  return path.startsWith("~/") ? join22(homedir7(), path.slice(2)) : path;
 }
 async function startChannel(deps) {
   const { cfg, agent, sessions, sessionCatalog, workspaces, controls } = deps;
@@ -15401,7 +16031,7 @@ async function startChannel(deps) {
   const pool = new ProcessPool(() => getMaxConcurrentRuns(controls.cfg));
   const executor = new RunExecutor({ agent, pool, activeRuns });
   const appSecret = await resolveAppSecret(cfg, deps.appPaths);
-  const callbackNonceStore = deps.appPaths?.mediaDir ? new CallbackNonceStore(join21(dirname16(deps.appPaths.mediaDir), "callback-nonces.json")) : void 0;
+  const callbackNonceStore = deps.appPaths?.mediaDir ? new CallbackNonceStore(join22(dirname17(deps.appPaths.mediaDir), "callback-nonces.json")) : void 0;
   await callbackNonceStore?.load();
   const callbackAuth = callbackNonceStore ? new CallbackAuth({
     keys: [{ version: 1, secret: appSecret }],
@@ -15874,7 +16504,7 @@ async function intakeMessage(deps) {
 }
 function commandPreservesPendingMessages(content) {
   const command = content.trim().toLowerCase();
-  return /^\/(?:status|help|ps)(?:\s|$)/u.test(command) || /^\/session(?:\s+\/?status)?\s*$/u.test(command) || /^\/timeout(?:\s|$)/u.test(command);
+  return /^\/(?:status|help|ps)(?:\s|$)/u.test(command) || /^\/session(?:\s+\/?status)?\s*$/u.test(command) || /^\/tmux(?:\s+(?:list|status))?(?:\s|$)/u.test(command) || /^\/timeout(?:\s|$)/u.test(command);
 }
 function rewriteAgentCommandMessage(msg, agentKind) {
   const trimmed = msg.content.trimStart();
@@ -16809,8 +17439,8 @@ async function runRollingReplyStream(input) {
     segment += 1;
     let producerStarted = false;
     let rolloverTimer;
-    const rollover = new Promise((resolve2) => {
-      rolloverTimer = setTimeout(resolve2, rolloverMs);
+    const rollover = new Promise((resolve3) => {
+      rolloverTimer = setTimeout(resolve3, rolloverMs);
     });
     const segmentDone = Promise.race([
       renderResult.then(() => void 0),
@@ -16913,7 +17543,7 @@ function scheduleWorkingReactionCleanup(channel, messageId, reactionPromise) {
   })();
 }
 function delay2(ms) {
-  return new Promise((resolve2) => setTimeout(resolve2, ms));
+  return new Promise((resolve3) => setTimeout(resolve3, ms));
 }
 function buildPrompt(batch, attachments, quotes = [], topicContext = [], botIdentity, extraInstructions) {
   const first = batch[0];
@@ -17394,9 +18024,9 @@ var SessionStore = class {
 };
 
 // src/session/catalog.ts
-import { randomUUID as randomUUID5 } from "crypto";
+import { randomUUID as randomUUID6 } from "crypto";
 import { open as open3, readFile as readFile14, rename as rename5, mkdir as mkdir15 } from "fs/promises";
-import { dirname as dirname17 } from "path";
+import { dirname as dirname18 } from "path";
 var DEFAULT_MAX_ARCHIVED_AGE_MS = 90 * 24 * 60 * 60 * 1e3;
 var DEFAULT_MAX_ENTRIES_PER_SCOPE = 20;
 var DEFAULT_MAX_ENTRIES_PER_PROFILE = 1e3;
@@ -17518,8 +18148,8 @@ var SessionCatalog = class {
     });
   }
   async persist() {
-    await mkdir15(dirname17(this.path), { recursive: true });
-    const tmp = `${this.path}.${process.pid}.${Date.now()}.${randomUUID5()}.tmp`;
+    await mkdir15(dirname18(this.path), { recursive: true });
+    const tmp = `${this.path}.${process.pid}.${Date.now()}.${randomUUID6()}.tmp`;
     const payload = `${JSON.stringify(this.entries(), null, 2)}
 `;
     const fh = await open3(tmp, "w", 384);
@@ -17531,7 +18161,7 @@ var SessionCatalog = class {
     }
     await rename5(tmp, this.path);
     try {
-      const dir = await open3(dirname17(this.path), "r");
+      const dir = await open3(dirname18(this.path), "r");
       try {
         await dir.sync();
       } finally {
@@ -17972,6 +18602,7 @@ function createRuntimeAgent(profileConfig, appPaths2) {
     });
   }
   return new ClaudeAdapter({
+    profileStateDir: appPaths2.profileDir,
     larkChannel,
     sessionMode: profileConfig.preferences?.agentSessionMode === "turn" ? "turn" : "live",
     liveTerminalBackend: "tmux"
@@ -17994,7 +18625,7 @@ async function resolveConflict(conflicts) {
     return false;
   }
   const rl = createInterface7({ input: process.stdin, output: process.stdout });
-  const ask = (q) => new Promise((resolve2) => rl.question(q, resolve2));
+  const ask = (q) => new Promise((resolve3) => rl.question(q, resolve3));
   try {
     const verb = conflicts.length > 1 ? "\u5B83\u4EEC" : "\u90A3\u4E2A";
     const answer = (await ask(`\u7EE7\u7EED\u542F\u52A8\u4F1A\u5148\u5173\u6389${verb},\u662F\u5426\u7EE7\u7EED? [y/N]: `)).trim().toLowerCase();
@@ -18049,7 +18680,7 @@ async function confirmStopRuntimeLockProcess2(err) {
   const rl = createInterface7({ input: process.stdin, output: process.stdout });
   try {
     const answer = (await new Promise(
-      (resolve2) => rl.question("\u662F\u5426\u505C\u6B62\u65E7\u8FDB\u7A0B\u5E76\u91CD\u65B0\u542F\u52A8? [y/N]: ", resolve2)
+      (resolve3) => rl.question("\u662F\u5426\u505C\u6B62\u65E7\u8FDB\u7A0B\u5E76\u91CD\u65B0\u542F\u52A8? [y/N]: ", resolve3)
     )).trim().toLowerCase();
     return answer === "y" || answer === "yes";
   } finally {
