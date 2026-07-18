@@ -8,6 +8,10 @@ type AgentEvent = {
     type: 'text';
     delta: string;
 } | {
+    type: 'interactive';
+    text: string;
+    phase: 'startup' | 'turn';
+} | {
     type: 'thinking';
     delta: string;
 } | {

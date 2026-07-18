@@ -25,6 +25,7 @@ const DEFAULT_BUSY_ACK_COOLDOWN_MS = 30_000;
 export class PendingQueue {
   private readonly map = new Map<string, PendingEntry>();
   private readonly blocked = new Set<string>();
+  private readonly deferredUntilFront = new Map<string, NormalizedMessage[]>();
   // Last "run in progress, your message is queued" acknowledgement per scope.
   // Long runs may stay blocked for hours, so suppress only short bursts rather
   // than silencing every later status request until the run ends.
@@ -61,12 +62,54 @@ export class PendingQueue {
     return 1;
   }
 
+  /** Put a TUI callback ahead of work already queued for the scope. */
+  pushFront(scope: string, messages: NormalizedMessage | readonly NormalizedMessage[]): number {
+    const priority = Array.isArray(messages) ? [...messages] : [messages];
+    const deferred = this.deferredUntilFront.get(scope) ?? [];
+    const incoming = [...priority, ...deferred];
+    if (incoming.length === 0) return this.map.get(scope)?.messages.length ?? 0;
+    if (deferred.length > 0) {
+      this.deferredUntilFront.delete(scope);
+      this.blocked.delete(scope);
+      this.busyAckedAt.delete(scope);
+      log.info('queue', 'interaction-released', { scope, deferred: deferred.length });
+    }
+    const existing = this.map.get(scope);
+    if (existing) {
+      if (existing.timer) clearTimeout(existing.timer);
+      existing.messages.unshift(...incoming);
+      existing.timer = this.blocked.has(scope) ? undefined : this.armTimer(scope);
+      return existing.messages.length;
+    }
+    this.map.set(scope, {
+      messages: incoming,
+      timer: this.blocked.has(scope) ? undefined : this.armTimer(scope),
+    });
+    return incoming.length;
+  }
+
+  /** Hold work until a live TUI control is inserted with pushFront(). */
+  deferUntilPriority(scope: string, messages: readonly NormalizedMessage[]): number {
+    if (messages.length === 0) return this.deferredUntilFront.get(scope)?.length ?? 0;
+    const deferred = this.deferredUntilFront.get(scope) ?? [];
+    deferred.push(...messages);
+    this.deferredUntilFront.set(scope, deferred);
+    this.block(scope);
+    log.info('queue', 'interaction-deferred', { scope, deferred: deferred.length });
+    return deferred.length;
+  }
+
   cancel(scope: string): NormalizedMessage[] {
     const entry = this.map.get(scope);
-    if (!entry) return [];
-    if (entry.timer) clearTimeout(entry.timer);
+    const deferred = this.deferredUntilFront.get(scope) ?? [];
+    if (entry?.timer) clearTimeout(entry.timer);
     this.map.delete(scope);
-    return entry.messages;
+    this.deferredUntilFront.delete(scope);
+    if (deferred.length > 0) {
+      this.blocked.delete(scope);
+      this.busyAckedAt.delete(scope);
+    }
+    return [...deferred, ...(entry?.messages ?? [])];
   }
 
   cancelAll(): void {
@@ -74,6 +117,7 @@ export class PendingQueue {
       if (entry.timer) clearTimeout(entry.timer);
     }
     this.map.clear();
+    this.deferredUntilFront.clear();
     this.blocked.clear();
     this.busyAckedAt.clear();
   }
@@ -112,6 +156,10 @@ export class PendingQueue {
   /** Resume the debounce timer; arms a fresh quiet window if anything queued. */
   unblock(scope: string): void {
     if (!this.blocked.has(scope)) return;
+    if ((this.deferredUntilFront.get(scope)?.length ?? 0) > 0) {
+      log.info('queue', 'interaction-wait', { scope });
+      return;
+    }
     this.blocked.delete(scope);
     this.busyAckedAt.delete(scope);
     const entry = this.map.get(scope);

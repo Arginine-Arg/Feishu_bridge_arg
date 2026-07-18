@@ -393,6 +393,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
             activePolicyFingerprints,
             lastRunModelByScope,
             liveInteractionByScope,
+            pending,
             scope,
             mode,
           });
@@ -823,7 +824,11 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
               : undefined,
         )
       : route.msg;
-  const size = pending.push(scope, agentMsg);
+  const priorityLiveControl =
+    pickerActive && liveInputModeForMessage(agentMsg) === 'control';
+  const size = priorityLiveControl
+    ? pending.pushFront(scope, agentMsg)
+    : pending.push(scope, agentMsg);
   log.info('intake', 'queued', { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
 
   // A run is already in flight on this scope, so this message won't be picked
@@ -961,6 +966,7 @@ interface RunBatchDeps {
   activePolicyFingerprints: Map<string, string>;
   lastRunModelByScope: Map<string, string>;
   liveInteractionByScope: Map<string, LiveInteractionState>;
+  pending: PendingQueue;
   scope: string;
   mode: ChatMode;
 }
@@ -981,6 +987,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     activePolicyFingerprints,
     lastRunModelByScope,
     liveInteractionByScope,
+    pending,
     scope,
     mode,
   } = deps;
@@ -1212,15 +1219,29 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const modelPreferenceSaves: Promise<void>[] = [];
   const syncedNativeModelSelections = new Set<string>();
   let interactionTextBuffer = '';
+  let startupInteractionDeferred = false;
   if (useLiveSession && nativeCommand && opensLivePicker(nativeCommand)) {
     const wasActive = liveInteractionByScope.has(scope);
     liveInteractionByScope.set(scope, { picker: true, updatedAt: Date.now() });
     if (!wasActive) log.info('agent-live', 'picker-enter', { scope, input: nativeCommand });
   }
   const observeLiveEvent = (evt: AgentEvent, opts: { sendInteractionCard?: boolean } = {}): void => {
-    if (evt.type !== 'text') return;
+    const isStartupInteraction = evt.type === 'interactive' && evt.phase === 'startup';
+    if (evt.type !== 'text' && evt.type !== 'interactive') return;
+    const delta = evt.type === 'text' ? evt.delta : evt.text;
+    if (isStartupInteraction && liveInputMode !== 'control') {
+      if (!startupInteractionDeferred) {
+        startupInteractionDeferred = true;
+        const queueSize = pending.deferUntilPriority(scope, batch);
+        log.info('agent-live', 'startup-interaction-deferred', {
+          scope,
+          queueSize,
+          batchSize: batch.length,
+        });
+      }
+    }
     if (useLiveSession && nativeCommand && controls.profileConfig.agentKind === 'codex') {
-      const selection = parseNativeCodexModelSelection(evt.delta);
+      const selection = parseNativeCodexModelSelection(delta);
       if (selection) {
         const signature = `${selection.model}:${selection.reasoningEffort ?? ''}`;
         if (!syncedNativeModelSelections.has(signature)) {
@@ -1249,9 +1270,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         }
       }
     }
-    interactionTextBuffer = `${interactionTextBuffer}\n${evt.delta}`.slice(-4000);
+    interactionTextBuffer = `${interactionTextBuffer}\n${delta}`.slice(-4000);
     const outputKind = bridgeAgent.classifyOutput(interactionTextBuffer);
-    const pickerLike = outputKind === 'picker';
+    const pickerLike = isStartupInteraction || outputKind === 'picker';
     const interaction = pickerLike ? detectLiveInteraction(interactionTextBuffer) : undefined;
     if (useLiveSession && (interaction || pickerLike)) {
       const wasActive = liveInteractionByScope.has(scope);
@@ -1265,6 +1286,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       if (!wasActive) log.info('agent-live', 'picker-enter', { scope });
     }
     if (opts.sendInteractionCard === false) return;
+    if (isStartupInteraction && liveInputMode === 'control') return;
     if (!interaction || !cardRenderOptions.signCallback) return;
     if (!useLiveSession && (sentInteractionSignatures.size > 0 || pendingInteractionSignatures.size > 0)) {
       return;
@@ -2255,6 +2277,8 @@ function liveInputModeForBatch(
 
 function looksLikeAgentPicker(text: string): boolean {
   return (
+    isClaudeBypassPermissionsPrompt(text) ||
+    isCodexUpdatePrompt(text) ||
     /press\s+enter\s+to\s+(?:confirm|continue)/i.test(text) ||
     /esc\s+to\s+(?:go\s+back|cancel)/i.test(text) ||
     /\b(?:y\/n|yes\/no|no\/yes)\b/i.test(text) ||
@@ -2305,7 +2329,18 @@ function detectLiveInteraction(text: string): LiveInteractionPrompt | undefined 
     buttons.push({ label, input });
   };
 
-  for (const choice of numberedChoices.slice(0, 8)) add(choice.input, choice.input);
+  const arrowNumberedPrompt =
+    isClaudeBypassPermissionsPrompt(prompt) || isCodexUpdatePrompt(prompt);
+  const selectedChoice = numberedChoices.findIndex((choice) => choice.selected);
+  for (const [index, choice] of numberedChoices.slice(0, 8).entries()) {
+    if (!arrowNumberedPrompt) {
+      add(choice.input, choice.input);
+      continue;
+    }
+    const distance = index - (selectedChoice >= 0 ? selectedChoice : 0);
+    const navigation = distance < 0 ? 'up '.repeat(-distance) : 'down '.repeat(distance);
+    add(choice.input, `${navigation}enter`.trim());
+  }
   const hasNumberedChoices = buttons.length > 0;
   const isBinaryConfirmation =
     /\b(?:y\/n|yes\/no|no\/yes)\b|(?:\[y\/n\]|\(y\/n\))/i.test(prompt) ||
@@ -2318,7 +2353,7 @@ function detectLiveInteraction(text: string): LiveInteractionPrompt | undefined 
     add('no', 'no');
   }
   if (
-    /press\s+enter\s+to\s+confirm|enter\s+to\s+(?:confirm|continue)|(?:按下?|点击)回车(?:键)?.*确认/i.test(
+    /(?:press\s+)?enter\s+to\s+confirm|enter\s+to\s+(?:confirm|continue)|(?:按下?|点击)回车(?:键)?.*确认/i.test(
       prompt,
     )
   ) {
@@ -2364,6 +2399,8 @@ function recentLiveInteractionPrompt(text: string): string {
 
 function isLiveInteractionPromptStart(line: string): boolean {
   return (
+    /claude\s+code\s+running\s+in\s+bypass\s+permissions\s+mode/i.test(line) ||
+    /\bupdate\s+available\b/i.test(line) ||
     /\bselect\s+(?:a\s+)?(?:model|reasoning|option)\b/i.test(line) ||
     /^skills?$/i.test(line) ||
     /\bchoose an action\b/i.test(line) ||
@@ -2374,12 +2411,26 @@ function isLiveInteractionPromptStart(line: string): boolean {
   );
 }
 
+function isClaudeBypassPermissionsPrompt(text: string): boolean {
+  return (
+    /claude\s+code\s+running\s+in\s+bypass\s+permissions\s+mode/i.test(text) &&
+    /\b(?:no,?\s+exit|yes,?\s+i\s+accept)\b/i.test(text)
+  );
+}
+
+function isCodexUpdatePrompt(text: string): boolean {
+  return (
+    /\bupdate\s+available\b/i.test(text) &&
+    /\bskip(?:\s+until\s+next\s+version)?\b/i.test(text)
+  );
+}
+
 function extractNumberedInteractionChoices(prompt: string): NumberedInteractionChoice[] {
   const choices = new Map<string, NumberedInteractionChoice>();
   for (const line of prompt.split('\n')) {
-    const match = line.match(/^(?:[›>▸*+-]\s*)?(\d{1,2})[.)、:\s-]+(.+)$/u);
+    const match = line.match(/^(?:[›❯>▸*+-]\s*)?(\d{1,2})[.)、:\s-]+(.+)$/u);
     if (!match) continue;
-    addNumberedInteractionChoice(choices, match[1]!, match[2]!, /^[›>▸]/u.test(line));
+    addNumberedInteractionChoice(choices, match[1]!, match[2]!, /^[›❯>▸]/u.test(line));
   }
 
   if (isCodexModelPickerPrompt(prompt)) {

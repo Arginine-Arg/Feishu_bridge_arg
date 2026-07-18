@@ -74,4 +74,51 @@ describe('PendingQueue busy-ack', () => {
       vi.useRealTimers();
     }
   });
+
+  it('flushes a live interaction key before the deferred original task', () => {
+    vi.useFakeTimers();
+    try {
+      const flushed: string[][] = [];
+      const queue = new PendingQueue(10, (_scope, batch) => {
+        flushed.push(batch.map((message) => message.content));
+      });
+      queue.block(SCOPE);
+      queue.pushFront(SCOPE, { content: 'original task', chatId: SCOPE } as never);
+      queue.pushFront(SCOPE, { content: 'down enter', chatId: SCOPE } as never);
+
+      queue.unblock(SCOPE);
+      vi.advanceTimersByTime(50);
+
+      expect(flushed).toEqual([['down enter', 'original task']]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps startup work gated until a priority control releases it', () => {
+    vi.useFakeTimers();
+    try {
+      const flushed: string[][] = [];
+      const queue = new PendingQueue(10, (_scope, batch) => {
+        flushed.push(batch.map((message) => message.content));
+      });
+      queue.block(SCOPE);
+      queue.deferUntilPriority(SCOPE, [
+        { content: 'original task', chatId: SCOPE } as never,
+      ]);
+      queue.push(SCOPE, { content: 'later message', chatId: SCOPE } as never);
+      queue.unblock(SCOPE);
+      vi.advanceTimersByTime(50);
+      expect(flushed).toEqual([]);
+      expect(queue.isBlocked(SCOPE)).toBe(true);
+
+      queue.pushFront(SCOPE, { content: 'down enter', chatId: SCOPE } as never);
+      vi.advanceTimersByTime(50);
+
+      expect(flushed).toEqual([['down enter', 'original task', 'later message']]);
+      expect(queue.isBlocked(SCOPE)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

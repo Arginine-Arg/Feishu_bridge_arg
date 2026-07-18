@@ -290,6 +290,8 @@ export class LiveTerminalSession {
     let controlLiteralConfirmTimer: ReturnType<typeof setTimeout> | undefined;
     let normalSubmitRetryTimer: ReturnType<typeof setTimeout> | undefined;
     let acceptingOutput = false;
+    let startupInteractionText: string | undefined;
+    let startupInteractionEventQueued = false;
     let diagFrames = 0;
     let sawAcceptedOutput = false;
     let sawCommandResultOutput = false;
@@ -405,6 +407,17 @@ export class LiveTerminalSession {
 
     const onData = (event: LiveOutput): void => {
       if (!acceptingOutput) {
+        const terminalText = event.terminalText ?? event.text;
+        if (terminalText && isLiveTerminalInteraction(terminalText)) {
+          startupInteractionText = terminalText;
+          if (!startupInteractionEventQueued) {
+            startupInteractionEventQueued = true;
+            push({ type: 'interactive', text: terminalText, phase: 'startup' });
+            log.info('agent-live', 'startup-interaction', {
+              textPreview: previewLiveText(terminalText),
+            });
+          }
+        }
         if (commandMode && diagFrames < LIVE_DIAG_MAX_FRAMES) {
           diagFrames += 1;
           log.info('agent-live', 'command-pre-output', {
@@ -534,45 +547,54 @@ export class LiveTerminalSession {
       arm(startupTimeoutMs + inputGraceMs);
       await this.waitForInputReady(inputGraceMs);
       if (!done) {
-        this.cleaner.resetTurn();
-        output.setSnapshotBaseline(this.lastTerminalSnapshot);
-        output.setHistoryBaseline(this.lastTerminalHistory);
-        if (commandMode) {
-          log.info('agent-live', 'command-clear', { sequence: 'esc ctrl-a ctrl-k' });
-          await this.clearPendingInput();
-          this.cleaner.resetTurn();
-        }
-        acceptingOutput = true;
-        const controlKeys = inputMode === 'control' ? parseLiveControlSequence(prompt) : null;
-        if (controlKeys) {
-          // Send each key as its own write so the tmux backend (which matches a
-          // single key per stdin chunk) sees them individually; a small gap keeps
-          // the writes from coalescing into one unrecognized chunk.
-          for (let i = 0; i < controlKeys.length; i++) {
-            if (i > 0) await delay(CONTROL_KEY_GAP_MS);
-            this.write(controlKeys[i]!);
-          }
+        if (startupInteractionText && inputMode !== 'control') {
+          // Leave the TUI untouched while Feishu renders the confirmation
+          // card. The channel defers this prompt, and the callback is
+          // prioritized so its key reaches the persistent session first.
+          done = true;
+          if (timer) clearTimeout(timer);
+          push({ type: 'done', terminationReason: 'normal' });
         } else {
-          if (commandMode) log.info('agent-live', 'command-submit', { commandText: prompt });
-          if (inputMode === 'control' && shouldDeferControlLiteralSubmit(prompt)) {
-            log.info('agent-live', 'control-literal-type', { input: prompt });
-            this.write(prompt);
-            controlLiteralConfirmTimer = setTimeout(() => {
-              controlLiteralConfirmTimer = undefined;
-              if (done || sawAcceptedOutput) return;
-              log.info('agent-live', 'control-literal-confirm', { input: prompt });
-              this.write('\r');
-            }, CONTROL_LITERAL_CONFIRM_DELAY_MS);
-          } else {
-            this.write(`${prompt}\r`);
-            scheduleSlashCommandConfirm();
-            scheduleNormalSubmitRetry();
+          this.cleaner.resetTurn();
+          output.setSnapshotBaseline(this.lastTerminalSnapshot);
+          output.setHistoryBaseline(this.lastTerminalHistory);
+          if (commandMode && !startupInteractionText) {
+            log.info('agent-live', 'command-clear', { sequence: 'esc ctrl-a ctrl-k' });
+            await this.clearPendingInput();
+            this.cleaner.resetTurn();
           }
-        }
-        if (commandMode && isStatusLiveCommand(prompt)) arm(idleMs);
-        else if (commandMode && isKnownSilentLiveCommand(prompt)) arm(idleMs);
-        else if (commandMode && isSlowSilentLiveCommand(prompt)) {
-          arm(noOutputIdleMs(prompt, idleMs));
+          acceptingOutput = true;
+          const controlKeys = inputMode === 'control' ? parseLiveControlSequence(prompt) : null;
+          if (controlKeys) {
+            // Send each key as its own write so the tmux backend (which matches a
+            // single key per stdin chunk) sees them individually; a small gap keeps
+            // the writes from coalescing into one unrecognized chunk.
+            for (let i = 0; i < controlKeys.length; i++) {
+              if (i > 0) await delay(CONTROL_KEY_GAP_MS);
+              this.write(controlKeys[i]!);
+            }
+          } else {
+            if (commandMode) log.info('agent-live', 'command-submit', { commandText: prompt });
+            if (inputMode === 'control' && shouldDeferControlLiteralSubmit(prompt)) {
+              log.info('agent-live', 'control-literal-type', { input: prompt });
+              this.write(prompt);
+              controlLiteralConfirmTimer = setTimeout(() => {
+                controlLiteralConfirmTimer = undefined;
+                if (done || sawAcceptedOutput) return;
+                log.info('agent-live', 'control-literal-confirm', { input: prompt });
+                this.write('\r');
+              }, CONTROL_LITERAL_CONFIRM_DELAY_MS);
+            } else {
+              this.write(`${prompt}\r`);
+              scheduleSlashCommandConfirm();
+              scheduleNormalSubmitRetry();
+            }
+          }
+          if (commandMode && isStatusLiveCommand(prompt)) arm(idleMs);
+          else if (commandMode && isKnownSilentLiveCommand(prompt)) arm(idleMs);
+          else if (commandMode && isSlowSilentLiveCommand(prompt)) {
+            arm(noOutputIdleMs(prompt, idleMs));
+          }
         }
       }
 
@@ -2150,9 +2172,11 @@ function isLiveTerminalReady(input: string): boolean {
 function isLiveTerminalInteraction(input: string): boolean {
   const recent = cleanTerminalOutput(input).split('\n').slice(-40).join('\n');
   return (
+    /claude\s+code\s+running\s+in\s+bypass\s+permissions\s+mode[\s\S]*\b(?:no,?\s+exit|yes,?\s+i\s+accept)\b/i.test(recent) ||
+    /\bupdate\s+available\b[\s\S]*\bskip(?:\s+until\s+next\s+version)?\b/i.test(recent) ||
     /\b(?:select\s+(?:a\s+)?(?:model|reasoning|option|permission|session)|choose\s+an\s+action|command\s+requires?\s+(?:approval|confirmation)|resume\s+previous\s+conversation)\b/i.test(recent) ||
     /\b(?:do\s+you\s+want\s+to|would\s+you\s+like\s+to|shall\s+i|waiting\s+for\s+(?:user|your)\s+(?:input|confirmation)|requires?\s+(?:approval|confirmation))\b/i.test(recent) ||
-    /\b(?:y\/n|yes\/no|no\/yes)\b|\[(?:y|yes)\/(?:n|no)\]|press\s+enter\s+to\s+(?:confirm|continue)|esc\s+to\s+(?:go\s+back|cancel)/i.test(recent) ||
+    /\b(?:y\/n|yes\/no|no\/yes)\b|\[(?:y|yes)\/(?:n|no)\]|(?:press\s+)?enter\s+to\s+(?:confirm|continue)|esc\s+to\s+(?:go\s+back|cancel)/i.test(recent) ||
     /(?:请选择|请(?:输入|回复).*(?:选项|编号|是|否)|等待(?:你|用户)(?:的)?(?:输入|选择|确认)|是否.*[？?]|(?:按下?|点击)回车(?:键)?.*确认)/i.test(recent)
   );
 }

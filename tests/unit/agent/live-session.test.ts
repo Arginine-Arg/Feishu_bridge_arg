@@ -595,6 +595,61 @@ setInterval(() => {}, 1000);
     expect(textOf(events)).toBe('clean answer\n');
   });
 
+  it('surfaces a startup confirmation without submitting the pending prompt', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-startup-interaction-test-'));
+    const bin = join(dir, 'fake-startup-interaction-agent.mjs');
+    const inputTrace = join(dir, 'input-trace.txt');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+import { appendFileSync, writeFileSync } from 'node:fs';
+writeFileSync(${JSON.stringify(inputTrace)}, '');
+process.stdin.setEncoding('utf8');
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+process.stdin.on('data', (chunk) => {
+  appendFileSync(${JSON.stringify(inputTrace)}, chunk);
+  if (chunk.includes('\\r')) process.stdout.write('startup-choice-accepted\\n');
+});
+setTimeout(() => process.stdout.write([
+  'WARNING: Claude Code running in Bypass Permissions mode',
+  '❯ 1. No, exit',
+  '  2. Yes, I accept',
+  'Enter to confirm · Esc to cancel',
+].join('\\n') + '\\n'), 50);
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('startup-interaction-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'startup-interaction',
+      usePty: true,
+      backend: 'pty',
+      idleMs: 40,
+      outputFlushMs: 10,
+      startupTimeoutMs: 500,
+    });
+
+    const blocked = await collect(session.run('startup-interaction-run', 'pending task', dir).events);
+    expect(interactionsOf(blocked)).toEqual([
+      expect.objectContaining({ type: 'interactive', phase: 'startup' }),
+    ]);
+    expect(await readFile(inputTrace, 'utf8')).toBe('');
+
+    const accepted = await collect(
+      session.run('startup-interaction-choice', 'down enter', dir, 'control').events,
+    );
+    await pool.closeAll();
+
+    expect(await readFile(inputTrace, 'utf8')).toBe('\x1B[B\r');
+    expect(textOf(accepted)).toBe('startup-choice-accepted\n');
+  });
+
   it('returns a live status fallback when Codex does not render /status output', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-status-fallback-test-'));
     const bin = join(dir, 'fake-status-empty-agent.mjs');
@@ -2112,6 +2167,13 @@ function textOf(events: AgentEvent[]): string {
     .filter((event): event is Extract<AgentEvent, { type: 'text' }> => event.type === 'text')
     .map((event) => event.delta)
     .join('');
+}
+
+function interactionsOf(events: AgentEvent[]): Array<Extract<AgentEvent, { type: 'interactive' }>> {
+  return events.filter(
+    (event): event is Extract<AgentEvent, { type: 'interactive' }> =>
+      event.type === 'interactive',
+  );
 }
 
 function hasTmux(): boolean {

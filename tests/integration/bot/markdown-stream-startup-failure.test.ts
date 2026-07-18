@@ -84,6 +84,61 @@ afterEach(async () => {
 });
 
 describe('markdown stream startup failures', () => {
+  it('waits for startup interaction input before replaying the original task', async () => {
+    const h = await createHarness();
+    h.profileConfig.preferences = {
+      ...(h.profileConfig.preferences ?? {}),
+      agentSessionMode: 'live',
+      messageReply: 'text',
+      messageReplyMigrated: true,
+    };
+    h.controls.profileConfig.preferences = h.profileConfig.preferences;
+    h.controls.cfg.preferences = h.profileConfig.preferences;
+    h.agent.setEvents([
+      [
+        {
+          type: 'interactive',
+          phase: 'startup',
+          text: [
+            'WARNING: Claude Code running in Bypass Permissions mode',
+            '❯ 1. No, exit',
+            '2. Yes, I accept',
+            'Enter to confirm · Esc to cancel',
+          ].join('\n'),
+        },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+      [{ type: 'done', terminationReason: 'normal' }],
+      [{ type: 'text', delta: 'original task completed\n' }, { type: 'done', terminationReason: 'normal' }],
+    ]);
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_startup_task', 'original task'));
+    await waitFor(() => h.agent.runOptions.length === 1 && h.channel.sent.length === 1);
+    await new Promise((resolve) => setTimeout(resolve, 800));
+
+    expect(h.agent.runOptions.map((options) => options.prompt)).toEqual(['original task']);
+    expect(buttonLabels((h.channel.sent[0]?.content as { card?: unknown }).card)).toEqual([
+      '1',
+      '2',
+      'esc',
+    ]);
+
+    await h.channel.handlers.message?.(message('om_startup_choice', 'down enter'));
+    await waitFor(() => h.agent.runOptions.length === 3, 4000);
+
+    expect(h.agent.runOptions.map((options) => options.prompt)).toEqual([
+      'original task',
+      'down enter',
+      'original task',
+    ]);
+    expect(h.agent.runOptions.map((options) => options.liveInputMode)).toEqual([
+      undefined,
+      'control',
+      undefined,
+    ]);
+  });
+
   it('sends native live picker output as a final button card without streaming', async () => {
     const h = await createHarness({
       stream: async () => {

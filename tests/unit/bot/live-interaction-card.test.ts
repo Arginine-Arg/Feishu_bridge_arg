@@ -136,6 +136,50 @@ describe('liveInteractionCard', () => {
     }
   });
 
+  it('maps the Claude bypass warning to safe terminal navigation keys', () => {
+    const card = liveInteractionCardForText(
+      [
+        'WARNING: Claude Code running in Bypass Permissions mode',
+        '',
+        'By proceeding, you accept all responsibility for actions taken while running in Bypass Permissions mode.',
+        '',
+        '❯ 1. No, exit',
+        '  2. Yes, I accept',
+        '',
+        'Enter to confirm · Esc to cancel',
+      ].join('\n'),
+      () => 'claude-startup-token',
+    );
+
+    expect(card).toBeDefined();
+    expect(buttonValues(card).map((value) => [value.input, value.cmd])).toEqual([
+      ['enter', 'live.input'],
+      ['down enter', 'live.input'],
+      ['esc', 'live.input'],
+    ]);
+  });
+
+  it('maps the Codex update picker to explicit navigation choices', () => {
+    const card = liveInteractionCardForText(
+      [
+        'Update available! 0.144.3 -> 0.145.0',
+        '❯ 1. Update now',
+        '  2. Skip',
+        '  3. Skip until next version',
+        'Enter to confirm · Esc to cancel',
+      ].join('\n'),
+      () => 'codex-update-token',
+    );
+
+    expect(card).toBeDefined();
+    expect(buttonValues(card).map((value) => value.input)).toEqual([
+      'enter',
+      'down enter',
+      'down down enter',
+      'esc',
+    ]);
+  });
+
   it('keeps all model choices when descriptions wrap and terminal rows are joined', () => {
     const card = liveInteractionCardForText(
       [

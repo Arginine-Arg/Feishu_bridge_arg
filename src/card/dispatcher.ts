@@ -245,7 +245,7 @@ function forwardLiveInput(
     },
     'control',
   );
-  deps.pending.push(scope, synthetic);
+  deps.pending.pushFront(scope, synthetic);
 }
 
 function forwardAgentInput(

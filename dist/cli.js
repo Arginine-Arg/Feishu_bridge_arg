@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.27",
+  version: "0.6.28",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -6468,6 +6468,8 @@ var LiveTerminalSession = class {
     let controlLiteralConfirmTimer;
     let normalSubmitRetryTimer;
     let acceptingOutput = false;
+    let startupInteractionText;
+    let startupInteractionEventQueued = false;
     let diagFrames = 0;
     let sawAcceptedOutput = false;
     let sawCommandResultOutput = false;
@@ -6574,6 +6576,17 @@ var LiveTerminalSession = class {
     };
     const onData = (event) => {
       if (!acceptingOutput) {
+        const terminalText = event.terminalText ?? event.text;
+        if (terminalText && isLiveTerminalInteraction(terminalText)) {
+          startupInteractionText = terminalText;
+          if (!startupInteractionEventQueued) {
+            startupInteractionEventQueued = true;
+            push({ type: "interactive", text: terminalText, phase: "startup" });
+            log.info("agent-live", "startup-interaction", {
+              textPreview: previewLiveText(terminalText)
+            });
+          }
+        }
         if (commandMode && diagFrames < LIVE_DIAG_MAX_FRAMES) {
           diagFrames += 1;
           log.info("agent-live", "command-pre-output", {
@@ -6683,42 +6696,48 @@ var LiveTerminalSession = class {
       arm(startupTimeoutMs + inputGraceMs);
       await this.waitForInputReady(inputGraceMs);
       if (!done) {
-        this.cleaner.resetTurn();
-        output.setSnapshotBaseline(this.lastTerminalSnapshot);
-        output.setHistoryBaseline(this.lastTerminalHistory);
-        if (commandMode) {
-          log.info("agent-live", "command-clear", { sequence: "esc ctrl-a ctrl-k" });
-          await this.clearPendingInput();
-          this.cleaner.resetTurn();
-        }
-        acceptingOutput = true;
-        const controlKeys = inputMode === "control" ? parseLiveControlSequence(prompt) : null;
-        if (controlKeys) {
-          for (let i = 0; i < controlKeys.length; i++) {
-            if (i > 0) await delay(CONTROL_KEY_GAP_MS);
-            this.write(controlKeys[i]);
-          }
+        if (startupInteractionText && inputMode !== "control") {
+          done = true;
+          if (timer) clearTimeout(timer);
+          push({ type: "done", terminationReason: "normal" });
         } else {
-          if (commandMode) log.info("agent-live", "command-submit", { commandText: prompt });
-          if (inputMode === "control" && shouldDeferControlLiteralSubmit(prompt)) {
-            log.info("agent-live", "control-literal-type", { input: prompt });
-            this.write(prompt);
-            controlLiteralConfirmTimer = setTimeout(() => {
-              controlLiteralConfirmTimer = void 0;
-              if (done || sawAcceptedOutput) return;
-              log.info("agent-live", "control-literal-confirm", { input: prompt });
-              this.write("\r");
-            }, CONTROL_LITERAL_CONFIRM_DELAY_MS);
-          } else {
-            this.write(`${prompt}\r`);
-            scheduleSlashCommandConfirm();
-            scheduleNormalSubmitRetry();
+          this.cleaner.resetTurn();
+          output.setSnapshotBaseline(this.lastTerminalSnapshot);
+          output.setHistoryBaseline(this.lastTerminalHistory);
+          if (commandMode && !startupInteractionText) {
+            log.info("agent-live", "command-clear", { sequence: "esc ctrl-a ctrl-k" });
+            await this.clearPendingInput();
+            this.cleaner.resetTurn();
           }
-        }
-        if (commandMode && isStatusLiveCommand(prompt)) arm(idleMs);
-        else if (commandMode && isKnownSilentLiveCommand(prompt)) arm(idleMs);
-        else if (commandMode && isSlowSilentLiveCommand(prompt)) {
-          arm(noOutputIdleMs(prompt, idleMs));
+          acceptingOutput = true;
+          const controlKeys = inputMode === "control" ? parseLiveControlSequence(prompt) : null;
+          if (controlKeys) {
+            for (let i = 0; i < controlKeys.length; i++) {
+              if (i > 0) await delay(CONTROL_KEY_GAP_MS);
+              this.write(controlKeys[i]);
+            }
+          } else {
+            if (commandMode) log.info("agent-live", "command-submit", { commandText: prompt });
+            if (inputMode === "control" && shouldDeferControlLiteralSubmit(prompt)) {
+              log.info("agent-live", "control-literal-type", { input: prompt });
+              this.write(prompt);
+              controlLiteralConfirmTimer = setTimeout(() => {
+                controlLiteralConfirmTimer = void 0;
+                if (done || sawAcceptedOutput) return;
+                log.info("agent-live", "control-literal-confirm", { input: prompt });
+                this.write("\r");
+              }, CONTROL_LITERAL_CONFIRM_DELAY_MS);
+            } else {
+              this.write(`${prompt}\r`);
+              scheduleSlashCommandConfirm();
+              scheduleNormalSubmitRetry();
+            }
+          }
+          if (commandMode && isStatusLiveCommand(prompt)) arm(idleMs);
+          else if (commandMode && isKnownSilentLiveCommand(prompt)) arm(idleMs);
+          else if (commandMode && isSlowSilentLiveCommand(prompt)) {
+            arm(noOutputIdleMs(prompt, idleMs));
+          }
         }
       }
       while (!done || queue.length > 0) {
@@ -8004,7 +8023,7 @@ function isLiveTerminalReady(input) {
 }
 function isLiveTerminalInteraction(input) {
   const recent = cleanTerminalOutput(input).split("\n").slice(-40).join("\n");
-  return /\b(?:select\s+(?:a\s+)?(?:model|reasoning|option|permission|session)|choose\s+an\s+action|command\s+requires?\s+(?:approval|confirmation)|resume\s+previous\s+conversation)\b/i.test(recent) || /\b(?:do\s+you\s+want\s+to|would\s+you\s+like\s+to|shall\s+i|waiting\s+for\s+(?:user|your)\s+(?:input|confirmation)|requires?\s+(?:approval|confirmation))\b/i.test(recent) || /\b(?:y\/n|yes\/no|no\/yes)\b|\[(?:y|yes)\/(?:n|no)\]|press\s+enter\s+to\s+(?:confirm|continue)|esc\s+to\s+(?:go\s+back|cancel)/i.test(recent) || /(?:请选择|请(?:输入|回复).*(?:选项|编号|是|否)|等待(?:你|用户)(?:的)?(?:输入|选择|确认)|是否.*[？?]|(?:按下?|点击)回车(?:键)?.*确认)/i.test(recent);
+  return /claude\s+code\s+running\s+in\s+bypass\s+permissions\s+mode[\s\S]*\b(?:no,?\s+exit|yes,?\s+i\s+accept)\b/i.test(recent) || /\bupdate\s+available\b[\s\S]*\bskip(?:\s+until\s+next\s+version)?\b/i.test(recent) || /\b(?:select\s+(?:a\s+)?(?:model|reasoning|option|permission|session)|choose\s+an\s+action|command\s+requires?\s+(?:approval|confirmation)|resume\s+previous\s+conversation)\b/i.test(recent) || /\b(?:do\s+you\s+want\s+to|would\s+you\s+like\s+to|shall\s+i|waiting\s+for\s+(?:user|your)\s+(?:input|confirmation)|requires?\s+(?:approval|confirmation))\b/i.test(recent) || /\b(?:y\/n|yes\/no|no\/yes)\b|\[(?:y|yes)\/(?:n|no)\]|(?:press\s+)?enter\s+to\s+(?:confirm|continue)|esc\s+to\s+(?:go\s+back|cancel)/i.test(recent) || /(?:请选择|请(?:输入|回复).*(?:选项|编号|是|否)|等待(?:你|用户)(?:的)?(?:输入|选择|确认)|是否.*[？?]|(?:按下?|点击)回车(?:键)?.*确认)/i.test(recent);
 }
 function stripCompactNoise(input, patterns) {
   const { compact, map } = compactWithIndex(input);
@@ -13416,7 +13435,7 @@ function forwardLiveInput(deps, payload, scope, threadId, mode) {
     },
     "control"
   );
-  deps.pending.push(scope, synthetic);
+  deps.pending.pushFront(scope, synthetic);
 }
 function forwardAgentInput(deps, payload, scope, threadId, mode) {
   const input = typeof payload.input === "string" ? payload.input.trim() : "";
@@ -15308,6 +15327,7 @@ var DEFAULT_BUSY_ACK_COOLDOWN_MS = 3e4;
 var PendingQueue = class {
   map = /* @__PURE__ */ new Map();
   blocked = /* @__PURE__ */ new Set();
+  deferredUntilFront = /* @__PURE__ */ new Map();
   // Last "run in progress, your message is queued" acknowledgement per scope.
   // Long runs may stay blocked for hours, so suppress only short bursts rather
   // than silencing every later status request until the run ends.
@@ -15336,18 +15356,59 @@ var PendingQueue = class {
     });
     return 1;
   }
+  /** Put a TUI callback ahead of work already queued for the scope. */
+  pushFront(scope, messages) {
+    const priority = Array.isArray(messages) ? [...messages] : [messages];
+    const deferred = this.deferredUntilFront.get(scope) ?? [];
+    const incoming = [...priority, ...deferred];
+    if (incoming.length === 0) return this.map.get(scope)?.messages.length ?? 0;
+    if (deferred.length > 0) {
+      this.deferredUntilFront.delete(scope);
+      this.blocked.delete(scope);
+      this.busyAckedAt.delete(scope);
+      log.info("queue", "interaction-released", { scope, deferred: deferred.length });
+    }
+    const existing = this.map.get(scope);
+    if (existing) {
+      if (existing.timer) clearTimeout(existing.timer);
+      existing.messages.unshift(...incoming);
+      existing.timer = this.blocked.has(scope) ? void 0 : this.armTimer(scope);
+      return existing.messages.length;
+    }
+    this.map.set(scope, {
+      messages: incoming,
+      timer: this.blocked.has(scope) ? void 0 : this.armTimer(scope)
+    });
+    return incoming.length;
+  }
+  /** Hold work until a live TUI control is inserted with pushFront(). */
+  deferUntilPriority(scope, messages) {
+    if (messages.length === 0) return this.deferredUntilFront.get(scope)?.length ?? 0;
+    const deferred = this.deferredUntilFront.get(scope) ?? [];
+    deferred.push(...messages);
+    this.deferredUntilFront.set(scope, deferred);
+    this.block(scope);
+    log.info("queue", "interaction-deferred", { scope, deferred: deferred.length });
+    return deferred.length;
+  }
   cancel(scope) {
     const entry = this.map.get(scope);
-    if (!entry) return [];
-    if (entry.timer) clearTimeout(entry.timer);
+    const deferred = this.deferredUntilFront.get(scope) ?? [];
+    if (entry?.timer) clearTimeout(entry.timer);
     this.map.delete(scope);
-    return entry.messages;
+    this.deferredUntilFront.delete(scope);
+    if (deferred.length > 0) {
+      this.blocked.delete(scope);
+      this.busyAckedAt.delete(scope);
+    }
+    return [...deferred, ...entry?.messages ?? []];
   }
   cancelAll() {
     for (const entry of this.map.values()) {
       if (entry.timer) clearTimeout(entry.timer);
     }
     this.map.clear();
+    this.deferredUntilFront.clear();
     this.blocked.clear();
     this.busyAckedAt.clear();
   }
@@ -15382,6 +15443,10 @@ var PendingQueue = class {
   /** Resume the debounce timer; arms a fresh quiet window if anything queued. */
   unblock(scope) {
     if (!this.blocked.has(scope)) return;
+    if ((this.deferredUntilFront.get(scope)?.length ?? 0) > 0) {
+      log.info("queue", "interaction-wait", { scope });
+      return;
+    }
     this.blocked.delete(scope);
     this.busyAckedAt.delete(scope);
     const entry = this.map.get(scope);
@@ -16166,6 +16231,7 @@ async function startChannel(deps) {
             activePolicyFingerprints,
             lastRunModelByScope,
             liveInteractionByScope,
+            pending,
             scope,
             mode
           });
@@ -16490,7 +16556,8 @@ async function intakeMessage(deps) {
     route.msg,
     route.msg.content.trimStart().startsWith("/") ? "command" : pickerActive ? "control" : void 0
   ) : route.msg;
-  const size = pending.push(scope, agentMsg);
+  const priorityLiveControl = pickerActive && liveInputModeForMessage(agentMsg) === "control";
+  const size = priorityLiveControl ? pending.pushFront(scope, agentMsg) : pending.push(scope, agentMsg);
   log.info("intake", "queued", { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
   if (pending.shouldAckBusy(scope)) {
     void channel.send(
@@ -16583,6 +16650,7 @@ async function runAgentBatch(deps) {
     activePolicyFingerprints,
     lastRunModelByScope,
     liveInteractionByScope,
+    pending,
     scope,
     mode
   } = deps;
@@ -16767,15 +16835,29 @@ async function runAgentBatch(deps) {
   const modelPreferenceSaves = [];
   const syncedNativeModelSelections = /* @__PURE__ */ new Set();
   let interactionTextBuffer = "";
+  let startupInteractionDeferred = false;
   if (useLiveSession && nativeCommand && opensLivePicker(nativeCommand)) {
     const wasActive = liveInteractionByScope.has(scope);
     liveInteractionByScope.set(scope, { picker: true, updatedAt: Date.now() });
     if (!wasActive) log.info("agent-live", "picker-enter", { scope, input: nativeCommand });
   }
   const observeLiveEvent = (evt, opts = {}) => {
-    if (evt.type !== "text") return;
+    const isStartupInteraction = evt.type === "interactive" && evt.phase === "startup";
+    if (evt.type !== "text" && evt.type !== "interactive") return;
+    const delta = evt.type === "text" ? evt.delta : evt.text;
+    if (isStartupInteraction && liveInputMode !== "control") {
+      if (!startupInteractionDeferred) {
+        startupInteractionDeferred = true;
+        const queueSize = pending.deferUntilPriority(scope, batch);
+        log.info("agent-live", "startup-interaction-deferred", {
+          scope,
+          queueSize,
+          batchSize: batch.length
+        });
+      }
+    }
     if (useLiveSession && nativeCommand && controls.profileConfig.agentKind === "codex") {
-      const selection = parseNativeCodexModelSelection(evt.delta);
+      const selection = parseNativeCodexModelSelection(delta);
       if (selection) {
         const signature = `${selection.model}:${selection.reasoningEffort ?? ""}`;
         if (!syncedNativeModelSelections.has(signature)) {
@@ -16800,9 +16882,9 @@ async function runAgentBatch(deps) {
       }
     }
     interactionTextBuffer = `${interactionTextBuffer}
-${evt.delta}`.slice(-4e3);
+${delta}`.slice(-4e3);
     const outputKind = bridgeAgent.classifyOutput(interactionTextBuffer);
-    const pickerLike = outputKind === "picker";
+    const pickerLike = isStartupInteraction || outputKind === "picker";
     const interaction = pickerLike ? detectLiveInteraction(interactionTextBuffer) : void 0;
     if (useLiveSession && (interaction || pickerLike)) {
       const wasActive = liveInteractionByScope.has(scope);
@@ -16816,6 +16898,7 @@ ${evt.delta}`.slice(-4e3);
       if (!wasActive) log.info("agent-live", "picker-enter", { scope });
     }
     if (opts.sendInteractionCard === false) return;
+    if (isStartupInteraction && liveInputMode === "control") return;
     if (!interaction || !cardRenderOptions.signCallback) return;
     if (!useLiveSession && (sentInteractionSignatures.size > 0 || pendingInteractionSignatures.size > 0)) {
       return;
@@ -17601,7 +17684,7 @@ function liveInputModeForBatch(batch, nativeCommand) {
   return nativeCommand.trimStart().startsWith("/") ? "command" : "control";
 }
 function looksLikeAgentPicker(text) {
-  return /press\s+enter\s+to\s+(?:confirm|continue)/i.test(text) || /esc\s+to\s+(?:go\s+back|cancel)/i.test(text) || /\b(?:y\/n|yes\/no|no\/yes)\b/i.test(text) || /\bselect\s+(?:a\s+)?(?:model|option)\b/i.test(text) || /\bchoose an action\b/i.test(text) || /(?:^|\n)\s*(?:[›>▸*+-]\s*)?\d{1,2}[.)、:\s-]+\S/u.test(text) && /\b(?:choose|select|enable|disable|skills?|model|effort|action)\b/i.test(text) || /(?:↑|↓|up\/down|arrow keys?|use .*arrows?)/i.test(text) || /(?:do you want to|would you like to|shall i|waiting for (?:user|your) (?:input|confirmation)|requires? (?:approval|confirmation)|approve|allow).*(?:\?|proceed|continue|run|execute|apply|approve|allow)/i.test(
+  return isClaudeBypassPermissionsPrompt(text) || isCodexUpdatePrompt(text) || /press\s+enter\s+to\s+(?:confirm|continue)/i.test(text) || /esc\s+to\s+(?:go\s+back|cancel)/i.test(text) || /\b(?:y\/n|yes\/no|no\/yes)\b/i.test(text) || /\bselect\s+(?:a\s+)?(?:model|option)\b/i.test(text) || /\bchoose an action\b/i.test(text) || /(?:^|\n)\s*(?:[›>▸*+-]\s*)?\d{1,2}[.)、:\s-]+\S/u.test(text) && /\b(?:choose|select|enable|disable|skills?|model|effort|action)\b/i.test(text) || /(?:↑|↓|up\/down|arrow keys?|use .*arrows?)/i.test(text) || /(?:do you want to|would you like to|shall i|waiting for (?:user|your) (?:input|confirmation)|requires? (?:approval|confirmation)|approve|allow).*(?:\?|proceed|continue|run|execute|apply|approve|allow)/i.test(
     text
   ) || /(?:请选择|请(?:输入|回复).*(?:选项|编号|是|否)|等待(?:你|用户)(?:的)?(?:输入|选择|确认)|是否.*[？?]|(?:按下?|点击)回车(?:键)?.*确认)/i.test(
     text
@@ -17618,7 +17701,17 @@ function detectLiveInteraction(text) {
     seenInputs.add(input);
     buttons.push({ label, input });
   };
-  for (const choice of numberedChoices.slice(0, 8)) add(choice.input, choice.input);
+  const arrowNumberedPrompt = isClaudeBypassPermissionsPrompt(prompt) || isCodexUpdatePrompt(prompt);
+  const selectedChoice = numberedChoices.findIndex((choice) => choice.selected);
+  for (const [index, choice] of numberedChoices.slice(0, 8).entries()) {
+    if (!arrowNumberedPrompt) {
+      add(choice.input, choice.input);
+      continue;
+    }
+    const distance = index - (selectedChoice >= 0 ? selectedChoice : 0);
+    const navigation = distance < 0 ? "up ".repeat(-distance) : "down ".repeat(distance);
+    add(choice.input, `${navigation}enter`.trim());
+  }
   const hasNumberedChoices = buttons.length > 0;
   const isBinaryConfirmation = /\b(?:y\/n|yes\/no|no\/yes)\b|(?:\[y\/n\]|\(y\/n\))/i.test(prompt) || /(?:do you want to|would you like to|shall i|requires? (?:approval|confirmation)|approve|allow).*(?:\?|proceed|continue|run|execute|apply|approve|allow)/i.test(
     prompt
@@ -17627,7 +17720,7 @@ function detectLiveInteraction(text) {
     add("yes", "yes");
     add("no", "no");
   }
-  if (/press\s+enter\s+to\s+confirm|enter\s+to\s+(?:confirm|continue)|(?:按下?|点击)回车(?:键)?.*确认/i.test(
+  if (/(?:press\s+)?enter\s+to\s+confirm|enter\s+to\s+(?:confirm|continue)|(?:按下?|点击)回车(?:键)?.*确认/i.test(
     prompt
   )) {
     add("enter", "enter");
@@ -17665,16 +17758,22 @@ function recentLiveInteractionPrompt(text) {
   return (start >= 0 ? recent.slice(start) : recent.slice(-12)).join("\n");
 }
 function isLiveInteractionPromptStart(line) {
-  return /\bselect\s+(?:a\s+)?(?:model|reasoning|option)\b/i.test(line) || /^skills?$/i.test(line) || /\bchoose an action\b/i.test(line) || /\b(?:command )?requires? (?:approval|confirmation)\b/i.test(line) || /\b(?:do you want to|would you like to|shall i)\s+(?:proceed|continue|run|execute|apply|approve|allow)\b/i.test(
+  return /claude\s+code\s+running\s+in\s+bypass\s+permissions\s+mode/i.test(line) || /\bupdate\s+available\b/i.test(line) || /\bselect\s+(?:a\s+)?(?:model|reasoning|option)\b/i.test(line) || /^skills?$/i.test(line) || /\bchoose an action\b/i.test(line) || /\b(?:command )?requires? (?:approval|confirmation)\b/i.test(line) || /\b(?:do you want to|would you like to|shall i)\s+(?:proceed|continue|run|execute|apply|approve|allow)\b/i.test(
     line
   );
+}
+function isClaudeBypassPermissionsPrompt(text) {
+  return /claude\s+code\s+running\s+in\s+bypass\s+permissions\s+mode/i.test(text) && /\b(?:no,?\s+exit|yes,?\s+i\s+accept)\b/i.test(text);
+}
+function isCodexUpdatePrompt(text) {
+  return /\bupdate\s+available\b/i.test(text) && /\bskip(?:\s+until\s+next\s+version)?\b/i.test(text);
 }
 function extractNumberedInteractionChoices(prompt) {
   const choices = /* @__PURE__ */ new Map();
   for (const line of prompt.split("\n")) {
-    const match = line.match(/^(?:[›>▸*+-]\s*)?(\d{1,2})[.)、:\s-]+(.+)$/u);
+    const match = line.match(/^(?:[›❯>▸*+-]\s*)?(\d{1,2})[.)、:\s-]+(.+)$/u);
     if (!match) continue;
-    addNumberedInteractionChoice(choices, match[1], match[2], /^[›>▸]/u.test(line));
+    addNumberedInteractionChoice(choices, match[1], match[2], /^[›❯>▸]/u.test(line));
   }
   if (isCodexModelPickerPrompt(prompt)) {
     const inlineModelChoice = /(?:^|[^0-9])(?:[›>▸*+-]\s*)?(\d{1,2})\s*[.)、:]\s*[a-z]{0,3}(gpt-[a-z0-9][a-z0-9._-]*)/giu;
