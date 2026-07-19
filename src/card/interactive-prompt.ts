@@ -72,12 +72,13 @@ function optionButton(
   header: string,
   question: string,
   option: AskOption,
+  type: 'primary' | 'default',
   sign: SignPromptToken,
 ): object {
   return {
     tag: 'button',
     text: { tag: 'plain_text', content: option.label },
-    type: 'primary',
+    type,
     width: 'default',
     behaviors: [
       {
@@ -95,30 +96,34 @@ function optionButton(
   };
 }
 
-/** Render an AskUserQuestion prompt as a CardKit 2.0 card with a button per option. */
+/** Render an AskUserQuestion prompt as a CardKit 2.0 card matching the
+ * /codex /model picker style: one markdown panel per question, one
+ * button row per question, primary button for option index 0, default
+ * for the rest. Multi-question (1–4 per AskUserQuestion call) renders
+ * sequentially within the same card body, each in its own row.
+ */
 export function renderAskCard(questions: AskQuestion[], sign: SignPromptToken): object {
   const elements: object[] = [];
   questions.forEach((q, qi) => {
     if (qi > 0) elements.push({ tag: 'hr' });
     const title = q.header ? `**❓ ${q.header}**` : '**❓ 请选择**';
-    elements.push({ tag: 'markdown', content: title });
-    if (q.question) elements.push({ tag: 'markdown', content: q.question });
-    if (q.multiSelect) {
-      elements.push({
-        tag: 'markdown',
-        content: '_（原为多选；这里每次点击提交一个选项）_',
-        text_size: 'notation',
-      });
-    }
-    for (const opt of q.options) {
-      if (opt.description) {
-        elements.push({
-          tag: 'markdown',
-          content: `**${opt.label}** — ${opt.description}`,
-          text_size: 'notation',
-        });
-      }
-      elements.push(optionButton(q.header, q.question, opt, sign));
+    const promptLine = q.question ? `${title}\n${q.question}` : title;
+    const numberedOptions = q.options
+      .map((opt, oi) => {
+        const desc = opt.description ? ` — ${opt.description}` : '';
+        return `**› ${oi + 1}. ${opt.label}**${desc}`;
+      })
+      .join('\n');
+    const multiHint = q.multiSelect ? '\n\n_（可多选；每次点击提交一个选项）_' : '';
+    elements.push({
+      tag: 'markdown',
+      content: `${promptLine}\n\n\`\`\`\n${numberedOptions}\n\`\`\`${multiHint}`,
+    });
+    for (let oi = 0; oi < q.options.length; oi++) {
+      const opt = q.options[oi]!;
+      elements.push(
+        optionButton(q.header, q.question, opt, oi === 0 ? 'primary' : 'default', sign),
+      );
     }
   });
   return {

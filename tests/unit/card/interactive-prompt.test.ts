@@ -176,4 +176,36 @@ describe('consumeInteractivePrompts', () => {
     expect(buttons.map((v) => v.decision)).toEqual(['approve', 'revise']);
     expect(buttons.every((v) => v.kind === 'plan')).toBe(true);
   });
+
+  it('renders multi-question AskUserQuestion as one card with hr-separated rows', () => {
+    const card = buildPromptCard(
+      'AskUserQuestion',
+      {
+        questions: [
+          askInput.questions[0]!,
+          {
+            question: 'How many retries?',
+            header: 'Retries',
+            multiSelect: false,
+            options: [
+              { label: '1', description: 'quick' },
+              { label: '3', description: 'medium' },
+              { label: '5', description: 'aggressive' },
+            ],
+          },
+        ],
+      },
+      () => 'tok',
+    ) as unknown as { body: { elements: Array<{ tag?: string; type?: string }> } };
+    const elements = card.body.elements;
+    // 2 questions: Q1 = 1 markdown + 2 buttons, Q2 = 1 hr + 1 markdown + 3 buttons = 8
+    expect(elements.length).toBe(8);
+    const buttons = buttonValues(card);
+    expect(buttons).toHaveLength(5); // 2 + 3
+    const buttonTypes = elements
+      .filter((e) => e.tag === 'button')
+      .map((b) => b.type);
+    // First option of each question is primary, the rest are default
+    expect(buttonTypes).toEqual(['primary', 'default', 'primary', 'default', 'default']);
+  });
 });
