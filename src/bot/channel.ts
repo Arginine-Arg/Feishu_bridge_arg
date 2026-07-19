@@ -50,6 +50,7 @@ import {
   getCotMessages,
   getMaxConcurrentRuns,
   getMessageReplyMode,
+  getProgressHeartbeatMs,
   getRequireMentionInGroup,
   getRunIdleTimeoutMs,
   getShowToolCalls,
@@ -1346,6 +1347,15 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     log.info('flush', 'idle-watchdog', { idleTimeoutMs });
   }
 
+  // Heartbeat cadence for the streaming run card. 0 / undefined = disabled.
+  // When enabled, the bridge re-renders the card every `progressHeartbeatMs`
+  // while a tool is in flight so the user sees the elapsed-time suffix tick
+  // — without this, multi-minute Bash/test/train runs look frozen.
+  const progressHeartbeatMs = getProgressHeartbeatMs(controls.cfg);
+  if (progressHeartbeatMs > 0) {
+    log.info('flush', 'progress-heartbeat', { progressHeartbeatMs });
+  }
+
   const configuredReplyMode = getMessageReplyMode(controls.cfg);
   const replyMode =
     useLiveSession && bridgeRoute?.presentation === 'card' ? 'card' : configuredReplyMode;
@@ -1455,6 +1465,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         eventStream,
         scope,
         idleTimeoutMs,
+        progressHeartbeatMs,
         recordSession,
         async () => {},
         observeLiveEvent,
@@ -1499,6 +1510,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           eventStream,
           scope,
           idleTimeoutMs,
+          progressHeartbeatMs,
           recordSession,
           async () => {},
           observeLiveEvent,
@@ -1563,6 +1575,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         eventStream,
         scope,
         idleTimeoutMs,
+        progressHeartbeatMs,
         recordSession,
         async (state) => {
           latestState = state;
@@ -1658,6 +1671,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         eventStream,
         scope,
         idleTimeoutMs,
+        progressHeartbeatMs,
         recordSession,
         async (state) => {
           latestState = state;
@@ -1723,6 +1737,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         eventStream,
         scope,
         idleTimeoutMs,
+        progressHeartbeatMs,
         recordSession,
         async () => {},
         observeLiveEvent,
@@ -1907,6 +1922,7 @@ async function processAgentStream(
   events: AsyncIterable<AgentEvent>,
   scope: string,
   idleTimeoutMs: number | undefined,
+  progressHeartbeatMs: number | undefined,
   recordSession: (event: AgentEvent) => void,
   flush: (state: RunState) => Promise<void>,
   observeEvent: (event: AgentEvent) => void = () => {},
@@ -1946,6 +1962,37 @@ async function processAgentStream(
     }, idleTimeoutMs);
   };
   armOrPauseIdle();
+
+  // Progress heartbeat: while a tool is in flight, re-render the card every
+  // `progressHeartbeatMs` so the user sees the running tool's elapsed-time
+  // suffix tick. Without this, multi-minute tool calls (npm install, train
+  // runs, big Bash scripts) leave the card visually frozen between
+  // tool_use and tool_result — the SDK Throttle at 400ms absorbs the
+  // redundant PATCH calls. The heartbeat's flush() produces a byte-different
+  // render (elapsed seconds changed) so it actually goes through.
+  let heartbeatTimer: NodeJS.Timeout | undefined;
+  let lastHeartbeatFlushMs = 0;
+  const startHeartbeat = (): void => {
+    if (!progressHeartbeatMs || progressHeartbeatMs <= 0) return;
+    if (heartbeatTimer) return;
+    heartbeatTimer = setInterval(() => {
+      if (state.terminal !== 'running') return;
+      if (state.footer !== 'tool_running') return;
+      if (state.lastToolStartedAt === undefined) return;
+      const now = Date.now();
+      const elapsed = now - state.lastToolStartedAt;
+      // Throttle to one flush per tick — even if multiple seconds have
+      // passed since lastHeartbeatFlushMs, the renderer's footer text only
+      // changes when the elapsed-second value crosses an integer boundary,
+      // so flushing every tick is enough.
+      if (now - lastHeartbeatFlushMs < progressHeartbeatMs) return;
+      lastHeartbeatFlushMs = now;
+      state = { ...state, currentToolElapsedMs: elapsed, lastEventAt: now };
+      log.info('card', 'heartbeat-flush', { scope, elapsedMs: elapsed });
+      void flush(state);
+    }, progressHeartbeatMs);
+  };
+  startHeartbeat();
 
   try {
     for await (const evt of events) {
@@ -2000,6 +2047,7 @@ async function processAgentStream(
     }
   } finally {
     if (timer) clearTimeout(timer);
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
   }
 
   // If state already reached a terminal event (done/error/etc.) before the

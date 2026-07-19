@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -88,6 +88,68 @@ describe('Claude stream-json translator', () => {
     expect([...translateEvent({ type: 'assistant', message: { content: [{ type: 'text', text: '' }] } })]).toEqual([]);
     expect([...translateEvent({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 't' }] } })]).toEqual([]);
     expect([...translateEvent({ type: 'system', subtype: 'other' })]).toEqual([]);
+  });
+
+  it('parses the AskUserQuestion fixture end-to-end', async () => {
+    const path = join(process.cwd(), 'tests/fixtures/claude/ask-user-question.jsonl');
+    const raw = (await readFile(path, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
+    const translated: AgentEvent[] = [];
+    for (const evt of raw) {
+      for (const t of translateEvent(evt)) translated.push(t);
+    }
+
+    // system → text preamble → tool_use AskUserQuestion → tool_result (auto-decline) → usage → done
+    expect(translated[0]).toMatchObject({
+      type: 'system',
+      sessionId: 'sess-claude-ask-1',
+      model: 'claude-opus-4-8',
+    });
+    const ask = translated.find((e) => e.type === 'tool_use' && e.name === 'AskUserQuestion');
+    expect(ask).toBeDefined();
+    expect(ask).toMatchObject({
+      type: 'tool_use',
+      name: 'AskUserQuestion',
+      id: 'toolu_claude_ask_1',
+    });
+    const askInput = (ask as Extract<AgentEvent, { type: 'tool_use' }>).input as {
+      questions: Array<{ options: unknown[] }>;
+    };
+    expect(askInput.questions).toHaveLength(1);
+    const firstQuestion = askInput.questions[0]!;
+    expect(firstQuestion.options).toHaveLength(3);
+
+    // The auto-declined tool_result arrives between tool_use and the final result.
+    const result = translated.find(
+      (e) => e.type === 'tool_result' && e.id === 'toolu_claude_ask_1',
+    );
+    expect(result).toMatchObject({ type: 'tool_result', isError: true });
+
+    // Final terminal: usage + done.
+    const usage = translated.at(-2);
+    const done = translated.at(-1);
+    expect(usage).toMatchObject({ type: 'usage', costUsd: 0.0123 });
+    expect(done).toMatchObject({ type: 'done', terminationReason: 'normal' });
+  });
+
+  it('parses the ExitPlanMode fixture end-to-end', async () => {
+    const path = join(process.cwd(), 'tests/fixtures/claude/exit-plan-mode.jsonl');
+    const raw = (await readFile(path, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
+    const translated: AgentEvent[] = [];
+    for (const evt of raw) {
+      for (const t of translateEvent(evt)) translated.push(t);
+    }
+
+    const plan = translated.find((e) => e.type === 'tool_use' && e.name === 'ExitPlanMode');
+    expect(plan).toBeDefined();
+    expect(plan).toMatchObject({
+      type: 'tool_use',
+      name: 'ExitPlanMode',
+      id: 'toolu_claude_plan_1',
+    });
+    const planInput = (plan as Extract<AgentEvent, { type: 'tool_use' }>).input as { plan: string };
+    expect(planInput.plan).toContain('Refactor auth flow');
+
+    expect(translated.at(-1)).toMatchObject({ type: 'done', terminationReason: 'normal' });
   });
 });
 

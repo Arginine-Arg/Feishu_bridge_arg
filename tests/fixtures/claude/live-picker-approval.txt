@@ -1,0 +1,13 @@
+Would you like to run the following command?
+
+Environment: local
+
+Reason: Allow the one-GPU CURE smoke test to initialize PyTorch's local TCPStore and use the local GPU.
+
+$ CURE_NPROC_PER_NODE=1 bash chem/runs/cure_l1000_tfe_alignment_train.sh hgraph
+
+› 1. Yes, allow this command (y)
+  2. Yes, allow all commands in this session (a)
+  3. No, deny this command (n)
+
+You can always change this setting later in /permissions.

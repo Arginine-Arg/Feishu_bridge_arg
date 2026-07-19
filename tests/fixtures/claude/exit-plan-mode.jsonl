@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","session_id":"sess-claude-plan-1","cwd":"/tmp","model":"claude-sonnet-5"}
+{"type":"assistant","message":{"id":"msg_p1","role":"assistant","content":[{"type":"text","text":"I have a plan; please review before I proceed."},{"type":"tool_use","id":"toolu_claude_plan_1","name":"ExitPlanMode","input":{"plan":"# Refactor auth flow\n1. Replace session cookies with JWT\n2. Add refresh token rotation\n3. Update middleware to verify on every request\n"}}]}}
+{"type":"result","session_id":"sess-claude-plan-1","total_cost_usd":0.0091,"usage":{"input_tokens":900,"output_tokens":50,"cache_read_input_tokens":0}}

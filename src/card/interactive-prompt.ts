@@ -200,13 +200,26 @@ export async function consumeInteractivePrompts(
   const seen = new Set<string>();
   try {
     for await (const evt of events) {
-      if (evt.type !== 'tool_use' || seen.has(evt.id)) continue;
+      if (evt.type !== 'tool_use') continue;
+      // Dedup on tool_use.id: stream-json can re-deliver the same block on
+      // resume/replay. A repeated id means we've already issued the card —
+      // surface the skip so misbehaving agents are visible in logs.
+      if (seen.has(evt.id)) {
+        log.info('prompt-card', 'skipped-duplicate', { scope: deps.scope, tool: evt.name, id: evt.id });
+        continue;
+      }
       const card = buildPromptCard(evt.name, evt.input, deps.sign);
-      if (!card) continue;
+      if (!card) {
+        // buildPromptCard returns undefined for any tool we don't bridge
+        // (e.g. 'Bash', 'Read'). Log so operators can spot a missed tool
+        // name without grepping every run's stream-json.
+        log.info('prompt-card', 'skipped-no-card', { scope: deps.scope, tool: evt.name });
+        continue;
+      }
       seen.add(evt.id);
       try {
         await deps.channel.send(deps.chatId, { card }, deps.sendOpts);
-        log.info('prompt-card', 'sent', { scope: deps.scope, tool: evt.name });
+        log.info('prompt-card', 'sent', { scope: deps.scope, tool: evt.name, id: evt.id });
       } catch (err) {
         log.warn('prompt-card', 'send-failed', {
           scope: deps.scope,

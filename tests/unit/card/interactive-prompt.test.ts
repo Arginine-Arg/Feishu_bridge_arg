@@ -1,5 +1,8 @@
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { AgentEvent } from '../../../src/agent/types';
+import { translateEvent } from '../../../src/agent/claude/stream-json';
 import {
   BRIDGE_PROMPT_CALLBACK_MARKER,
   buildPromptCard,
@@ -132,5 +135,45 @@ describe('consumeInteractivePrompts', () => {
         deps(channel),
       ),
     ).resolves.toBeUndefined();
+  });
+
+  it('emits a Feishu card when Claude raises AskUserQuestion (via JSONL fixture)', async () => {
+    const path = join(process.cwd(), 'tests/fixtures/claude/ask-user-question.jsonl');
+    const raw = (await readFile(path, 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
+    const events: AgentEvent[] = [];
+    for (const r of raw) for (const t of translateEvent(r)) events.push(t);
+
+    const channel = fakeChannel();
+    await consumeInteractivePrompts(stream(events), deps(channel));
+
+    expect(channel.send).toHaveBeenCalledTimes(1);
+    const [, body] = channel.send.mock.calls[0]!;
+    const card = (body as { card: { body: { elements: unknown[] } } }).card;
+    // Three option buttons (AWS Lambda, ECS Fargate, Vercel).
+    const buttons = buttonValues(card);
+    const labels = buttons.map((v) => v.answer);
+    expect(labels).toEqual(['AWS Lambda', 'ECS Fargate', 'Vercel']);
+    for (const v of buttons) {
+      expect(v[BRIDGE_PROMPT_CALLBACK_MARKER]).toBe(true);
+      expect(v.kind).toBe('ask');
+      expect(v.header).toBe('Target');
+    }
+  });
+
+  it('emits a Feishu card when Claude raises ExitPlanMode (via JSONL fixture)', async () => {
+    const path = join(process.cwd(), 'tests/fixtures/claude/exit-plan-mode.jsonl');
+    const raw = (await readFile(path, 'utf8')).trim().split('\n').map((l) => JSON.parse(l));
+    const events: AgentEvent[] = [];
+    for (const r of raw) for (const t of translateEvent(r)) events.push(t);
+
+    const channel = fakeChannel();
+    await consumeInteractivePrompts(stream(events), deps(channel));
+
+    expect(channel.send).toHaveBeenCalledTimes(1);
+    const [, body] = channel.send.mock.calls[0]!;
+    const card = (body as { card: { body: { elements: unknown[] } } }).card;
+    const buttons = buttonValues(card);
+    expect(buttons.map((v) => v.decision)).toEqual(['approve', 'revise']);
+    expect(buttons.every((v) => v.kind === 'plan')).toBe(true);
   });
 });

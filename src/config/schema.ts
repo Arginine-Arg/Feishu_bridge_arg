@@ -173,6 +173,18 @@ export interface AppPreferences {
    * Range 100-30000; out-of-range values fall back to default.
    */
   agentStopGraceMs?: number;
+  /**
+   * Heartbeat interval (ms) for the streaming run card. While a tool is in
+   * flight and no stream events are flowing, the bridge re-renders the
+   * card every `progressHeartbeatMs` so the user sees the running tool's
+   * elapsed time continue to tick — without this, long tool calls (5+
+   * minute Bash / npm install / train runs) make the card look frozen.
+   *
+   * Default 10000 (10s). Set 0 to disable entirely. Range 0-60000; out-of-
+   * range values fall back to default. Applies to both Claude and Codex —
+   * the same frozen-card symptom affects both adapters.
+   */
+  progressHeartbeatMs?: number;
 }
 
 /**
@@ -299,4 +311,20 @@ export function getRunIdleTimeoutMs(cfg: AppConfig): number | undefined {
   if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) return undefined;
   const clamped = Math.min(Math.max(Math.floor(raw), 1), 120);
   return clamped * 60_000;
+}
+
+/**
+ * Resolve the streaming-card heartbeat interval in ms. Returns `0` when
+ * disabled. Clamps to [0, 60000] so a typo can't either lock the bot into
+ * a per-second re-render storm or wait forever between updates.
+ *
+ * Default 10000 (10 seconds) — long enough to be invisible to Feishu's
+ * rate limits, short enough that the elapsed-time suffix in the footer
+ * ticks at human-readable cadence.
+ */
+export function getProgressHeartbeatMs(cfg: AppConfig): number {
+  const raw = cfg.preferences?.progressHeartbeatMs;
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return 10_000;
+  const clamped = Math.min(Math.max(Math.floor(raw), 0), 60_000);
+  return clamped;
 }

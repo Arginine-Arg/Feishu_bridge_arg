@@ -47,7 +47,14 @@ export function renderCard(state: RunState, options: RunCardRenderOptions = {}):
   }
 
   if (state.terminal === 'running') {
-    if (state.footer) elements.push(footerStatus(state.footer));
+    if (state.footer) {
+      // Surface the running tool's elapsed time only while a tool is in
+      // flight — for 'thinking'/'streaming' footers there's no useful
+      // duration to display.
+      const elapsedMs =
+        state.footer === 'tool_running' ? state.currentToolElapsedMs : undefined;
+      elements.push(footerStatus(state.footer, elapsedMs));
+    }
     elements.push(stopButton(options));
   }
 
@@ -191,14 +198,38 @@ function stopButton(options: RunCardRenderOptions): object {
   };
 }
 
-function footerStatus(status: Exclude<FooterStatus, null>): object {
-  const text =
+function footerStatus(status: Exclude<FooterStatus, null>, elapsedMs?: number): object {
+  const baseText =
     status === 'thinking'
       ? '🧠 正在思考'
       : status === 'tool_running'
         ? '🧰 正在调用工具'
         : '✍️ 正在输出';
-  return noteMd(text);
+  return noteMd(appendElapsed(baseText, elapsedMs));
+}
+
+/**
+ * Append a `_已运行 X 分 Y 秒_` suffix to a footer string when `elapsedMs`
+ * is set. Returns the input unchanged otherwise. The format is human-friendly
+ * Chinese: 12 秒 / 3 分 14 秒 / 1 时 5 分 — terse enough not to inflate the
+ * 30KB-per-element Feishu card budget.
+ */
+export function formatElapsed(ms: number): string {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  if (totalSec < 60) return `${totalSec} 秒`;
+  const totalMin = Math.floor(totalSec / 60);
+  if (totalMin < 60) {
+    const sec = totalSec % 60;
+    return sec > 0 ? `${totalMin} 分 ${sec} 秒` : `${totalMin} 分`;
+  }
+  const hour = Math.floor(totalMin / 60);
+  const min = totalMin % 60;
+  return min > 0 ? `${hour} 时 ${min} 分` : `${hour} 时`;
+}
+
+function appendElapsed(base: string, ms: number | undefined): string {
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms <= 0) return base;
+  return `${base} · 已运行 ${formatElapsed(ms)}`;
 }
 
 function summaryText(state: RunState): string {
