@@ -1570,6 +1570,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           sendOpts,
         );
       };
+      let lastSentCardSerialized: string | undefined;
       const renderDone = processAgentStream(
         handle,
         eventStream,
@@ -1580,14 +1581,23 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         async (state) => {
           latestState = state;
           if (cardCtrl) {
+            // Dedup: skip PATCH if the rendered card is byte-identical to the
+            // last one we sent. SDK throttle absorbs most redundant updates,
+            // but during long runs with no state change the reducer still
+            // emits `done` / `usage` events that re-render → identical card.
+            // Without this guard we PATCH the same JSON many times in a row.
+            const nextCard = renderLiveAwareReplyCard(
+              prepareStateForReply(state),
+              cardRenderOptions,
+              useLiveSession ? 'live' : 'agent',
+            );
+            const nextSerialized = JSON.stringify(nextCard);
+            if (nextSerialized === lastSentCardSerialized) {
+              return;
+            }
+            lastSentCardSerialized = nextSerialized;
             try {
-              await cardCtrl.update(
-                renderLiveAwareReplyCard(
-                  prepareStateForReply(state),
-                  cardRenderOptions,
-                  useLiveSession ? 'live' : 'agent',
-                ),
-              );
+              await cardCtrl.update(nextCard);
             } catch (err) {
               streamDegraded = true;
               cardCtrl = undefined;
@@ -1666,6 +1676,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           await channel.send(chatId, { markdown: body }, sendOpts);
         }
       };
+      let lastSentMarkdownText: string | undefined;
       const renderDone = processAgentStream(
         handle,
         eventStream,
@@ -1676,8 +1687,16 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         async (state) => {
           latestState = state;
           if (markdownCtrl) {
+            // Dedup: skip PATCH if rendered markdown is identical to the
+            // last one we sent. SDK throttle absorbs most redundant updates,
+            // but on text-heavy streams (v0.6.32 motivation: bridge echoed
+            // a 6KB+ reply 30+ times), this kills the perceived "duplicate"
+            // symptom in Feishu.
+            const nextText = renderText(prepareStateForReply(state));
+            if (nextText === lastSentMarkdownText) return;
+            lastSentMarkdownText = nextText;
             try {
-              await markdownCtrl.setContent(renderText(prepareStateForReply(state)));
+              await markdownCtrl.setContent(nextText);
             } catch (err) {
               streamDegraded = true;
               markdownCtrl = undefined;

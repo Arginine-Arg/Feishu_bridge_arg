@@ -22,7 +22,7 @@ const COLLAPSE_TOOL_THRESHOLD = 3;
  * tool bodies (always recoverable from `/doctor` or the daemon log) than
  * lose the whole conversation.
  */
-const CARD_BYTE_BUDGET = 24_000;
+export const CARD_BYTE_BUDGET = 24_000;
 
 interface ToolGroup {
   kind: 'tools';
