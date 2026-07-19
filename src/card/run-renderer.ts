@@ -24,6 +24,15 @@ const COLLAPSE_TOOL_THRESHOLD = 3;
  */
 export const CARD_BYTE_BUDGET = 24_000;
 
+/**
+ * Per text-block caps for the tail-preserving fold strategy. When a text
+ * block has to be folded to fit the card byte budget, we keep the first
+ * `TEXT_HEAD_CHARS` chars and the last `TEXT_TAIL_CHARS` chars (the latter
+ * is what the user actually cares about — the agent's final summary).
+ */
+const TEXT_HEAD_CHARS = 800;
+const TEXT_TAIL_CHARS = 2400;
+
 interface ToolGroup {
   kind: 'tools';
   tools: ToolEntry[];
@@ -200,11 +209,19 @@ function enforceCardByteBudget(
     const range = textBlockRanges[largestIdx]!;
     const el = workingElements[range.markdownElIdx] as { content?: string };
     if (!el?.content) break;
-    const newLen = Math.max(0, Math.floor(el.content.length * 0.75));
+    // Tail-preserving fold: keep a fixed-size head + a fixed-size tail,
+    // replace the middle with a fold marker. The user's most-important
+    // content (the agent's final words) is always at the tail — never lose it.
+    const HEAD_TAIL_BUDGET = CARD_BYTE_BUDGET; // worst case, full budget for one block
+    const headLen = Math.min(TEXT_HEAD_CHARS, el.content.length);
+    const tailLen = Math.min(TEXT_TAIL_CHARS, el.content.length - headLen);
+    const head = el.content.slice(0, headLen);
+    const tail = el.content.slice(el.content.length - tailLen);
+    const dropped = el.content.length - headLen - tailLen;
     const truncated =
-      newLen > 0
-        ? `${el.content.slice(0, newLen)}\n\n_… 已截断（${el.content.length - newLen} 字已折叠）_`
-        : '_（内容已折叠）_';
+      dropped > 0
+        ? `${head}\n\n_… ${dropped} 字已折叠（保留首尾）…_\n\n${tail}`
+        : el.content;
     workingElements[range.markdownElIdx] = { tag: 'markdown', content: truncated };
   }
 

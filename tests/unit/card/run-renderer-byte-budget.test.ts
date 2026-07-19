@@ -46,8 +46,9 @@ describe('renderCard byte-budget enforcement', () => {
     const bytes = JSON.stringify(card).length;
 
     expect(bytes).toBeLessThan(30_000);
-    // Truncation marker should appear so the user knows content was folded.
-    expect(JSON.stringify(card)).toMatch(/已截断/);
+    // Tail-preserving fold marker should appear so the user knows content
+    // was folded in the middle, with head + tail preserved.
+    expect(JSON.stringify(card)).toMatch(/已折叠/);
   });
 
   it('truncates oversized reasoning when it exceeds the cap', () => {
@@ -57,5 +58,25 @@ describe('renderCard byte-budget enforcement', () => {
     state.blocks; // satisfy lint
     const card = renderCard(state);
     expect(JSON.stringify(card).length).toBeLessThan(30_000);
+  });
+
+  it('preserves the tail of an oversized text block (the user-visible fix)', () => {
+    // The user's complaint: "现在这个状况导致我看不到模型最后说了什么？
+    // 这往往是最重要的". The agent's final words are the most important.
+    // Old strategy chopped the tail (lost them). New strategy keeps head + tail.
+    const head = 'A'.repeat(2_000);
+    const middle = 'm'.repeat(80_000);
+    const tail = 'CONCLUSION: the answer is 42';
+    const fullText = `${head}${middle}${tail}`;
+    const state = reduce(initialState, { type: 'text', delta: fullText });
+    const card = renderCard(state) as object;
+    const flat = JSON.stringify(card);
+
+    // Head survives
+    expect(flat).toContain('A'.repeat(100));
+    // Tail survives (the agent's final answer)
+    expect(flat).toContain(tail);
+    // Middle is folded
+    expect(flat).toMatch(/已折叠/);
   });
 });

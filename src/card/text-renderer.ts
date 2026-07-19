@@ -5,6 +5,12 @@ import { CARD_BYTE_BUDGET } from './run-renderer';
 const MARKER_RESERVE = 256;
 const EFFECTIVE_BUDGET = CARD_BYTE_BUDGET - MARKER_RESERVE;
 
+/** Head / tail size caps when a single text block must be folded. The tail
+ * is intentionally larger than the head because the user's most important
+ * content is almost always the agent's final summary / conclusion. */
+const TEXT_HEAD_CHARS = 800;
+const TEXT_TAIL_CHARS = 2400;
+
 /**
  * Render `RunState` as plain markdown text — used in `messageReply: 'text'`
  * mode where we stream a markdown message instead of a card.
@@ -63,11 +69,17 @@ function enforceTextByteBudget(text: string): string {
     working = parts.join('\n\n');
   }
 
-  // If a single text block alone exceeds the budget (rare), hard-truncate it.
+  // If a single text block alone exceeds the budget (rare), use head+tail fold
+  // rather than chopping the tail — the tail is what the user actually cares
+  // about (the agent's final summary).
   if (Buffer.byteLength(working, 'utf8') > EFFECTIVE_BUDGET) {
-    const buf = Buffer.from(working, 'utf8');
-    working = buf.subarray(0, EFFECTIVE_BUDGET).toString('utf8');
-    droppedBytes += Buffer.byteLength(text, 'utf8') - Buffer.byteLength(working, 'utf8');
+    const head = working.slice(0, TEXT_HEAD_CHARS);
+    const tail = working.slice(working.length - TEXT_TAIL_CHARS);
+    const folded = working.length - TEXT_HEAD_CHARS - TEXT_TAIL_CHARS;
+    working = folded > 0
+      ? `${head}\n\n_… ${folded} 字已折叠（保留首尾）…_\n\n${tail}`
+      : working;
+    droppedBytes = Buffer.byteLength(text, 'utf8') - Buffer.byteLength(working, 'utf8');
   }
 
   if (droppedBytes > 0) {

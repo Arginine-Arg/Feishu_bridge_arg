@@ -23,13 +23,13 @@ describe('renderText byte budget (v0.6.32)', () => {
   it('passes through short text untouched', () => {
     const out = renderText(bigTextState(200));
     expect(out).toContain('x'.repeat(200));
-    expect(out).not.toMatch(/已截断/);
+    expect(out).not.toMatch(/已折叠/);
   });
 
   it('truncates long text and adds fold marker', () => {
     const out = renderText(bigTextState(60_000));
     expect(out.length).toBeLessThan(24_000);
-    expect(out).toMatch(/已截断/);
+    expect(out).toMatch(/已折叠/);
   });
 
   it('produces stable output on second call with same state', () => {
