@@ -4,6 +4,26 @@ import { toolBodyMd, toolHeaderText } from './tool-render';
 const REASONING_MAX = 1500;
 const COLLAPSE_TOOL_THRESHOLD = 3;
 
+/**
+ * Cumulative byte ceiling for a single rendered card. Feishu's per-element
+ * limit is ~30KB and per-card overhead varies; 24KB leaves comfortable
+ * headroom for JSON wrapping (schema field, summary, borders, etc.) plus
+ * safety against per-element limit drift across API versions.
+ *
+ * When a `RunState` would render over this, the renderer force-collapses
+ * the **earlier** tools' bodies via `collapsedToolSummary` and prepends an
+ * `_N 更早的工具详情已折叠…_` marker. The latest tool, if any, keeps its
+ * full panel because that's the one the user is watching right now.
+ *
+ * This is intentionally aggressive — a 30KB-ish stream patch that
+ * `ctrl.update()` posts is a known failure mode in production (feishu
+ * returns 230011 / withdrawn errors), and small-but-still-oversize cards
+ * cause the user's reply to be silently clipped. Better to lose the older
+ * tool bodies (always recoverable from `/doctor` or the daemon log) than
+ * lose the whole conversation.
+ */
+const CARD_BYTE_BUDGET = 24_000;
+
 interface ToolGroup {
   kind: 'tools';
   tools: ToolEntry[];
@@ -25,13 +45,23 @@ export function renderCard(state: RunState, options: RunCardRenderOptions = {}):
     elements.push(reasoningPanel(state.reasoning.content, state.reasoning.active));
   }
 
+  // Index of each tool group in `elements` so we can collapse the earliest
+  // one(s) when the cumulative card size blows past CARD_BYTE_BUDGET. The
+  // latest group is always preserved (it's the one the user is watching).
+  const groupElementRange: Array<{ start: number; toolCount: number }> = [];
+  const textBlockRanges: Array<{ start: number; markdownElIdx: number }> = [];
   for (const group of groupBlocks(state.blocks)) {
     if (group.kind === 'text') {
-      if (group.content.trim()) {
-        elements.push(markdown(group.content));
+      const content = group.content.trim();
+      if (content) {
+        const start = elements.length;
+        elements.push(markdown(content));
+        textBlockRanges.push({ start, markdownElIdx: elements.length - 1 });
       }
     } else {
+      const start = elements.length;
       elements.push(...renderToolGroup(group.tools, state.terminal !== 'running'));
+      groupElementRange.push({ start, toolCount: group.tools.length });
     }
   }
 
@@ -58,14 +88,127 @@ export function renderCard(state: RunState, options: RunCardRenderOptions = {}):
     elements.push(stopButton(options));
   }
 
-  return {
+  return enforceCardByteBudget(state, elements, groupElementRange, textBlockRanges);
+}
+
+/**
+ * Collapse tool groups from the earliest first until the serialized card is
+ * under CARD_BYTE_BUDGET. Replaces each collapsed group with a single
+ * `collapsedToolSummary` (header + per-tool title, no bodies) so the user
+ * still sees *that* the tools ran, with their headers (icon + name + short
+ * input summary). Bodies are always recoverable from `/doctor` or the daemon
+ * log via the runId.
+ *
+ * Strategy:
+ *   1. Serialize the card with the current elements.
+ *   2. If over budget, walk `foldCount` from 1..N-1 (preserving the last
+ *      group's full panels). At each step, build a fresh elements list:
+ *      elements before the first group + one collapsed summary + elements
+ *      from the rest of the source (skipping the folded groups' tool
+ *      panels).
+ *   3. Prepend a fold-marker note (so the user understands the gap) and
+ *      re-measure. Stop as soon as we drop below the budget. Bail out and
+ *      return the best-attempt card if even fully-folded doesn't fit (the
+ *      SDK will likely reject; at least we tried).
+ */
+function enforceCardByteBudget(
+  state: RunState,
+  elements: object[],
+  groupElementRange: Array<{ start: number; toolCount: number }>,
+  textBlockRanges: Array<{ start: number; markdownElIdx: number }>,
+): object {
+  const wrap = (body: object[]): object => ({
     schema: '2.0',
     config: {
       streaming_mode: state.terminal === 'running',
       summary: { content: summaryText(state) },
     },
-    body: { elements },
-  };
+    body: { elements: body },
+  });
+
+  const sizeOf = (els: object[]): number => JSON.stringify(wrap(els)).length;
+  if (sizeOf(elements) <= CARD_BYTE_BUDGET) return wrap(elements);
+
+  // Pass 1: fold earliest tool groups into header-only summaries.
+  // Tool bodies are already aggressively truncated to BODY_TOTAL_MAX in
+  // tool-render.ts, but with many tools the cumulative panel overhead can
+  // still exceed budget. We preserve the most recent tool group's full
+  // panels — that's the one the user is watching.
+  let workingElements = elements.slice();
+  const groupTools: ToolEntry[][] = [];
+  for (const g of groupBlocks(state.blocks)) {
+    if (g.kind === 'tools') groupTools.push(g.tools);
+  }
+  for (let foldCount = 1; foldCount < groupElementRange.length; foldCount++) {
+    const firstStart = groupElementRange[0]!.start;
+    const firstUnfoldedStart = groupElementRange[foldCount]!.start;
+    const foldedTools = groupTools.slice(0, foldCount).flat();
+    if (foldedTools.length === 0) continue;
+    const newBody: object[] = [];
+    for (let i = 0; i < firstStart; i++) newBody.push(workingElements[i]!);
+    newBody.push(
+      noteMd(
+        `_… ${foldedTools.length} 个更早的工具调用详情已折叠（完整内容见 /doctor 或 daemon 日志）_`,
+      ),
+    );
+    newBody.push(
+      collapsedToolSummary(foldedTools, state.terminal !== 'running'),
+    );
+    for (let i = firstUnfoldedStart; i < workingElements.length; i++) {
+      newBody.push(workingElements[i]!);
+    }
+    workingElements = newBody;
+    if (sizeOf(workingElements) <= CARD_BYTE_BUDGET) {
+      return wrap(workingElements);
+    }
+  }
+
+  // Pass 2: if tool folding alone isn't enough, the oversize is in text
+  // blocks (streaming assistant text has no per-block cap). Truncate each
+  // text markdown body to fit. We re-use each block's markdown element and
+  // shrink its `content` until the card body fits.
+  if (textBlockRanges.length === 0) {
+    // Nothing left to trim. Return best-effort.
+    return wrap(workingElements);
+  }
+  // Get all text-block contents in order; we'll iteratively shrink the
+  // largest one until we fit.
+  // Re-walk groups to fetch the original (untruncated) text contents.
+  const textContents: string[] = [];
+  for (const g of groupBlocks(state.blocks)) {
+    if (g.kind === 'text') {
+      const c = g.content.trim();
+      if (c) textContents.push(c);
+    }
+  }
+  // Map textBlockRanges[i] → textContents[i] by index (same order).
+  for (let pass = 0; pass < 32; pass++) {
+    if (sizeOf(workingElements) <= CARD_BYTE_BUDGET) return wrap(workingElements);
+    // Find the largest text markdown element and chop its tail by 25%.
+    let largestIdx = -1;
+    let largestLen = 0;
+    for (let i = 0; i < textBlockRanges.length; i++) {
+      const range = textBlockRanges[i]!;
+      const el = workingElements[range.markdownElIdx] as { content?: string };
+      const len = el?.content?.length ?? 0;
+      if (len > largestLen) {
+        largestLen = len;
+        largestIdx = i;
+      }
+    }
+    if (largestIdx === -1) break;
+    const range = textBlockRanges[largestIdx]!;
+    const el = workingElements[range.markdownElIdx] as { content?: string };
+    if (!el?.content) break;
+    const newLen = Math.max(0, Math.floor(el.content.length * 0.75));
+    const truncated =
+      newLen > 0
+        ? `${el.content.slice(0, newLen)}\n\n_… 已截断（${el.content.length - newLen} 字已折叠）_`
+        : '_（内容已折叠）_';
+    workingElements[range.markdownElIdx] = { tag: 'markdown', content: truncated };
+  }
+
+  return wrap(workingElements);
 }
 
 function* groupBlocks(blocks: Block[]): Generator<Group> {
