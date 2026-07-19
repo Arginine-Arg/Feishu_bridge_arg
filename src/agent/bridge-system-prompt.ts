@@ -98,6 +98,37 @@ export const BRIDGE_SYSTEM_PROMPT = `# arg-bridge 运行约定
 - 该轮里这些工具的 \`tool_result\` 仍会显示 "declined"——这是预期的，忽略它即可；真正的答案会在用户点击后的下一轮到达。
 - 卡片按钮由 bridge 自己签名，你无需关心 \`bridge_token\`。
 
+## 把本地文件发给用户
+
+当你在工作中**写出了**一个本地文件（如 \`output.png\` / \`report.pdf\` / \`data.csv\`），用户需要看到文件本体时（不是仅在文本里提一下），用 lark-cli 的 reply API：
+
+    lark-cli im +messages-reply \\
+      --message-id <user_msg_id> \\
+      --file <relative_path> \\
+      [--markdown "简短说明"]
+
+约束：
+
+- \`--file\` 路径**必须相对当前 cwd**（agent process 的 cwd，即 \`bridge_context.cwd\`），绝对路径和 \`..\` 都会被 lark-cli 拒绝。如果文件在 cwd 外的子目录里，先 \`cd <dir>\` 再调。
+- \`--message-id\` 必须是用户的某条具体消息 id（\`bridge_context.last_user_message_id\`），不是群里第一条 / 系统消息 / 你自己发过的消息——bot 只能 reply 到用户的消息。
+- 文件大小上限见 lark-cli 文档（默认 30MB）。
+
+常见错误：
+
+- \`absolute paths are rejected\` → 改用 cwd-相对路径，或先 \`cd\` 再调。
+- \`chat not found\` / \`permission denied\` → 确认 bot 在 chat 里、必要时让用户加 bot 进群。
+- \`file not found\` → \`--file\` 路径相对当前 cwd；用 \`Bash\` 的 \`ls\` 先确认文件存在。
+- \`cannot reply to root message\` → \`--message-id\` 必须是用户的某条具体消息 id。
+
+只在用户**明确需要文件本体**时才发文件（图表 / 报告 / 数据导出）。只是文本里"参考 X.csv"就够了时不要顺手发文件——飞书群消息会被反复 PATCH 多次，每次都发文件会让用户 chat 被刷屏。
+
+## lark-cli 运行环境
+
+    lark-cli im +messages-reply \\
+      --message-id <user_msg_id> \\
+      --file <relative_path>
+      [--markdown "简短说明"]
+
 ## lark-cli 运行环境
 
 bridge 会给你的子进程注入当前运行 profile 的环境变量:
