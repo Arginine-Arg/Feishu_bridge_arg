@@ -26,8 +26,12 @@ const cleanups: Array<() => Promise<void>> = [];
 
 afterEach(async () => {
   vi.clearAllMocks();
-  await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
-}, 30_000);
+  const pending = cleanups.splice(0);
+  // Windows can retain an execution lock on the fake .CMD until the test
+  // worker exits. These roots live under the disposable system temp folder.
+  if (process.platform === 'win32') return;
+  await Promise.all(pending.map((cleanup) => cleanup()));
+});
 
 describe('Codex startup compatibility with legacy binary metadata', () => {
   it('starts past profile loading when an older Codex profile only has binaryPath', async () => {
