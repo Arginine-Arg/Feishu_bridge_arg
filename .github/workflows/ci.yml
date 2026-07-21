@@ -37,17 +37,28 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          pnpm test *> vitest.log
+          pnpm exec vitest run --reporter=json --outputFile=vitest-results.json
           $testExit = $LASTEXITCODE
-          Get-Content vitest.log
           if ($testExit -ne 0) {
-            $tail = (Get-Content vitest.log | Select-Object -Last 150) -join "`n"
-            $tail = $tail -replace "$([char]27)\[[0-9;?]*[ -/]*[@-~]", ''
-            if ($tail.Length -gt 12000) {
-              $tail = $tail.Substring($tail.Length - 12000)
+            $failures = @()
+            if (Test-Path vitest-results.json) {
+              $results = Get-Content vitest-results.json -Raw | ConvertFrom-Json
+              foreach ($suite in $results.testResults) {
+                foreach ($assertion in $suite.assertionResults) {
+                  if ($assertion.status -eq 'failed') {
+                    $messages = $assertion.failureMessages -join "`n"
+                    $failures += "$($suite.name) :: $($assertion.fullName)`n$messages"
+                  }
+                }
+              }
             }
-            $escaped = $tail.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
-            Write-Output "::error file=.github,title=Windows Vitest failure::$escaped"
+            $summary = if ($failures.Count) { $failures -join "`n`n" } else { 'Vitest failed without a failed assertion result.' }
+            for ($offset = 0; $offset -lt $summary.Length; $offset += 3000) {
+              $length = [Math]::Min(3000, $summary.Length - $offset)
+              $part = $summary.Substring($offset, $length)
+              $escaped = $part.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+              Write-Output "::error file=.github,title=Windows Vitest failure::$escaped"
+            }
             exit $testExit
           }
 
