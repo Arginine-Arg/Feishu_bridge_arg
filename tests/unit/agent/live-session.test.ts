@@ -12,7 +12,9 @@ import {
   isLiveTerminalBusy,
   parseLiveControlSequence,
   encodeTmuxInputFrame,
+  liveTmuxIdentity,
   scopeLiveSnapshotToPrompt,
+  undeliveredSnapshotSuffix,
 } from '../../../src/agent/live-session';
 
 beforeAll(async () => {
@@ -63,6 +65,15 @@ describe('tmux input framing and snapshots', () => {
   it('frames each tmux write independently so pipe chunks cannot merge prompts', () => {
     expect(encodeTmuxInputFrame('aha\r')).toBe('YWhhDQ==\n');
     expect(encodeTmuxInputFrame('nihao\r')).toBe('bmloYW8N\n');
+  });
+
+  it('continues after the last delivered tail inside a full history redraw', () => {
+    expect(
+      undeliveredSnapshotSuffix(
+        'recent update one\nrecent update two\n',
+        'older history\nrecent update one\nrecent update two\nfinal completion\n',
+      ),
+    ).toBe('final completion\n');
   });
 
   it('keeps only the current prompt and its output from a pane snapshot', () => {
@@ -561,6 +572,50 @@ setInterval(() => {}, 1000);
     expect(await readFile(countFile, 'utf8')).toBe('start\n');
   }, 70_000);
 
+  it('keeps delivering the final completion after more than 120k characters', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-output-tail-test-'));
+    const bin = join(dir, 'fake-long-stream-agent.mjs');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+process.stdin.once('data', () => {
+  let index = 0;
+  const timer = setInterval(() => {
+    if (index < 8) {
+      process.stdout.write('chunk-' + index + ':' + 'x'.repeat(19990) + '\\n');
+      index += 1;
+      return;
+    }
+    clearInterval(timer);
+    process.stdout.write('FINAL_COMPLETION_MESSAGE\\n');
+  }, 15);
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('output-tail-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'output-tail',
+      usePty: false,
+      idleMs: 100,
+      outputFlushMs: 5,
+      startupTimeoutMs: 500,
+    });
+
+    const text = textOf(await collect(session.run('output-tail-run', 'stream', dir).events));
+    await pool.closeAll();
+
+    expect(text.length).toBeGreaterThan(120_000);
+    expect(text).toContain('FINAL_COMPLETION_MESSAGE\n');
+  }, 15_000);
+
   it('ignores startup terminal output before the turn input is sent', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-startup-noise-test-'));
     const bin = join(dir, 'fake-startup-noise-agent.mjs');
@@ -871,9 +926,9 @@ setInterval(() => {}, 1000);
     const text = textOf(events);
     expect(text).toContain('Codex live session status');
     expect(text).toContain('Terminal backend: tmux');
-    expect(text).toMatch(/Tmux socket: \/.+\/tmux-\d+\/default/);
-    expect(text).toMatch(/Tmux target: argbridge-[^\n]+:0\.0/);
-    expect(text).toMatch(/Attach command: tmux -S .+\/tmux-\d+\/default attach -t argbridge-/);
+    expect(text).toContain(`Tmux socket: ${dir}/.ab-live-`);
+    expect(text).toMatch(/Tmux target: argbridge-live-[^\n:]+/);
+    expect(text).toContain(`Attach command: tmux -S ${dir}/.ab-live-`);
   }, 15_000);
 
   tmuxIt('appends exactly one attach footer when native /status has output', async () => {
@@ -912,7 +967,7 @@ setInterval(() => {}, 1000);
     const text = textOf(events);
     expect(text).toContain('Codex native status panel');
     expect((text.match(/Attach command:/g) ?? []).length).toBe(1);
-    expect(text).toMatch(/Attach command: tmux -S .+\/tmux-\d+\/default attach -t argbridge-/);
+    expect(text).toContain(`Attach command: tmux -S ${dir}/.ab-live-`);
   }, 15_000);
 
   tmuxIt('interrupts a turn without destroying the tmux session or its history', async () => {
@@ -975,7 +1030,7 @@ setInterval(() => {}, 1000);
       backend: 'tmux' as const,
       idleMs: 250,
       outputFlushMs: 30,
-      startupTimeoutMs: 1000,
+      startupTimeoutMs: 2000,
     };
     const session = pool.getOrCreate('tmux-stop-preserves-session', options);
 
@@ -995,7 +1050,8 @@ setInterval(() => {}, 1000);
       const socket = statusText.match(/Tmux socket: ([^\n]+)/)?.[1];
       const target = statusText.match(/Tmux target: ([^\n]+)/)?.[1];
       expect(socket).toBeTruthy();
-      expect(target).toMatch(/^argbridge-[^:]+:0\.0$/);
+      expect(socket?.startsWith(dir)).toBe(true);
+      expect(target).toMatch(/^argbridge-live-[^:]+$/);
 
       const reused = pool.getOrCreate('tmux-stop-preserves-session', options);
       expect(reused).toBe(session);
@@ -1298,6 +1354,152 @@ setInterval(() => {}, 1000);
     expect(textOf(events)).toBe('48 120\n48x120\n');
   });
 
+  tmuxIt('reconnects after bridge detach without restarting the agent or replaying output', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-reconnect-test-'));
+    const bin = join(dir, 'fake-tmux-reconnect-agent.mjs');
+    const countFile = join(dir, 'starts.txt');
+    const scopeKey = 'reconnect-scope';
+    const signature = 'reconnect-signature';
+    const { socketPath } = liveTmuxIdentity(dir, scopeKey, signature);
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs';
+appendFileSync(${JSON.stringify(countFile)}, 'start\\n');
+process.stdin.setEncoding('utf8');
+let buffer = '';
+process.stdin.on('data', (chunk) => {
+  buffer += chunk;
+  let index;
+  while ((index = buffer.search(/[\\r\\n]/)) !== -1) {
+    const line = buffer.slice(0, index).trim();
+    buffer = buffer.slice(index + 1);
+    if (line) process.stdout.write('\\x1b[2J\\x1b[H› ' + line + '\\n• reply:' + line + '\\n›\\n');
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const command = {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature,
+      tmuxScopeId: scopeKey,
+      usePty: true,
+      backend: 'tmux' as const,
+      idleMs: 220,
+      outputFlushMs: 30,
+      startupTimeoutMs: 1_500,
+    };
+    const firstPool = new LiveSessionPool();
+    let secondPool: LiveSessionPool | undefined;
+    try {
+      const first = firstPool.getOrCreate(scopeKey, command);
+      expect(textOf(await collect(first.run('reconnect-first', 'first', dir).events))).toContain(
+        'reply:first',
+      );
+      await firstPool.detachAll();
+
+      secondPool = new LiveSessionPool();
+      const second = secondPool.getOrCreate(scopeKey, command);
+      const output = textOf(await collect(second.run('reconnect-second', 'second', dir).events));
+      expect(output).toContain('reply:second');
+      expect(output).not.toContain('reply:first');
+      expect(await readFile(countFile, 'utf8')).toBe('start\n');
+      expect(secondPool.terminalInfo(scopeKey)?.socketPath).toBe(socketPath);
+    } finally {
+      await firstPool.closeAll();
+      await secondPool?.closeAll();
+      spawnSync('tmux', ['-S', socketPath, 'kill-server'], { stdio: 'ignore' });
+    }
+  }, 20_000);
+
+  tmuxIt('preserves a Ctrl-C pane and starts the next task in a new window', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-ctrl-c-test-'));
+    const bin = join(dir, 'fake-tmux-ctrl-c-agent.mjs');
+    const countFile = join(dir, 'starts.txt');
+    const scopeKey = 'ctrl-c-scope';
+    const signature = 'ctrl-c-signature';
+    const { socketPath, sessionName } = liveTmuxIdentity(dir, scopeKey, signature);
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs';
+appendFileSync(${JSON.stringify(countFile)}, 'start\\n');
+process.stdin.setEncoding('utf8');
+let buffer = '';
+process.on('SIGINT', () => process.exit(0));
+process.stdin.on('data', (chunk) => {
+  buffer += chunk;
+  let index;
+  while ((index = buffer.search(/[\\r\\n]/)) !== -1) {
+    const line = buffer.slice(0, index).trim();
+    buffer = buffer.slice(index + 1);
+    if (line === 'first task') {
+      process.stdout.write('\\x1b[2J\\x1b[H› first task\\n• first agent reply\\n›\\n');
+    } else if (line === 'second task') {
+      process.stdout.write('\\x1b[2J\\x1b[H› second task\\n• second agent reply\\n›\\n');
+    }
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    try {
+      const session = pool.getOrCreate(scopeKey, {
+        command: process.execPath,
+        args: [bin],
+        cwd: dir,
+        signature,
+        tmuxScopeId: scopeKey,
+        usePty: true,
+        backend: 'tmux',
+        idleMs: 220,
+        outputFlushMs: 30,
+        startupTimeoutMs: 1_500,
+      });
+      expect(textOf(await collect(session.run('ctrl-c-first', 'first task', dir).events))).toContain(
+        'first agent reply',
+      );
+
+      expect(
+        spawnSync('tmux', ['-S', socketPath, 'send-keys', '-t', sessionName, 'C-c']).status,
+      ).toBe(0);
+      await testDelay(500);
+
+      expect(textOf(await collect(session.run('ctrl-c-second', 'second task', dir).events))).toBe(
+        '• second agent reply\n',
+      );
+      expect((await readFile(countFile, 'utf8')).trim().split('\n')).toEqual(['start', 'start']);
+
+      const paneStates = spawnSync(
+        'tmux',
+        ['-S', socketPath, 'list-panes', '-a', '-F', '#{pane_dead}'],
+        { encoding: 'utf8' },
+      ).stdout.trim().split('\n');
+      expect(paneStates).toContain('1');
+      expect(paneStates).toContain('0');
+      const oldPane = spawnSync(
+        'tmux',
+        ['-S', socketPath, 'capture-pane', '-p', '-t', `${sessionName}:0.0`],
+        { encoding: 'utf8' },
+      );
+      expect(oldPane.status).toBe(0);
+      expect(oldPane.stdout).toContain('first agent reply');
+    } finally {
+      await pool.closeAll();
+      spawnSync('tmux', ['-S', socketPath, 'kill-server'], { stdio: 'ignore' });
+    }
+  }, 20_000);
+
   tmuxIt('can run live sessions through tmux capture-pane and send-keys', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-test-'));
     const bin = join(dir, 'fake-tmux-agent.mjs');
@@ -1340,15 +1542,23 @@ setInterval(() => {}, 1000);
     const events = await collect(session.run('run-tmux', 'hello', dir).events);
     const terminal = pool.terminalInfo('tmux-scope');
     expect(terminal?.ownership).toBe('managed');
-    expect(terminal?.socketPath).toBeTruthy();
+    expect(terminal?.socketPath?.startsWith(dir)).toBe(true);
     expect(
-      spawnSync('tmux', ['list-sessions', '-F', '#{session_name}'], { encoding: 'utf8' }).stdout,
+      spawnSync(
+        'tmux',
+        ['-S', terminal!.socketPath!, 'list-sessions', '-F', '#{session_name}'],
+        { encoding: 'utf8' },
+      ).stdout,
     ).toContain(terminal?.sessionName);
     await pool.closeAll();
 
     expect(
-      spawnSync('tmux', ['list-sessions', '-F', '#{session_name}'], { encoding: 'utf8' }).stdout,
-    ).not.toContain(terminal?.sessionName);
+      spawnSync(
+        'tmux',
+        ['-S', terminal!.socketPath!, 'has-session', '-t', terminal!.sessionName!],
+        { stdio: 'ignore' },
+      ).status,
+    ).not.toBe(0);
 
     expect(textOf(events)).toContain('tmux:hello\n48 120\n48x120\n');
   });

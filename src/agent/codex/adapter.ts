@@ -263,7 +263,7 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   async shutdown(): Promise<void> {
-    await this.liveSessions.closeAll();
+    await this.liveSessions.detachAll();
   }
 
   private runLive(opts: AgentRunOptions): AgentRun {

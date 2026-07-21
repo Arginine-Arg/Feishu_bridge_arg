@@ -72,6 +72,27 @@ interface RunState {
     /** Set when terminal === 'idle_timeout' — how long claude was idle before
      * the watchdog gave up (so the message can say "N 分钟无响应"). */
     idleTimeoutMinutes?: number;
+    /**
+     * Wall-clock time (ms epoch) of the most recent reducer transition. The
+     * progress-heartbeat tick inside `processAgentStream` uses this to decide
+     * whether the streaming card has gone stale and needs a re-render so the
+     * user sees the tool's elapsed time continue to tick.
+     */
+    lastEventAt?: number;
+    /**
+     * Wall-clock time (ms epoch) of the currently-running tool's tool_use
+     * event. Set when a tool opens, cleared when its tool_result arrives
+     * (or the run reaches any terminal state). Drives the
+     * `currentToolElapsedMs` projection surfaced in the card footer.
+     */
+    lastToolStartedAt?: number;
+    /**
+     * Tool's running duration in ms, refreshed by the progress heartbeat
+     * inside `processAgentStream`. Undefined when no tool is in flight; the
+     * footer/projection code skips the elapsed suffix when this is absent so
+     * short tasks render unchanged.
+     */
+    currentToolElapsedMs?: number;
 }
 declare const initialState: RunState;
 declare function reduce(state: RunState, evt: AgentEvent): RunState;
@@ -92,6 +113,10 @@ declare function renderCard(state: RunState, options?: RunCardRenderOptions): ob
  *   - Tool calls collapse to a single short line each (no body)
  *   - No reasoning / thinking output (no place to fold it; would be noise)
  *   - Footer is appended inline at the bottom while running
+ *
+ * Output is bounded to `EFFECTIVE_BUDGET` bytes by progressively
+ * truncating trailing text blocks; each fold appends a marker so the
+ * user can tell content was dropped.
  */
 declare function renderText(state: RunState): string;
 

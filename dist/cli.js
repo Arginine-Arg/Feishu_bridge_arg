@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.28",
+  version: "0.6.35",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -2086,6 +2086,12 @@ function getRunIdleTimeoutMs(cfg) {
   if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) return void 0;
   const clamped = Math.min(Math.max(Math.floor(raw), 1), 120);
   return clamped * 6e4;
+}
+function getProgressHeartbeatMs(cfg) {
+  const raw = cfg.preferences?.progressHeartbeatMs;
+  if (typeof raw !== "number" || !Number.isFinite(raw)) return 1e4;
+  const clamped = Math.min(Math.max(Math.floor(raw), 0), 6e4);
+  return clamped;
 }
 
 // src/config/store.ts
@@ -5725,7 +5731,7 @@ import { createInterface as createInterface7 } from "readline";
 // src/agent/claude/adapter.ts
 import { mkdtempSync, rmSync, writeFileSync as writeFileSync2 } from "fs";
 import { tmpdir as tmpdir3 } from "os";
-import { join as join17 } from "path";
+import { join as join18 } from "path";
 import { createInterface as createInterface3 } from "readline";
 
 // src/agent/event-queue.ts
@@ -5860,6 +5866,37 @@ var BRIDGE_SYSTEM_PROMPT = `# arg-bridge \u8FD0\u884C\u7EA6\u5B9A
 - \u8BE5\u8F6E\u91CC\u8FD9\u4E9B\u5DE5\u5177\u7684 \`tool_result\` \u4ECD\u4F1A\u663E\u793A "declined"\u2014\u2014\u8FD9\u662F\u9884\u671F\u7684\uFF0C\u5FFD\u7565\u5B83\u5373\u53EF\uFF1B\u771F\u6B63\u7684\u7B54\u6848\u4F1A\u5728\u7528\u6237\u70B9\u51FB\u540E\u7684\u4E0B\u4E00\u8F6E\u5230\u8FBE\u3002
 - \u5361\u7247\u6309\u94AE\u7531 bridge \u81EA\u5DF1\u7B7E\u540D\uFF0C\u4F60\u65E0\u9700\u5173\u5FC3 \`bridge_token\`\u3002
 
+## \u628A\u672C\u5730\u6587\u4EF6\u53D1\u7ED9\u7528\u6237
+
+\u5F53\u4F60\u5728\u5DE5\u4F5C\u4E2D**\u5199\u51FA\u4E86**\u4E00\u4E2A\u672C\u5730\u6587\u4EF6\uFF08\u5982 \`output.png\` / \`report.pdf\` / \`data.csv\`\uFF09\uFF0C\u7528\u6237\u9700\u8981\u770B\u5230\u6587\u4EF6\u672C\u4F53\u65F6\uFF08\u4E0D\u662F\u4EC5\u5728\u6587\u672C\u91CC\u63D0\u4E00\u4E0B\uFF09\uFF0C\u7528 lark-cli \u7684 reply API\uFF1A
+
+    lark-cli im +messages-reply \\
+      --message-id <user_msg_id> \\
+      --file <relative_path> \\
+      [--markdown "\u7B80\u77ED\u8BF4\u660E"]
+
+\u7EA6\u675F\uFF1A
+
+- \`--file\` \u8DEF\u5F84**\u5FC5\u987B\u76F8\u5BF9\u5F53\u524D cwd**\uFF08agent process \u7684 cwd\uFF0C\u5373 \`bridge_context.cwd\`\uFF09\uFF0C\u7EDD\u5BF9\u8DEF\u5F84\u548C \`..\` \u90FD\u4F1A\u88AB lark-cli \u62D2\u7EDD\u3002\u5982\u679C\u6587\u4EF6\u5728 cwd \u5916\u7684\u5B50\u76EE\u5F55\u91CC\uFF0C\u5148 \`cd <dir>\` \u518D\u8C03\u3002
+- \`--message-id\` \u5FC5\u987B\u662F\u7528\u6237\u7684\u67D0\u6761\u5177\u4F53\u6D88\u606F id\uFF08\`bridge_context.last_user_message_id\`\uFF09\uFF0C\u4E0D\u662F\u7FA4\u91CC\u7B2C\u4E00\u6761 / \u7CFB\u7EDF\u6D88\u606F / \u4F60\u81EA\u5DF1\u53D1\u8FC7\u7684\u6D88\u606F\u2014\u2014bot \u53EA\u80FD reply \u5230\u7528\u6237\u7684\u6D88\u606F\u3002
+- \u6587\u4EF6\u5927\u5C0F\u4E0A\u9650\u89C1 lark-cli \u6587\u6863\uFF08\u9ED8\u8BA4 30MB\uFF09\u3002
+
+\u5E38\u89C1\u9519\u8BEF\uFF1A
+
+- \`absolute paths are rejected\` \u2192 \u6539\u7528 cwd-\u76F8\u5BF9\u8DEF\u5F84\uFF0C\u6216\u5148 \`cd\` \u518D\u8C03\u3002
+- \`chat not found\` / \`permission denied\` \u2192 \u786E\u8BA4 bot \u5728 chat \u91CC\u3001\u5FC5\u8981\u65F6\u8BA9\u7528\u6237\u52A0 bot \u8FDB\u7FA4\u3002
+- \`file not found\` \u2192 \`--file\` \u8DEF\u5F84\u76F8\u5BF9\u5F53\u524D cwd\uFF1B\u7528 \`Bash\` \u7684 \`ls\` \u5148\u786E\u8BA4\u6587\u4EF6\u5B58\u5728\u3002
+- \`cannot reply to root message\` \u2192 \`--message-id\` \u5FC5\u987B\u662F\u7528\u6237\u7684\u67D0\u6761\u5177\u4F53\u6D88\u606F id\u3002
+
+\u53EA\u5728\u7528\u6237**\u660E\u786E\u9700\u8981\u6587\u4EF6\u672C\u4F53**\u65F6\u624D\u53D1\u6587\u4EF6\uFF08\u56FE\u8868 / \u62A5\u544A / \u6570\u636E\u5BFC\u51FA\uFF09\u3002\u53EA\u662F\u6587\u672C\u91CC"\u53C2\u8003 X.csv"\u5C31\u591F\u4E86\u65F6\u4E0D\u8981\u987A\u624B\u53D1\u6587\u4EF6\u2014\u2014\u98DE\u4E66\u7FA4\u6D88\u606F\u4F1A\u88AB\u53CD\u590D PATCH \u591A\u6B21\uFF0C\u6BCF\u6B21\u90FD\u53D1\u6587\u4EF6\u4F1A\u8BA9\u7528\u6237 chat \u88AB\u5237\u5C4F\u3002
+
+## lark-cli \u8FD0\u884C\u73AF\u5883
+
+    lark-cli im +messages-reply \\
+      --message-id <user_msg_id> \\
+      --file <relative_path>
+      [--markdown "\u7B80\u77ED\u8BF4\u660E"]
+
 ## lark-cli \u8FD0\u884C\u73AF\u5883
 
 bridge \u4F1A\u7ED9\u4F60\u7684\u5B50\u8FDB\u7A0B\u6CE8\u5165\u5F53\u524D\u8FD0\u884C profile \u7684\u73AF\u5883\u53D8\u91CF:
@@ -5916,10 +5953,11 @@ ${prompt}`;
 
 // src/agent/live-session.ts
 import { EventEmitter } from "events";
-import { randomUUID as randomUUID2 } from "crypto";
+import { createHash as createHash2 } from "crypto";
+import { join as join17 } from "path";
 
 // src/agent/tmux-control.ts
-import { createHash, randomUUID } from "crypto";
+import { createHash } from "crypto";
 import {
   lstatSync,
   readFileSync as readFileSync2,
@@ -5955,8 +5993,7 @@ var TmuxBindingController = class {
   managedSessionName(scopeId) {
     const profile2 = safeTmuxName(this.profile).slice(0, 24) || this.agentKind;
     const scopeHash = createHash("sha256").update(scopeId).digest("hex").slice(0, 12);
-    const instance = randomUUID().replace(/-/g, "").slice(0, 8);
-    return `argbridge-${profile2}-${scopeHash}-${process.pid}-${instance}`.slice(0, 96);
+    return `argbridge-${this.agentKind}-${profile2}-${scopeHash}`.slice(0, 96);
   }
   async list(socket) {
     return listTmuxAgentPanes(socket);
@@ -6310,6 +6347,12 @@ var LiveSessionPool = class {
     this.sessions.clear();
     await Promise.allSettled(sessions.map((session) => session.close("shutdown")));
   }
+  /** Stop bridge relays while leaving managed tmux agents available to reconnect. */
+  async detachAll() {
+    const sessions = [...this.sessions.values()];
+    this.sessions.clear();
+    await Promise.allSettled(sessions.map((session) => session.detach("shutdown")));
+  }
   async close(key, reason = "close") {
     const session = this.sessions.get(key);
     if (!session) return;
@@ -6329,6 +6372,7 @@ var LiveTerminalSession = class {
   child;
   terminalInfo;
   closed = false;
+  finalized = false;
   primed = false;
   startedAt = 0;
   activeTurnCleanup;
@@ -6374,6 +6418,21 @@ var LiveTerminalSession = class {
     };
   }
   async close(reason) {
+    await this.stopHelper(reason);
+    const terminal = this.terminalInfo;
+    if (terminal?.backend === "tmux" && terminal.ownership === "managed" && terminal.socketPath && terminal.sessionName) {
+      spawnProcessSync(
+        "tmux",
+        ["-S", terminal.socketPath, "kill-session", "-t", terminal.sessionName],
+        { stdio: "ignore" }
+      );
+    }
+  }
+  /** Stop only the bridge-side relay; the managed tmux session keeps running. */
+  async detach(reason) {
+    await this.stopHelper(reason);
+  }
+  async stopHelper(reason) {
     if (this.closed) return;
     this.closed = true;
     const child = this.child;
@@ -6391,6 +6450,11 @@ var LiveTerminalSession = class {
         });
       });
     }
+    this.finalize();
+  }
+  finalize() {
+    if (this.finalized) return;
+    this.finalized = true;
     this.opts.cleanup?.();
     this.onClose();
   }
@@ -6418,14 +6482,13 @@ var LiveTerminalSession = class {
     child.stderr.on("data", (chunk) => this.emitData(chunk));
     child.on("error", (err) => {
       this.emitter.emit("error", err);
-      void this.close("error").catch(() => {
+      void this.detach("error").catch(() => {
       });
     });
     child.on("exit", (code, signal) => {
       log.info("agent-live", "exit", { pid: child.pid ?? null, code, signal });
       this.emitter.emit("exit", { code, signal });
-      this.opts.cleanup?.();
-      this.onClose();
+      this.finalize();
     });
     child.stdin.on("error", (err) => {
       log.warn("agent-live", "stdin-error", { message: err.message });
@@ -6838,15 +6901,15 @@ function encodeTmuxInputFrame(input) {
 }
 function spawnTmuxLiveProcess(opts, env, commandLine, rows, columns) {
   const external = opts.tmuxTarget;
-  const socketPath = external?.socketPath ?? defaultTmuxSocketPath(env);
-  const sessionName = external?.sessionName ?? opts.tmuxSessionName ?? `argbridge-${process.pid}-${randomUUID2().replace(/-/g, "").slice(0, 8)}`;
-  const target = external?.paneId ?? `${sessionName}:0.0`;
-  const attachTarget = external ?? {
-    socketPath,
-    sessionName,
-    windowIndex: "0",
-    paneIndex: "0"
-  };
+  const managedIdentity = external ? void 0 : liveTmuxIdentity(
+    opts.cwd,
+    opts.tmuxScopeId ?? opts.tmuxSessionName ?? opts.cwd,
+    opts.signature,
+    opts.tmuxSessionName
+  );
+  const socketPath = external?.socketPath ?? managedIdentity.socketPath;
+  const sessionName = external?.sessionName ?? managedIdentity.sessionName;
+  const target = external?.paneId ?? sessionName;
   const child = spawnProcess(
     process.execPath,
     [
@@ -6879,10 +6942,17 @@ function spawnTmuxLiveProcess(opts, env, commandLine, rows, columns) {
       socketPath,
       sessionName,
       target,
-      attachCommand: tmuxAttachCommand(attachTarget),
+      attachCommand: external ? tmuxAttachCommand(external) : `tmux -S ${shellQuote2(socketPath)} attach -t ${shellQuote2(sessionName)}`,
       ownership: external ? "external" : "managed"
     },
     child
+  };
+}
+function liveTmuxIdentity(cwd, sessionKey, signature, preferredSessionName) {
+  const hash = createHash2("sha256").update(cwd).update("\0").update(sessionKey).update("\0").update(signature).digest("hex").slice(0, 20);
+  return {
+    socketPath: join17(cwd, `.ab-live-${hash.slice(0, 12)}.sock`),
+    sessionName: preferredSessionName ?? `argbridge-live-${hash}`
   };
 }
 function isTmuxAvailable() {
@@ -6904,11 +6974,16 @@ const { spawnSync } = require('node:child_process');
 
 const [mode, socketPath, session, requestedTarget, commandBase64, cwd, rows, columns, profile, scope, ownerPid] = process.argv.slice(1);
 const managed = mode === 'managed';
-const target = managed ? session + ':0.0' : requestedTarget;
+let target = managed ? session + ':0.0' : requestedTarget;
 const commandLine = Buffer.from(commandBase64, 'base64').toString('utf8');
 let closed = false;
 let lastSnapshot = '';
 let inputBuffer = '';
+
+process.on('uncaughtException', (error) => {
+  process.stderr.write('tmux live helper crashed: ' + (error && error.stack ? error.stack : String(error)) + '\n');
+  process.exit(1);
+});
 
 function tmux(args, options = {}) {
   return spawnSync('tmux', ['-S', socketPath, ...args], {
@@ -6925,40 +7000,108 @@ function writeError(prefix, result) {
   process.stderr.write(prefix + (message ? ': ' + message : '') + '\n');
 }
 
-function cleanup() {
-  if (closed) return;
-  closed = true;
-  if (managed) tmux(['kill-session', '-t', session], { stdio: 'ignore' });
+function selectedPaneTarget() {
+  const selected = tmux([
+    'display-message',
+    '-p',
+    '-t',
+    session,
+    '#{session_name}:#{window_index}.#{pane_index}',
+  ]);
+  return selected.status === 0 && selected.stdout.trim()
+    ? selected.stdout.trim()
+    : session + ':0.0';
 }
 
-if (managed) {
-  const created = tmux([
-    'new-session',
-    '-d',
-    '-x',
-    columns,
-    '-y',
-    rows,
-    '-s',
-    session,
-    '-c',
-    cwd,
-    commandLine,
-  ]);
-  if (created.status !== 0) {
-    writeError('failed to start tmux live session', created);
-    process.exit(1);
-  }
+function setPersistentPaneOptions() {
+  const remain = tmux(['set-window-option', '-t', target, 'remain-on-exit', 'on']);
+  if (remain.status !== 0) writeError('failed to preserve tmux live pane', remain);
+  const history = tmux(['set-window-option', '-t', target, 'history-limit', '50000']);
+  if (history.status !== 0) writeError('failed to preserve tmux live history', history);
+}
+
+function setManagedMetadata() {
   tmux(['set-option', '-t', session, '@argbridge_managed', '1'], { stdio: 'ignore' });
   tmux(['set-option', '-t', session, '@argbridge_owner_pid', ownerPid], { stdio: 'ignore' });
   tmux(['set-option', '-t', session, '@argbridge_profile', profile], { stdio: 'ignore' });
   tmux(['set-option', '-t', session, '@argbridge_scope', scope], { stdio: 'ignore' });
+}
+
+function createAgentWindow(initial) {
+  const args = initial
+    ? [
+        'new-session',
+        '-d',
+        '-x',
+        columns,
+        '-y',
+        rows,
+        '-s',
+        session,
+        '-n',
+        'agent',
+        '-c',
+        cwd,
+      ]
+    : [
+        'new-window',
+        '-d',
+        '-P',
+        '-F',
+        '#{session_name}:#{window_index}.#{pane_index}',
+        '-t',
+        session,
+        '-n',
+        'agent-' + Date.now(),
+        '-c',
+        cwd,
+      ];
+  const created = tmux(args);
+  if (created.status !== 0) {
+    writeError('failed to start tmux live session', created);
+    return false;
+  }
+  target = initial ? session + ':0.0' : created.stdout.trim();
+  if (!target) target = selectedPaneTarget();
+  const selected = tmux(['select-window', '-t', target]);
+  if (selected.status !== 0) writeError('failed to select tmux live window', selected);
+  setPersistentPaneOptions();
+  const started = tmux(['respawn-pane', '-k', '-t', target, '-c', cwd, commandLine]);
+  if (started.status !== 0) {
+    writeError('failed to start tmux live agent', started);
+    return false;
+  }
+  lastSnapshot = '';
+  return true;
+}
+
+if (managed) {
+  const existing = tmux(['has-session', '-t', session], { stdio: 'ignore' });
+  if (existing.status === 0) {
+    target = selectedPaneTarget();
+    setPersistentPaneOptions();
+  } else if (!createAgentWindow(true)) {
+    process.exit(1);
+  }
+  setManagedMetadata();
 } else {
   const exists = tmux(['display-message', '-p', '-t', target, '#{pane_id}'], { stdio: 'ignore' });
   if (exists.status !== 0) {
     writeError('external tmux pane is unavailable', exists);
     process.exit(1);
   }
+}
+
+function paneIsDead() {
+  const result = tmux(['display-message', '-p', '-t', target, '#{pane_dead}']);
+  return result.status === 0 && result.stdout.trim() === '1';
+}
+
+function ensureLivePane() {
+  if (!managed || !paneIsDead()) return true;
+  // Preserve the exited pane and its history. A later user message starts a
+  // new native agent in another window of the same cwd-bound tmux session.
+  return createAgentWindow(false);
 }
 
 function sendKeys(args) {
@@ -6977,6 +7120,7 @@ function sendBracketedPaste(text) {
 }
 
 function sendInput(input) {
+  if (input !== '\x03' && !ensureLivePane()) return;
   if (input === '\x03') {
     sendKeys(['C-c']);
     return;
@@ -7022,13 +7166,13 @@ function capture() {
   if (closed) return;
   const available = tmux(['display-message', '-p', '-t', target, '#{pane_id}'], { stdio: 'ignore' });
   if (available.status !== 0) {
-    cleanup();
+    closed = true;
     process.exit(0);
   }
   const result = tmux(['capture-pane', '-p', '-S', '-${TMUX_CAPTURE_HISTORY_LINES}', '-t', target]);
   if (result.status !== 0) {
     writeError('failed to capture tmux live session', result);
-    cleanup();
+    closed = true;
     process.exit(1);
   }
   const captured = result.stdout.replace(/\n$/u, '');
@@ -7065,19 +7209,19 @@ process.stdin.on('data', (chunk) => {
 });
 process.stdin.on('end', () => {
   clearInterval(timer);
-  cleanup();
+  closed = true;
 });
 process.on('SIGTERM', () => {
   clearInterval(timer);
-  cleanup();
+  closed = true;
   process.exit(0);
 });
 process.on('SIGINT', () => {
   clearInterval(timer);
-  cleanup();
+  closed = true;
   process.exit(0);
 });
-process.on('exit', cleanup);
+process.on('exit', () => clearInterval(timer));
 `;
 var CONTROL_KEYS = {
   up: "\x1B[A",
@@ -7450,10 +7594,9 @@ var TurnOutputBuffer = class {
   maxChars;
   promptEcho;
   stripInputLines;
-  emitted = "";
+  deliveredTail = "";
   pending = "";
   lastCompleteLine = "";
-  truncated = false;
   snapshotBaseline = "";
   historyBaseline = "";
   setSnapshotBaseline(snapshot) {
@@ -7469,7 +7612,7 @@ var TurnOutputBuffer = class {
     if (isStaleStatusSnapshotForPrompt(compacted, this.promptEcho)) return false;
     if (isStaleGoalUsageSnapshotForPrompt(compacted, this.promptEcho)) return false;
     if (isSlashCompletionSnapshotForPrompt(compacted, this.promptEcho)) return false;
-    const existing = this.emitted + this.pending;
+    const existing = this.deliveredTail + this.pending;
     if (existing.endsWith(compacted)) return false;
     this.pending += compacted;
     this.enforceLimit();
@@ -7500,12 +7643,12 @@ var TurnOutputBuffer = class {
       const normalized = deliverable.endsWith("\n") ? deliverable : `${deliverable}
 `;
       if (hasPromptAnchor) {
-        const nextPending = undeliveredSnapshotSuffix(this.emitted, normalized);
+        const nextPending = undeliveredSnapshotSuffix(this.deliveredTail, normalized);
         if (this.pending === nextPending) return false;
         if (shouldKeepRicherSnapshot(this.pending, nextPending)) return false;
         this.pending = nextPending;
       } else {
-        const existing = this.emitted + this.pending;
+        const existing = this.deliveredTail + this.pending;
         const suffix = undeliveredSnapshotSuffix(existing, normalized);
         if (!suffix) return false;
         this.pending += suffix;
@@ -7513,7 +7656,7 @@ var TurnOutputBuffer = class {
       this.enforceLimit();
       return Boolean(this.pending);
     }
-    if (this.pending === compacted || this.emitted.endsWith(compacted)) return false;
+    if (this.pending === compacted || this.deliveredTail.endsWith(compacted)) return false;
     if (shouldKeepRicherSnapshot(this.pending, compacted)) return false;
     this.pending = compacted.endsWith("\n") ? compacted : `${compacted}
 `;
@@ -7522,7 +7665,7 @@ var TurnOutputBuffer = class {
   }
   take() {
     const out = stripKnownLiveNoise(this.pending, this.promptEcho);
-    this.emitted += out;
+    this.deliveredTail = trimTail(this.deliveredTail + out, this.maxChars);
     this.pending = "";
     return out;
   }
@@ -7553,28 +7696,23 @@ var TurnOutputBuffer = class {
     return out;
   }
   enforceLimit() {
-    const total = this.emitted.length + this.pending.length;
-    if (total <= this.maxChars) return;
-    const overflow = total - this.maxChars;
-    if (overflow >= this.pending.length) {
-      this.pending = "";
-      return;
-    }
-    this.pending = this.pending.slice(overflow);
-    if (!this.truncated) {
-      this.truncated = true;
-      this.pending = `[live output truncated to ${this.maxChars} chars]
-${this.pending}`;
-    }
+    if (this.pending.length <= this.maxChars) return;
+    const marker = `[live output segment truncated to ${this.maxChars} chars; latest output retained]
+`;
+    this.pending = `${marker}${trimTail(this.pending, Math.max(0, this.maxChars - marker.length))}`;
   }
 };
-function undeliveredSnapshotSuffix(emitted, snapshot) {
-  if (!emitted) return snapshot;
-  if (snapshot.startsWith(emitted)) return snapshot.slice(emitted.length);
-  if (emitted.endsWith(snapshot)) return "";
-  const max = Math.min(emitted.length, snapshot.length);
+function trimTail(value, maxChars) {
+  return value.length <= maxChars ? value : value.slice(-maxChars);
+}
+function undeliveredSnapshotSuffix(deliveredTail, snapshot) {
+  if (!deliveredTail) return snapshot;
+  const containedAt = snapshot.lastIndexOf(deliveredTail);
+  if (containedAt >= 0) return snapshot.slice(containedAt + deliveredTail.length);
+  if (deliveredTail.endsWith(snapshot)) return "";
+  const max = Math.min(deliveredTail.length, snapshot.length);
   for (let overlap = max; overlap > 0; overlap -= 1) {
-    if (emitted.endsWith(snapshot.slice(0, overlap))) return snapshot.slice(overlap);
+    if (deliveredTail.endsWith(snapshot.slice(0, overlap))) return snapshot.slice(overlap);
   }
   return snapshot;
 }
@@ -8180,7 +8318,7 @@ var ClaudeAdapter = class {
     this.liveUsePty = opts.liveUsePty;
     this.liveTerminalBackend = opts.liveTerminalBackend;
     this.liveIdleMs = opts.liveIdleMs;
-    const profileStateDir = opts.profileStateDir ?? join17(tmpdir3(), `arg-bridge-${process.pid}-claude`);
+    const profileStateDir = opts.profileStateDir ?? join18(tmpdir3(), `arg-bridge-${process.pid}-claude`);
     this.tmuxBindings = new TmuxBindingController(
       profileStateDir,
       opts.larkChannel?.profile ?? "claude",
@@ -8339,7 +8477,7 @@ var ClaudeAdapter = class {
     };
   }
   async shutdown() {
-    await this.liveSessions.closeAll();
+    await this.liveSessions.detachAll();
   }
   runLive(opts) {
     if (!opts.cwd) {
@@ -8440,8 +8578,8 @@ function createEventStream(child, stderrChunks, getError) {
   return events;
 }
 function writeSystemPromptFile(content) {
-  const dir = mkdtempSync(join17(tmpdir3(), "lark-claude-"));
-  const path = join17(dir, "append-system-prompt.md");
+  const dir = mkdtempSync(join18(tmpdir3(), "lark-claude-"));
+  const path = join18(dir, "append-system-prompt.md");
   writeFileSync2(path, content, "utf8");
   return {
     path,
@@ -8459,7 +8597,7 @@ function isWindowsCommandNotFoundLine(line) {
 
 // src/agent/codex/adapter.ts
 import { createInterface as createInterface4 } from "readline";
-import { join as join18 } from "path";
+import { join as join19 } from "path";
 
 // src/runtime/errors.ts
 var RunRejected = class extends Error {
@@ -8818,7 +8956,7 @@ var CodexAdapter = class {
     if (this.codexHome) {
       envOverrides.CODEX_HOME = this.codexHome;
     } else if (!this.inheritCodexHome) {
-      envOverrides.CODEX_HOME = join18(this.profileStateDir, "codex-home");
+      envOverrides.CODEX_HOME = join19(this.profileStateDir, "codex-home");
     }
     const child = spawnProcess(this.binary, args, {
       cwd: opts.cwd,
@@ -8913,7 +9051,7 @@ var CodexAdapter = class {
     };
   }
   async shutdown() {
-    await this.liveSessions.closeAll();
+    await this.liveSessions.detachAll();
   }
   runLive(opts) {
     if (!opts.cwd) {
@@ -8932,7 +9070,7 @@ var CodexAdapter = class {
     if (this.codexHome) {
       envOverrides.CODEX_HOME = this.codexHome;
     } else if (!this.inheritCodexHome) {
-      envOverrides.CODEX_HOME = join18(this.profileStateDir, "codex-home");
+      envOverrides.CODEX_HOME = join19(this.profileStateDir, "codex-home");
     }
     const signature = JSON.stringify({
       cwd: opts.cwd,
@@ -9039,7 +9177,7 @@ function isWindowsCommandNotFoundLine2(line) {
 // src/bot/channel.ts
 import { createLarkChannel } from "@larksuite/channel";
 import { homedir as homedir7 } from "os";
-import { dirname as dirname17, join as join22 } from "path";
+import { dirname as dirname17, join as join23 } from "path";
 
 // src/agent/capability.ts
 function claudeCapability(profile2) {
@@ -9078,7 +9216,7 @@ function codexCapability(profile2) {
 }
 
 // src/bridge-agent/router.ts
-import { createHash as createHash2 } from "crypto";
+import { createHash as createHash3 } from "crypto";
 
 // src/bridge-agent/prompt.ts
 var BRIDGE_AGENT_SYSTEM_PROMPT = `
@@ -9214,7 +9352,7 @@ function looksLikeTerminalPicker(text) {
   );
 }
 function sha256(value) {
-  return createHash2("sha256").update(value).digest("hex");
+  return createHash3("sha256").update(value).digest("hex");
 }
 
 // src/agent/models.ts
@@ -9287,7 +9425,7 @@ function safeJsonStringify(value) {
 }
 
 // src/commands/index.ts
-import { randomUUID as randomUUID3 } from "crypto";
+import { randomUUID } from "crypto";
 import { lstat, readFile as readFile11, realpath as realpath4 } from "fs/promises";
 import { homedir as homedir6 } from "os";
 import { basename as basename5, dirname as dirname15, isAbsolute as isAbsolute3, relative, sep } from "path";
@@ -10146,7 +10284,7 @@ function escapeCode(s) {
 }
 
 // src/policy/fingerprint.ts
-import { createHash as createHash3 } from "crypto";
+import { createHash as createHash4 } from "crypto";
 
 // src/session/jcs.ts
 function canonicalizeJcs(value) {
@@ -10209,7 +10347,7 @@ function attachmentPolicyConfigDigest(input) {
   });
 }
 function digestCanonical(value) {
-  return createHash3("sha256").update(canonicalizeJcs(value)).digest().subarray(0, 16).toString("base64url");
+  return createHash4("sha256").update(canonicalizeJcs(value)).digest().subarray(0, 16).toString("base64url");
 }
 
 // src/policy/access.ts
@@ -10364,18 +10502,28 @@ function truncate2(s, max) {
 // src/card/run-renderer.ts
 var REASONING_MAX = 1500;
 var COLLAPSE_TOOL_THRESHOLD = 3;
+var CARD_BYTE_BUDGET = 24e3;
+var TEXT_HEAD_CHARS = 800;
+var TEXT_TAIL_CHARS = 2400;
 function renderCard(state, options = {}) {
   const elements = [];
   if (state.reasoning.content) {
     elements.push(reasoningPanel(state.reasoning.content, state.reasoning.active));
   }
+  const groupElementRange = [];
+  const textBlockRanges = [];
   for (const group of groupBlocks(state.blocks)) {
     if (group.kind === "text") {
-      if (group.content.trim()) {
-        elements.push(markdown(group.content));
+      const content = group.content.trim();
+      if (content) {
+        const start = elements.length;
+        elements.push(markdown(content));
+        textBlockRanges.push({ start, markdownElIdx: elements.length - 1 });
       }
     } else {
+      const start = elements.length;
       elements.push(...renderToolGroup(group.tools, state.terminal !== "running"));
+      groupElementRange.push({ start, toolCount: group.tools.length });
     }
   }
   if (state.terminal === "interrupted") {
@@ -10389,17 +10537,94 @@ function renderCard(state, options = {}) {
     elements.push(noteMd("_\uFF08\u672A\u8FD4\u56DE\u5185\u5BB9\uFF09_"));
   }
   if (state.terminal === "running") {
-    if (state.footer) elements.push(footerStatus(state.footer));
+    if (state.footer) {
+      const elapsedMs = state.footer === "tool_running" ? state.currentToolElapsedMs : void 0;
+      elements.push(footerStatus(state.footer, elapsedMs));
+    }
     elements.push(stopButton(options));
   }
-  return {
+  return enforceCardByteBudget(state, elements, groupElementRange, textBlockRanges);
+}
+function enforceCardByteBudget(state, elements, groupElementRange, textBlockRanges) {
+  const wrap = (body) => ({
     schema: "2.0",
     config: {
       streaming_mode: state.terminal === "running",
       summary: { content: summaryText(state) }
     },
-    body: { elements }
-  };
+    body: { elements: body }
+  });
+  const sizeOf = (els) => JSON.stringify(wrap(els)).length;
+  if (sizeOf(elements) <= CARD_BYTE_BUDGET) return wrap(elements);
+  let workingElements = elements.slice();
+  const groupTools = [];
+  for (const g of groupBlocks(state.blocks)) {
+    if (g.kind === "tools") groupTools.push(g.tools);
+  }
+  for (let foldCount = 1; foldCount < groupElementRange.length; foldCount++) {
+    const firstStart = groupElementRange[0].start;
+    const firstUnfoldedStart = groupElementRange[foldCount].start;
+    const foldedTools = groupTools.slice(0, foldCount).flat();
+    if (foldedTools.length === 0) continue;
+    const newBody = [];
+    for (let i = 0; i < firstStart; i++) newBody.push(workingElements[i]);
+    newBody.push(
+      noteMd(
+        `_\u2026 ${foldedTools.length} \u4E2A\u66F4\u65E9\u7684\u5DE5\u5177\u8C03\u7528\u8BE6\u60C5\u5DF2\u6298\u53E0\uFF08\u5B8C\u6574\u5185\u5BB9\u89C1 /doctor \u6216 daemon \u65E5\u5FD7\uFF09_`
+      )
+    );
+    newBody.push(
+      collapsedToolSummary(foldedTools, state.terminal !== "running")
+    );
+    for (let i = firstUnfoldedStart; i < workingElements.length; i++) {
+      newBody.push(workingElements[i]);
+    }
+    workingElements = newBody;
+    if (sizeOf(workingElements) <= CARD_BYTE_BUDGET) {
+      return wrap(workingElements);
+    }
+  }
+  if (textBlockRanges.length === 0) {
+    return wrap(workingElements);
+  }
+  const textContents = [];
+  for (const g of groupBlocks(state.blocks)) {
+    if (g.kind === "text") {
+      const c = g.content.trim();
+      if (c) textContents.push(c);
+    }
+  }
+  for (let pass = 0; pass < 32; pass++) {
+    if (sizeOf(workingElements) <= CARD_BYTE_BUDGET) return wrap(workingElements);
+    let largestIdx = -1;
+    let largestLen = 0;
+    for (let i = 0; i < textBlockRanges.length; i++) {
+      const range2 = textBlockRanges[i];
+      const el2 = workingElements[range2.markdownElIdx];
+      const len = el2?.content?.length ?? 0;
+      if (len > largestLen) {
+        largestLen = len;
+        largestIdx = i;
+      }
+    }
+    if (largestIdx === -1) break;
+    const range = textBlockRanges[largestIdx];
+    const el = workingElements[range.markdownElIdx];
+    if (!el?.content) break;
+    const HEAD_TAIL_BUDGET = CARD_BYTE_BUDGET;
+    const headLen = Math.min(TEXT_HEAD_CHARS, el.content.length);
+    const tailLen = Math.min(TEXT_TAIL_CHARS, el.content.length - headLen);
+    const head = el.content.slice(0, headLen);
+    const tail = el.content.slice(el.content.length - tailLen);
+    const dropped = el.content.length - headLen - tailLen;
+    const truncated = dropped > 0 ? `${head}
+
+_\u2026 ${dropped} \u5B57\u5DF2\u6298\u53E0\uFF08\u4FDD\u7559\u9996\u5C3E\uFF09\u2026_
+
+${tail}` : el.content;
+    workingElements[range.markdownElIdx] = { tag: "markdown", content: truncated };
+  }
+  return wrap(workingElements);
 }
 function* groupBlocks(blocks) {
   let toolBuf = [];
@@ -10501,9 +10726,25 @@ function stopButton(options) {
     behaviors: [{ type: "callback", value }]
   };
 }
-function footerStatus(status) {
-  const text = status === "thinking" ? "\u{1F9E0} \u6B63\u5728\u601D\u8003" : status === "tool_running" ? "\u{1F9F0} \u6B63\u5728\u8C03\u7528\u5DE5\u5177" : "\u270D\uFE0F \u6B63\u5728\u8F93\u51FA";
-  return noteMd(text);
+function footerStatus(status, elapsedMs) {
+  const baseText = status === "thinking" ? "\u{1F9E0} \u6B63\u5728\u601D\u8003" : status === "tool_running" ? "\u{1F9F0} \u6B63\u5728\u8C03\u7528\u5DE5\u5177" : "\u270D\uFE0F \u6B63\u5728\u8F93\u51FA";
+  return noteMd(appendElapsed(baseText, elapsedMs));
+}
+function formatElapsed(ms) {
+  const totalSec = Math.max(0, Math.floor(ms / 1e3));
+  if (totalSec < 60) return `${totalSec} \u79D2`;
+  const totalMin = Math.floor(totalSec / 60);
+  if (totalMin < 60) {
+    const sec = totalSec % 60;
+    return sec > 0 ? `${totalMin} \u5206 ${sec} \u79D2` : `${totalMin} \u5206`;
+  }
+  const hour = Math.floor(totalMin / 60);
+  const min = totalMin % 60;
+  return min > 0 ? `${hour} \u65F6 ${min} \u5206` : `${hour} \u65F6`;
+}
+function appendElapsed(base, ms) {
+  if (typeof ms !== "number" || !Number.isFinite(ms) || ms <= 0) return base;
+  return `${base} \xB7 \u5DF2\u8FD0\u884C ${formatElapsed(ms)}`;
 }
 function summaryText(state) {
   if (state.terminal === "interrupted") return "\u5DF2\u4E2D\u65AD";
@@ -10530,32 +10771,49 @@ function closeStreamingText(blocks) {
     (b) => b.kind === "text" && b.streaming ? { ...b, streaming: false } : b
   );
 }
+function withLiveness(state, now, opts = {}) {
+  const base = { ...state, lastEventAt: now };
+  if (opts.clearTool) {
+    delete base.lastToolStartedAt;
+    delete base.currentToolElapsedMs;
+  }
+  return base;
+}
 function reduce(state, evt) {
   switch (evt.type) {
     case "text": {
       const last = state.blocks[state.blocks.length - 1];
       if (last && last.kind === "text" && last.streaming) {
         const next = { ...last, content: last.content + evt.delta };
-        return {
+        return withLiveness(
+          {
+            ...state,
+            blocks: [...state.blocks.slice(0, -1), next],
+            reasoning: { ...state.reasoning, active: false },
+            footer: "streaming"
+          },
+          Date.now()
+        );
+      }
+      return withLiveness(
+        {
           ...state,
-          blocks: [...state.blocks.slice(0, -1), next],
+          blocks: [...state.blocks, { kind: "text", content: evt.delta, streaming: true }],
           reasoning: { ...state.reasoning, active: false },
           footer: "streaming"
-        };
-      }
-      return {
-        ...state,
-        blocks: [...state.blocks, { kind: "text", content: evt.delta, streaming: true }],
-        reasoning: { ...state.reasoning, active: false },
-        footer: "streaming"
-      };
+        },
+        Date.now()
+      );
     }
     case "thinking": {
-      return {
-        ...state,
-        reasoning: { content: state.reasoning.content + evt.delta, active: true },
-        footer: "thinking"
-      };
+      return withLiveness(
+        {
+          ...state,
+          reasoning: { content: state.reasoning.content + evt.delta, active: true },
+          footer: "thinking"
+        },
+        Date.now()
+      );
     }
     case "tool_use": {
       const tool = {
@@ -10564,11 +10822,22 @@ function reduce(state, evt) {
         input: evt.input,
         status: "running"
       };
+      const now = Date.now();
       return {
-        ...state,
-        blocks: [...closeStreamingText(state.blocks), { kind: "tool", tool }],
-        reasoning: { ...state.reasoning, active: false },
-        footer: "tool_running"
+        ...withLiveness(
+          {
+            ...state,
+            blocks: [...closeStreamingText(state.blocks), { kind: "tool", tool }],
+            reasoning: { ...state.reasoning, active: false },
+            footer: "tool_running"
+          },
+          now
+        ),
+        // Reset any prior tool's elapsed display; the new tool starts the
+        // clock fresh. lastToolStartedAt drives currentToolElapsedMs until
+        // the matching tool_result clears it.
+        lastToolStartedAt: now,
+        currentToolElapsedMs: 0
       };
     }
     case "tool_result": {
@@ -10583,66 +10852,91 @@ function reduce(state, evt) {
           }
         };
       });
-      return { ...state, blocks };
+      const matching = state.blocks.some(
+        (b) => b.kind === "tool" && b.tool.id === evt.id
+      );
+      return withLiveness({ ...state, blocks }, Date.now(), {
+        clearTool: matching
+      });
     }
     case "error": {
       const terminal = evt.terminationReason === "interrupted" ? "interrupted" : evt.terminationReason === "timeout" ? "idle_timeout" : "error";
-      return {
-        ...state,
-        terminal,
-        errorMsg: terminal === "error" ? evt.message : state.errorMsg,
-        footer: null
-      };
+      return withLiveness(
+        {
+          ...state,
+          terminal,
+          errorMsg: terminal === "error" ? evt.message : state.errorMsg,
+          footer: null
+        },
+        Date.now(),
+        { clearTool: true }
+      );
     }
     case "done": {
       const terminal = evt.terminationReason === "interrupted" ? "interrupted" : evt.terminationReason === "timeout" ? "idle_timeout" : "done";
-      return {
-        ...state,
-        blocks: closeStreamingText(state.blocks),
-        reasoning: { ...state.reasoning, active: false },
-        terminal,
-        footer: null
-      };
+      return withLiveness(
+        {
+          ...state,
+          blocks: closeStreamingText(state.blocks),
+          reasoning: { ...state.reasoning, active: false },
+          terminal,
+          footer: null
+        },
+        Date.now(),
+        { clearTool: true }
+      );
     }
     default:
       return state;
   }
 }
 function markInterrupted(state) {
-  return {
-    ...state,
-    blocks: closeStreamingText(state.blocks),
-    reasoning: { ...state.reasoning, active: false },
-    terminal: "interrupted",
-    footer: null
-  };
+  return withLiveness(
+    {
+      ...state,
+      blocks: closeStreamingText(state.blocks),
+      reasoning: { ...state.reasoning, active: false },
+      terminal: "interrupted",
+      footer: null
+    },
+    Date.now(),
+    { clearTool: true }
+  );
 }
 function markIdleTimeout(state, minutes) {
-  return {
-    ...state,
-    blocks: closeStreamingText(state.blocks),
-    reasoning: { ...state.reasoning, active: false },
-    terminal: "idle_timeout",
-    footer: null,
-    idleTimeoutMinutes: minutes
-  };
+  return withLiveness(
+    {
+      ...state,
+      blocks: closeStreamingText(state.blocks),
+      reasoning: { ...state.reasoning, active: false },
+      terminal: "idle_timeout",
+      footer: null,
+      idleTimeoutMinutes: minutes
+    },
+    Date.now(),
+    { clearTool: true }
+  );
 }
 function finalizeIfRunning(state) {
   if (state.terminal !== "running") return state;
-  return {
-    ...state,
-    blocks: closeStreamingText(state.blocks),
-    reasoning: { ...state.reasoning, active: false },
-    terminal: "done",
-    footer: null
-  };
+  return withLiveness(
+    {
+      ...state,
+      blocks: closeStreamingText(state.blocks),
+      reasoning: { ...state.reasoning, active: false },
+      terminal: "done",
+      footer: null
+    },
+    Date.now(),
+    { clearTool: true }
+  );
 }
 
 // src/session/history.ts
 import { createReadStream } from "fs";
 import { readdir as readdir4, stat as stat6 } from "fs/promises";
 import { homedir as homedir5 } from "os";
-import { join as join19 } from "path";
+import { join as join20 } from "path";
 import { createInterface as createInterface5 } from "readline";
 
 // src/session/preview.ts
@@ -10681,7 +10975,7 @@ function encodeCwd(cwd) {
   return cwd.replace(/[^A-Za-z0-9]/g, "-");
 }
 function claudeProjectDir(cwd) {
-  return join19(homedir5(), ".claude", "projects", encodeCwd(cwd));
+  return join20(homedir5(), ".claude", "projects", encodeCwd(cwd));
 }
 async function listRecentSessions(cwd, limit = 5) {
   const dir = claudeProjectDir(cwd);
@@ -10695,7 +10989,7 @@ async function listRecentSessions(cwd, limit = 5) {
   const jsonls = files.filter((f) => f.endsWith(".jsonl"));
   const withStats = await Promise.all(
     jsonls.map(async (f) => {
-      const path = join19(dir, f);
+      const path = join20(dir, f);
       try {
         const st = await stat6(path);
         return { file: f, path, mtime: st.mtimeMs };
@@ -10766,7 +11060,7 @@ function formatRelTime(mtime) {
 
 // src/session/codex-history.ts
 import { createInterface as createInterface6 } from "readline";
-import { join as join20 } from "path";
+import { join as join21 } from "path";
 var CodexHistoryError = class extends Error {
   code;
   constructor(code, message, options) {
@@ -10881,7 +11175,7 @@ function spawnCodexAppServer(options) {
   if (options.codexHome) {
     envOverrides.CODEX_HOME = options.codexHome;
   } else if (options.inheritCodexHome === false) {
-    envOverrides.CODEX_HOME = join20(options.profileStateDir, "codex-home");
+    envOverrides.CODEX_HOME = join21(options.profileStateDir, "codex-home");
   }
   return spawnProcess(options.binary, ["app-server", "--listen", "stdio://"], {
     env: mergeProcessEnv(process.env, envOverrides),
@@ -11606,8 +11900,8 @@ async function applyResume(sessionId, ctx) {
 }
 function issueResumeCandidate(identity, target) {
   pruneResumeCandidates();
-  let nonce = randomUUID3().slice(0, 12);
-  while (resumeCandidates.has(nonce)) nonce = randomUUID3().slice(0, 12);
+  let nonce = randomUUID().slice(0, 12);
+  while (resumeCandidates.has(nonce)) nonce = randomUUID().slice(0, 12);
   resumeCandidates.set(nonce, {
     scopeId: identity.scopeId,
     agentId: identity.agentId,
@@ -13168,11 +13462,11 @@ function parseQuestions(input) {
   }
   return out;
 }
-function optionButton(header, question, option, sign2) {
+function optionButton(header, question, option, type, sign2) {
   return {
     tag: "button",
     text: { tag: "plain_text", content: option.label },
-    type: "primary",
+    type,
     width: "default",
     behaviors: [
       {
@@ -13194,24 +13488,26 @@ function renderAskCard(questions, sign2) {
   questions.forEach((q, qi) => {
     if (qi > 0) elements.push({ tag: "hr" });
     const title = q.header ? `**\u2753 ${q.header}**` : "**\u2753 \u8BF7\u9009\u62E9**";
-    elements.push({ tag: "markdown", content: title });
-    if (q.question) elements.push({ tag: "markdown", content: q.question });
-    if (q.multiSelect) {
-      elements.push({
-        tag: "markdown",
-        content: "_\uFF08\u539F\u4E3A\u591A\u9009\uFF1B\u8FD9\u91CC\u6BCF\u6B21\u70B9\u51FB\u63D0\u4EA4\u4E00\u4E2A\u9009\u9879\uFF09_",
-        text_size: "notation"
-      });
-    }
-    for (const opt of q.options) {
-      if (opt.description) {
-        elements.push({
-          tag: "markdown",
-          content: `**${opt.label}** \u2014 ${opt.description}`,
-          text_size: "notation"
-        });
-      }
-      elements.push(optionButton(q.header, q.question, opt, sign2));
+    const promptLine2 = q.question ? `${title}
+${q.question}` : title;
+    const numberedOptions = q.options.map((opt, oi) => {
+      const desc = opt.description ? ` \u2014 ${opt.description}` : "";
+      return `**\u203A ${oi + 1}. ${opt.label}**${desc}`;
+    }).join("\n");
+    const multiHint = q.multiSelect ? "\n\n_\uFF08\u53EF\u591A\u9009\uFF1B\u6BCF\u6B21\u70B9\u51FB\u63D0\u4EA4\u4E00\u4E2A\u9009\u9879\uFF09_" : "";
+    elements.push({
+      tag: "markdown",
+      content: `${promptLine2}
+
+\`\`\`
+${numberedOptions}
+\`\`\`${multiHint}`
+    });
+    for (let oi = 0; oi < q.options.length; oi++) {
+      const opt = q.options[oi];
+      elements.push(
+        optionButton(q.header, q.question, opt, oi === 0 ? "primary" : "default", sign2)
+      );
     }
   });
   return {
@@ -13267,13 +13563,20 @@ async function consumeInteractivePrompts(events, deps) {
   const seen = /* @__PURE__ */ new Set();
   try {
     for await (const evt of events) {
-      if (evt.type !== "tool_use" || seen.has(evt.id)) continue;
+      if (evt.type !== "tool_use") continue;
+      if (seen.has(evt.id)) {
+        log.info("prompt-card", "skipped-duplicate", { scope: deps.scope, tool: evt.name, id: evt.id });
+        continue;
+      }
       const card = buildPromptCard(evt.name, evt.input, deps.sign);
-      if (!card) continue;
+      if (!card) {
+        log.info("prompt-card", "skipped-no-card", { scope: deps.scope, tool: evt.name });
+        continue;
+      }
       seen.add(evt.id);
       try {
         await deps.channel.send(deps.chatId, { card }, deps.sendOpts);
-        log.info("prompt-card", "sent", { scope: deps.scope, tool: evt.name });
+        log.info("prompt-card", "sent", { scope: deps.scope, tool: evt.name, id: evt.id });
       } catch (err) {
         log.warn("prompt-card", "send-failed", {
           scope: deps.scope,
@@ -13734,6 +14037,10 @@ var CallbackNonceStore = class {
 };
 
 // src/card/text-renderer.ts
+var MARKER_RESERVE = 256;
+var EFFECTIVE_BUDGET = CARD_BYTE_BUDGET - MARKER_RESERVE;
+var TEXT_HEAD_CHARS2 = 800;
+var TEXT_TAIL_CHARS2 = 2400;
 function renderText(state) {
   const parts = [];
   for (const block of state.blocks) {
@@ -13750,7 +14057,36 @@ function renderText(state) {
   } else if (state.terminal === "running" && state.footer) {
     parts.push(footerLine(state.footer));
   }
-  return parts.join("\n\n");
+  return enforceTextByteBudget(parts.join("\n\n"));
+}
+function enforceTextByteBudget(text) {
+  if (Buffer.byteLength(text, "utf8") <= EFFECTIVE_BUDGET) return text;
+  const parts = text.split("\n\n");
+  let working = parts.join("\n\n");
+  let droppedBytes = 0;
+  while (Buffer.byteLength(working, "utf8") > EFFECTIVE_BUDGET && parts.length > 1) {
+    const removed = parts.pop();
+    if (removed === void 0) break;
+    droppedBytes += Buffer.byteLength(removed, "utf8") + 2;
+    working = parts.join("\n\n");
+  }
+  if (Buffer.byteLength(working, "utf8") > EFFECTIVE_BUDGET) {
+    const head = working.slice(0, TEXT_HEAD_CHARS2);
+    const tail = working.slice(working.length - TEXT_TAIL_CHARS2);
+    const folded = working.length - TEXT_HEAD_CHARS2 - TEXT_TAIL_CHARS2;
+    working = folded > 0 ? `${head}
+
+_\u2026 ${folded} \u5B57\u5DF2\u6298\u53E0\uFF08\u4FDD\u7559\u9996\u5C3E\uFF09\u2026_
+
+${tail}` : working;
+    droppedBytes = Buffer.byteLength(text, "utf8") - Buffer.byteLength(working, "utf8");
+  }
+  if (droppedBytes > 0) {
+    return `${working}
+
+_\u2026 \u5DF2\u622A\u65AD\uFF08${droppedBytes} \u5B57\u8282\u5DF2\u6298\u53E0\uFF09_`;
+  }
+  return working;
 }
 function renderBlock(block) {
   if (block.kind === "text") {
@@ -13768,10 +14104,10 @@ function footerLine(status) {
 }
 
 // src/media/cache.ts
-import { createHash as createHash4 } from "crypto";
+import { createHash as createHash5 } from "crypto";
 import { createReadStream as createReadStream2 } from "fs";
 import { mkdir as mkdir13, readdir as readdir5, rename as rename4, rm as rm11, stat as stat7 } from "fs/promises";
-import { join as join21 } from "path";
+import { join as join22 } from "path";
 
 // src/media/attachment.ts
 var DEFAULT_POLICY = {
@@ -13907,7 +14243,7 @@ var MediaCache = class {
       return null;
     }
     const kind = r.type;
-    const tmpPath = join21(
+    const tmpPath = join22(
       this.rootDir,
       `.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`
     );
@@ -13921,7 +14257,7 @@ var MediaCache = class {
     const hash = await hashFile(tmpPath);
     const mime = contentType ?? defaultMime(kind);
     const ext = safeExtensionForMime(mime);
-    const absPath = join21(this.rootDir, `${hash}.${ext}`);
+    const absPath = join22(this.rootDir, `${hash}.${ext}`);
     try {
       await stat7(absPath);
       await rm11(tmpPath, { force: true });
@@ -13984,7 +14320,7 @@ async function listFiles(root) {
   const out = [];
   const entries = await readdir5(root, { withFileTypes: true }).catch(() => []);
   for (const entry of entries) {
-    const full = join21(root, entry.name);
+    const full = join22(root, entry.name);
     if (entry.isDirectory()) {
       out.push(...await listFiles(full));
     } else if (entry.isFile()) {
@@ -13994,7 +14330,7 @@ async function listFiles(root) {
   return out;
 }
 async function hashFile(path) {
-  const hash = createHash4("sha256");
+  const hash = createHash5("sha256");
   for await (const chunk of createReadStream2(path)) {
     hash.update(chunk);
   }
@@ -14066,7 +14402,7 @@ async function fetchOwnerId(source) {
 }
 
 // src/runtime/run-executor.ts
-import { randomUUID as randomUUID4 } from "crypto";
+import { randomUUID as randomUUID2 } from "crypto";
 
 // src/bot/active-runs.ts
 var ActiveRuns = class {
@@ -14211,7 +14547,7 @@ var RunExecutor = class {
     this.agent = deps.agent;
     this.pool = deps.pool;
     this.activeRuns = deps.activeRuns;
-    this.createRunId = deps.createRunId ?? randomUUID4;
+    this.createRunId = deps.createRunId ?? randomUUID2;
     this.now = deps.now ?? Date.now;
     this.postDoneExitGraceMs = deps.postDoneExitGraceMs ?? DEFAULT_POST_DONE_EXIT_GRACE_MS;
   }
@@ -14555,7 +14891,7 @@ var ChatModeCache = class {
 };
 
 // src/bot/comments.ts
-import { randomUUID as randomUUID5 } from "crypto";
+import { randomUUID as randomUUID3 } from "crypto";
 import { mkdir as mkdir14 } from "fs/promises";
 import { dirname as dirname16 } from "path";
 
@@ -14689,9 +15025,9 @@ function recordRunSessionEvent(input) {
 }
 
 // src/bot/comment-resource.ts
-import { createHash as createHash5 } from "crypto";
+import { createHash as createHash6 } from "crypto";
 function commentTokenDigest(token) {
-  return createHash5("sha256").update(token).digest("hex").slice(0, 16);
+  return createHash6("sha256").update(token).digest("hex").slice(0, 16);
 }
 function commentDocumentScopeId(fileToken) {
   return `comment-doc:${commentTokenDigest(fileToken)}`;
@@ -15064,7 +15400,7 @@ function commentRunRejectedReply(code) {
   }
 }
 function commentExecutionScopeId(commentThreadScopeId) {
-  return `${commentThreadScopeId}:${randomUUID5().slice(0, 12)}`;
+  return `${commentThreadScopeId}:${randomUUID3().slice(0, 12)}`;
 }
 function commentDocumentSessionScopeId(fileToken) {
   return `doc:${commentTokenDigest(fileToken)}`;
@@ -16086,7 +16422,7 @@ function stringifyArgs(args) {
 }
 function expandHomeDirectory(path) {
   if (path === "~") return homedir7();
-  return path.startsWith("~/") ? join22(homedir7(), path.slice(2)) : path;
+  return path.startsWith("~/") ? join23(homedir7(), path.slice(2)) : path;
 }
 async function startChannel(deps) {
   const { cfg, agent, sessions, sessionCatalog, workspaces, controls } = deps;
@@ -16096,7 +16432,7 @@ async function startChannel(deps) {
   const pool = new ProcessPool(() => getMaxConcurrentRuns(controls.cfg));
   const executor = new RunExecutor({ agent, pool, activeRuns });
   const appSecret = await resolveAppSecret(cfg, deps.appPaths);
-  const callbackNonceStore = deps.appPaths?.mediaDir ? new CallbackNonceStore(join22(dirname17(deps.appPaths.mediaDir), "callback-nonces.json")) : void 0;
+  const callbackNonceStore = deps.appPaths?.mediaDir ? new CallbackNonceStore(join23(dirname17(deps.appPaths.mediaDir), "callback-nonces.json")) : void 0;
   await callbackNonceStore?.load();
   const callbackAuth = callbackNonceStore ? new CallbackAuth({
     keys: [{ version: 1, secret: appSecret }],
@@ -16942,6 +17278,10 @@ ${delta}`.slice(-4e3);
   if (idleTimeoutMs) {
     log.info("flush", "idle-watchdog", { idleTimeoutMs });
   }
+  const progressHeartbeatMs = getProgressHeartbeatMs(controls.cfg);
+  if (progressHeartbeatMs > 0) {
+    log.info("flush", "progress-heartbeat", { progressHeartbeatMs });
+  }
   const configuredReplyMode = getMessageReplyMode(controls.cfg);
   const replyMode = useLiveSession && bridgeRoute?.presentation === "card" ? "card" : configuredReplyMode;
   log.info("flush", "reply-mode", {
@@ -17023,6 +17363,7 @@ ${delta}`.slice(-4e3);
         eventStream,
         scope,
         idleTimeoutMs,
+        progressHeartbeatMs,
         recordSession,
         async () => {
         },
@@ -17067,6 +17408,7 @@ ${delta}`.slice(-4e3);
           eventStream,
           scope,
           idleTimeoutMs,
+          progressHeartbeatMs,
           recordSession,
           async () => {
           },
@@ -17120,23 +17462,29 @@ ${delta}`.slice(-4e3);
           sendOpts
         );
       };
+      let lastSentCardSerialized;
       const renderDone = processAgentStream(
         handle,
         eventStream,
         scope,
         idleTimeoutMs,
+        progressHeartbeatMs,
         recordSession,
         async (state) => {
           latestState = state;
           if (cardCtrl) {
+            const nextCard = renderLiveAwareReplyCard(
+              prepareStateForReply(state),
+              cardRenderOptions,
+              useLiveSession ? "live" : "agent"
+            );
+            const nextSerialized = JSON.stringify(nextCard);
+            if (nextSerialized === lastSentCardSerialized) {
+              return;
+            }
+            lastSentCardSerialized = nextSerialized;
             try {
-              await cardCtrl.update(
-                renderLiveAwareReplyCard(
-                  prepareStateForReply(state),
-                  cardRenderOptions,
-                  useLiveSession ? "live" : "agent"
-                )
-              );
+              await cardCtrl.update(nextCard);
             } catch (err) {
               streamDegraded = true;
               cardCtrl = void 0;
@@ -17212,17 +17560,22 @@ ${delta}`.slice(-4e3);
           await channel.send(chatId, { markdown: body }, sendOpts);
         }
       };
+      let lastSentMarkdownText;
       const renderDone = processAgentStream(
         handle,
         eventStream,
         scope,
         idleTimeoutMs,
+        progressHeartbeatMs,
         recordSession,
         async (state) => {
           latestState = state;
           if (markdownCtrl) {
+            const nextText = renderText(prepareStateForReply(state));
+            if (nextText === lastSentMarkdownText) return;
+            lastSentMarkdownText = nextText;
             try {
-              await markdownCtrl.setContent(renderText(prepareStateForReply(state)));
+              await markdownCtrl.setContent(nextText);
             } catch (err) {
               streamDegraded = true;
               markdownCtrl = void 0;
@@ -17278,6 +17631,7 @@ ${delta}`.slice(-4e3);
         eventStream,
         scope,
         idleTimeoutMs,
+        progressHeartbeatMs,
         recordSession,
         async () => {
         },
@@ -17421,7 +17775,7 @@ function outboundLogFields(input, type, body, result) {
     replyInThread: input.sendOpts?.replyInThread === true
   };
 }
-async function processAgentStream(handle, events, scope, idleTimeoutMs, recordSession, flush, observeEvent = () => {
+async function processAgentStream(handle, events, scope, idleTimeoutMs, progressHeartbeatMs, recordSession, flush, observeEvent = () => {
 }) {
   const runStart2 = Date.now();
   let state = initialState;
@@ -17442,6 +17796,25 @@ async function processAgentStream(handle, events, scope, idleTimeoutMs, recordSe
     }, idleTimeoutMs);
   };
   armOrPauseIdle();
+  let heartbeatTimer;
+  let lastHeartbeatFlushMs = 0;
+  const startHeartbeat = () => {
+    if (!progressHeartbeatMs || progressHeartbeatMs <= 0) return;
+    if (heartbeatTimer) return;
+    heartbeatTimer = setInterval(() => {
+      if (state.terminal !== "running") return;
+      if (state.footer !== "tool_running") return;
+      if (state.lastToolStartedAt === void 0) return;
+      const now = Date.now();
+      const elapsed = now - state.lastToolStartedAt;
+      if (now - lastHeartbeatFlushMs < progressHeartbeatMs) return;
+      lastHeartbeatFlushMs = now;
+      state = { ...state, currentToolElapsedMs: elapsed, lastEventAt: now };
+      log.info("card", "heartbeat-flush", { scope, elapsedMs: elapsed });
+      void flush(state);
+    }, progressHeartbeatMs);
+  };
+  startHeartbeat();
   try {
     for await (const evt of events) {
       if (handle.interrupted) break;
@@ -17486,6 +17859,7 @@ async function processAgentStream(handle, events, scope, idleTimeoutMs, recordSe
     }
   } finally {
     if (timer) clearTimeout(timer);
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
   }
   if (state.terminal === "running") {
     if (idleFired) {
@@ -18123,7 +18497,7 @@ var SessionStore = class {
 };
 
 // src/session/catalog.ts
-import { randomUUID as randomUUID6 } from "crypto";
+import { randomUUID as randomUUID4 } from "crypto";
 import { open as open3, readFile as readFile14, rename as rename5, mkdir as mkdir15 } from "fs/promises";
 import { dirname as dirname18 } from "path";
 var DEFAULT_MAX_ARCHIVED_AGE_MS = 90 * 24 * 60 * 60 * 1e3;
@@ -18248,7 +18622,7 @@ var SessionCatalog = class {
   }
   async persist() {
     await mkdir15(dirname18(this.path), { recursive: true });
-    const tmp = `${this.path}.${process.pid}.${Date.now()}.${randomUUID6()}.tmp`;
+    const tmp = `${this.path}.${process.pid}.${Date.now()}.${randomUUID4()}.tmp`;
     const payload = `${JSON.stringify(this.entries(), null, 2)}
 `;
     const fh = await open3(tmp, "w", 384);

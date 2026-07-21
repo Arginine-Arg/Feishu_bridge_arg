@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
-import { randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
+import { join } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
 import { log } from '../core/logger';
 import {
@@ -10,7 +11,6 @@ import {
 } from '../platform/spawn';
 import type { AgentEvent, AgentRun } from './types';
 import {
-  defaultTmuxSocketPath,
   tmuxAttachCommand,
   type TmuxOwnership,
   type TmuxPaneTarget,
@@ -105,6 +105,13 @@ export class LiveSessionPool {
     await Promise.allSettled(sessions.map((session) => session.close('shutdown')));
   }
 
+  /** Stop bridge relays while leaving managed tmux agents available to reconnect. */
+  async detachAll(): Promise<void> {
+    const sessions = [...this.sessions.values()];
+    this.sessions.clear();
+    await Promise.allSettled(sessions.map((session) => session.detach('shutdown')));
+  }
+
   async close(key: string, reason = 'close'): Promise<void> {
     const session = this.sessions.get(key);
     if (!session) return;
@@ -127,6 +134,7 @@ export class LiveTerminalSession {
   private child: LiveChild | undefined;
   private terminalInfo: LiveTerminalInfo | undefined;
   private closed = false;
+  private finalized = false;
   private primed = false;
   private startedAt = 0;
   private activeTurnCleanup: (() => void) | undefined;
@@ -180,6 +188,28 @@ export class LiveTerminalSession {
   }
 
   async close(reason: string): Promise<void> {
+    await this.stopHelper(reason);
+    const terminal = this.terminalInfo;
+    if (
+      terminal?.backend === 'tmux' &&
+      terminal.ownership === 'managed' &&
+      terminal.socketPath &&
+      terminal.sessionName
+    ) {
+      spawnProcessSync(
+        'tmux',
+        ['-S', terminal.socketPath, 'kill-session', '-t', terminal.sessionName],
+        { stdio: 'ignore' },
+      );
+    }
+  }
+
+  /** Stop only the bridge-side relay; the managed tmux session keeps running. */
+  async detach(reason: string): Promise<void> {
+    await this.stopHelper(reason);
+  }
+
+  private async stopHelper(reason: string): Promise<void> {
     if (this.closed) return;
     this.closed = true;
     const child = this.child;
@@ -197,6 +227,12 @@ export class LiveTerminalSession {
         });
       });
     }
+    this.finalize();
+  }
+
+  private finalize(): void {
+    if (this.finalized) return;
+    this.finalized = true;
     this.opts.cleanup?.();
     this.onClose();
   }
@@ -227,13 +263,12 @@ export class LiveTerminalSession {
     child.stderr.on('data', (chunk: Buffer) => this.emitData(chunk));
     child.on('error', (err) => {
       this.emitter.emit('error', err);
-      void this.close('error').catch(() => {});
+      void this.detach('error').catch(() => {});
     });
     child.on('exit', (code, signal) => {
       log.info('agent-live', 'exit', { pid: child.pid ?? null, code, signal });
       this.emitter.emit('exit', { code, signal });
-      this.opts.cleanup?.();
-      this.onClose();
+      this.finalize();
     });
     child.stdin.on('error', (err) => {
       log.warn('agent-live', 'stdin-error', { message: err.message });
@@ -721,16 +756,19 @@ function spawnTmuxLiveProcess(
   terminal: LiveTerminalInfo;
 } {
   const external = opts.tmuxTarget;
-  const socketPath = external?.socketPath ?? defaultTmuxSocketPath(env);
-  const sessionName = external?.sessionName ?? opts.tmuxSessionName ??
-    `argbridge-${process.pid}-${randomUUID().replace(/-/g, '').slice(0, 8)}`;
-  const target = external?.paneId ?? `${sessionName}:0.0`;
-  const attachTarget = external ?? {
-    socketPath,
-    sessionName,
-    windowIndex: '0',
-    paneIndex: '0',
-  };
+  const managedIdentity = external
+    ? undefined
+    : liveTmuxIdentity(
+        opts.cwd,
+        opts.tmuxScopeId ?? opts.tmuxSessionName ?? opts.cwd,
+        opts.signature,
+        opts.tmuxSessionName,
+      );
+  const socketPath = external?.socketPath ?? managedIdentity!.socketPath;
+  const sessionName = external?.sessionName ?? managedIdentity!.sessionName;
+  // Managed panes can be replaced after a native Ctrl-C. Expose the stable
+  // session target instead of an initial pane address that can become stale.
+  const target = external?.paneId ?? sessionName;
   const child = spawnProcess(
     process.execPath,
     [
@@ -763,10 +801,33 @@ function spawnTmuxLiveProcess(
       socketPath,
       sessionName,
       target,
-      attachCommand: tmuxAttachCommand(attachTarget),
+      attachCommand: external
+        ? tmuxAttachCommand(external)
+        : `tmux -S ${shellQuote(socketPath)} attach -t ${shellQuote(sessionName)}`,
       ownership: external ? 'external' : 'managed',
     },
     child,
+  };
+}
+
+/** Stable managed tmux identity for one cwd, conversation scope, and launch signature. */
+export function liveTmuxIdentity(
+  cwd: string,
+  sessionKey: string,
+  signature: string,
+  preferredSessionName?: string,
+): { socketPath: string; sessionName: string } {
+  const hash = createHash('sha256')
+    .update(cwd)
+    .update('\0')
+    .update(sessionKey)
+    .update('\0')
+    .update(signature)
+    .digest('hex')
+    .slice(0, 20);
+  return {
+    socketPath: join(cwd, `.ab-live-${hash.slice(0, 12)}.sock`),
+    sessionName: preferredSessionName ?? `argbridge-live-${hash}`,
   };
 }
 
@@ -792,11 +853,16 @@ const { spawnSync } = require('node:child_process');
 
 const [mode, socketPath, session, requestedTarget, commandBase64, cwd, rows, columns, profile, scope, ownerPid] = process.argv.slice(1);
 const managed = mode === 'managed';
-const target = managed ? session + ':0.0' : requestedTarget;
+let target = managed ? session + ':0.0' : requestedTarget;
 const commandLine = Buffer.from(commandBase64, 'base64').toString('utf8');
 let closed = false;
 let lastSnapshot = '';
 let inputBuffer = '';
+
+process.on('uncaughtException', (error) => {
+  process.stderr.write('tmux live helper crashed: ' + (error && error.stack ? error.stack : String(error)) + '\n');
+  process.exit(1);
+});
 
 function tmux(args, options = {}) {
   return spawnSync('tmux', ['-S', socketPath, ...args], {
@@ -813,40 +879,108 @@ function writeError(prefix, result) {
   process.stderr.write(prefix + (message ? ': ' + message : '') + '\n');
 }
 
-function cleanup() {
-  if (closed) return;
-  closed = true;
-  if (managed) tmux(['kill-session', '-t', session], { stdio: 'ignore' });
+function selectedPaneTarget() {
+  const selected = tmux([
+    'display-message',
+    '-p',
+    '-t',
+    session,
+    '#{session_name}:#{window_index}.#{pane_index}',
+  ]);
+  return selected.status === 0 && selected.stdout.trim()
+    ? selected.stdout.trim()
+    : session + ':0.0';
 }
 
-if (managed) {
-  const created = tmux([
-    'new-session',
-    '-d',
-    '-x',
-    columns,
-    '-y',
-    rows,
-    '-s',
-    session,
-    '-c',
-    cwd,
-    commandLine,
-  ]);
-  if (created.status !== 0) {
-    writeError('failed to start tmux live session', created);
-    process.exit(1);
-  }
+function setPersistentPaneOptions() {
+  const remain = tmux(['set-window-option', '-t', target, 'remain-on-exit', 'on']);
+  if (remain.status !== 0) writeError('failed to preserve tmux live pane', remain);
+  const history = tmux(['set-window-option', '-t', target, 'history-limit', '50000']);
+  if (history.status !== 0) writeError('failed to preserve tmux live history', history);
+}
+
+function setManagedMetadata() {
   tmux(['set-option', '-t', session, '@argbridge_managed', '1'], { stdio: 'ignore' });
   tmux(['set-option', '-t', session, '@argbridge_owner_pid', ownerPid], { stdio: 'ignore' });
   tmux(['set-option', '-t', session, '@argbridge_profile', profile], { stdio: 'ignore' });
   tmux(['set-option', '-t', session, '@argbridge_scope', scope], { stdio: 'ignore' });
+}
+
+function createAgentWindow(initial) {
+  const args = initial
+    ? [
+        'new-session',
+        '-d',
+        '-x',
+        columns,
+        '-y',
+        rows,
+        '-s',
+        session,
+        '-n',
+        'agent',
+        '-c',
+        cwd,
+      ]
+    : [
+        'new-window',
+        '-d',
+        '-P',
+        '-F',
+        '#{session_name}:#{window_index}.#{pane_index}',
+        '-t',
+        session,
+        '-n',
+        'agent-' + Date.now(),
+        '-c',
+        cwd,
+      ];
+  const created = tmux(args);
+  if (created.status !== 0) {
+    writeError('failed to start tmux live session', created);
+    return false;
+  }
+  target = initial ? session + ':0.0' : created.stdout.trim();
+  if (!target) target = selectedPaneTarget();
+  const selected = tmux(['select-window', '-t', target]);
+  if (selected.status !== 0) writeError('failed to select tmux live window', selected);
+  setPersistentPaneOptions();
+  const started = tmux(['respawn-pane', '-k', '-t', target, '-c', cwd, commandLine]);
+  if (started.status !== 0) {
+    writeError('failed to start tmux live agent', started);
+    return false;
+  }
+  lastSnapshot = '';
+  return true;
+}
+
+if (managed) {
+  const existing = tmux(['has-session', '-t', session], { stdio: 'ignore' });
+  if (existing.status === 0) {
+    target = selectedPaneTarget();
+    setPersistentPaneOptions();
+  } else if (!createAgentWindow(true)) {
+    process.exit(1);
+  }
+  setManagedMetadata();
 } else {
   const exists = tmux(['display-message', '-p', '-t', target, '#{pane_id}'], { stdio: 'ignore' });
   if (exists.status !== 0) {
     writeError('external tmux pane is unavailable', exists);
     process.exit(1);
   }
+}
+
+function paneIsDead() {
+  const result = tmux(['display-message', '-p', '-t', target, '#{pane_dead}']);
+  return result.status === 0 && result.stdout.trim() === '1';
+}
+
+function ensureLivePane() {
+  if (!managed || !paneIsDead()) return true;
+  // Preserve the exited pane and its history. A later user message starts a
+  // new native agent in another window of the same cwd-bound tmux session.
+  return createAgentWindow(false);
 }
 
 function sendKeys(args) {
@@ -865,6 +999,7 @@ function sendBracketedPaste(text) {
 }
 
 function sendInput(input) {
+  if (input !== '\x03' && !ensureLivePane()) return;
   if (input === '\x03') {
     sendKeys(['C-c']);
     return;
@@ -910,13 +1045,13 @@ function capture() {
   if (closed) return;
   const available = tmux(['display-message', '-p', '-t', target, '#{pane_id}'], { stdio: 'ignore' });
   if (available.status !== 0) {
-    cleanup();
+    closed = true;
     process.exit(0);
   }
   const result = tmux(['capture-pane', '-p', '-S', '-${TMUX_CAPTURE_HISTORY_LINES}', '-t', target]);
   if (result.status !== 0) {
     writeError('failed to capture tmux live session', result);
-    cleanup();
+    closed = true;
     process.exit(1);
   }
   const captured = result.stdout.replace(/\n$/u, '');
@@ -953,19 +1088,19 @@ process.stdin.on('data', (chunk) => {
 });
 process.stdin.on('end', () => {
   clearInterval(timer);
-  cleanup();
+  closed = true;
 });
 process.on('SIGTERM', () => {
   clearInterval(timer);
-  cleanup();
+  closed = true;
   process.exit(0);
 });
 process.on('SIGINT', () => {
   clearInterval(timer);
-  cleanup();
+  closed = true;
   process.exit(0);
 });
-process.on('exit', cleanup);
+process.on('exit', () => clearInterval(timer));
 `;
 
 // Word → terminal key. Lets users drive an agent's interactive picker
@@ -1405,10 +1540,9 @@ class VirtualTerminalScreen {
 }
 
 class TurnOutputBuffer {
-  private emitted = '';
+  private deliveredTail = '';
   private pending = '';
   private lastCompleteLine = '';
-  private truncated = false;
   private snapshotBaseline = '';
   private historyBaseline = '';
 
@@ -1433,7 +1567,7 @@ class TurnOutputBuffer {
     if (isStaleStatusSnapshotForPrompt(compacted, this.promptEcho)) return false;
     if (isStaleGoalUsageSnapshotForPrompt(compacted, this.promptEcho)) return false;
     if (isSlashCompletionSnapshotForPrompt(compacted, this.promptEcho)) return false;
-    const existing = this.emitted + this.pending;
+    const existing = this.deliveredTail + this.pending;
     if (existing.endsWith(compacted)) return false;
 
     this.pending += compacted;
@@ -1465,12 +1599,12 @@ class TurnOutputBuffer {
       if (!deliverable.trim()) return false;
       const normalized = deliverable.endsWith('\n') ? deliverable : `${deliverable}\n`;
       if (hasPromptAnchor) {
-        const nextPending = undeliveredSnapshotSuffix(this.emitted, normalized);
+        const nextPending = undeliveredSnapshotSuffix(this.deliveredTail, normalized);
         if (this.pending === nextPending) return false;
         if (shouldKeepRicherSnapshot(this.pending, nextPending)) return false;
         this.pending = nextPending;
       } else {
-        const existing = this.emitted + this.pending;
+        const existing = this.deliveredTail + this.pending;
         const suffix = undeliveredSnapshotSuffix(existing, normalized);
         if (!suffix) return false;
         this.pending += suffix;
@@ -1478,7 +1612,7 @@ class TurnOutputBuffer {
       this.enforceLimit();
       return Boolean(this.pending);
     }
-    if (this.pending === compacted || this.emitted.endsWith(compacted)) return false;
+    if (this.pending === compacted || this.deliveredTail.endsWith(compacted)) return false;
     if (shouldKeepRicherSnapshot(this.pending, compacted)) return false;
     this.pending = compacted.endsWith('\n') ? compacted : `${compacted}\n`;
     this.enforceLimit();
@@ -1487,7 +1621,9 @@ class TurnOutputBuffer {
 
   take(): string {
     const out = stripKnownLiveNoise(this.pending, this.promptEcho);
-    this.emitted += out;
+    // Keep enough context to reject redraw duplicates without allowing a long
+    // live run to suppress its own final answer after the old global cap.
+    this.deliveredTail = trimTail(this.deliveredTail + out, this.maxChars);
     this.pending = '';
     return out;
   }
@@ -1521,28 +1657,24 @@ class TurnOutputBuffer {
   }
 
   private enforceLimit(): void {
-    const total = this.emitted.length + this.pending.length;
-    if (total <= this.maxChars) return;
-    const overflow = total - this.maxChars;
-    if (overflow >= this.pending.length) {
-      this.pending = '';
-      return;
-    }
-    this.pending = this.pending.slice(overflow);
-    if (!this.truncated) {
-      this.truncated = true;
-      this.pending = `[live output truncated to ${this.maxChars} chars]\n${this.pending}`;
-    }
+    if (this.pending.length <= this.maxChars) return;
+    const marker = `[live output segment truncated to ${this.maxChars} chars; latest output retained]\n`;
+    this.pending = `${marker}${trimTail(this.pending, Math.max(0, this.maxChars - marker.length))}`;
   }
 }
 
-function undeliveredSnapshotSuffix(emitted: string, snapshot: string): string {
-  if (!emitted) return snapshot;
-  if (snapshot.startsWith(emitted)) return snapshot.slice(emitted.length);
-  if (emitted.endsWith(snapshot)) return '';
-  const max = Math.min(emitted.length, snapshot.length);
+function trimTail(value: string, maxChars: number): string {
+  return value.length <= maxChars ? value : value.slice(-maxChars);
+}
+
+export function undeliveredSnapshotSuffix(deliveredTail: string, snapshot: string): string {
+  if (!deliveredTail) return snapshot;
+  const containedAt = snapshot.lastIndexOf(deliveredTail);
+  if (containedAt >= 0) return snapshot.slice(containedAt + deliveredTail.length);
+  if (deliveredTail.endsWith(snapshot)) return '';
+  const max = Math.min(deliveredTail.length, snapshot.length);
   for (let overlap = max; overlap > 0; overlap -= 1) {
-    if (emitted.endsWith(snapshot.slice(0, overlap))) return snapshot.slice(overlap);
+    if (deliveredTail.endsWith(snapshot.slice(0, overlap))) return snapshot.slice(overlap);
   }
   return snapshot;
 }

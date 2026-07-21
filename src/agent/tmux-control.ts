@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import {
   lstatSync,
   readFileSync,
@@ -80,8 +80,7 @@ export class TmuxBindingController {
   managedSessionName(scopeId: string): string {
     const profile = safeTmuxName(this.profile).slice(0, 24) || this.agentKind;
     const scopeHash = createHash('sha256').update(scopeId).digest('hex').slice(0, 12);
-    const instance = randomUUID().replace(/-/g, '').slice(0, 8);
-    return `argbridge-${profile}-${scopeHash}-${process.pid}-${instance}`.slice(0, 96);
+    return `argbridge-${this.agentKind}-${profile}-${scopeHash}`.slice(0, 96);
   }
 
   async list(socket?: string): Promise<TmuxPaneTarget[]> {

@@ -121,18 +121,28 @@ function truncate(s, max) {
 // src/card/run-renderer.ts
 var REASONING_MAX = 1500;
 var COLLAPSE_TOOL_THRESHOLD = 3;
+var CARD_BYTE_BUDGET = 24e3;
+var TEXT_HEAD_CHARS = 800;
+var TEXT_TAIL_CHARS = 2400;
 function renderCard(state, options = {}) {
   const elements = [];
   if (state.reasoning.content) {
     elements.push(reasoningPanel(state.reasoning.content, state.reasoning.active));
   }
+  const groupElementRange = [];
+  const textBlockRanges = [];
   for (const group of groupBlocks(state.blocks)) {
     if (group.kind === "text") {
-      if (group.content.trim()) {
-        elements.push(markdown(group.content));
+      const content = group.content.trim();
+      if (content) {
+        const start = elements.length;
+        elements.push(markdown(content));
+        textBlockRanges.push({ start, markdownElIdx: elements.length - 1 });
       }
     } else {
+      const start = elements.length;
       elements.push(...renderToolGroup(group.tools, state.terminal !== "running"));
+      groupElementRange.push({ start, toolCount: group.tools.length });
     }
   }
   if (state.terminal === "interrupted") {
@@ -146,17 +156,94 @@ function renderCard(state, options = {}) {
     elements.push(noteMd("_\uFF08\u672A\u8FD4\u56DE\u5185\u5BB9\uFF09_"));
   }
   if (state.terminal === "running") {
-    if (state.footer) elements.push(footerStatus(state.footer));
+    if (state.footer) {
+      const elapsedMs = state.footer === "tool_running" ? state.currentToolElapsedMs : void 0;
+      elements.push(footerStatus(state.footer, elapsedMs));
+    }
     elements.push(stopButton(options));
   }
-  return {
+  return enforceCardByteBudget(state, elements, groupElementRange, textBlockRanges);
+}
+function enforceCardByteBudget(state, elements, groupElementRange, textBlockRanges) {
+  const wrap = (body) => ({
     schema: "2.0",
     config: {
       streaming_mode: state.terminal === "running",
       summary: { content: summaryText(state) }
     },
-    body: { elements }
-  };
+    body: { elements: body }
+  });
+  const sizeOf = (els) => JSON.stringify(wrap(els)).length;
+  if (sizeOf(elements) <= CARD_BYTE_BUDGET) return wrap(elements);
+  let workingElements = elements.slice();
+  const groupTools = [];
+  for (const g of groupBlocks(state.blocks)) {
+    if (g.kind === "tools") groupTools.push(g.tools);
+  }
+  for (let foldCount = 1; foldCount < groupElementRange.length; foldCount++) {
+    const firstStart = groupElementRange[0].start;
+    const firstUnfoldedStart = groupElementRange[foldCount].start;
+    const foldedTools = groupTools.slice(0, foldCount).flat();
+    if (foldedTools.length === 0) continue;
+    const newBody = [];
+    for (let i = 0; i < firstStart; i++) newBody.push(workingElements[i]);
+    newBody.push(
+      noteMd(
+        `_\u2026 ${foldedTools.length} \u4E2A\u66F4\u65E9\u7684\u5DE5\u5177\u8C03\u7528\u8BE6\u60C5\u5DF2\u6298\u53E0\uFF08\u5B8C\u6574\u5185\u5BB9\u89C1 /doctor \u6216 daemon \u65E5\u5FD7\uFF09_`
+      )
+    );
+    newBody.push(
+      collapsedToolSummary(foldedTools, state.terminal !== "running")
+    );
+    for (let i = firstUnfoldedStart; i < workingElements.length; i++) {
+      newBody.push(workingElements[i]);
+    }
+    workingElements = newBody;
+    if (sizeOf(workingElements) <= CARD_BYTE_BUDGET) {
+      return wrap(workingElements);
+    }
+  }
+  if (textBlockRanges.length === 0) {
+    return wrap(workingElements);
+  }
+  const textContents = [];
+  for (const g of groupBlocks(state.blocks)) {
+    if (g.kind === "text") {
+      const c = g.content.trim();
+      if (c) textContents.push(c);
+    }
+  }
+  for (let pass = 0; pass < 32; pass++) {
+    if (sizeOf(workingElements) <= CARD_BYTE_BUDGET) return wrap(workingElements);
+    let largestIdx = -1;
+    let largestLen = 0;
+    for (let i = 0; i < textBlockRanges.length; i++) {
+      const range2 = textBlockRanges[i];
+      const el2 = workingElements[range2.markdownElIdx];
+      const len = el2?.content?.length ?? 0;
+      if (len > largestLen) {
+        largestLen = len;
+        largestIdx = i;
+      }
+    }
+    if (largestIdx === -1) break;
+    const range = textBlockRanges[largestIdx];
+    const el = workingElements[range.markdownElIdx];
+    if (!el?.content) break;
+    const HEAD_TAIL_BUDGET = CARD_BYTE_BUDGET;
+    const headLen = Math.min(TEXT_HEAD_CHARS, el.content.length);
+    const tailLen = Math.min(TEXT_TAIL_CHARS, el.content.length - headLen);
+    const head = el.content.slice(0, headLen);
+    const tail = el.content.slice(el.content.length - tailLen);
+    const dropped = el.content.length - headLen - tailLen;
+    const truncated = dropped > 0 ? `${head}
+
+_\u2026 ${dropped} \u5B57\u5DF2\u6298\u53E0\uFF08\u4FDD\u7559\u9996\u5C3E\uFF09\u2026_
+
+${tail}` : el.content;
+    workingElements[range.markdownElIdx] = { tag: "markdown", content: truncated };
+  }
+  return wrap(workingElements);
 }
 function* groupBlocks(blocks) {
   let toolBuf = [];
@@ -258,9 +345,25 @@ function stopButton(options) {
     behaviors: [{ type: "callback", value }]
   };
 }
-function footerStatus(status) {
-  const text = status === "thinking" ? "\u{1F9E0} \u6B63\u5728\u601D\u8003" : status === "tool_running" ? "\u{1F9F0} \u6B63\u5728\u8C03\u7528\u5DE5\u5177" : "\u270D\uFE0F \u6B63\u5728\u8F93\u51FA";
-  return noteMd(text);
+function footerStatus(status, elapsedMs) {
+  const baseText = status === "thinking" ? "\u{1F9E0} \u6B63\u5728\u601D\u8003" : status === "tool_running" ? "\u{1F9F0} \u6B63\u5728\u8C03\u7528\u5DE5\u5177" : "\u270D\uFE0F \u6B63\u5728\u8F93\u51FA";
+  return noteMd(appendElapsed(baseText, elapsedMs));
+}
+function formatElapsed(ms) {
+  const totalSec = Math.max(0, Math.floor(ms / 1e3));
+  if (totalSec < 60) return `${totalSec} \u79D2`;
+  const totalMin = Math.floor(totalSec / 60);
+  if (totalMin < 60) {
+    const sec = totalSec % 60;
+    return sec > 0 ? `${totalMin} \u5206 ${sec} \u79D2` : `${totalMin} \u5206`;
+  }
+  const hour = Math.floor(totalMin / 60);
+  const min = totalMin % 60;
+  return min > 0 ? `${hour} \u65F6 ${min} \u5206` : `${hour} \u65F6`;
+}
+function appendElapsed(base, ms) {
+  if (typeof ms !== "number" || !Number.isFinite(ms) || ms <= 0) return base;
+  return `${base} \xB7 \u5DF2\u8FD0\u884C ${formatElapsed(ms)}`;
 }
 function summaryText(state) {
   if (state.terminal === "interrupted") return "\u5DF2\u4E2D\u65AD";
@@ -276,6 +379,10 @@ function truncate2(s, max) {
 }
 
 // src/card/text-renderer.ts
+var MARKER_RESERVE = 256;
+var EFFECTIVE_BUDGET = CARD_BYTE_BUDGET - MARKER_RESERVE;
+var TEXT_HEAD_CHARS2 = 800;
+var TEXT_TAIL_CHARS2 = 2400;
 function renderText(state) {
   const parts = [];
   for (const block of state.blocks) {
@@ -292,7 +399,36 @@ function renderText(state) {
   } else if (state.terminal === "running" && state.footer) {
     parts.push(footerLine(state.footer));
   }
-  return parts.join("\n\n");
+  return enforceTextByteBudget(parts.join("\n\n"));
+}
+function enforceTextByteBudget(text) {
+  if (Buffer.byteLength(text, "utf8") <= EFFECTIVE_BUDGET) return text;
+  const parts = text.split("\n\n");
+  let working = parts.join("\n\n");
+  let droppedBytes = 0;
+  while (Buffer.byteLength(working, "utf8") > EFFECTIVE_BUDGET && parts.length > 1) {
+    const removed = parts.pop();
+    if (removed === void 0) break;
+    droppedBytes += Buffer.byteLength(removed, "utf8") + 2;
+    working = parts.join("\n\n");
+  }
+  if (Buffer.byteLength(working, "utf8") > EFFECTIVE_BUDGET) {
+    const head = working.slice(0, TEXT_HEAD_CHARS2);
+    const tail = working.slice(working.length - TEXT_TAIL_CHARS2);
+    const folded = working.length - TEXT_HEAD_CHARS2 - TEXT_TAIL_CHARS2;
+    working = folded > 0 ? `${head}
+
+_\u2026 ${folded} \u5B57\u5DF2\u6298\u53E0\uFF08\u4FDD\u7559\u9996\u5C3E\uFF09\u2026_
+
+${tail}` : working;
+    droppedBytes = Buffer.byteLength(text, "utf8") - Buffer.byteLength(working, "utf8");
+  }
+  if (droppedBytes > 0) {
+    return `${working}
+
+_\u2026 \u5DF2\u622A\u65AD\uFF08${droppedBytes} \u5B57\u8282\u5DF2\u6298\u53E0\uFF09_`;
+  }
+  return working;
 }
 function renderBlock(block) {
   if (block.kind === "text") {
@@ -321,32 +457,49 @@ function closeStreamingText(blocks) {
     (b) => b.kind === "text" && b.streaming ? { ...b, streaming: false } : b
   );
 }
+function withLiveness(state, now, opts = {}) {
+  const base = { ...state, lastEventAt: now };
+  if (opts.clearTool) {
+    delete base.lastToolStartedAt;
+    delete base.currentToolElapsedMs;
+  }
+  return base;
+}
 function reduce(state, evt) {
   switch (evt.type) {
     case "text": {
       const last = state.blocks[state.blocks.length - 1];
       if (last && last.kind === "text" && last.streaming) {
         const next = { ...last, content: last.content + evt.delta };
-        return {
+        return withLiveness(
+          {
+            ...state,
+            blocks: [...state.blocks.slice(0, -1), next],
+            reasoning: { ...state.reasoning, active: false },
+            footer: "streaming"
+          },
+          Date.now()
+        );
+      }
+      return withLiveness(
+        {
           ...state,
-          blocks: [...state.blocks.slice(0, -1), next],
+          blocks: [...state.blocks, { kind: "text", content: evt.delta, streaming: true }],
           reasoning: { ...state.reasoning, active: false },
           footer: "streaming"
-        };
-      }
-      return {
-        ...state,
-        blocks: [...state.blocks, { kind: "text", content: evt.delta, streaming: true }],
-        reasoning: { ...state.reasoning, active: false },
-        footer: "streaming"
-      };
+        },
+        Date.now()
+      );
     }
     case "thinking": {
-      return {
-        ...state,
-        reasoning: { content: state.reasoning.content + evt.delta, active: true },
-        footer: "thinking"
-      };
+      return withLiveness(
+        {
+          ...state,
+          reasoning: { content: state.reasoning.content + evt.delta, active: true },
+          footer: "thinking"
+        },
+        Date.now()
+      );
     }
     case "tool_use": {
       const tool = {
@@ -355,11 +508,22 @@ function reduce(state, evt) {
         input: evt.input,
         status: "running"
       };
+      const now = Date.now();
       return {
-        ...state,
-        blocks: [...closeStreamingText(state.blocks), { kind: "tool", tool }],
-        reasoning: { ...state.reasoning, active: false },
-        footer: "tool_running"
+        ...withLiveness(
+          {
+            ...state,
+            blocks: [...closeStreamingText(state.blocks), { kind: "tool", tool }],
+            reasoning: { ...state.reasoning, active: false },
+            footer: "tool_running"
+          },
+          now
+        ),
+        // Reset any prior tool's elapsed display; the new tool starts the
+        // clock fresh. lastToolStartedAt drives currentToolElapsedMs until
+        // the matching tool_result clears it.
+        lastToolStartedAt: now,
+        currentToolElapsedMs: 0
       };
     }
     case "tool_result": {
@@ -374,49 +538,70 @@ function reduce(state, evt) {
           }
         };
       });
-      return { ...state, blocks };
+      const matching = state.blocks.some(
+        (b) => b.kind === "tool" && b.tool.id === evt.id
+      );
+      return withLiveness({ ...state, blocks }, Date.now(), {
+        clearTool: matching
+      });
     }
     case "error": {
       const terminal = evt.terminationReason === "interrupted" ? "interrupted" : evt.terminationReason === "timeout" ? "idle_timeout" : "error";
-      return {
-        ...state,
-        terminal,
-        errorMsg: terminal === "error" ? evt.message : state.errorMsg,
-        footer: null
-      };
+      return withLiveness(
+        {
+          ...state,
+          terminal,
+          errorMsg: terminal === "error" ? evt.message : state.errorMsg,
+          footer: null
+        },
+        Date.now(),
+        { clearTool: true }
+      );
     }
     case "done": {
       const terminal = evt.terminationReason === "interrupted" ? "interrupted" : evt.terminationReason === "timeout" ? "idle_timeout" : "done";
-      return {
-        ...state,
-        blocks: closeStreamingText(state.blocks),
-        reasoning: { ...state.reasoning, active: false },
-        terminal,
-        footer: null
-      };
+      return withLiveness(
+        {
+          ...state,
+          blocks: closeStreamingText(state.blocks),
+          reasoning: { ...state.reasoning, active: false },
+          terminal,
+          footer: null
+        },
+        Date.now(),
+        { clearTool: true }
+      );
     }
     default:
       return state;
   }
 }
 function markInterrupted(state) {
-  return {
-    ...state,
-    blocks: closeStreamingText(state.blocks),
-    reasoning: { ...state.reasoning, active: false },
-    terminal: "interrupted",
-    footer: null
-  };
+  return withLiveness(
+    {
+      ...state,
+      blocks: closeStreamingText(state.blocks),
+      reasoning: { ...state.reasoning, active: false },
+      terminal: "interrupted",
+      footer: null
+    },
+    Date.now(),
+    { clearTool: true }
+  );
 }
 function finalizeIfRunning(state) {
   if (state.terminal !== "running") return state;
-  return {
-    ...state,
-    blocks: closeStreamingText(state.blocks),
-    reasoning: { ...state.reasoning, active: false },
-    terminal: "done",
-    footer: null
-  };
+  return withLiveness(
+    {
+      ...state,
+      blocks: closeStreamingText(state.blocks),
+      reasoning: { ...state.reasoning, active: false },
+      terminal: "done",
+      footer: null
+    },
+    Date.now(),
+    { clearTool: true }
+  );
 }
 
 // src/core/logger.ts
