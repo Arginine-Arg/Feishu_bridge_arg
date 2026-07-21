@@ -381,8 +381,7 @@ function truncate2(s, max) {
 // src/card/text-renderer.ts
 var MARKER_RESERVE = 256;
 var EFFECTIVE_BUDGET = CARD_BYTE_BUDGET - MARKER_RESERVE;
-var TEXT_HEAD_CHARS2 = 800;
-var TEXT_TAIL_CHARS2 = 2400;
+var TEXT_HEAD_BYTE_BUDGET = 2400;
 function renderText(state) {
   const parts = [];
   for (const block of state.blocks) {
@@ -402,33 +401,55 @@ function renderText(state) {
   return enforceTextByteBudget(parts.join("\n\n"));
 }
 function enforceTextByteBudget(text) {
-  if (Buffer.byteLength(text, "utf8") <= EFFECTIVE_BUDGET) return text;
-  const parts = text.split("\n\n");
-  let working = parts.join("\n\n");
-  let droppedBytes = 0;
-  while (Buffer.byteLength(working, "utf8") > EFFECTIVE_BUDGET && parts.length > 1) {
-    const removed = parts.pop();
-    if (removed === void 0) break;
-    droppedBytes += Buffer.byteLength(removed, "utf8") + 2;
-    working = parts.join("\n\n");
-  }
-  if (Buffer.byteLength(working, "utf8") > EFFECTIVE_BUDGET) {
-    const head = working.slice(0, TEXT_HEAD_CHARS2);
-    const tail = working.slice(working.length - TEXT_TAIL_CHARS2);
-    const folded = working.length - TEXT_HEAD_CHARS2 - TEXT_TAIL_CHARS2;
-    working = folded > 0 ? `${head}
+  const totalBytes = Buffer.byteLength(text, "utf8");
+  if (totalBytes <= EFFECTIVE_BUDGET) return text;
+  const head = utf8Head(text, TEXT_HEAD_BYTE_BUDGET);
+  const headBytes = Buffer.byteLength(head, "utf8");
+  let tail = "";
+  let marker = "";
+  for (let pass = 0; pass < 2; pass += 1) {
+    const tailBytes2 = Buffer.byteLength(tail, "utf8");
+    const droppedBytes = Math.max(0, totalBytes - headBytes - tailBytes2);
+    marker = `_\u2026 ${droppedBytes} \u5B57\u8282\u5DF2\u6298\u53E0\uFF08\u4FDD\u7559\u9996\u5C3E\uFF09\u2026_`;
+    const separatorBytes = Buffer.byteLength(`
 
-_\u2026 ${folded} \u5B57\u5DF2\u6298\u53E0\uFF08\u4FDD\u7559\u9996\u5C3E\uFF09\u2026_
+${marker}
 
-${tail}` : working;
-    droppedBytes = Buffer.byteLength(text, "utf8") - Buffer.byteLength(working, "utf8");
+`, "utf8");
+    const tailBudget = Math.max(0, EFFECTIVE_BUDGET - headBytes - separatorBytes);
+    tail = utf8Tail(text, tailBudget);
   }
-  if (droppedBytes > 0) {
-    return `${working}
+  const tailBytes = Buffer.byteLength(tail, "utf8");
+  marker = `_\u2026 ${Math.max(0, totalBytes - headBytes - tailBytes)} \u5B57\u8282\u5DF2\u6298\u53E0\uFF08\u4FDD\u7559\u9996\u5C3E\uFF09\u2026_`;
+  return `${head}
 
-_\u2026 \u5DF2\u622A\u65AD\uFF08${droppedBytes} \u5B57\u8282\u5DF2\u6298\u53E0\uFF09_`;
+${marker}
+
+${tail}`;
+}
+function utf8Head(input, maxBytes) {
+  let bytes = 0;
+  let out = "";
+  for (const char of input) {
+    const next = Buffer.byteLength(char, "utf8");
+    if (bytes + next > maxBytes) break;
+    out += char;
+    bytes += next;
   }
-  return working;
+  return out;
+}
+function utf8Tail(input, maxBytes) {
+  let bytes = 0;
+  const out = [];
+  const chars = Array.from(input);
+  for (let index = chars.length - 1; index >= 0; index -= 1) {
+    const char = chars[index];
+    const next = Buffer.byteLength(char, "utf8");
+    if (bytes + next > maxBytes) break;
+    out.push(char);
+    bytes += next;
+  }
+  return out.reverse().join("");
 }
 function renderBlock(block) {
   if (block.kind === "text") {

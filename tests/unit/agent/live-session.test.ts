@@ -1,5 +1,5 @@
 import { chmod, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -337,6 +337,7 @@ describe('tmux input framing and snapshots', () => {
 
 const linuxIt = process.platform === 'linux' ? it : it.skip;
 const tmuxIt = process.platform === 'linux' && hasTmux() ? it : it.skip;
+const tmuxAttachIt = process.platform === 'linux' && hasTmux() && hasScript() ? it : it.skip;
 
 describe('LiveSessionPool', () => {
   it('reuses a background process and forwards slash commands through stdin', async () => {
@@ -1418,6 +1419,100 @@ setInterval(() => {}, 1000);
     }
   }, 20_000);
 
+  tmuxAttachIt('survives an attached client disconnect without replacing the agent conversation', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-client-disconnect-test-'));
+    const bin = join(dir, 'fake-tmux-client-disconnect-agent.mjs');
+    const countFile = join(dir, 'starts.txt');
+    const scopeKey = 'client-disconnect-scope';
+    const signature = 'client-disconnect-signature';
+    const { socketPath, sessionName } = liveTmuxIdentity(dir, scopeKey, signature);
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs';
+appendFileSync(${JSON.stringify(countFile)}, 'start\\n');
+process.stdin.setEncoding('utf8');
+let buffer = '';
+let turn = 0;
+process.stdin.on('data', (chunk) => {
+  buffer += chunk;
+  let index;
+  while ((index = buffer.search(/[\\r\\n]/)) !== -1) {
+    const line = buffer.slice(0, index).trim();
+    buffer = buffer.slice(index + 1);
+    if (!line) continue;
+    turn += 1;
+    process.stdout.write('\\x1b[2J\\x1b[H› ' + line + '\\n• reply:' + line + ':turn=' + turn + '\\n›\\n');
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    // Reproduce a user tmux configuration that would otherwise destroy the
+    // last session as soon as its only attached client disconnects.
+    expect(
+      spawnSync('tmux', ['-S', socketPath, '-f', '/dev/null', 'new-session', '-d', '-s', 'seed']).status,
+    ).toBe(0);
+    expect(
+      spawnSync('tmux', ['-S', socketPath, 'set-option', '-g', 'exit-empty', 'off']).status,
+    ).toBe(0);
+    expect(
+      spawnSync('tmux', ['-S', socketPath, 'set-option', '-g', 'destroy-unattached', 'on']).status,
+    ).toBe(0);
+    const pool = new LiveSessionPool();
+    let attached: ReturnType<typeof spawn> | undefined;
+    try {
+      const session = pool.getOrCreate(scopeKey, {
+        command: process.execPath,
+        args: [bin],
+        cwd: dir,
+        signature,
+        tmuxScopeId: scopeKey,
+        usePty: true,
+        backend: 'tmux',
+        idleMs: 250,
+        outputFlushMs: 30,
+        startupTimeoutMs: 1_500,
+      });
+      expect(textOf(await collect(session.run('disconnect-first', 'first', dir).events))).toContain(
+        'reply:first:turn=1',
+      );
+      expect(
+        spawnSync('tmux', ['-S', socketPath, 'show-options', '-t', sessionName, 'destroy-unattached'], {
+          encoding: 'utf8',
+        }).stdout.trim(),
+      ).toBe('destroy-unattached off');
+
+      attached = spawn(
+        'script',
+        ['-q', '-c', `tmux -S ${socketPath} attach -t ${sessionName}`, '/dev/null'],
+        { detached: true, stdio: 'ignore', env: { ...process.env, TERM: 'xterm-256color' } },
+      );
+      await waitForTmuxClient(socketPath, true, 3_000);
+      expect(
+        spawnSync('tmux', ['-S', socketPath, 'detach-client', '-s', sessionName], {
+          stdio: 'ignore',
+        }).status,
+      ).toBe(0);
+      await waitForTmuxClient(socketPath, false, 3_000);
+
+      expect(
+        spawnSync('tmux', ['-S', socketPath, 'has-session', '-t', sessionName], { stdio: 'ignore' }).status,
+      ).toBe(0);
+      expect(textOf(await collect(session.run('disconnect-second', 'second', dir).events))).toBe(
+        '• reply:second:turn=2\n',
+      );
+      expect(await readFile(countFile, 'utf8')).toBe('start\n');
+    } finally {
+      if (attached) terminateAttachClient(attached, 'SIGTERM');
+      await pool.closeAll();
+      spawnSync('tmux', ['-S', socketPath, 'kill-server'], { stdio: 'ignore' });
+    }
+  }, 20_000);
+
   tmuxIt('preserves a Ctrl-C pane and starts the next task in a new window', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-ctrl-c-test-'));
     const bin = join(dir, 'fake-tmux-ctrl-c-agent.mjs');
@@ -1613,6 +1708,61 @@ setInterval(() => {}, 1000);
 
     expect(textOf(events)).toBe(`${expectedLines.join('\n')}\n`);
   }, 15_000);
+
+  tmuxIt('forwards each line once after the prompt rolls beyond 1000 history lines', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-history-roll-test-'));
+    const bin = join(dir, 'fake-tmux-history-roll-agent.mjs');
+    const prompt = 'produce very long report';
+    const expectedLines = Array.from(
+      { length: 1_400 },
+      (_, index) => `• unique progress ${String(index + 1).padStart(4, '0')}`,
+    );
+    const finalAnswer = '• FINAL_COMPLETION_AFTER_HISTORY_ROLL';
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+let draft = '';
+process.stdout.write('› \\n');
+process.stdin.on('data', (chunk) => {
+  for (const char of chunk) {
+    if (char !== '\\r' && char !== '\\n') {
+      draft += char;
+      continue;
+    }
+    if (draft !== ${JSON.stringify(prompt)}) continue;
+    draft = '';
+    process.stdout.write('› ${prompt}\\n' + ${JSON.stringify(expectedLines)}.join('\\n') + '\\n');
+    setTimeout(() => process.stdout.write(${JSON.stringify(`${finalAnswer}\n› \n`)}), 350);
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-history-roll-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-history-roll',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 700,
+      outputFlushMs: 30,
+      startupTimeoutMs: 6_000,
+    });
+
+    const output = textOf(await collect(session.run('tmux-history-roll-run', prompt, dir).events));
+    await pool.closeAll();
+
+    expect(output).toBe(`${expectedLines.join('\n')}\n${finalAnswer}\n`);
+    expect(output.match(/unique progress 0001/g)).toHaveLength(1);
+    expect(output.match(/unique progress 1400/g)).toHaveLength(1);
+    expect(output.match(/FINAL_COMPLETION_AFTER_HISTORY_ROLL/g)).toHaveLength(1);
+  }, 20_000);
 
   tmuxIt('submits a first Chinese prompt and streams every delayed task update', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-first-prompt-test-'));
@@ -2388,6 +2538,41 @@ function interactionsOf(events: AgentEvent[]): Array<Extract<AgentEvent, { type:
 
 function hasTmux(): boolean {
   return spawnSync('tmux', ['-V'], { stdio: 'ignore' }).status === 0;
+}
+
+function hasScript(): boolean {
+  return spawnSync('script', ['--version'], { stdio: 'ignore' }).status === 0;
+}
+
+function terminateAttachClient(
+  child: ReturnType<typeof spawn>,
+  signal: NodeJS.Signals,
+): void {
+  if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
+  try {
+    process.kill(-child.pid, signal);
+  } catch {
+    child.kill(signal);
+  }
+}
+
+async function waitForTmuxClient(
+  socketPath: string,
+  expected: boolean,
+  timeoutMs: number,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const result = spawnSync('tmux', ['-S', socketPath, 'list-clients', '-F', '#{client_pid}'], {
+      encoding: 'utf8',
+    });
+    const attached = result.status === 0 && Boolean(result.stdout.trim());
+    if (attached === expected) return;
+    if (Date.now() >= deadline) {
+      throw new Error(`timed out waiting for tmux client attached=${expected}`);
+    }
+    await testDelay(25);
+  }
 }
 
 function testDelay(ms: number): Promise<void> {

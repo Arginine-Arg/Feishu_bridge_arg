@@ -5,11 +5,7 @@ import { CARD_BYTE_BUDGET } from './run-renderer';
 const MARKER_RESERVE = 256;
 const EFFECTIVE_BUDGET = CARD_BYTE_BUDGET - MARKER_RESERVE;
 
-/** Head / tail size caps when a single text block must be folded. The tail
- * is intentionally larger than the head because the user's most important
- * content is almost always the agent's final summary / conclusion. */
-const TEXT_HEAD_CHARS = 800;
-const TEXT_TAIL_CHARS = 2400;
+const TEXT_HEAD_BYTE_BUDGET = 2400;
 
 /**
  * Render `RunState` as plain markdown text — used in `messageReply: 'text'`
@@ -21,9 +17,8 @@ const TEXT_TAIL_CHARS = 2400;
  *   - No reasoning / thinking output (no place to fold it; would be noise)
  *   - Footer is appended inline at the bottom while running
  *
- * Output is bounded to `EFFECTIVE_BUDGET` bytes by progressively
- * truncating trailing text blocks; each fold appends a marker so the
- * user can tell content was dropped.
+ * Output is bounded to `EFFECTIVE_BUDGET` bytes with a global head/tail
+ * fold. The marker stays in the middle so the final answer remains visible.
  */
 export function renderText(state: RunState): string {
   const parts: string[] = [];
@@ -47,45 +42,55 @@ export function renderText(state: RunState): string {
   return enforceTextByteBudget(parts.join('\n\n'));
 }
 
-/**
- * Truncate the joined text to fit under `EFFECTIVE_BUDGET` by walking
- * backwards through text blocks and trimming their content. Non-text
- * blocks (tool lines / footer / status) are always preserved.
- */
 function enforceTextByteBudget(text: string): string {
-  if (Buffer.byteLength(text, 'utf8') <= EFFECTIVE_BUDGET) return text;
+  const totalBytes = Buffer.byteLength(text, 'utf8');
+  if (totalBytes <= EFFECTIVE_BUDGET) return text;
 
-  // Walk the parts backwards. Drop text parts entirely when they are
-  // the obvious offender; trim trailing whitespace from a still-useful
-  // text part if it alone blows the budget.
-  const parts = text.split('\n\n');
-  let working = parts.join('\n\n');
-  let droppedBytes = 0;
+  const head = utf8Head(text, TEXT_HEAD_BYTE_BUDGET);
+  const headBytes = Buffer.byteLength(head, 'utf8');
+  let tail = '';
+  let marker = '';
 
-  while (Buffer.byteLength(working, 'utf8') > EFFECTIVE_BUDGET && parts.length > 1) {
-    const removed = parts.pop();
-    if (removed === undefined) break;
-    droppedBytes += Buffer.byteLength(removed, 'utf8') + 2; // +2 for \n\n
-    working = parts.join('\n\n');
+  // The marker length changes slightly with the dropped-byte count. Two
+  // passes converge while keeping the serialized markdown below the limit.
+  for (let pass = 0; pass < 2; pass += 1) {
+    const tailBytes = Buffer.byteLength(tail, 'utf8');
+    const droppedBytes = Math.max(0, totalBytes - headBytes - tailBytes);
+    marker = `_… ${droppedBytes} 字节已折叠（保留首尾）…_`;
+    const separatorBytes = Buffer.byteLength(`\n\n${marker}\n\n`, 'utf8');
+    const tailBudget = Math.max(0, EFFECTIVE_BUDGET - headBytes - separatorBytes);
+    tail = utf8Tail(text, tailBudget);
   }
 
-  // If a single text block alone exceeds the budget (rare), use head+tail fold
-  // rather than chopping the tail — the tail is what the user actually cares
-  // about (the agent's final summary).
-  if (Buffer.byteLength(working, 'utf8') > EFFECTIVE_BUDGET) {
-    const head = working.slice(0, TEXT_HEAD_CHARS);
-    const tail = working.slice(working.length - TEXT_TAIL_CHARS);
-    const folded = working.length - TEXT_HEAD_CHARS - TEXT_TAIL_CHARS;
-    working = folded > 0
-      ? `${head}\n\n_… ${folded} 字已折叠（保留首尾）…_\n\n${tail}`
-      : working;
-    droppedBytes = Buffer.byteLength(text, 'utf8') - Buffer.byteLength(working, 'utf8');
-  }
+  const tailBytes = Buffer.byteLength(tail, 'utf8');
+  marker = `_… ${Math.max(0, totalBytes - headBytes - tailBytes)} 字节已折叠（保留首尾）…_`;
+  return `${head}\n\n${marker}\n\n${tail}`;
+}
 
-  if (droppedBytes > 0) {
-    return `${working}\n\n_… 已截断（${droppedBytes} 字节已折叠）_`;
+function utf8Head(input: string, maxBytes: number): string {
+  let bytes = 0;
+  let out = '';
+  for (const char of input) {
+    const next = Buffer.byteLength(char, 'utf8');
+    if (bytes + next > maxBytes) break;
+    out += char;
+    bytes += next;
   }
-  return working;
+  return out;
+}
+
+function utf8Tail(input: string, maxBytes: number): string {
+  let bytes = 0;
+  const out: string[] = [];
+  const chars = Array.from(input);
+  for (let index = chars.length - 1; index >= 0; index -= 1) {
+    const char = chars[index]!;
+    const next = Buffer.byteLength(char, 'utf8');
+    if (bytes + next > maxBytes) break;
+    out.push(char);
+    bytes += next;
+  }
+  return out.reverse().join('');
 }
 
 function renderBlock(block: Block): string {

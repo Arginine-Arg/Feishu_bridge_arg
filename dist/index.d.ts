@@ -114,9 +114,8 @@ declare function renderCard(state: RunState, options?: RunCardRenderOptions): ob
  *   - No reasoning / thinking output (no place to fold it; would be noise)
  *   - Footer is appended inline at the bottom while running
  *
- * Output is bounded to `EFFECTIVE_BUDGET` bytes by progressively
- * truncating trailing text blocks; each fold appends a marker so the
- * user can tell content was dropped.
+ * Output is bounded to `EFFECTIVE_BUDGET` bytes with a global head/tail
+ * fold. The marker stays in the middle so the final answer remains visible.
  */
 declare function renderText(state: RunState): string;
 

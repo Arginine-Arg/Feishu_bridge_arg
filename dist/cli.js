@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.35",
+  version: "0.6.36",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -6377,7 +6377,7 @@ var LiveTerminalSession = class {
   startedAt = 0;
   activeTurnCleanup;
   lastTerminalSnapshot = "";
-  lastTerminalHistory = "";
+  lastTerminalHistory;
   terminalReady = Promise.resolve();
   resolveTerminalReady;
   constructor(opts, onClose = () => {
@@ -6479,7 +6479,15 @@ var LiveTerminalSession = class {
     });
     this.cleaner.setScreenMode(spawned.pty);
     child.stdout.on("data", (chunk) => this.emitData(chunk));
-    child.stderr.on("data", (chunk) => this.emitData(chunk));
+    child.stderr.on("data", (chunk) => {
+      if (spawned.terminal.backend === "tmux") {
+        const helperError = chunk.toString("utf8").trim().split("\n");
+        log.warn("agent-live", "tmux-helper-stderr", {
+          message: helperError.find((line) => line.includes("tmux live helper crashed")) ?? helperError[0]
+        });
+      }
+      this.emitData(chunk);
+    });
     child.on("error", (err) => {
       this.emitter.emit("error", err);
       void this.detach("error").catch(() => {
@@ -6504,8 +6512,8 @@ var LiveTerminalSession = class {
     if (output.mode === "snapshot" && output.text.trim()) {
       this.lastTerminalSnapshot = output.text;
     }
-    if (output.historyText?.trim()) this.lastTerminalHistory = output.historyText;
-    if (!output.text.trim() && !output.terminalText?.trim()) return;
+    if (output.history?.text.trim()) this.lastTerminalHistory = output.history;
+    if (!output.text.trim() && !output.terminalText?.trim() && !output.history?.text.trim()) return;
     this.emitter.emit("data", output);
   }
   write(input) {
@@ -6676,8 +6684,8 @@ var LiveTerminalSession = class {
           suspendIdle();
         }
       }
-      const useHistory = Boolean(event.historyText);
-      const text = useHistory ? event.historyText : sanitizeLiveTurnOutput(event.text, prompt);
+      const useHistory = Boolean(event.history?.text);
+      const text = useHistory ? event.history.text : sanitizeLiveTurnOutput(event.text, prompt);
       const beforeAppendFrame = commandMode && diagFrames < LIVE_DIAG_MAX_FRAMES;
       if (beforeAppendFrame) diagFrames += 1;
       if (!text) {
@@ -6687,7 +6695,7 @@ var LiveTerminalSession = class {
         }
         return;
       }
-      const accepted = event.mode === "snapshot" ? output.replace(text, useHistory) : output.append(text);
+      const accepted = event.mode === "snapshot" ? output.replace(text, useHistory, event.history) : output.append(text);
       if (beforeAppendFrame) {
         log.info("agent-live", "command-output", {
           mode: event.mode,
@@ -6971,6 +6979,7 @@ function shellQuote2(value) {
 }
 var TMUX_BRIDGE_HELPER = String.raw`
 const { spawnSync } = require('node:child_process');
+const { existsSync } = require('node:fs');
 
 const [mode, socketPath, session, requestedTarget, commandBase64, cwd, rows, columns, profile, scope, ownerPid] = process.argv.slice(1);
 const managed = mode === 'managed';
@@ -6978,6 +6987,8 @@ let target = managed ? session + ':0.0' : requestedTarget;
 const commandLine = Buffer.from(commandBase64, 'base64').toString('utf8');
 let closed = false;
 let lastSnapshot = '';
+let lastHistoryPane = '';
+let lastHistoryEnd = -1;
 let inputBuffer = '';
 
 process.on('uncaughtException', (error) => {
@@ -6986,11 +6997,11 @@ process.on('uncaughtException', (error) => {
 });
 
 function tmux(args, options = {}) {
-  return spawnSync('tmux', ['-S', socketPath, ...args], {
+  return spawnSync('tmux', ['-S', socketPath, ...(managed ? ['-f', '/dev/null'] : []), ...args], {
     cwd,
     env: process.env,
     encoding: 'utf8',
-    maxBuffer: 1024 * 1024,
+    maxBuffer: 16 * 1024 * 1024,
     ...options,
   });
 }
@@ -7013,7 +7024,19 @@ function selectedPaneTarget() {
     : session + ':0.0';
 }
 
+function setManagedLifecycleOptions() {
+  const destroyDefault = tmux(['set-option', '-g', 'destroy-unattached', 'off']);
+  if (destroyDefault.status !== 0) writeError('failed to preserve new detached tmux sessions', destroyDefault);
+  const exitUnattached = tmux(['set-option', '-s', 'exit-unattached', 'off']);
+  if (exitUnattached.status !== 0) writeError('failed to preserve detached tmux live server', exitUnattached);
+}
+
 function setPersistentPaneOptions() {
+  if (managed) {
+    setManagedLifecycleOptions();
+    const destroy = tmux(['set-option', '-t', session, 'destroy-unattached', 'off']);
+    if (destroy.status !== 0) writeError('failed to preserve detached tmux live session', destroy);
+  }
   const remain = tmux(['set-window-option', '-t', target, 'remain-on-exit', 'on']);
   if (remain.status !== 0) writeError('failed to preserve tmux live pane', remain);
   const history = tmux(['set-window-option', '-t', target, 'history-limit', '50000']);
@@ -7072,10 +7095,16 @@ function createAgentWindow(initial) {
     return false;
   }
   lastSnapshot = '';
+  lastHistoryPane = '';
+  lastHistoryEnd = -1;
   return true;
 }
 
 if (managed) {
+  // Heal destructive user/server defaults before creating a detached session;
+  // setting only the session option afterwards is too late because tmux may
+  // destroy the new session as soon as new-session -d completes.
+  if (existsSync(socketPath)) setManagedLifecycleOptions();
   const existing = tmux(['has-session', '-t', session], { stdio: 'ignore' });
   if (existing.status === 0) {
     target = selectedPaneTarget();
@@ -7164,12 +7193,25 @@ function sendInput(input) {
 
 function capture() {
   if (closed) return;
-  const available = tmux(['display-message', '-p', '-t', target, '#{pane_id}'], { stdio: 'ignore' });
+  const available = tmux([
+    'display-message',
+    '-p',
+    '-t',
+    target,
+    '#{pane_id}|#{history_size}',
+  ]);
   if (available.status !== 0) {
     closed = true;
     process.exit(0);
   }
-  const result = tmux(['capture-pane', '-p', '-S', '-${TMUX_CAPTURE_HISTORY_LINES}', '-t', target]);
+  const [paneId = '', historySizeRaw = '0'] = available.stdout.trim().split('|');
+  const historySize = Number.parseInt(historySizeRaw, 10) || 0;
+  const canContinue = paneId === lastHistoryPane && lastHistoryEnd >= 0;
+  const requestedStart = canContinue
+    ? Math.min(0, lastHistoryEnd - historySize - 1)
+    : -${TMUX_CAPTURE_HISTORY_LINES};
+  const actualStart = Math.max(requestedStart, -historySize);
+  const result = tmux(['capture-pane', '-p', '-S', String(requestedStart), '-t', target]);
   if (result.status !== 0) {
     writeError('failed to capture tmux live session', result);
     closed = true;
@@ -7182,7 +7224,16 @@ function capture() {
   const history = captured.replace(/\s+$/u, '');
   if (snapshot && snapshot !== lastSnapshot) {
     lastSnapshot = snapshot;
-    const historyFrame = '\x1b]777;arg-bridge-history=' + Buffer.from(history, 'utf8').toString('base64') + '\x07';
+    const lineCount = history ? history.split('\n').length : 0;
+    const historyFramePayload = JSON.stringify({
+      paneId,
+      startLine: historySize + actualStart,
+      endLine: historySize + actualStart + lineCount,
+      text: history,
+    });
+    lastHistoryPane = paneId;
+    lastHistoryEnd = historySize + actualStart + lineCount;
+    const historyFrame = '\x1b]777;arg-bridge-history=' + Buffer.from(historyFramePayload, 'utf8').toString('base64') + '\x07';
     process.stdout.write(historyFrame + '\x1b[2J\x1b[H' + snapshot);
   }
 }
@@ -7355,21 +7406,21 @@ var TerminalOutputCleaner = class {
   screenMode = false;
   lastTerminalSnapshot = "";
   transportCarry = "";
-  lastHistorySnapshot = "";
+  lastHistorySnapshot;
   screen = new VirtualTerminalScreen();
   setScreenMode(enabled) {
     this.screenMode = enabled;
     this.carry = "";
     this.lastTerminalSnapshot = "";
     this.transportCarry = "";
-    this.lastHistorySnapshot = "";
+    this.lastHistorySnapshot = void 0;
     this.screen.reset();
   }
   resetTurn() {
     this.carry = "";
     this.lastTerminalSnapshot = "";
     this.transportCarry = "";
-    this.lastHistorySnapshot = "";
+    this.lastHistorySnapshot = void 0;
     if (this.screenMode) this.screen.reset();
   }
   push(input) {
@@ -7378,14 +7429,18 @@ var TerminalOutputCleaner = class {
       const terminalText = this.screen.snapshot();
       const snapshot = stripKnownLiveNoise(terminalText);
       if (!terminalText.trim() || terminalText === this.lastTerminalSnapshot) {
-        return { mode: "snapshot", text: "" };
+        return {
+          mode: "snapshot",
+          text: "",
+          ...this.lastHistorySnapshot ? { history: this.lastHistorySnapshot } : {}
+        };
       }
       this.lastTerminalSnapshot = terminalText;
       return {
         mode: "snapshot",
         text: snapshot,
         terminalText,
-        ...this.lastHistorySnapshot ? { historyText: this.lastHistorySnapshot } : {}
+        ...this.lastHistorySnapshot ? { history: this.lastHistorySnapshot } : {}
       };
     }
     const combined = this.carry + input;
@@ -7412,15 +7467,32 @@ var TerminalOutputCleaner = class {
         this.transportCarry = combined.slice(start);
         break;
       }
-      this.lastHistorySnapshot = Buffer.from(
+      const decoded = Buffer.from(
         combined.slice(payloadStart, end),
         "base64"
       ).toString("utf8");
+      this.lastHistorySnapshot = parseLiveHistorySnapshot(decoded);
       combined = combined.slice(end + 1);
     }
     return terminal;
   }
 };
+function parseLiveHistorySnapshot(payload) {
+  try {
+    const parsed = JSON.parse(payload);
+    if (typeof parsed.paneId === "string" && typeof parsed.startLine === "number" && Number.isFinite(parsed.startLine) && typeof parsed.endLine === "number" && Number.isFinite(parsed.endLine) && typeof parsed.text === "string") {
+      return {
+        paneId: parsed.paneId,
+        startLine: parsed.startLine,
+        endLine: parsed.endLine,
+        text: parsed.text
+      };
+    }
+  } catch {
+  }
+  const lineCount = payload ? payload.split("\n").length : 0;
+  return { paneId: "", startLine: 0, endLine: lineCount, text: payload };
+}
 function matchingPrefixSuffixLength(input, prefix) {
   const max = Math.min(input.length, prefix.length - 1);
   for (let length = max; length > 0; length -= 1) {
@@ -7599,11 +7671,13 @@ var TurnOutputBuffer = class {
   lastCompleteLine = "";
   snapshotBaseline = "";
   historyBaseline = "";
+  historyPositionBaseline;
   setSnapshotBaseline(snapshot) {
     this.snapshotBaseline = snapshot;
   }
   setHistoryBaseline(snapshot) {
-    this.historyBaseline = snapshot;
+    this.historyBaseline = snapshot?.text ?? "";
+    this.historyPositionBaseline = snapshot;
   }
   append(raw) {
     const compacted = stripPromptMismatchedLiveContent(this.compact(raw), this.promptEcho);
@@ -7618,16 +7692,22 @@ var TurnOutputBuffer = class {
     this.enforceLimit();
     return true;
   }
-  replace(raw, preferPromptAnchor = false) {
+  replace(raw, preferPromptAnchor = false, historyPosition) {
     const hasPromptAnchor = preferPromptAnchor && snapshotHasPromptAnchor(raw, this.promptEcho);
-    const scoped = scopeLiveSnapshotToPrompt(
+    const previousBaseline = preferPromptAnchor ? this.historyBaseline : this.snapshotBaseline;
+    const positionedDelta = preferPromptAnchor && !hasPromptAnchor && historyPosition && this.historyPositionBaseline ? positionedHistoryDelta(this.historyPositionBaseline, historyPosition) : void 0;
+    const scoped = positionedDelta ?? scopeLiveSnapshotToPrompt(
       raw,
       this.promptEcho,
-      preferPromptAnchor ? this.historyBaseline : this.snapshotBaseline,
+      previousBaseline,
       preferPromptAnchor
     );
-    if (preferPromptAnchor) this.historyBaseline = raw;
-    else this.snapshotBaseline = raw;
+    if (preferPromptAnchor) {
+      this.historyBaseline = raw;
+      this.historyPositionBaseline = historyPosition;
+    } else {
+      this.snapshotBaseline = raw;
+    }
     const compacted = stripPromptMismatchedLiveContent(
       this.compact(scoped, true),
       this.promptEcho
@@ -7702,6 +7782,19 @@ var TurnOutputBuffer = class {
     this.pending = `${marker}${trimTail(this.pending, Math.max(0, this.maxChars - marker.length))}`;
   }
 };
+function positionedHistoryDelta(previous, current) {
+  if (!previous.paneId || previous.paneId !== current.paneId) return void 0;
+  if (current.endLine > previous.endLine) {
+    if (previous.endLine <= current.startLine) return current.text;
+    const lines = current.text ? current.text.split("\n") : [];
+    const offset = clamp(previous.endLine - current.startLine, 0, lines.length);
+    return lines.slice(offset).join("\n");
+  }
+  if (current.startLine === previous.startLine && current.endLine === previous.endLine) {
+    return scopeSnapshotDelta(current.text.split("\n"), previous.text);
+  }
+  return void 0;
+}
 function trimTail(value, maxChars) {
   return value.length <= maxChars ? value : value.slice(-maxChars);
 }
@@ -14039,8 +14132,7 @@ var CallbackNonceStore = class {
 // src/card/text-renderer.ts
 var MARKER_RESERVE = 256;
 var EFFECTIVE_BUDGET = CARD_BYTE_BUDGET - MARKER_RESERVE;
-var TEXT_HEAD_CHARS2 = 800;
-var TEXT_TAIL_CHARS2 = 2400;
+var TEXT_HEAD_BYTE_BUDGET = 2400;
 function renderText(state) {
   const parts = [];
   for (const block of state.blocks) {
@@ -14060,33 +14152,55 @@ function renderText(state) {
   return enforceTextByteBudget(parts.join("\n\n"));
 }
 function enforceTextByteBudget(text) {
-  if (Buffer.byteLength(text, "utf8") <= EFFECTIVE_BUDGET) return text;
-  const parts = text.split("\n\n");
-  let working = parts.join("\n\n");
-  let droppedBytes = 0;
-  while (Buffer.byteLength(working, "utf8") > EFFECTIVE_BUDGET && parts.length > 1) {
-    const removed = parts.pop();
-    if (removed === void 0) break;
-    droppedBytes += Buffer.byteLength(removed, "utf8") + 2;
-    working = parts.join("\n\n");
-  }
-  if (Buffer.byteLength(working, "utf8") > EFFECTIVE_BUDGET) {
-    const head = working.slice(0, TEXT_HEAD_CHARS2);
-    const tail = working.slice(working.length - TEXT_TAIL_CHARS2);
-    const folded = working.length - TEXT_HEAD_CHARS2 - TEXT_TAIL_CHARS2;
-    working = folded > 0 ? `${head}
+  const totalBytes = Buffer.byteLength(text, "utf8");
+  if (totalBytes <= EFFECTIVE_BUDGET) return text;
+  const head = utf8Head(text, TEXT_HEAD_BYTE_BUDGET);
+  const headBytes = Buffer.byteLength(head, "utf8");
+  let tail = "";
+  let marker = "";
+  for (let pass = 0; pass < 2; pass += 1) {
+    const tailBytes2 = Buffer.byteLength(tail, "utf8");
+    const droppedBytes = Math.max(0, totalBytes - headBytes - tailBytes2);
+    marker = `_\u2026 ${droppedBytes} \u5B57\u8282\u5DF2\u6298\u53E0\uFF08\u4FDD\u7559\u9996\u5C3E\uFF09\u2026_`;
+    const separatorBytes = Buffer.byteLength(`
 
-_\u2026 ${folded} \u5B57\u5DF2\u6298\u53E0\uFF08\u4FDD\u7559\u9996\u5C3E\uFF09\u2026_
+${marker}
 
-${tail}` : working;
-    droppedBytes = Buffer.byteLength(text, "utf8") - Buffer.byteLength(working, "utf8");
+`, "utf8");
+    const tailBudget = Math.max(0, EFFECTIVE_BUDGET - headBytes - separatorBytes);
+    tail = utf8Tail(text, tailBudget);
   }
-  if (droppedBytes > 0) {
-    return `${working}
+  const tailBytes = Buffer.byteLength(tail, "utf8");
+  marker = `_\u2026 ${Math.max(0, totalBytes - headBytes - tailBytes)} \u5B57\u8282\u5DF2\u6298\u53E0\uFF08\u4FDD\u7559\u9996\u5C3E\uFF09\u2026_`;
+  return `${head}
 
-_\u2026 \u5DF2\u622A\u65AD\uFF08${droppedBytes} \u5B57\u8282\u5DF2\u6298\u53E0\uFF09_`;
+${marker}
+
+${tail}`;
+}
+function utf8Head(input, maxBytes) {
+  let bytes = 0;
+  let out = "";
+  for (const char of input) {
+    const next = Buffer.byteLength(char, "utf8");
+    if (bytes + next > maxBytes) break;
+    out += char;
+    bytes += next;
   }
-  return working;
+  return out;
+}
+function utf8Tail(input, maxBytes) {
+  let bytes = 0;
+  const out = [];
+  const chars = Array.from(input);
+  for (let index = chars.length - 1; index >= 0; index -= 1) {
+    const char = chars[index];
+    const next = Buffer.byteLength(char, "utf8");
+    if (bytes + next > maxBytes) break;
+    out.push(char);
+    bytes += next;
+  }
+  return out.reverse().join("");
 }
 function renderBlock(block) {
   if (block.kind === "text") {

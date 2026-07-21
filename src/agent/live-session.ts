@@ -19,14 +19,20 @@ import {
 export type LiveTerminalInputMode = 'command' | 'control';
 
 type LiveChild = SpawnedProcessByStdio<Writable, Readable, Readable>;
+interface LiveHistorySnapshot {
+  paneId: string;
+  startLine: number;
+  endLine: number;
+  text: string;
+}
 type LiveOutput = {
   mode: 'append' | 'snapshot';
   /** Cleaned content eligible for delivery to the chat. */
   text: string;
   /** Terminal snapshot before presentation-only chrome is stripped. */
   terminalText?: string;
-  /** Bounded tmux history used to recover output above the visible pane. */
-  historyText?: string;
+  /** Positioned tmux history used to recover output above the visible pane. */
+  history?: LiveHistorySnapshot;
 };
 export type LiveTerminalBackend = 'auto' | 'tmux' | 'pty' | 'pipe';
 
@@ -139,7 +145,7 @@ export class LiveTerminalSession {
   private startedAt = 0;
   private activeTurnCleanup: (() => void) | undefined;
   private lastTerminalSnapshot = '';
-  private lastTerminalHistory = '';
+  private lastTerminalHistory: LiveHistorySnapshot | undefined;
   private terminalReady: Promise<void> = Promise.resolve();
   private resolveTerminalReady: (() => void) | undefined;
 
@@ -260,7 +266,15 @@ export class LiveTerminalSession {
     this.cleaner.setScreenMode(spawned.pty);
 
     child.stdout.on('data', (chunk: Buffer) => this.emitData(chunk));
-    child.stderr.on('data', (chunk: Buffer) => this.emitData(chunk));
+    child.stderr.on('data', (chunk: Buffer) => {
+      if (spawned.terminal.backend === 'tmux') {
+        const helperError = chunk.toString('utf8').trim().split('\n');
+        log.warn('agent-live', 'tmux-helper-stderr', {
+          message: helperError.find((line) => line.includes('tmux live helper crashed')) ?? helperError[0],
+        });
+      }
+      this.emitData(chunk);
+    });
     child.on('error', (err) => {
       this.emitter.emit('error', err);
       void this.detach('error').catch(() => {});
@@ -285,8 +299,8 @@ export class LiveTerminalSession {
     if (output.mode === 'snapshot' && output.text.trim()) {
       this.lastTerminalSnapshot = output.text;
     }
-    if (output.historyText?.trim()) this.lastTerminalHistory = output.historyText;
-    if (!output.text.trim() && !output.terminalText?.trim()) return;
+    if (output.history?.text.trim()) this.lastTerminalHistory = output.history;
+    if (!output.text.trim() && !output.terminalText?.trim() && !output.history?.text.trim()) return;
     this.emitter.emit('data', output);
   }
 
@@ -486,12 +500,12 @@ export class LiveTerminalSession {
           suspendIdle();
         }
       }
-      const useHistory = Boolean(event.historyText);
+      const useHistory = Boolean(event.history?.text);
       // Tmux history must retain prompt echoes until TurnOutputBuffer scopes
       // the capture to the latest turn. Current-pane snapshots are already
       // scoped through their rolling baseline and can be sanitized eagerly.
       const text = useHistory
-        ? event.historyText!
+        ? event.history!.text
         : sanitizeLiveTurnOutput(event.text, prompt);
       const beforeAppendFrame = commandMode && diagFrames < LIVE_DIAG_MAX_FRAMES;
       if (beforeAppendFrame) diagFrames += 1;
@@ -505,7 +519,7 @@ export class LiveTerminalSession {
         return;
       }
       const accepted = event.mode === 'snapshot'
-        ? output.replace(text, useHistory)
+        ? output.replace(text, useHistory, event.history)
         : output.append(text);
       if (beforeAppendFrame) {
         log.info('agent-live', 'command-output', {
@@ -850,6 +864,7 @@ function shellQuote(value: string): string {
 
 const TMUX_BRIDGE_HELPER = String.raw`
 const { spawnSync } = require('node:child_process');
+const { existsSync } = require('node:fs');
 
 const [mode, socketPath, session, requestedTarget, commandBase64, cwd, rows, columns, profile, scope, ownerPid] = process.argv.slice(1);
 const managed = mode === 'managed';
@@ -857,6 +872,8 @@ let target = managed ? session + ':0.0' : requestedTarget;
 const commandLine = Buffer.from(commandBase64, 'base64').toString('utf8');
 let closed = false;
 let lastSnapshot = '';
+let lastHistoryPane = '';
+let lastHistoryEnd = -1;
 let inputBuffer = '';
 
 process.on('uncaughtException', (error) => {
@@ -865,11 +882,11 @@ process.on('uncaughtException', (error) => {
 });
 
 function tmux(args, options = {}) {
-  return spawnSync('tmux', ['-S', socketPath, ...args], {
+  return spawnSync('tmux', ['-S', socketPath, ...(managed ? ['-f', '/dev/null'] : []), ...args], {
     cwd,
     env: process.env,
     encoding: 'utf8',
-    maxBuffer: 1024 * 1024,
+    maxBuffer: 16 * 1024 * 1024,
     ...options,
   });
 }
@@ -892,7 +909,19 @@ function selectedPaneTarget() {
     : session + ':0.0';
 }
 
+function setManagedLifecycleOptions() {
+  const destroyDefault = tmux(['set-option', '-g', 'destroy-unattached', 'off']);
+  if (destroyDefault.status !== 0) writeError('failed to preserve new detached tmux sessions', destroyDefault);
+  const exitUnattached = tmux(['set-option', '-s', 'exit-unattached', 'off']);
+  if (exitUnattached.status !== 0) writeError('failed to preserve detached tmux live server', exitUnattached);
+}
+
 function setPersistentPaneOptions() {
+  if (managed) {
+    setManagedLifecycleOptions();
+    const destroy = tmux(['set-option', '-t', session, 'destroy-unattached', 'off']);
+    if (destroy.status !== 0) writeError('failed to preserve detached tmux live session', destroy);
+  }
   const remain = tmux(['set-window-option', '-t', target, 'remain-on-exit', 'on']);
   if (remain.status !== 0) writeError('failed to preserve tmux live pane', remain);
   const history = tmux(['set-window-option', '-t', target, 'history-limit', '50000']);
@@ -951,10 +980,16 @@ function createAgentWindow(initial) {
     return false;
   }
   lastSnapshot = '';
+  lastHistoryPane = '';
+  lastHistoryEnd = -1;
   return true;
 }
 
 if (managed) {
+  // Heal destructive user/server defaults before creating a detached session;
+  // setting only the session option afterwards is too late because tmux may
+  // destroy the new session as soon as new-session -d completes.
+  if (existsSync(socketPath)) setManagedLifecycleOptions();
   const existing = tmux(['has-session', '-t', session], { stdio: 'ignore' });
   if (existing.status === 0) {
     target = selectedPaneTarget();
@@ -1043,12 +1078,25 @@ function sendInput(input) {
 
 function capture() {
   if (closed) return;
-  const available = tmux(['display-message', '-p', '-t', target, '#{pane_id}'], { stdio: 'ignore' });
+  const available = tmux([
+    'display-message',
+    '-p',
+    '-t',
+    target,
+    '#{pane_id}|#{history_size}',
+  ]);
   if (available.status !== 0) {
     closed = true;
     process.exit(0);
   }
-  const result = tmux(['capture-pane', '-p', '-S', '-${TMUX_CAPTURE_HISTORY_LINES}', '-t', target]);
+  const [paneId = '', historySizeRaw = '0'] = available.stdout.trim().split('|');
+  const historySize = Number.parseInt(historySizeRaw, 10) || 0;
+  const canContinue = paneId === lastHistoryPane && lastHistoryEnd >= 0;
+  const requestedStart = canContinue
+    ? Math.min(0, lastHistoryEnd - historySize - 1)
+    : -${TMUX_CAPTURE_HISTORY_LINES};
+  const actualStart = Math.max(requestedStart, -historySize);
+  const result = tmux(['capture-pane', '-p', '-S', String(requestedStart), '-t', target]);
   if (result.status !== 0) {
     writeError('failed to capture tmux live session', result);
     closed = true;
@@ -1061,7 +1109,16 @@ function capture() {
   const history = captured.replace(/\s+$/u, '');
   if (snapshot && snapshot !== lastSnapshot) {
     lastSnapshot = snapshot;
-    const historyFrame = '\x1b]777;arg-bridge-history=' + Buffer.from(history, 'utf8').toString('base64') + '\x07';
+    const lineCount = history ? history.split('\n').length : 0;
+    const historyFramePayload = JSON.stringify({
+      paneId,
+      startLine: historySize + actualStart,
+      endLine: historySize + actualStart + lineCount,
+      text: history,
+    });
+    lastHistoryPane = paneId;
+    lastHistoryEnd = historySize + actualStart + lineCount;
+    const historyFrame = '\x1b]777;arg-bridge-history=' + Buffer.from(historyFramePayload, 'utf8').toString('base64') + '\x07';
     process.stdout.write(historyFrame + '\x1b[2J\x1b[H' + snapshot);
   }
 }
@@ -1274,7 +1331,7 @@ class TerminalOutputCleaner {
   private screenMode = false;
   private lastTerminalSnapshot = '';
   private transportCarry = '';
-  private lastHistorySnapshot = '';
+  private lastHistorySnapshot: LiveHistorySnapshot | undefined;
   private readonly screen = new VirtualTerminalScreen();
 
   setScreenMode(enabled: boolean): void {
@@ -1282,7 +1339,7 @@ class TerminalOutputCleaner {
     this.carry = '';
     this.lastTerminalSnapshot = '';
     this.transportCarry = '';
-    this.lastHistorySnapshot = '';
+    this.lastHistorySnapshot = undefined;
     this.screen.reset();
   }
 
@@ -1290,7 +1347,7 @@ class TerminalOutputCleaner {
     this.carry = '';
     this.lastTerminalSnapshot = '';
     this.transportCarry = '';
-    this.lastHistorySnapshot = '';
+    this.lastHistorySnapshot = undefined;
     if (this.screenMode) this.screen.reset();
   }
 
@@ -1300,7 +1357,11 @@ class TerminalOutputCleaner {
       const terminalText = this.screen.snapshot();
       const snapshot = stripKnownLiveNoise(terminalText);
       if (!terminalText.trim() || terminalText === this.lastTerminalSnapshot) {
-        return { mode: 'snapshot', text: '' };
+        return {
+          mode: 'snapshot',
+          text: '',
+          ...(this.lastHistorySnapshot ? { history: this.lastHistorySnapshot } : {}),
+        };
       }
       this.lastTerminalSnapshot = terminalText;
       return {
@@ -1308,7 +1369,7 @@ class TerminalOutputCleaner {
         text: snapshot,
         terminalText,
         ...(this.lastHistorySnapshot
-          ? { historyText: this.lastHistorySnapshot }
+          ? { history: this.lastHistorySnapshot }
           : {}),
       };
     }
@@ -1339,15 +1400,41 @@ class TerminalOutputCleaner {
         this.transportCarry = combined.slice(start);
         break;
       }
-      this.lastHistorySnapshot = Buffer.from(
+      const decoded = Buffer.from(
         combined.slice(payloadStart, end),
         'base64',
       ).toString('utf8');
+      this.lastHistorySnapshot = parseLiveHistorySnapshot(decoded);
       combined = combined.slice(end + 1);
     }
 
     return terminal;
   }
+}
+
+function parseLiveHistorySnapshot(payload: string): LiveHistorySnapshot {
+  try {
+    const parsed = JSON.parse(payload) as Partial<LiveHistorySnapshot>;
+    if (
+      typeof parsed.paneId === 'string' &&
+      typeof parsed.startLine === 'number' &&
+      Number.isFinite(parsed.startLine) &&
+      typeof parsed.endLine === 'number' &&
+      Number.isFinite(parsed.endLine) &&
+      typeof parsed.text === 'string'
+    ) {
+      return {
+        paneId: parsed.paneId,
+        startLine: parsed.startLine,
+        endLine: parsed.endLine,
+        text: parsed.text,
+      };
+    }
+  } catch {
+    // v0.6.35 helpers sent the raw history text in this frame.
+  }
+  const lineCount = payload ? payload.split('\n').length : 0;
+  return { paneId: '', startLine: 0, endLine: lineCount, text: payload };
 }
 
 function matchingPrefixSuffixLength(input: string, prefix: string): number {
@@ -1545,6 +1632,7 @@ class TurnOutputBuffer {
   private lastCompleteLine = '';
   private snapshotBaseline = '';
   private historyBaseline = '';
+  private historyPositionBaseline: LiveHistorySnapshot | undefined;
 
   constructor(
     private readonly maxChars: number,
@@ -1556,8 +1644,9 @@ class TurnOutputBuffer {
     this.snapshotBaseline = snapshot;
   }
 
-  setHistoryBaseline(snapshot: string): void {
-    this.historyBaseline = snapshot;
+  setHistoryBaseline(snapshot: LiveHistorySnapshot | undefined): void {
+    this.historyBaseline = snapshot?.text ?? '';
+    this.historyPositionBaseline = snapshot;
   }
 
   append(raw: string): boolean {
@@ -1575,16 +1664,29 @@ class TurnOutputBuffer {
     return true;
   }
 
-  replace(raw: string, preferPromptAnchor = false): boolean {
+  replace(
+    raw: string,
+    preferPromptAnchor = false,
+    historyPosition?: LiveHistorySnapshot,
+  ): boolean {
     const hasPromptAnchor = preferPromptAnchor && snapshotHasPromptAnchor(raw, this.promptEcho);
-    const scoped = scopeLiveSnapshotToPrompt(
+    const previousBaseline = preferPromptAnchor ? this.historyBaseline : this.snapshotBaseline;
+    const positionedDelta =
+      preferPromptAnchor && !hasPromptAnchor && historyPosition && this.historyPositionBaseline
+        ? positionedHistoryDelta(this.historyPositionBaseline, historyPosition)
+        : undefined;
+    const scoped = positionedDelta ?? scopeLiveSnapshotToPrompt(
       raw,
       this.promptEcho,
-      preferPromptAnchor ? this.historyBaseline : this.snapshotBaseline,
+      previousBaseline,
       preferPromptAnchor,
     );
-    if (preferPromptAnchor) this.historyBaseline = raw;
-    else this.snapshotBaseline = raw;
+    if (preferPromptAnchor) {
+      this.historyBaseline = raw;
+      this.historyPositionBaseline = historyPosition;
+    } else {
+      this.snapshotBaseline = raw;
+    }
     const compacted = stripPromptMismatchedLiveContent(
       this.compact(scoped, true),
       this.promptEcho,
@@ -1661,6 +1763,25 @@ class TurnOutputBuffer {
     const marker = `[live output segment truncated to ${this.maxChars} chars; latest output retained]\n`;
     this.pending = `${marker}${trimTail(this.pending, Math.max(0, this.maxChars - marker.length))}`;
   }
+}
+
+function positionedHistoryDelta(
+  previous: LiveHistorySnapshot,
+  current: LiveHistorySnapshot,
+): string | undefined {
+  if (!previous.paneId || previous.paneId !== current.paneId) return undefined;
+  if (current.endLine > previous.endLine) {
+    if (previous.endLine <= current.startLine) return current.text;
+    const lines = current.text ? current.text.split('\n') : [];
+    const offset = clamp(previous.endLine - current.startLine, 0, lines.length);
+    return lines.slice(offset).join('\n');
+  }
+  if (current.startLine === previous.startLine && current.endLine === previous.endLine) {
+    return scopeSnapshotDelta(current.text.split('\n'), previous.text);
+  }
+  // A clear-screen redraw can shrink the positioned content. Let the normal
+  // prompt/snapshot scoper decide whether the replacement is substantive.
+  return undefined;
 }
 
 function trimTail(value: string, maxChars: number): string {
