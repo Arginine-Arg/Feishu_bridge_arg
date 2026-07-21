@@ -30,7 +30,22 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Test
+        if: runner.os != 'Windows'
         run: pnpm test
+
+      - name: Test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          pnpm test *> vitest.log
+          $testExit = $LASTEXITCODE
+          Get-Content vitest.log
+          if ($testExit -ne 0) {
+            $tail = (Get-Content vitest.log | Select-Object -Last 100) -join "`n"
+            $escaped = $tail.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Output "::error file=.github,title=Windows Vitest failure::$escaped"
+            exit $testExit
+          }
 
       - name: Typecheck
         run: pnpm typecheck
