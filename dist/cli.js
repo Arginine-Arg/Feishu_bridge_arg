@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.38",
+  version: "0.6.39",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -7211,15 +7211,19 @@ function capture() {
     '-p',
     '-t',
     target,
-    '#{pane_id}|#{history_size}',
+    '#{pane_id}|#{history_size}|#{pane_width}|#{pane_height}',
   ]);
   if (available.status !== 0) {
     closed = true;
     process.exit(0);
   }
-  const [paneId = '', historySizeRaw = '0'] = available.stdout.trim().split('|');
+  const [paneId = '', historySizeRaw = '0', paneWidth = '', paneHeight = ''] = available.stdout.trim().split('|');
   const historySize = Number.parseInt(historySizeRaw, 10) || 0;
-  const canContinue = paneId === lastHistoryPane && lastHistoryEnd >= 0;
+  // Attaching a differently sized client can reflow tmux history without
+  // changing pane_id. Treat each layout as a distinct positioned stream so
+  // stale line coordinates cannot skip output after attach/detach.
+  const historyIdentity = paneId + '@' + paneWidth + 'x' + paneHeight;
+  const canContinue = historyIdentity === lastHistoryPane && lastHistoryEnd >= 0;
   const requestedStart = canContinue
     ? Math.min(0, lastHistoryEnd - historySize - 1)
     : -${TMUX_CAPTURE_HISTORY_LINES};
@@ -7239,12 +7243,12 @@ function capture() {
     lastSnapshot = snapshot;
     const lineCount = history ? history.split('\n').length : 0;
     const historyFramePayload = JSON.stringify({
-      paneId,
+      paneId: historyIdentity,
       startLine: historySize + actualStart,
       endLine: historySize + actualStart + lineCount,
       text: history,
     });
-    lastHistoryPane = paneId;
+    lastHistoryPane = historyIdentity;
     lastHistoryEnd = historySize + actualStart + lineCount;
     const historyFrame = '\x1b]777;arg-bridge-history=' + Buffer.from(historyFramePayload, 'utf8').toString('base64') + '\x07';
     process.stdout.write(historyFrame + '\x1b[2J\x1b[H' + snapshot);
