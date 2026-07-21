@@ -41,7 +41,11 @@ jobs:
           $testExit = $LASTEXITCODE
           Get-Content vitest.log
           if ($testExit -ne 0) {
-            $tail = (Get-Content vitest.log | Select-Object -Last 100) -join "`n"
+            $tail = (Get-Content vitest.log | Select-Object -Last 150) -join "`n"
+            $tail = $tail -replace "$([char]27)\[[0-9;?]*[ -/]*[@-~]", ''
+            if ($tail.Length -gt 12000) {
+              $tail = $tail.Substring($tail.Length - 12000)
+            }
             $escaped = $tail.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
             Write-Output "::error file=.github,title=Windows Vitest failure::$escaped"
             exit $testExit
