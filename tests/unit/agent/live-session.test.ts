@@ -691,7 +691,11 @@ setInterval(() => {}, 1000);
       startupTimeoutMs: 500,
     });
 
-    const blocked = await collect(session.run('startup-interaction-run', 'pending task', dir).events);
+    const startupRun = session.run('startup-interaction-run', 'pending task', dir);
+    // Reproduce a busy bridge/runtime that does not subscribe immediately.
+    // Startup prompts emitted in this window must still block task submission.
+    await testDelay(200);
+    const blocked = await collect(startupRun.events);
     expect(interactionsOf(blocked)).toEqual([
       expect.objectContaining({ type: 'interactive', phase: 'startup' }),
     ]);

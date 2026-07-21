@@ -87,6 +87,7 @@ const TMUX_HISTORY_FRAME_PREFIX = '\x1B]777;arg-bridge-history=';
 const TMUX_READY_FRAME = '\x1B]777;arg-bridge-ready\x07';
 const LIVE_DIAG_PREVIEW_CHARS = 800;
 const LIVE_DIAG_MAX_FRAMES = 8;
+const MAX_PENDING_TERMINAL_FRAMES = 64;
 
 export class LiveSessionPool {
   private readonly sessions = new Map<string, LiveTerminalSession>();
@@ -144,6 +145,7 @@ export class LiveTerminalSession {
   private primed = false;
   private startedAt = 0;
   private activeTurnCleanup: (() => void) | undefined;
+  private readonly pendingTerminalOutput: LiveOutput[] = [];
   private lastTerminalSnapshot = '';
   private lastTerminalHistory: LiveHistorySnapshot | undefined;
   private terminalReady: Promise<void> = Promise.resolve();
@@ -301,6 +303,16 @@ export class LiveTerminalSession {
     }
     if (output.history?.text.trim()) this.lastTerminalHistory = output.history;
     if (!output.text.trim() && !output.terminalText?.trim() && !output.history?.text.trim()) return;
+    if (this.emitter.listenerCount('data') === 0) {
+      this.pendingTerminalOutput.push(output);
+      if (this.pendingTerminalOutput.length > MAX_PENDING_TERMINAL_FRAMES) {
+        this.pendingTerminalOutput.splice(
+          0,
+          this.pendingTerminalOutput.length - MAX_PENDING_TERMINAL_FRAMES,
+        );
+      }
+      return;
+    }
     this.emitter.emit('data', output);
   }
 
@@ -592,6 +604,7 @@ export class LiveTerminalSession {
     this.emitter.on('data', onData);
     this.emitter.once('exit', onExit);
     this.emitter.once('error', onError);
+    for (const event of this.pendingTerminalOutput.splice(0)) onData(event);
     try {
       arm(startupTimeoutMs + inputGraceMs);
       await this.waitForInputReady(inputGraceMs);

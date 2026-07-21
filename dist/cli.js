@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.36",
+  version: "0.6.37",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -6326,6 +6326,7 @@ var TMUX_HISTORY_FRAME_PREFIX = "\x1B]777;arg-bridge-history=";
 var TMUX_READY_FRAME = "\x1B]777;arg-bridge-ready\x07";
 var LIVE_DIAG_PREVIEW_CHARS = 800;
 var LIVE_DIAG_MAX_FRAMES = 8;
+var MAX_PENDING_TERMINAL_FRAMES = 64;
 var LiveSessionPool = class {
   sessions = /* @__PURE__ */ new Map();
   getOrCreate(key, command) {
@@ -6376,6 +6377,7 @@ var LiveTerminalSession = class {
   primed = false;
   startedAt = 0;
   activeTurnCleanup;
+  pendingTerminalOutput = [];
   lastTerminalSnapshot = "";
   lastTerminalHistory;
   terminalReady = Promise.resolve();
@@ -6514,6 +6516,16 @@ var LiveTerminalSession = class {
     }
     if (output.history?.text.trim()) this.lastTerminalHistory = output.history;
     if (!output.text.trim() && !output.terminalText?.trim() && !output.history?.text.trim()) return;
+    if (this.emitter.listenerCount("data") === 0) {
+      this.pendingTerminalOutput.push(output);
+      if (this.pendingTerminalOutput.length > MAX_PENDING_TERMINAL_FRAMES) {
+        this.pendingTerminalOutput.splice(
+          0,
+          this.pendingTerminalOutput.length - MAX_PENDING_TERMINAL_FRAMES
+        );
+      }
+      return;
+    }
     this.emitter.emit("data", output);
   }
   write(input) {
@@ -6763,6 +6775,7 @@ var LiveTerminalSession = class {
     this.emitter.on("data", onData);
     this.emitter.once("exit", onExit);
     this.emitter.once("error", onError);
+    for (const event of this.pendingTerminalOutput.splice(0)) onData(event);
     try {
       arm(startupTimeoutMs + inputGraceMs);
       await this.waitForInputReady(inputGraceMs);
