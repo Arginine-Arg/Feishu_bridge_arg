@@ -688,7 +688,9 @@ setInterval(() => {}, 1000);
       backend: 'pty',
       idleMs: 40,
       outputFlushMs: 10,
-      startupTimeoutMs: 500,
+      // Windows runners can take well over 500ms to start a fresh Node ESM
+      // process. Production allows 15s, so keep this test realistic.
+      startupTimeoutMs: 2_000,
     });
 
     const startupRun = session.run('startup-interaction-run', 'pending task', dir);
