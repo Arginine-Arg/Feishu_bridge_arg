@@ -688,9 +688,9 @@ setInterval(() => {}, 1000);
       backend: 'pty',
       idleMs: 40,
       outputFlushMs: 10,
-      // Windows runners can take well over 500ms to start a fresh Node ESM
+      // Windows runners can take several seconds to start and schedule a fresh Node ESM
       // process. Production allows 15s, so keep this test realistic.
-      startupTimeoutMs: 2_000,
+      startupTimeoutMs: 5_000,
     });
 
     const startupRun = session.run('startup-interaction-run', 'pending task', dir);
@@ -710,7 +710,7 @@ setInterval(() => {}, 1000);
 
     expect(await readFile(inputTrace, 'utf8')).toBe('\x1B[B\r');
     expect(textOf(accepted)).toBe('startup-choice-accepted\n');
-  });
+  }, 15_000);
 
   it('returns a live status fallback when Codex does not render /status output', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-status-fallback-test-'));

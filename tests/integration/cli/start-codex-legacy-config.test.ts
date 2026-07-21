@@ -27,7 +27,7 @@ const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
   vi.clearAllMocks();
   await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
-});
+}, 30_000);
 
 describe('Codex startup compatibility with legacy binary metadata', () => {
   it('starts past profile loading when an older Codex profile only has binaryPath', async () => {
