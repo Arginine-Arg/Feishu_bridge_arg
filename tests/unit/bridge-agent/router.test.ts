@@ -66,6 +66,11 @@ describe('BridgeAgent', () => {
         'Would you like to run the following command?\n1. Yes, proceed\n2. Yes, and do not ask again\n3. No',
       ),
     ).toBe('picker');
+    expect(
+      agent.classifyOutput(
+        '请回复是否采用这个选择？\n• Edited abstract.md (+2 -2)\n• 已按你的要求修改：最终摘要已完成。',
+      ),
+    ).not.toBe('picker');
     expect(agent.classifyOutput('Tests passed.')).toBe('final');
   });
 });

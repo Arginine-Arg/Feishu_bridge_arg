@@ -10,6 +10,7 @@ import {
   LiveSessionPool,
   LiveTerminalSession,
   isLiveTerminalBusy,
+  isLiveTerminalInteraction,
   parseLiveControlSequence,
   encodeTmuxInputFrame,
   liveTmuxIdentity,
@@ -62,6 +63,44 @@ describe('LiveTerminalSession prime slot', () => {
 });
 
 describe('tmux input framing and snapshots', () => {
+  it('requires terminal controls instead of interaction words in ordinary output', () => {
+    const academicOutput = [
+      '• 我会按你的要求调整摘要，请选择更直接的表达。',
+      '• 这需要判断模型是否考虑通路程序？请回复审阅意见。',
+      '• Edited stablefate_aaai_abstract_bilingual_2026-07-20.md (+2 -2)',
+      '• 已按你的要求修改：英文摘要为 179 words，中文摘要已同步。',
+    ].join('\n');
+    const stalePicker = [
+      'Select Model and Effort',
+      '1. gpt-5.5',
+      'Press enter to confirm or esc to go back',
+      '• 已完成正文修改，最终答复如下。',
+    ].join('\n');
+
+    expect(isLiveTerminalInteraction(academicOutput)).toBe(false);
+    expect(isLiveTerminalInteraction(stalePicker)).toBe(false);
+    expect(
+      isLiveTerminalInteraction(
+        [
+          'Select Model and Effort',
+          '1. gpt-5.5',
+          '2. gpt-5.4',
+          'Press enter to confirm or esc to go back',
+        ].join('\n'),
+      ),
+    ).toBe(true);
+    expect(
+      isLiveTerminalInteraction(
+        [
+          'WARNING: Claude Code running in Bypass Permissions mode',
+          '1. No, exit',
+          '2. Yes, I accept',
+          'Enter to confirm · Esc to cancel',
+        ].join('\n'),
+      ),
+    ).toBe(true);
+  });
+
   it('frames each tmux write independently so pipe chunks cannot merge prompts', () => {
     expect(encodeTmuxInputFrame('aha\r')).toBe('YWhhDQ==\n');
     expect(encodeTmuxInputFrame('nihao\r')).toBe('bmloYW8N\n');
@@ -710,6 +749,58 @@ setInterval(() => {}, 1000);
 
     expect(await readFile(inputTrace, 'utf8')).toBe('\x1B[B\r');
     expect(textOf(accepted)).toBe('startup-choice-accepted\n');
+  }, 15_000);
+
+  it('submits a pending task when startup history only contains interaction words', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-startup-prose-test-'));
+    const bin = join(dir, 'fake-startup-prose-agent.mjs');
+    const inputTrace = join(dir, 'input-trace.txt');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+import { appendFileSync, writeFileSync } from 'node:fs';
+writeFileSync(${JSON.stringify(inputTrace)}, '');
+process.stdin.setEncoding('utf8');
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+process.stdout.write([
+  '• 我会按你的要求修改，请选择更直接的表述。',
+  '• 现有方法是否考虑 pathway programs？请回复审阅意见。',
+  '• Edited abstract.md (+2 -2)',
+  '• 已按你的要求完成上一项修改。',
+].join('\\n') + '\\n');
+process.stdin.on('data', (chunk) => {
+  appendFileSync(${JSON.stringify(inputTrace)}, chunk);
+  if (chunk.includes('continue current task') && chunk.includes('\\r')) {
+    process.stdout.write('• 已按你的要求修改：最终答复完整可见。\\n');
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('startup-prose-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'startup-prose',
+      usePty: true,
+      backend: 'pty',
+      idleMs: 60,
+      outputFlushMs: 10,
+      startupTimeoutMs: 5_000,
+    });
+
+    const events = await collect(
+      session.run('startup-prose-run', 'continue current task', dir).events,
+    );
+    await pool.closeAll();
+
+    expect(interactionsOf(events)).toEqual([]);
+    expect(await readFile(inputTrace, 'utf8')).toContain('continue current task\r');
+    expect(textOf(events)).toBe('• 已按你的要求修改：最终答复完整可见。\n');
   }, 15_000);
 
   it('returns a live status fallback when Codex does not render /status output', async () => {

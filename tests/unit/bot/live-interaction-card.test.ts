@@ -382,6 +382,32 @@ describe('liveInteractionCard', () => {
         'agent',
       ),
     ).toBeUndefined();
+    expect(
+      liveInteractionCardForText(
+        [
+          '• 我会按你的要求做两处结构调整，请选择更直接的表述。',
+          '• 现有模型是否考虑 pathway programs？请回复审阅意见。',
+          '• Edited stablefate_aaai_abstract_bilingual_2026-07-20.md (+2 -2)',
+          '7 -Word count: 180 words',
+          '7 +Word count: 179 words',
+          '• 已按你的要求修改：英文与中文摘要已经同步完成。',
+        ].join('\n'),
+        () => 'tok',
+        'live',
+      ),
+    ).toBeUndefined();
+    expect(
+      liveInteractionCardForText(
+        [
+          'Select Model and Effort',
+          '1. gpt-5.5',
+          'Press enter to confirm or esc to go back',
+          '• 已完成任务，这是最终答复。',
+        ].join('\n'),
+        () => 'tok',
+        'live',
+      ),
+    ).toBeUndefined();
   });
 });
 

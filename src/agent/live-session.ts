@@ -11,6 +11,10 @@ import {
 } from '../platform/spawn';
 import type { AgentEvent, AgentRun } from './types';
 import {
+  isLiveInteractionPromptStart,
+  isStructuredLiveInteraction,
+} from './live-interaction-detection';
+import {
   tmuxAttachCommand,
   type TmuxOwnership,
   type TmuxPaneTarget,
@@ -2159,14 +2163,7 @@ function isLivePickerCommand(input: string): boolean {
 }
 
 function isLivePickerStartLine(line: string): boolean {
-  const trimmed = line.trim();
-  return (
-    /\bselect\s+(?:a\s+)?(?:model|reasoning|option|permission|session)\b/i.test(trimmed) ||
-    /\bchoose an action\b/i.test(trimmed) ||
-    /\bcommand requires approval\b/i.test(trimmed) ||
-    /\bresume previous conversation\b/i.test(trimmed) ||
-    /^skills?$/i.test(trimmed)
-  );
+  return isLiveInteractionPromptStart(line.trim());
 }
 
 function isLikelyLivePickerOutput(text: string): boolean {
@@ -2439,16 +2436,8 @@ function isLiveTerminalReady(input: string): boolean {
   });
 }
 
-function isLiveTerminalInteraction(input: string): boolean {
-  const recent = cleanTerminalOutput(input).split('\n').slice(-40).join('\n');
-  return (
-    /claude\s+code\s+running\s+in\s+bypass\s+permissions\s+mode[\s\S]*\b(?:no,?\s+exit|yes,?\s+i\s+accept)\b/i.test(recent) ||
-    /\bupdate\s+available\b[\s\S]*\bskip(?:\s+until\s+next\s+version)?\b/i.test(recent) ||
-    /\b(?:select\s+(?:a\s+)?(?:model|reasoning|option|permission|session)|choose\s+an\s+action|command\s+requires?\s+(?:approval|confirmation)|resume\s+previous\s+conversation)\b/i.test(recent) ||
-    /\b(?:do\s+you\s+want\s+to|would\s+you\s+like\s+to|shall\s+i|waiting\s+for\s+(?:user|your)\s+(?:input|confirmation)|requires?\s+(?:approval|confirmation))\b/i.test(recent) ||
-    /\b(?:y\/n|yes\/no|no\/yes)\b|\[(?:y|yes)\/(?:n|no)\]|(?:press\s+)?enter\s+to\s+(?:confirm|continue)|esc\s+to\s+(?:go\s+back|cancel)/i.test(recent) ||
-    /(?:请选择|请(?:输入|回复).*(?:选项|编号|是|否)|等待(?:你|用户)(?:的)?(?:输入|选择|确认)|是否.*[？?]|(?:按下?|点击)回车(?:键)?.*确认)/i.test(recent)
-  );
+export function isLiveTerminalInteraction(input: string): boolean {
+  return isStructuredLiveInteraction(cleanTerminalOutput(input));
 }
 
 function stripCompactNoise(input: string, patterns: string[]): string {

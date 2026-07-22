@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { isStructuredLiveInteraction } from '../agent/live-interaction-detection';
 import { log } from '../core/logger';
 import { BRIDGE_AGENT_SYSTEM_PROMPT } from './prompt';
 
@@ -191,10 +192,7 @@ function isValidDecision(
 }
 
 function looksLikeTerminalPicker(text: string): boolean {
-  return /(?:select|choose|press\s+enter|y\/n|请选择|是否.*[？?]|等待.*(?:选择|确认))/iu.test(text) ||
-    /\b(?:do you want to|would you like to|shall i|requires? (?:approval|confirmation)|needs? (?:approval|confirmation))\b[\s\S]{0,240}\b(?:proceed|continue|run|execute|apply|approve|allow)\b/iu.test(
-      text,
-    );
+  return isStructuredLiveInteraction(text);
 }
 
 function sha256(value: string): string {

@@ -30,6 +30,11 @@ import {
 } from '../card/dispatcher';
 import { consumeInteractivePrompts, PROMPT_CALLBACK_ACTION } from '../card/interactive-prompt';
 import { isLiveControlInput } from '../agent/live-session';
+import {
+  isBareAgentConfirmation,
+  isStructuredLiveInteraction,
+  liveInteractionSurface,
+} from '../agent/live-interaction-detection';
 import { CallbackAuth } from '../card/callback-auth';
 import { CallbackNonceStore } from '../card/callback-store';
 import { renderCard } from '../card/run-renderer';
@@ -1844,7 +1849,13 @@ async function sendFinalReply(input: {
       'sent',
       outboundLogFields(
         input,
-        isLiveInteractionCardForText(body, input.skipLiveInteractionSignatures) ? 'live-interaction-card' : 'card',
+        isLiveInteractionCardForText(
+          body,
+          input.liveInteractionInputRoute ?? 'live',
+          input.skipLiveInteractionSignatures,
+        )
+          ? 'live-interaction-card'
+          : 'card',
         body,
         result,
       ),
@@ -2342,24 +2353,10 @@ function liveInputModeForBatch(
   return nativeCommand.trimStart().startsWith('/') ? 'command' : 'control';
 }
 
-function looksLikeAgentPicker(text: string): boolean {
+function looksLikeAgentPicker(text: string, allowBareConfirmation = false): boolean {
   return (
-    isClaudeBypassPermissionsPrompt(text) ||
-    isCodexUpdatePrompt(text) ||
-    /press\s+enter\s+to\s+(?:confirm|continue)/i.test(text) ||
-    /esc\s+to\s+(?:go\s+back|cancel)/i.test(text) ||
-    /\b(?:y\/n|yes\/no|no\/yes)\b/i.test(text) ||
-    /\bselect\s+(?:a\s+)?(?:model|option)\b/i.test(text) ||
-    /\bchoose an action\b/i.test(text) ||
-    /(?:^|\n)\s*(?:[›>▸*+-]\s*)?\d{1,2}[.)、:\s-]+\S/u.test(text) &&
-      /\b(?:choose|select|enable|disable|skills?|model|effort|action)\b/i.test(text) ||
-    /(?:↑|↓|up\/down|arrow keys?|use .*arrows?)/i.test(text) ||
-    /(?:do you want to|would you like to|shall i|waiting for (?:user|your) (?:input|confirmation)|requires? (?:approval|confirmation)|approve|allow).*(?:\?|proceed|continue|run|execute|apply|approve|allow)/i.test(
-      text,
-    ) ||
-    /(?:请选择|请(?:输入|回复).*(?:选项|编号|是|否)|等待(?:你|用户)(?:的)?(?:输入|选择|确认)|是否.*[？?]|(?:按下?|点击)回车(?:键)?.*确认)/i.test(
-      text,
-    )
+    isStructuredLiveInteraction(text) ||
+    (allowBareConfirmation && isBareAgentConfirmation(text))
   );
 }
 
@@ -2384,8 +2381,13 @@ interface NumberedInteractionChoice {
   state?: string;
 }
 
-function detectLiveInteraction(text: string): LiveInteractionPrompt | undefined {
-  const prompt = recentLiveInteractionPrompt(text);
+function detectLiveInteraction(
+  text: string,
+  allowBareConfirmation = false,
+): LiveInteractionPrompt | undefined {
+  const surface = liveInteractionSurface(text);
+  if (!surface && !(allowBareConfirmation && isBareAgentConfirmation(text))) return undefined;
+  const prompt = surface ?? recentLiveInteractionPrompt(text);
   const numberedChoices = extractNumberedInteractionChoices(prompt);
   const displayPrompt = formatLiveInteractionPrompt(prompt, numberedChoices);
   const buttons: LiveInteractionButton[] = [];
@@ -2433,11 +2435,11 @@ function detectLiveInteraction(text: string): LiveInteractionPrompt | undefined 
   ) {
     add('esc', 'esc');
   }
-  if (hasNumberedChoices && looksLikeAgentPicker(prompt)) {
+  if (hasNumberedChoices && looksLikeAgentPicker(prompt, allowBareConfirmation)) {
     add('enter', 'enter');
     add('esc', 'esc');
   }
-  if (buttons.length === 0 && looksLikeAgentPicker(prompt)) {
+  if (buttons.length === 0 && looksLikeAgentPicker(prompt, allowBareConfirmation)) {
     add('up', 'up');
     add('down', 'down');
     add('enter', 'enter');
@@ -2452,6 +2454,8 @@ function detectLiveInteraction(text: string): LiveInteractionPrompt | undefined 
 }
 
 function recentLiveInteractionPrompt(text: string): string {
+  const surface = liveInteractionSurface(text);
+  if (surface) return surface;
   const lines = text
     .split('\n')
     .map((line) => line.trim())
@@ -2624,8 +2628,9 @@ export function liveInteractionCardForText(
   skipSignatures?: ReadonlySet<string>,
 ): object | undefined {
   if (!signCallback) return undefined;
-  if (!looksLikeAgentPicker(text)) return undefined;
-  const interaction = detectLiveInteraction(text);
+  const allowBareConfirmation = inputRoute === 'agent';
+  if (!looksLikeAgentPicker(text, allowBareConfirmation)) return undefined;
+  const interaction = detectLiveInteraction(text, allowBareConfirmation);
   if (!interaction || skipSignatures?.has(interaction.signature)) return undefined;
   return liveInteractionCard(interaction, signCallback, inputRoute);
 }
@@ -2645,10 +2650,12 @@ export function renderLiveAwareReplyCard(
 
 function isLiveInteractionCardForText(
   text: string,
+  inputRoute: LiveInteractionInputRoute,
   skipSignatures?: ReadonlySet<string>,
 ): boolean {
-  if (!looksLikeAgentPicker(text)) return false;
-  const interaction = detectLiveInteraction(text);
+  const allowBareConfirmation = inputRoute === 'agent';
+  if (!looksLikeAgentPicker(text, allowBareConfirmation)) return false;
+  const interaction = detectLiveInteraction(text, allowBareConfirmation);
   return Boolean(interaction && !skipSignatures?.has(interaction.signature));
 }
 
