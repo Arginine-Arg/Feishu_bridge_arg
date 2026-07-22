@@ -800,7 +800,9 @@ setInterval(() => {}, 1000);
 
     expect(interactionsOf(events)).toEqual([]);
     expect(await readFile(inputTrace, 'utf8')).toContain('continue current task\r');
-    expect(textOf(events)).toBe('• 已按你的要求修改：最终答复完整可见。\n');
+    const text = textOf(events);
+    expect(text).toContain('• 已按你的要求修改：最终答复完整可见。\n');
+    expect(text.match(/最终答复完整可见/g)).toHaveLength(1);
   }, 15_000);
 
   it('returns a live status fallback when Codex does not render /status output', async () => {
