@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   TmuxBindingController,
+  captureTmuxPaneTail,
   isSafeTmuxSocket,
   listTmuxAgentPanes,
   discoverTmuxSockets,
@@ -41,6 +42,42 @@ describe.skipIf(!live)('tmux control', () => {
     expect(panes.map((pane) => pane.agentKind).sort()).toEqual(['claude', 'codex']);
     expect(panes.every((pane) => pane.ownership === 'external')).toBe(true);
     expect(panes.every((pane) => pane.attachCommand.includes(`tmux -S ${socket}`))).toBe(true);
+  });
+
+  it('captures only the requested trailing lines from a known tmux pane', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'tmux-control-tail-'));
+    const socket = join(root, 'tmux.sock');
+    cleanup.push(async () => {
+      spawnSync('tmux', ['-S', socket, 'kill-server'], { stdio: 'ignore' });
+      await rm(root, { recursive: true, force: true });
+    });
+    expect(
+      spawnSync('tmux', [
+        '-S', socket,
+        'new-session',
+        '-d',
+        '-s',
+        'tail',
+        '-c',
+        root,
+        'sh',
+        '-c',
+        "printf 'one\\ntwo\\nthree\\n'; sleep 30",
+      ]).status,
+    ).toBe(0);
+
+    const tail = captureTmuxPaneTail(
+      {
+        socketPath: socket,
+        target: 'tail:0.0',
+        attachCommand: `tmux -S ${socket} attach -t tail`,
+        ownership: 'managed',
+      },
+      2,
+    );
+
+    expect(tail.requestedLines).toBe(2);
+    expect(tail.text).toBe('two\nthree');
   });
 
   it('persists and revalidates one external pane binding without killing it', async () => {

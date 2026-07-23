@@ -240,6 +240,7 @@ arg-bridge profile export <name> --include-secrets --yes
 | `/config` | 调整展示偏好、访问控制和 lark-cli 身份策略 |
 | `/model` | 选择模型；Codex 直接使用 CLI 原生模型/reasoning 选项，并把结果同步到当前 profile |
 | `/session [status\|live\|turn]` | 查看终端执行状态。tmux/live 为默认模式；`turn` 仅作为兼容回退 |
+| `/tmux tail [N]` | 仅管理员：显示当前 scope tmux pane 的末尾 `N` 行（默认 27，最大 200） |
 | `/invite user @某人` | 允许用户私聊使用 bot |
 | `/invite admin @某人` | 添加访问控制管理员 |
 | `/invite group` | 允许当前群使用 bot |

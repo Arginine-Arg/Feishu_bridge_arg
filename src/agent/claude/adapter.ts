@@ -9,7 +9,13 @@ import { mergeProcessEnv, spawnProcess, type SpawnedProcessByStdio } from '../..
 import { buildBridgeSystemPrompt } from '../bridge-system-prompt';
 import { buildLarkChannelEnv, type LarkChannelEnvContext } from '../lark-channel-env';
 import { LiveSessionPool, type LiveTerminalBackend } from '../live-session';
-import { TmuxBindingController, type AgentTmuxControl } from '../tmux-control';
+import {
+  captureTmuxPaneTail,
+  TmuxBindingController,
+  type AgentTmuxControl,
+  type TmuxBindingStatus,
+  type TmuxTerminalTarget,
+} from '../tmux-control';
 import { checkAgentAvailability, type AgentAvailability } from '../preflight';
 import {
   CLAUDE_DEFAULT_PERMISSION_MODE,
@@ -73,26 +79,32 @@ export class ClaudeAdapter implements AgentAdapter {
         if (removed) await this.liveSessions.close(scopeId, 'tmux-unbind');
         return removed;
       },
-      status: async (scopeId) => {
-        const binding = await this.tmuxBindings.status(scopeId);
-        if (binding.state !== 'none') return binding;
-        const terminal = this.liveSessions.terminalInfo(scopeId);
-        if (!terminal?.attachCommand || !terminal.socketPath || !terminal.target) return binding;
-        return {
-          state: terminal.ownership === 'external' ? 'external' as const : 'managed' as const,
-          terminal: {
-            socketPath: terminal.socketPath,
-            target: terminal.target,
-            attachCommand: terminal.attachCommand,
-            ownership: terminal.ownership ?? 'managed',
-          },
-        };
+      status: (scopeId) => this.tmuxStatus(scopeId),
+      tail: async (scopeId, lineCount) => {
+        const terminal = tmuxTerminalForStatus(await this.tmuxStatus(scopeId));
+        return captureTmuxPaneTail(terminal, lineCount);
       },
     };
   }
 
   setBotIdentity(identity: AgentBotIdentity): void {
     this.botIdentity = identity;
+  }
+
+  private async tmuxStatus(scopeId: string): Promise<TmuxBindingStatus> {
+    const binding = await this.tmuxBindings.status(scopeId);
+    if (binding.state !== 'none') return binding;
+    const terminal = this.liveSessions.terminalInfo(scopeId);
+    if (!terminal?.attachCommand || !terminal.socketPath || !terminal.target) return binding;
+    return {
+      state: terminal.ownership === 'external' ? 'external' as const : 'managed' as const,
+      terminal: {
+        socketPath: terminal.socketPath,
+        target: terminal.target,
+        attachCommand: terminal.attachCommand,
+        ownership: terminal.ownership ?? 'managed',
+      },
+    };
   }
 
   async isAvailable(): Promise<boolean> {
@@ -279,6 +291,22 @@ export class ClaudeAdapter implements AgentAdapter {
     });
     return session.run(opts.runId, opts.prompt, opts.cwd, opts.liveInputMode);
   }
+}
+
+function tmuxTerminalForStatus(status: TmuxBindingStatus): TmuxTerminalTarget {
+  if (status.state === 'invalid') {
+    throw new Error(status.message ?? '当前 tmux 绑定已失效');
+  }
+  if (status.terminal) return status.terminal;
+  if (status.target) {
+    return {
+      socketPath: status.target.socketPath,
+      target: status.target.paneId,
+      attachCommand: status.target.attachCommand,
+      ownership: status.target.ownership,
+    };
+  }
+  throw new Error('当前 scope 尚未创建或绑定 tmux terminal');
 }
 
 function createEventStream(

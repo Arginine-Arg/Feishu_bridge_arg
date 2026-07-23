@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.40",
+  version: "0.6.41",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -6015,6 +6015,7 @@ import {
 import { basename as basename4, dirname as dirname14, isAbsolute as isAbsolute2, join as join16, resolve as resolve2 } from "path";
 import { tmpdir as tmpdir2 } from "os";
 var BINDINGS_FILE = "tmux-bindings.json";
+var MAX_TMUX_TAIL_CHARS = 12e3;
 var TMUX_FORMAT = [
   "#{session_name}",
   "#{window_index}",
@@ -6198,6 +6199,38 @@ function isSafeTmuxSocket(path) {
 }
 function tmuxTargetKey(target) {
   return `${target.socketPath}::${target.paneId}`;
+}
+function captureTmuxPaneTail(terminal, requestedLines) {
+  if (!Number.isSafeInteger(requestedLines) || requestedLines <= 0) {
+    throw new Error("\u884C\u6570\u5FC5\u987B\u662F\u6B63\u6574\u6570");
+  }
+  if (!isSafeTmuxSocket(terminal.socketPath)) {
+    throw new Error("tmux socket \u4E0D\u5B58\u5728\u6216\u4E0D\u5B89\u5168");
+  }
+  const result = spawnProcessSync(
+    "tmux",
+    ["-S", terminal.socketPath, "capture-pane", "-p", "-S", `-${requestedLines}`, "-t", terminal.target],
+    { encoding: "utf8", maxBuffer: 1024 * 1024 }
+  );
+  if (result.status !== 0) {
+    const detail = typeof result.stderr === "string" ? result.stderr.trim() : result.error?.message;
+    throw new Error(`\u65E0\u6CD5\u8BFB\u53D6\u5F53\u524D tmux pane${detail ? `\uFF1A${detail}` : ""}`);
+  }
+  const output = typeof result.stdout === "string" ? result.stdout : result.stdout?.toString("utf8") ?? "";
+  return {
+    terminal,
+    requestedLines,
+    text: normalizeTmuxTail(output, requestedLines)
+  };
+}
+function normalizeTmuxTail(output, requestedLines) {
+  const cleaned = output.replace(/\r/g, "").replace(/\x1B(?:\][\s\S]*?(?:\x07|\x1B\\)|\[[0-?]*[ -/]*[@-~]|[@-_])/gu, "").replace(/[\u0000-\u0008\u000B-\u001F\u007F]/gu, "");
+  const lines = cleaned.split("\n");
+  while (lines.at(-1) === "") lines.pop();
+  const tail = lines.slice(-requestedLines).join("\n").replace(/[ \t]+$/gmu, "");
+  if (tail.length <= MAX_TMUX_TAIL_CHARS) return tail;
+  return `\u2026\uFF08\u8F93\u51FA\u8FC7\u957F\uFF0C\u4EC5\u663E\u793A\u6700\u540E ${MAX_TMUX_TAIL_CHARS} \u4E2A\u5B57\u7B26\uFF09
+${tail.slice(-MAX_TMUX_TAIL_CHARS)}`;
 }
 function resolveSocketSelector(selector) {
   const trimmed = selector.trim();
@@ -8492,25 +8525,30 @@ var ClaudeAdapter = class {
         if (removed) await this.liveSessions.close(scopeId, "tmux-unbind");
         return removed;
       },
-      status: async (scopeId) => {
-        const binding = await this.tmuxBindings.status(scopeId);
-        if (binding.state !== "none") return binding;
-        const terminal = this.liveSessions.terminalInfo(scopeId);
-        if (!terminal?.attachCommand || !terminal.socketPath || !terminal.target) return binding;
-        return {
-          state: terminal.ownership === "external" ? "external" : "managed",
-          terminal: {
-            socketPath: terminal.socketPath,
-            target: terminal.target,
-            attachCommand: terminal.attachCommand,
-            ownership: terminal.ownership ?? "managed"
-          }
-        };
+      status: (scopeId) => this.tmuxStatus(scopeId),
+      tail: async (scopeId, lineCount) => {
+        const terminal = tmuxTerminalForStatus(await this.tmuxStatus(scopeId));
+        return captureTmuxPaneTail(terminal, lineCount);
       }
     };
   }
   setBotIdentity(identity) {
     this.botIdentity = identity;
+  }
+  async tmuxStatus(scopeId) {
+    const binding = await this.tmuxBindings.status(scopeId);
+    if (binding.state !== "none") return binding;
+    const terminal = this.liveSessions.terminalInfo(scopeId);
+    if (!terminal?.attachCommand || !terminal.socketPath || !terminal.target) return binding;
+    return {
+      state: terminal.ownership === "external" ? "external" : "managed",
+      terminal: {
+        socketPath: terminal.socketPath,
+        target: terminal.target,
+        attachCommand: terminal.attachCommand,
+        ownership: terminal.ownership ?? "managed"
+      }
+    };
   }
   async isAvailable() {
     return (await this.checkAvailability()).ok;
@@ -8668,6 +8706,21 @@ var ClaudeAdapter = class {
     return session.run(opts.runId, opts.prompt, opts.cwd, opts.liveInputMode);
   }
 };
+function tmuxTerminalForStatus(status) {
+  if (status.state === "invalid") {
+    throw new Error(status.message ?? "\u5F53\u524D tmux \u7ED1\u5B9A\u5DF2\u5931\u6548");
+  }
+  if (status.terminal) return status.terminal;
+  if (status.target) {
+    return {
+      socketPath: status.target.socketPath,
+      target: status.target.paneId,
+      attachCommand: status.target.attachCommand,
+      ownership: status.target.ownership
+    };
+  }
+  throw new Error("\u5F53\u524D scope \u5C1A\u672A\u521B\u5EFA\u6216\u7ED1\u5B9A tmux terminal");
+}
 function createEventStream(child, stderrChunks, getError) {
   const events = new AsyncEventQueue();
   if (!child.pid) {
@@ -9048,25 +9101,30 @@ var CodexAdapter = class {
         if (removed) await this.liveSessions.close(scopeId, "tmux-unbind");
         return removed;
       },
-      status: async (scopeId) => {
-        const binding = await this.tmuxBindings.status(scopeId);
-        if (binding.state !== "none") return binding;
-        const terminal = this.liveSessions.terminalInfo(scopeId);
-        if (!terminal?.attachCommand || !terminal.socketPath || !terminal.target) return binding;
-        return {
-          state: terminal.ownership === "external" ? "external" : "managed",
-          terminal: {
-            socketPath: terminal.socketPath,
-            target: terminal.target,
-            attachCommand: terminal.attachCommand,
-            ownership: terminal.ownership ?? "managed"
-          }
-        };
+      status: (scopeId) => this.tmuxStatus(scopeId),
+      tail: async (scopeId, lineCount) => {
+        const terminal = tmuxTerminalForStatus2(await this.tmuxStatus(scopeId));
+        return captureTmuxPaneTail(terminal, lineCount);
       }
     };
   }
   setBotIdentity(identity) {
     this.botIdentity = identity;
+  }
+  async tmuxStatus(scopeId) {
+    const binding = await this.tmuxBindings.status(scopeId);
+    if (binding.state !== "none") return binding;
+    const terminal = this.liveSessions.terminalInfo(scopeId);
+    if (!terminal?.attachCommand || !terminal.socketPath || !terminal.target) return binding;
+    return {
+      state: terminal.ownership === "external" ? "external" : "managed",
+      terminal: {
+        socketPath: terminal.socketPath,
+        target: terminal.target,
+        attachCommand: terminal.attachCommand,
+        ownership: terminal.ownership ?? "managed"
+      }
+    };
   }
   async isAvailable() {
     return (await this.checkAvailability()).ok;
@@ -9252,6 +9310,21 @@ var CodexAdapter = class {
     return session.run(opts.runId, opts.prompt, opts.cwd, opts.liveInputMode);
   }
 };
+function tmuxTerminalForStatus2(status) {
+  if (status.state === "invalid") {
+    throw new Error(status.message ?? "\u5F53\u524D tmux \u7ED1\u5B9A\u5DF2\u5931\u6548");
+  }
+  if (status.terminal) return status.terminal;
+  if (status.target) {
+    return {
+      socketPath: status.target.socketPath,
+      target: status.target.paneId,
+      attachCommand: status.target.attachCommand,
+      ownership: status.target.ownership
+    };
+  }
+  throw new Error("\u5F53\u524D scope \u5C1A\u672A\u521B\u5EFA\u6216\u7ED1\u5B9A tmux terminal");
+}
 function createEventStream2(child, stderrChunks, getError, getStopReason) {
   const events = new AsyncEventQueue();
   const translator = new CodexJsonlTranslator();
@@ -10406,7 +10479,7 @@ function helpCard(agentName = "Agent") {
         "- `/model` \u2014 \u9009\u62E9\u6A21\u578B\uFF1BCodex \u4F7F\u7528 CLI \u539F\u751F\u6A21\u578B\u548C reasoning \u9009\u9879\u5E76\u540C\u6B65\u5230 profile",
         "- `/status` \u2014 \u5F53\u524D\u72B6\u6001",
         "- `/session` \u2014 \u67E5\u770B\u6216\u5207\u6362\u540E\u53F0 agent session \u6A21\u5F0F",
-        "- `/tmux list|bind <\u7F16\u53F7\u6216 pane id>|status|unbind` \u2014 \u7BA1\u7406\u5458\u67E5\u770B\u548C\u7ED1\u5B9A\u672C\u673A tmux agent pane",
+        "- `/tmux list|bind <\u7F16\u53F7\u6216 pane id>|status|tail [N]|unbind` \u2014 \u7BA1\u7406\u5458\u7BA1\u7406 tmux\uFF1B`tail` \u9ED8\u8BA4\u663E\u793A\u5F53\u524D pane \u672B\u5C3E 27 \u884C",
         "- `/sendfile <path>` \u2014 \u7BA1\u7406\u5458\u76F4\u63A5\u56DE\u590D\u5F53\u524D\u6D88\u606F\u53D1\u9001\u5DE5\u4F5C\u76EE\u5F55\u5185\u7684\u6587\u4EF6",
         "- `/stop` \u2014 \u7ED3\u675F\u5F53\u524D\u6B63\u5728\u8DD1\u7684\u4EFB\u52A1\uFF08\u4E5F\u53EF\u70B9\u5361\u7247\u5E95\u90E8 \u23F9 \u7EC8\u6B62 \u6309\u94AE\uFF09",
         "- `/stop comment:<scopeHash>` \u2014 \u7BA1\u7406\u5458\u505C\u6B62\u4E91\u6587\u6863\u8BC4\u8BBA\u4EFB\u52A1",
@@ -11530,6 +11603,8 @@ async function fetchKnownChats(channel) {
 
 // src/commands/index.ts
 var RESUME_CANDIDATE_TTL_MS = 10 * 60 * 1e3;
+var DEFAULT_TMUX_TAIL_LINES = 27;
+var MAX_TMUX_TAIL_LINES = 200;
 var resumeCandidates = /* @__PURE__ */ new Map();
 var AUDIT_SAFE_COMMAND_REPLY = "\u547D\u4EE4\u5DF2\u5904\u7406\u3002";
 var RESUME_APPLIED_REPLY = "\u5DF2\u5B8C\u6210\uFF0C\u8BF7\u7EE7\u7EED\u53D1\u9001\u4E0B\u4E00\u6761\u6D88\u606F\u3002";
@@ -12243,7 +12318,8 @@ async function handleTmux(args, ctx) {
     await reply(ctx, "\u5F53\u524D agent \u4E0D\u652F\u6301 tmux \u63A7\u5236\u3002");
     return;
   }
-  const [action = "status", ...rest] = args.trim().split(/\s+/).filter(Boolean);
+  const [rawAction = "status", ...rest] = args.trim().split(/\s+/).filter(Boolean);
+  const action = rawAction.toLowerCase();
   const value = rest.join(" ");
   try {
     if (action === "list") {
@@ -12290,6 +12366,25 @@ async function handleTmux(args, ctx) {
       await reply(ctx, formatTmuxStatus(status) || "\u5F53\u524D scope \u5C1A\u672A\u521B\u5EFA\u6216\u7ED1\u5B9A tmux terminal\u3002");
       return;
     }
+    if (action === "tail") {
+      const lineCount = parseTmuxTailLineCount(rest);
+      if (lineCount === void 0) {
+        await reply(ctx, `\u7528\u6CD5\uFF1A\`/tmux tail [1-${MAX_TMUX_TAIL_LINES}]\`\uFF08\u9ED8\u8BA4 ${DEFAULT_TMUX_TAIL_LINES} \u884C\uFF09`);
+        return;
+      }
+      if (!tmux.tail) {
+        await reply(ctx, "\u5F53\u524D agent \u4E0D\u652F\u6301\u8BFB\u53D6 tmux \u672B\u5C3E\u8F93\u51FA\u3002");
+        return;
+      }
+      const tail = await tmux.tail(ctx.scope, lineCount);
+      const content = tail.text || "\uFF08\u5F53\u524D pane \u6682\u65E0\u53EF\u89C1\u8F93\u51FA\uFF09";
+      await reply(
+        ctx,
+        `\u5F53\u524D tmux \u672B\u5C3E\uFF08\u6700\u591A ${tail.requestedLines} \u884C\uFF09\uFF1A
+${fencedCodeBlock(content)}`
+      );
+      return;
+    }
     if (action === "unbind") {
       if (ctx.activeRuns.get(ctx.scope)) {
         await reply(ctx, "\u5F53\u524D scope \u6709\u8FD0\u884C\u4E2D\u7684\u4EFB\u52A1\uFF0C\u8BF7\u5148 `/stop`\uFF0C\u7B49\u5F85\u4EFB\u52A1\u7ED3\u675F\u540E\u518D\u89E3\u7ED1\u3002");
@@ -12302,10 +12397,23 @@ async function handleTmux(args, ctx) {
       );
       return;
     }
-    await reply(ctx, "\u7528\u6CD5\uFF1A`/tmux [list|bind <\u7F16\u53F7\u6216 id>|status|unbind]`");
+    await reply(ctx, `\u7528\u6CD5\uFF1A\`/tmux [list|bind <\u7F16\u53F7\u6216 id>|status|tail [1-${MAX_TMUX_TAIL_LINES}]|unbind]\``);
   } catch (err) {
     await reply(ctx, `tmux \u64CD\u4F5C\u5931\u8D25\uFF1A${err instanceof Error ? err.message : String(err)}`);
   }
+}
+function parseTmuxTailLineCount(parts) {
+  if (parts.length === 0) return DEFAULT_TMUX_TAIL_LINES;
+  if (parts.length !== 1 || !/^\d+$/u.test(parts[0])) return void 0;
+  const parsed = Number.parseInt(parts[0], 10);
+  return parsed >= 1 && parsed <= MAX_TMUX_TAIL_LINES ? parsed : void 0;
+}
+function fencedCodeBlock(content) {
+  const longestBacktickRun = Math.max(0, ...[...content.matchAll(/`+/gu)].map((match) => match[0].length));
+  const fence = "`".repeat(Math.max(3, longestBacktickRun + 1));
+  return `${fence}text
+${content}
+${fence}`;
 }
 function parseTmuxSocketArgument(parts) {
   if (parts.length === 0) return "";
@@ -17082,7 +17190,7 @@ async function intakeMessage(deps) {
 }
 function commandPreservesPendingMessages(content) {
   const command = content.trim().toLowerCase();
-  return /^\/(?:status|help|ps)(?:\s|$)/u.test(command) || /^\/session(?:\s+\/?status)?\s*$/u.test(command) || /^\/tmux(?:\s+(?:list|status))?(?:\s|$)/u.test(command) || /^\/timeout(?:\s|$)/u.test(command);
+  return /^\/(?:status|help|ps)(?:\s|$)/u.test(command) || /^\/session(?:\s+\/?status)?\s*$/u.test(command) || /^\/tmux(?:\s+(?:list|status|tail))?(?:\s|$)/u.test(command) || /^\/timeout(?:\s|$)/u.test(command);
 }
 function rewriteAgentCommandMessage(msg, agentKind) {
   const trimmed = msg.content.trimStart();

@@ -369,6 +369,39 @@ describe('Bridge command contracts', () => {
     expect(lastMarkdown(h.channel)).toContain('bridge 托管');
   });
 
+  it('captures the current tmux tail with a default of 27 lines', async () => {
+    const h = await createHarness();
+    const tail = vi.fn(async (_scope: string, lineCount: number) => ({
+      terminal: {
+        socketPath: '/tmp/tmux-2103/default',
+        target: 'argbridge-claude-abcd:0.0',
+        attachCommand: 'tmux -S /tmp/tmux-2103/default attach -t argbridge-claude-abcd:0.0',
+        ownership: 'managed' as const,
+      },
+      requestedLines: lineCount,
+      text: '• final progress\n• final answer',
+    }));
+    h.agent.tmux = {
+      list: vi.fn(async () => []),
+      bind: vi.fn(),
+      unbind: vi.fn(async () => false),
+      status: vi.fn(async () => ({ state: 'none' as const })),
+      tail,
+    };
+
+    await expect(h.run('/tmux tail')).resolves.toBe(true);
+    expect(tail).toHaveBeenCalledWith('chat-1', 27);
+    expect(lastMarkdown(h.channel)).toContain('最多 27 行');
+    expect(lastMarkdown(h.channel)).toContain('final answer');
+
+    await expect(h.run('/tmux tail 3')).resolves.toBe(true);
+    expect(tail).toHaveBeenLastCalledWith('chat-1', 3);
+
+    await expect(h.run('/tmux tail 201')).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('用法');
+    expect(tail).toHaveBeenCalledTimes(2);
+  });
+
   it('rejects admin-only commands for non owner/admin users', async () => {
     const h = await createHarness();
 

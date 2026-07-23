@@ -169,6 +169,8 @@ interface ResumeCandidate {
 }
 
 const RESUME_CANDIDATE_TTL_MS = 10 * 60 * 1000;
+const DEFAULT_TMUX_TAIL_LINES = 27;
+const MAX_TMUX_TAIL_LINES = 200;
 const resumeCandidates = new Map<string, ResumeCandidate>();
 const AUDIT_SAFE_COMMAND_REPLY = '命令已处理。';
 const RESUME_APPLIED_REPLY = '已完成，请继续发送下一条消息。';
@@ -1035,7 +1037,8 @@ async function handleTmux(args: string, ctx: CommandContext): Promise<void> {
     await reply(ctx, '当前 agent 不支持 tmux 控制。');
     return;
   }
-  const [action = 'status', ...rest] = args.trim().split(/\s+/).filter(Boolean);
+  const [rawAction = 'status', ...rest] = args.trim().split(/\s+/).filter(Boolean);
+  const action = rawAction.toLowerCase();
   const value = rest.join(' ');
   try {
     if (action === 'list') {
@@ -1082,6 +1085,24 @@ async function handleTmux(args: string, ctx: CommandContext): Promise<void> {
       await reply(ctx, formatTmuxStatus(status) || '当前 scope 尚未创建或绑定 tmux terminal。');
       return;
     }
+    if (action === 'tail') {
+      const lineCount = parseTmuxTailLineCount(rest);
+      if (lineCount === undefined) {
+        await reply(ctx, `用法：\`/tmux tail [1-${MAX_TMUX_TAIL_LINES}]\`（默认 ${DEFAULT_TMUX_TAIL_LINES} 行）`);
+        return;
+      }
+      if (!tmux.tail) {
+        await reply(ctx, '当前 agent 不支持读取 tmux 末尾输出。');
+        return;
+      }
+      const tail = await tmux.tail(ctx.scope, lineCount);
+      const content = tail.text || '（当前 pane 暂无可见输出）';
+      await reply(
+        ctx,
+        `当前 tmux 末尾（最多 ${tail.requestedLines} 行）：\n${fencedCodeBlock(content)}`,
+      );
+      return;
+    }
     if (action === 'unbind') {
       if (ctx.activeRuns.get(ctx.scope)) {
         await reply(ctx, '当前 scope 有运行中的任务，请先 `/stop`，等待任务结束后再解绑。');
@@ -1096,10 +1117,23 @@ async function handleTmux(args: string, ctx: CommandContext): Promise<void> {
       );
       return;
     }
-    await reply(ctx, '用法：`/tmux [list|bind <编号或 id>|status|unbind]`');
+    await reply(ctx, `用法：\`/tmux [list|bind <编号或 id>|status|tail [1-${MAX_TMUX_TAIL_LINES}]|unbind]\``);
   } catch (err) {
     await reply(ctx, `tmux 操作失败：${err instanceof Error ? err.message : String(err)}`);
   }
+}
+
+function parseTmuxTailLineCount(parts: string[]): number | undefined {
+  if (parts.length === 0) return DEFAULT_TMUX_TAIL_LINES;
+  if (parts.length !== 1 || !/^\d+$/u.test(parts[0]!)) return undefined;
+  const parsed = Number.parseInt(parts[0]!, 10);
+  return parsed >= 1 && parsed <= MAX_TMUX_TAIL_LINES ? parsed : undefined;
+}
+
+function fencedCodeBlock(content: string): string {
+  const longestBacktickRun = Math.max(0, ...[...content.matchAll(/`+/gu)].map((match) => match[0].length));
+  const fence = '`'.repeat(Math.max(3, longestBacktickRun + 1));
+  return `${fence}text\n${content}\n${fence}`;
 }
 
 function parseTmuxSocketArgument(parts: string[]): string | null {

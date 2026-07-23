@@ -28,15 +28,23 @@ export interface TmuxPaneTarget {
   attachCommand: string;
 }
 
+export interface TmuxTerminalTarget {
+  socketPath: string;
+  target: string;
+  attachCommand: string;
+  ownership: TmuxOwnership;
+}
+
+export interface TmuxPaneTail {
+  terminal: TmuxTerminalTarget;
+  requestedLines: number;
+  text: string;
+}
+
 export interface TmuxBindingStatus {
   state: 'managed' | 'external' | 'none' | 'invalid';
   target?: TmuxPaneTarget;
-  terminal?: {
-    socketPath: string;
-    target: string;
-    attachCommand: string;
-    ownership: TmuxOwnership;
-  };
+  terminal?: TmuxTerminalTarget;
   message?: string;
 }
 
@@ -45,6 +53,8 @@ export interface AgentTmuxControl {
   bind(scopeId: string, selector: string): Promise<TmuxPaneTarget>;
   unbind(scopeId: string): Promise<boolean>;
   status(scopeId: string): Promise<TmuxBindingStatus>;
+  /** Captures only the current scope's active or bound pane. */
+  tail?(scopeId: string, lineCount: number): Promise<TmuxPaneTail>;
 }
 
 interface TmuxBindingsFile {
@@ -53,6 +63,7 @@ interface TmuxBindingsFile {
 }
 
 const BINDINGS_FILE = 'tmux-bindings.json';
+const MAX_TMUX_TAIL_CHARS = 12_000;
 const TMUX_FORMAT = [
   '#{session_name}',
   '#{window_index}',
@@ -259,6 +270,52 @@ export function isSafeTmuxSocket(path: string): boolean {
 
 export function tmuxTargetKey(target: Pick<TmuxPaneTarget, 'socketPath' | 'paneId'>): string {
   return `${target.socketPath}::${target.paneId}`;
+}
+
+/**
+ * Capture the visible end of a known bridge terminal. The caller supplies the
+ * terminal from a live session or a revalidated binding; this helper never
+ * discovers or selects arbitrary panes.
+ */
+export function captureTmuxPaneTail(
+  terminal: TmuxTerminalTarget,
+  requestedLines: number,
+): TmuxPaneTail {
+  if (!Number.isSafeInteger(requestedLines) || requestedLines <= 0) {
+    throw new Error('行数必须是正整数');
+  }
+  if (!isSafeTmuxSocket(terminal.socketPath)) {
+    throw new Error('tmux socket 不存在或不安全');
+  }
+  const result = spawnProcessSync(
+    'tmux',
+    ['-S', terminal.socketPath, 'capture-pane', '-p', '-S', `-${requestedLines}`, '-t', terminal.target],
+    { encoding: 'utf8', maxBuffer: 1024 * 1024 },
+  );
+  if (result.status !== 0) {
+    const detail = typeof result.stderr === 'string'
+      ? result.stderr.trim()
+      : result.error?.message;
+    throw new Error(`无法读取当前 tmux pane${detail ? `：${detail}` : ''}`);
+  }
+  const output = typeof result.stdout === 'string' ? result.stdout : result.stdout?.toString('utf8') ?? '';
+  return {
+    terminal,
+    requestedLines,
+    text: normalizeTmuxTail(output, requestedLines),
+  };
+}
+
+function normalizeTmuxTail(output: string, requestedLines: number): string {
+  const cleaned = output
+    .replace(/\r/g, '')
+    .replace(/\x1B(?:\][\s\S]*?(?:\x07|\x1B\\)|\[[0-?]*[ -/]*[@-~]|[@-_])/gu, '')
+    .replace(/[\u0000-\u0008\u000B-\u001F\u007F]/gu, '');
+  const lines = cleaned.split('\n');
+  while (lines.at(-1) === '') lines.pop();
+  const tail = lines.slice(-requestedLines).join('\n').replace(/[ \t]+$/gmu, '');
+  if (tail.length <= MAX_TMUX_TAIL_CHARS) return tail;
+  return `…（输出过长，仅显示最后 ${MAX_TMUX_TAIL_CHARS} 个字符）\n${tail.slice(-MAX_TMUX_TAIL_CHARS)}`;
 }
 
 function resolveSocketSelector(selector: string): string {

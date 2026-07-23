@@ -194,7 +194,7 @@ export function helpCard(agentName = 'Agent'): object {
         '- `/model` — 选择模型；Codex 使用 CLI 原生模型和 reasoning 选项并同步到 profile',
         '- `/status` — 当前状态',
         '- `/session` — 查看或切换后台 agent session 模式',
-        '- `/tmux list|bind <编号或 pane id>|status|unbind` — 管理员查看和绑定本机 tmux agent pane',
+        '- `/tmux list|bind <编号或 pane id>|status|tail [N]|unbind` — 管理员管理 tmux；`tail` 默认显示当前 pane 末尾 27 行',
         '- `/sendfile <path>` — 管理员直接回复当前消息发送工作目录内的文件',
         '- `/stop` — 结束当前正在跑的任务（也可点卡片底部 ⏹ 终止 按钮）',
         '- `/stop comment:<scopeHash>` — 管理员停止云文档评论任务',

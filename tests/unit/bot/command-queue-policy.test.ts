@@ -6,6 +6,8 @@ describe('command pending-message policy', () => {
     expect(commandPreservesPendingMessages('/status')).toBe(true);
     expect(commandPreservesPendingMessages('/session status')).toBe(true);
     expect(commandPreservesPendingMessages('/session /status')).toBe(true);
+    expect(commandPreservesPendingMessages('/tmux tail')).toBe(true);
+    expect(commandPreservesPendingMessages('/tmux tail 80')).toBe(true);
     expect(commandPreservesPendingMessages('/help')).toBe(true);
     expect(commandPreservesPendingMessages('/ps')).toBe(true);
   });
