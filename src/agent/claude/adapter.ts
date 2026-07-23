@@ -13,6 +13,7 @@ import {
   captureTmuxPaneTail,
   TmuxBindingController,
   type AgentTmuxControl,
+  type ManagedTmuxTerminal,
   type TmuxBindingStatus,
   type TmuxTerminalTarget,
 } from '../tmux-control';
@@ -79,9 +80,9 @@ export class ClaudeAdapter implements AgentAdapter {
         if (removed) await this.liveSessions.close(scopeId, 'tmux-unbind');
         return removed;
       },
-      status: (scopeId) => this.tmuxStatus(scopeId),
-      tail: async (scopeId, lineCount) => {
-        const terminal = tmuxTerminalForStatus(await this.tmuxStatus(scopeId));
+      status: (scopeId, cwd) => this.tmuxStatus(scopeId, cwd),
+      tail: async (scopeId, lineCount, cwd) => {
+        const terminal = tmuxTerminalForStatus(await this.tmuxStatus(scopeId, cwd));
         return captureTmuxPaneTail(terminal, lineCount);
       },
     };
@@ -91,20 +92,22 @@ export class ClaudeAdapter implements AgentAdapter {
     this.botIdentity = identity;
   }
 
-  private async tmuxStatus(scopeId: string): Promise<TmuxBindingStatus> {
+  private async tmuxStatus(scopeId: string, cwd?: string): Promise<TmuxBindingStatus> {
     const binding = await this.tmuxBindings.status(scopeId);
     if (binding.state !== 'none') return binding;
     const terminal = this.liveSessions.terminalInfo(scopeId);
-    if (!terminal?.attachCommand || !terminal.socketPath || !terminal.target) return binding;
-    return {
-      state: terminal.ownership === 'external' ? 'external' as const : 'managed' as const,
-      terminal: {
-        socketPath: terminal.socketPath,
-        target: terminal.target,
-        attachCommand: terminal.attachCommand,
-        ownership: terminal.ownership ?? 'managed',
-      },
-    };
+    if (terminal?.attachCommand && terminal.socketPath && terminal.target) {
+      return {
+        state: terminal.ownership === 'external' ? 'external' as const : 'managed' as const,
+        terminal: {
+          socketPath: terminal.socketPath,
+          target: terminal.target,
+          attachCommand: terminal.attachCommand,
+          ownership: terminal.ownership ?? 'managed',
+        },
+      };
+    }
+    return this.tmuxBindings.managedStatus(scopeId, cwd);
   }
 
   async isAvailable(): Promise<boolean> {
@@ -275,19 +278,40 @@ export class ClaudeAdapter implements AgentAdapter {
     });
     const scopeKey = opts.scopeId ?? opts.cwd;
     const tmuxTarget = this.tmuxBindings.bindingFor(scopeKey, opts.cwd);
+    const liveSignature = `${signature}:${tmuxTarget ? `${tmuxTarget.socketPath}:${tmuxTarget.paneId}` : 'managed'}`;
+    const managedTerminal: ManagedTmuxTerminal | undefined = tmuxTarget
+      ? undefined
+      : this.tmuxBindings.managedTerminalFor(scopeKey, opts.cwd, liveSignature);
     const session = this.liveSessions.getOrCreate(scopeKey, {
       command: this.binary,
       args,
       cwd: opts.cwd,
       env: buildLarkChannelEnv(this.larkChannel),
-      signature: `${signature}:${tmuxTarget ? `${tmuxTarget.socketPath}:${tmuxTarget.paneId}` : 'managed'}`,
+      signature: liveSignature,
       usePty: this.liveUsePty,
       backend: this.liveTerminalBackend ?? 'tmux',
       idleMs: this.liveIdleMs,
       tmuxSessionName: this.tmuxBindings.managedSessionName(scopeKey),
       tmuxProfile: this.larkChannel?.profile ?? 'claude',
       tmuxScopeId: scopeKey,
+      tmuxAgentKind: 'claude',
+      tmuxManagedTerminal: managedTerminal,
       tmuxTarget,
+      onTerminal: async (terminal) => {
+        if (
+          tmuxTarget ||
+          terminal.backend !== 'tmux' ||
+          terminal.ownership !== 'managed' ||
+          !terminal.socketPath ||
+          !terminal.sessionName ||
+          !terminal.attachCommand
+        ) return;
+        await this.tmuxBindings.rememberManaged(scopeKey, opts.cwd!, liveSignature, {
+          socketPath: terminal.socketPath,
+          sessionName: terminal.sessionName,
+          attachCommand: terminal.attachCommand,
+        });
+      },
     });
     return session.run(opts.runId, opts.prompt, opts.cwd, opts.liveInputMode);
   }

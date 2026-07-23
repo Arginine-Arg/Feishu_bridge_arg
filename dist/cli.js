@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.41",
+  version: "0.6.42",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -6015,6 +6015,7 @@ import {
 import { basename as basename4, dirname as dirname14, isAbsolute as isAbsolute2, join as join16, resolve as resolve2 } from "path";
 import { tmpdir as tmpdir2 } from "os";
 var BINDINGS_FILE = "tmux-bindings.json";
+var MANAGED_TERMINALS_FILE = "tmux-managed-terminals.json";
 var MAX_TMUX_TAIL_CHARS = 12e3;
 var TMUX_FORMAT = [
   "#{session_name}",
@@ -6033,16 +6034,19 @@ var TmuxBindingController = class {
     this.agentKind = agentKind;
     this.file = join16(profileStateDir, BINDINGS_FILE);
     this.bindings = loadBindings(this.file);
+    this.managedFile = join16(profileStateDir, MANAGED_TERMINALS_FILE);
+    this.managedTerminals = loadManagedTerminals(this.managedFile, agentKind);
   }
   profileStateDir;
   profile;
   agentKind;
   file;
   bindings;
+  managedFile;
+  managedTerminals;
+  managedSaving = Promise.resolve();
   managedSessionName(scopeId) {
-    const profile2 = safeTmuxName(this.profile).slice(0, 24) || this.agentKind;
-    const scopeHash = createHash("sha256").update(scopeId).digest("hex").slice(0, 12);
-    return `argbridge-${this.agentKind}-${profile2}-${scopeHash}`.slice(0, 96);
+    return managedSessionNameFor(this.profile, this.agentKind, scopeId);
   }
   async list(socket) {
     return listTmuxAgentPanes(socket);
@@ -6100,6 +6104,52 @@ var TmuxBindingController = class {
       };
     }
   }
+  /**
+   * Returns a persisted managed terminal after validating its ownership and
+   * current session metadata. `cwd` is required for recovery/discovery so a
+   * scope cannot accidentally read a terminal from another workspace.
+   */
+  async managedStatus(scopeId, cwd) {
+    let saved = this.managedTerminals[scopeId];
+    if (!saved && cwd) {
+      saved = recoverManagedTerminal(cwd, scopeId, this.profile, this.agentKind);
+      if (saved) {
+        this.managedTerminals[scopeId] = saved;
+        await this.flushManaged();
+      }
+    }
+    if (!saved) return { state: "none" };
+    if (cwd && resolve2(saved.cwdRealpath) !== resolve2(cwd)) return { state: "none" };
+    try {
+      const terminal = revalidateManagedTerminal(saved, scopeId, this.profile, this.agentKind);
+      return { state: "managed", terminal };
+    } catch {
+      return { state: "none" };
+    }
+  }
+  /** Stable identity used by a new bridge process to reconnect to a managed session. */
+  managedTerminalFor(scopeId, cwd, launchSignature) {
+    const saved = this.managedTerminals[scopeId];
+    if (!saved || resolve2(saved.cwdRealpath) !== resolve2(cwd)) return void 0;
+    if (saved.launchSignature && saved.launchSignature !== launchSignature) return void 0;
+    if (!isManagedSocketPath(saved.socketPath, cwd)) return void 0;
+    return { ...saved };
+  }
+  async rememberManaged(scopeId, cwd, launchSignature, terminal) {
+    if (!isManagedSocketPath(terminal.socketPath, cwd)) return;
+    const expectedSessionName = this.managedSessionName(scopeId);
+    if (terminal.sessionName !== expectedSessionName) return;
+    this.managedTerminals[scopeId] = {
+      socketPath: resolve2(terminal.socketPath),
+      sessionName: terminal.sessionName,
+      attachCommand: terminal.attachCommand,
+      cwdRealpath: resolve2(cwd),
+      agentKind: this.agentKind,
+      launchSignature,
+      updatedAt: Date.now()
+    };
+    await this.flushManaged();
+  }
   bindingFor(scopeId, cwd) {
     const saved = this.bindings[scopeId];
     if (!saved) return void 0;
@@ -6124,6 +6174,17 @@ var TmuxBindingController = class {
     const content = { version: 1, bindings: this.bindings };
     await writeFileAtomic(this.file, `${JSON.stringify(content, null, 2)}
 `, { mode: 384 });
+  }
+  async flushManaged() {
+    this.managedSaving = this.managedSaving.then(async () => {
+      const content = {
+        version: 1,
+        terminals: this.managedTerminals
+      };
+      await writeFileAtomic(this.managedFile, `${JSON.stringify(content, null, 2)}
+`, { mode: 384 });
+    });
+    await this.managedSaving;
   }
 };
 function defaultTmuxSocketPath(env = process.env) {
@@ -6347,11 +6408,115 @@ function revalidateTmuxTarget(saved, expectedAgent) {
   }
   return current;
 }
+function revalidateManagedTerminal(saved, scopeId, profile2, expectedAgent) {
+  if (!isSafeTmuxSocket(saved.socketPath)) throw new Error("socket \u4E0D\u5B58\u5728\u6216\u4E0D\u5B89\u5168");
+  const expectedSession = managedSessionNameFor(profile2, expectedAgent, scopeId);
+  if (saved.sessionName !== expectedSession) throw new Error("managed session \u540D\u79F0\u4E0D\u5339\u914D");
+  const metadata = readManagedMetadata(saved.socketPath, saved.sessionName);
+  if (!metadata || metadata.managed !== "1") throw new Error("session \u4E0D\u662F bridge \u6258\u7BA1 session");
+  if (metadata.profile !== profile2 || metadata.scope !== scopeId) {
+    throw new Error("session ownership metadata \u4E0D\u5339\u914D");
+  }
+  if (metadata.agent && metadata.agent !== expectedAgent) {
+    throw new Error("session agent metadata \u4E0D\u5339\u914D");
+  }
+  return {
+    socketPath: saved.socketPath,
+    target: saved.sessionName,
+    attachCommand: saved.attachCommand,
+    ownership: "managed"
+  };
+}
+function readManagedMetadata(socketPath, sessionName) {
+  const result = spawnProcessSync(
+    "tmux",
+    [
+      "-S",
+      socketPath,
+      "display-message",
+      "-p",
+      "-t",
+      sessionName,
+      "#{@argbridge_managed}	#{@argbridge_profile}	#{@argbridge_scope}	#{@argbridge_agent}	#{@argbridge_cwd}"
+    ],
+    { encoding: "utf8" }
+  );
+  if (result.status !== 0 || typeof result.stdout !== "string") return void 0;
+  const [managed = "", profile2 = "", scope = "", agent = "", cwd = ""] = result.stdout.trim().split("	");
+  if (!managed || !profile2 || !scope) return void 0;
+  return { managed, profile: profile2, scope, agent, cwd };
+}
+function recoverManagedTerminal(cwd, scopeId, profile2, agentKind) {
+  const expectedSessionName = managedSessionNameFor(profile2, agentKind, scopeId);
+  let names;
+  try {
+    names = readdirSync(cwd);
+  } catch {
+    return void 0;
+  }
+  for (const name of names.sort()) {
+    if (!/^\.ab-live-[a-f0-9]{12}\.sock$/u.test(name)) continue;
+    const socketPath = join16(cwd, name);
+    if (!isSafeTmuxSocket(socketPath)) continue;
+    const hasSession = spawnProcessSync(
+      "tmux",
+      ["-S", socketPath, "has-session", "-t", expectedSessionName],
+      { stdio: "ignore" }
+    );
+    if (hasSession.status !== 0) continue;
+    const metadata = readManagedMetadata(socketPath, expectedSessionName);
+    if (!metadata || metadata.managed !== "1") continue;
+    if (metadata.profile !== profile2 || metadata.scope !== scopeId) continue;
+    if (metadata.agent && metadata.agent !== agentKind) continue;
+    return {
+      socketPath: resolve2(socketPath),
+      sessionName: expectedSessionName,
+      attachCommand: `tmux -S ${shellQuote(socketPath)} attach -t ${shellQuote(expectedSessionName)}`,
+      cwdRealpath: resolve2(cwd),
+      agentKind,
+      launchSignature: "",
+      updatedAt: Date.now()
+    };
+  }
+  return void 0;
+}
+function isManagedSocketPath(socketPath, cwd) {
+  return resolve2(dirname14(socketPath)) === resolve2(cwd) && /^\.ab-live-[a-f0-9]{12}\.sock$/u.test(basename4(socketPath));
+}
+function managedSessionNameFor(profile2, agentKind, scopeId) {
+  const safeProfile = safeTmuxName(profile2).slice(0, 24) || agentKind;
+  const scopeHash = createHash("sha256").update(scopeId).digest("hex").slice(0, 12);
+  return `argbridge-${agentKind}-${safeProfile}-${scopeHash}`.slice(0, 96);
+}
 function loadBindings(file) {
   try {
     const parsed = JSON.parse(readFileSync2(file, "utf8"));
     if (parsed.version !== 1 || !parsed.bindings || typeof parsed.bindings !== "object") return {};
     return parsed.bindings;
+  } catch {
+    return {};
+  }
+}
+function loadManagedTerminals(file, expectedAgent) {
+  try {
+    const parsed = JSON.parse(readFileSync2(file, "utf8"));
+    if (parsed.version !== 1 || !parsed.terminals || typeof parsed.terminals !== "object") return {};
+    const out = {};
+    for (const [scopeId, raw] of Object.entries(parsed.terminals)) {
+      if (!raw || typeof raw !== "object") continue;
+      const item = raw;
+      if (typeof item.socketPath !== "string" || typeof item.sessionName !== "string" || typeof item.attachCommand !== "string" || typeof item.cwdRealpath !== "string" || item.agentKind !== expectedAgent || item.launchSignature !== void 0 && typeof item.launchSignature !== "string" || typeof item.updatedAt !== "number" || !isManagedSocketPath(item.socketPath, item.cwdRealpath)) continue;
+      out[scopeId] = {
+        socketPath: resolve2(item.socketPath),
+        sessionName: item.sessionName,
+        attachCommand: item.attachCommand,
+        cwdRealpath: resolve2(item.cwdRealpath),
+        agentKind: expectedAgent,
+        launchSignature: item.launchSignature ?? "",
+        updatedAt: item.updatedAt
+      };
+    }
+    return out;
   } catch {
     return {};
   }
@@ -6463,6 +6628,7 @@ var LiveTerminalSession = class {
   lastTerminalHistory;
   terminalReady = Promise.resolve();
   resolveTerminalReady;
+  startPromise;
   constructor(opts, onClose = () => {
   }) {
     this.opts = opts;
@@ -6489,7 +6655,7 @@ var LiveTerminalSession = class {
     return true;
   }
   run(runId, prompt, cwd, inputMode) {
-    void this.ensureStarted();
+    void this.start();
     const events = this.turnEvents(prompt, cwd, inputMode);
     return {
       runId,
@@ -6584,6 +6750,24 @@ var LiveTerminalSession = class {
     child.stdin.on("error", (err) => {
       log.warn("agent-live", "stdin-error", { message: err.message });
     });
+    try {
+      await this.opts.onTerminal?.(spawned.terminal);
+    } catch (err) {
+      log.warn("agent-live", "terminal-persist-failed", {
+        message: err instanceof Error ? err.message : String(err)
+      });
+    }
+  }
+  start() {
+    if (this.startPromise) return this.startPromise;
+    if (this.isAlive()) return Promise.resolve();
+    const pending = this.ensureStarted();
+    let tracked;
+    tracked = pending.finally(() => {
+      if (this.startPromise === tracked) this.startPromise = void 0;
+    });
+    this.startPromise = tracked;
+    return tracked;
   }
   emitData(chunk) {
     const raw = chunk.toString("utf8");
@@ -6618,6 +6802,7 @@ var LiveTerminalSession = class {
   }
   async *turnEvents(prompt, cwd, inputMode) {
     yield { type: "system", cwd };
+    await this.start();
     const commandMode = inputMode === "command";
     const idleMs = commandMode ? Math.max(this.opts.idleMs ?? DEFAULT_IDLE_MS, COMMAND_IDLE_MS) : this.opts.idleMs ?? DEFAULT_IDLE_MS;
     const outputFlushMs = this.opts.outputFlushMs ?? DEFAULT_OUTPUT_FLUSH_MS;
@@ -7003,7 +7188,7 @@ function encodeTmuxInputFrame(input) {
 }
 function spawnTmuxLiveProcess(opts, env, commandLine, rows, columns) {
   const external = opts.tmuxTarget;
-  const managedIdentity = external ? void 0 : liveTmuxIdentity(
+  const managedIdentity = external ? void 0 : opts.tmuxManagedTerminal ?? liveTmuxIdentity(
     opts.cwd,
     opts.tmuxScopeId ?? opts.tmuxSessionName ?? opts.cwd,
     opts.signature,
@@ -7027,6 +7212,7 @@ function spawnTmuxLiveProcess(opts, env, commandLine, rows, columns) {
       columns,
       opts.tmuxProfile ?? "",
       opts.tmuxScopeId ?? "",
+      opts.tmuxAgentKind ?? "",
       String(process.pid)
     ],
     {
@@ -7075,7 +7261,7 @@ var TMUX_BRIDGE_HELPER = String.raw`
 const { spawnSync } = require('node:child_process');
 const { existsSync } = require('node:fs');
 
-const [mode, socketPath, session, requestedTarget, commandBase64, cwd, rows, columns, profile, scope, ownerPid] = process.argv.slice(1);
+const [mode, socketPath, session, requestedTarget, commandBase64, cwd, rows, columns, profile, scope, agentKind, ownerPid] = process.argv.slice(1);
 const managed = mode === 'managed';
 let target = managed ? session + ':0.0' : requestedTarget;
 const commandLine = Buffer.from(commandBase64, 'base64').toString('utf8');
@@ -7123,6 +7309,13 @@ function setManagedLifecycleOptions() {
   if (destroyDefault.status !== 0) writeError('failed to preserve new detached tmux sessions', destroyDefault);
   const exitUnattached = tmux(['set-option', '-s', 'exit-unattached', 'off']);
   if (exitUnattached.status !== 0) writeError('failed to preserve detached tmux live server', exitUnattached);
+  const exitEmpty = tmux(['set-option', '-g', 'exit-empty', 'off']);
+  if (exitEmpty.status !== 0) writeError('failed to preserve empty tmux live server', exitEmpty);
+  // A Ctrl-C typed into an attached managed client should cancel the current
+  // TUI turn (Codex/Claude use Escape for that) rather than terminate the
+  // native process and force a new conversation in another pane.
+  const interrupt = tmux(['bind-key', '-n', 'C-c', 'send-keys', 'Escape']);
+  if (interrupt.status !== 0) writeError('failed to preserve managed Ctrl-C handling', interrupt);
 }
 
 function setPersistentPaneOptions() {
@@ -7142,6 +7335,8 @@ function setManagedMetadata() {
   tmux(['set-option', '-t', session, '@argbridge_owner_pid', ownerPid], { stdio: 'ignore' });
   tmux(['set-option', '-t', session, '@argbridge_profile', profile], { stdio: 'ignore' });
   tmux(['set-option', '-t', session, '@argbridge_scope', scope], { stdio: 'ignore' });
+  tmux(['set-option', '-t', session, '@argbridge_agent', agentKind], { stdio: 'ignore' });
+  tmux(['set-option', '-t', session, '@argbridge_cwd', cwd], { stdio: 'ignore' });
 }
 
 function createAgentWindow(initial) {
@@ -7215,13 +7410,31 @@ if (managed) {
   }
 }
 
-function paneIsDead() {
-  const result = tmux(['display-message', '-p', '-t', target, '#{pane_dead}']);
+function paneIsDead(pane = target) {
+  const result = tmux(['display-message', '-p', '-t', pane, '#{pane_dead}']);
   return result.status === 0 && result.stdout.trim() === '1';
+}
+
+function resetCaptureState() {
+  lastSnapshot = '';
+  lastHistoryPane = '';
+  lastHistoryEnd = -1;
+}
+
+function adoptSelectedLivePane() {
+  const selected = selectedPaneTarget();
+  if (!selected || selected === target || paneIsDead(selected)) return false;
+  target = selected;
+  setPersistentPaneOptions();
+  resetCaptureState();
+  return true;
 }
 
 function ensureLivePane() {
   if (!managed || !paneIsDead()) return true;
+  // The user may have manually resumed the exact native conversation in a
+  // new window. Prefer that selected live pane over starting a fresh CLI.
+  if (adoptSelectedLivePane()) return true;
   // Preserve the exited pane and its history. A later user message starts a
   // new native agent in another window of the same cwd-bound tmux session.
   return createAgentWindow(false);
@@ -7287,6 +7500,7 @@ function sendInput(input) {
 
 function capture() {
   if (closed) return;
+  if (managed && paneIsDead()) adoptSelectedLivePane();
   const available = tmux([
     'display-message',
     '-p',
@@ -8525,9 +8739,9 @@ var ClaudeAdapter = class {
         if (removed) await this.liveSessions.close(scopeId, "tmux-unbind");
         return removed;
       },
-      status: (scopeId) => this.tmuxStatus(scopeId),
-      tail: async (scopeId, lineCount) => {
-        const terminal = tmuxTerminalForStatus(await this.tmuxStatus(scopeId));
+      status: (scopeId, cwd) => this.tmuxStatus(scopeId, cwd),
+      tail: async (scopeId, lineCount, cwd) => {
+        const terminal = tmuxTerminalForStatus(await this.tmuxStatus(scopeId, cwd));
         return captureTmuxPaneTail(terminal, lineCount);
       }
     };
@@ -8535,20 +8749,22 @@ var ClaudeAdapter = class {
   setBotIdentity(identity) {
     this.botIdentity = identity;
   }
-  async tmuxStatus(scopeId) {
+  async tmuxStatus(scopeId, cwd) {
     const binding = await this.tmuxBindings.status(scopeId);
     if (binding.state !== "none") return binding;
     const terminal = this.liveSessions.terminalInfo(scopeId);
-    if (!terminal?.attachCommand || !terminal.socketPath || !terminal.target) return binding;
-    return {
-      state: terminal.ownership === "external" ? "external" : "managed",
-      terminal: {
-        socketPath: terminal.socketPath,
-        target: terminal.target,
-        attachCommand: terminal.attachCommand,
-        ownership: terminal.ownership ?? "managed"
-      }
-    };
+    if (terminal?.attachCommand && terminal.socketPath && terminal.target) {
+      return {
+        state: terminal.ownership === "external" ? "external" : "managed",
+        terminal: {
+          socketPath: terminal.socketPath,
+          target: terminal.target,
+          attachCommand: terminal.attachCommand,
+          ownership: terminal.ownership ?? "managed"
+        }
+      };
+    }
+    return this.tmuxBindings.managedStatus(scopeId, cwd);
   }
   async isAvailable() {
     return (await this.checkAvailability()).ok;
@@ -8689,19 +8905,31 @@ var ClaudeAdapter = class {
     });
     const scopeKey = opts.scopeId ?? opts.cwd;
     const tmuxTarget = this.tmuxBindings.bindingFor(scopeKey, opts.cwd);
+    const liveSignature = `${signature}:${tmuxTarget ? `${tmuxTarget.socketPath}:${tmuxTarget.paneId}` : "managed"}`;
+    const managedTerminal = tmuxTarget ? void 0 : this.tmuxBindings.managedTerminalFor(scopeKey, opts.cwd, liveSignature);
     const session = this.liveSessions.getOrCreate(scopeKey, {
       command: this.binary,
       args,
       cwd: opts.cwd,
       env: buildLarkChannelEnv(this.larkChannel),
-      signature: `${signature}:${tmuxTarget ? `${tmuxTarget.socketPath}:${tmuxTarget.paneId}` : "managed"}`,
+      signature: liveSignature,
       usePty: this.liveUsePty,
       backend: this.liveTerminalBackend ?? "tmux",
       idleMs: this.liveIdleMs,
       tmuxSessionName: this.tmuxBindings.managedSessionName(scopeKey),
       tmuxProfile: this.larkChannel?.profile ?? "claude",
       tmuxScopeId: scopeKey,
-      tmuxTarget
+      tmuxAgentKind: "claude",
+      tmuxManagedTerminal: managedTerminal,
+      tmuxTarget,
+      onTerminal: async (terminal) => {
+        if (tmuxTarget || terminal.backend !== "tmux" || terminal.ownership !== "managed" || !terminal.socketPath || !terminal.sessionName || !terminal.attachCommand) return;
+        await this.tmuxBindings.rememberManaged(scopeKey, opts.cwd, liveSignature, {
+          socketPath: terminal.socketPath,
+          sessionName: terminal.sessionName,
+          attachCommand: terminal.attachCommand
+        });
+      }
     });
     return session.run(opts.runId, opts.prompt, opts.cwd, opts.liveInputMode);
   }
@@ -9101,9 +9329,9 @@ var CodexAdapter = class {
         if (removed) await this.liveSessions.close(scopeId, "tmux-unbind");
         return removed;
       },
-      status: (scopeId) => this.tmuxStatus(scopeId),
-      tail: async (scopeId, lineCount) => {
-        const terminal = tmuxTerminalForStatus2(await this.tmuxStatus(scopeId));
+      status: (scopeId, cwd) => this.tmuxStatus(scopeId, cwd),
+      tail: async (scopeId, lineCount, cwd) => {
+        const terminal = tmuxTerminalForStatus2(await this.tmuxStatus(scopeId, cwd));
         return captureTmuxPaneTail(terminal, lineCount);
       }
     };
@@ -9111,20 +9339,22 @@ var CodexAdapter = class {
   setBotIdentity(identity) {
     this.botIdentity = identity;
   }
-  async tmuxStatus(scopeId) {
+  async tmuxStatus(scopeId, cwd) {
     const binding = await this.tmuxBindings.status(scopeId);
     if (binding.state !== "none") return binding;
     const terminal = this.liveSessions.terminalInfo(scopeId);
-    if (!terminal?.attachCommand || !terminal.socketPath || !terminal.target) return binding;
-    return {
-      state: terminal.ownership === "external" ? "external" : "managed",
-      terminal: {
-        socketPath: terminal.socketPath,
-        target: terminal.target,
-        attachCommand: terminal.attachCommand,
-        ownership: terminal.ownership ?? "managed"
-      }
-    };
+    if (terminal?.attachCommand && terminal.socketPath && terminal.target) {
+      return {
+        state: terminal.ownership === "external" ? "external" : "managed",
+        terminal: {
+          socketPath: terminal.socketPath,
+          target: terminal.target,
+          attachCommand: terminal.attachCommand,
+          ownership: terminal.ownership ?? "managed"
+        }
+      };
+    }
+    return this.tmuxBindings.managedStatus(scopeId, cwd);
   }
   async isAvailable() {
     return (await this.checkAvailability()).ok;
@@ -9293,19 +9523,31 @@ var CodexAdapter = class {
     });
     const scopeKey = opts.scopeId ?? opts.cwd;
     const tmuxTarget = this.tmuxBindings.bindingFor(scopeKey, opts.cwd);
+    const liveSignature = `${signature}:${tmuxTarget ? `${tmuxTarget.socketPath}:${tmuxTarget.paneId}` : "managed"}`;
+    const managedTerminal = tmuxTarget ? void 0 : this.tmuxBindings.managedTerminalFor(scopeKey, opts.cwd, liveSignature);
     const session = this.liveSessions.getOrCreate(scopeKey, {
       command: this.binary,
       args,
       cwd: opts.cwd,
       env: envOverrides,
-      signature: `${signature}:${tmuxTarget ? `${tmuxTarget.socketPath}:${tmuxTarget.paneId}` : "managed"}`,
+      signature: liveSignature,
       usePty: this.liveUsePty,
       backend: this.liveTerminalBackend ?? "tmux",
       idleMs: this.liveIdleMs,
       tmuxSessionName: this.tmuxBindings.managedSessionName(scopeKey),
       tmuxProfile: this.larkChannel?.profile ?? "codex",
       tmuxScopeId: scopeKey,
-      tmuxTarget
+      tmuxAgentKind: "codex",
+      tmuxManagedTerminal: managedTerminal,
+      tmuxTarget,
+      onTerminal: async (terminal) => {
+        if (tmuxTarget || terminal.backend !== "tmux" || terminal.ownership !== "managed" || !terminal.socketPath || !terminal.sessionName || !terminal.attachCommand) return;
+        await this.tmuxBindings.rememberManaged(scopeKey, opts.cwd, liveSignature, {
+          socketPath: terminal.socketPath,
+          sessionName: terminal.sessionName,
+          attachCommand: terminal.attachCommand
+        });
+      }
     });
     return session.run(opts.runId, opts.prompt, opts.cwd, opts.liveInputMode);
   }
@@ -12277,7 +12519,7 @@ async function handleSession(args, ctx) {
     const label = current === "live" ? "live\uFF08\u540E\u53F0\u5E38\u9A7B CLI\uFF09" : "turn\uFF08\u6BCF\u8F6E\u77ED\u4EFB\u52A1\uFF09";
     const active2 = ctx.activeRuns.get(ctx.scope);
     const runStatus = active2 ? `\u8FD0\u884C\u4E2D\uFF08run \`${active2.run.runId.slice(0, 8)}\u2026\`\uFF09` : "\u65E0\u8FD0\u884C\u4EFB\u52A1";
-    const terminal = await ctx.agent.tmux?.status(ctx.scope);
+    const terminal = await ctx.agent.tmux?.status(ctx.scope, effectiveWorkspaceCwd(ctx));
     const terminalText = formatTmuxStatus(terminal);
     await reply(
       ctx,
@@ -12362,7 +12604,7 @@ async function handleTmux(args, ctx) {
       return;
     }
     if (action === "status") {
-      const status = await tmux.status(ctx.scope);
+      const status = await tmux.status(ctx.scope, effectiveWorkspaceCwd(ctx));
       await reply(ctx, formatTmuxStatus(status) || "\u5F53\u524D scope \u5C1A\u672A\u521B\u5EFA\u6216\u7ED1\u5B9A tmux terminal\u3002");
       return;
     }
@@ -12376,7 +12618,7 @@ async function handleTmux(args, ctx) {
         await reply(ctx, "\u5F53\u524D agent \u4E0D\u652F\u6301\u8BFB\u53D6 tmux \u672B\u5C3E\u8F93\u51FA\u3002");
         return;
       }
-      const tail = await tmux.tail(ctx.scope, lineCount);
+      const tail = await tmux.tail(ctx.scope, lineCount, effectiveWorkspaceCwd(ctx));
       const content = tail.text || "\uFF08\u5F53\u524D pane \u6682\u65E0\u53EF\u89C1\u8F93\u51FA\uFF09";
       await reply(
         ctx,

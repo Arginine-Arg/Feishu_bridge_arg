@@ -1,9 +1,11 @@
-import { chmod, mkdtemp, mkdir, rm, symlink } from 'node:fs/promises';
+import { chmod, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { ClaudeAdapter } from '../../../src/agent/claude/adapter.js';
+import { CodexAdapter } from '../../../src/agent/codex/adapter.js';
 import {
   TmuxBindingController,
   captureTmuxPaneTail,
@@ -12,7 +14,8 @@ import {
   discoverTmuxSockets,
   tmuxTargetKey,
 } from '../../../src/agent/tmux-control.js';
-import { LiveSessionPool } from '../../../src/agent/live-session.js';
+import { LiveSessionPool, liveTmuxIdentity } from '../../../src/agent/live-session.js';
+import type { AgentAdapter, AgentEvent } from '../../../src/agent/types.js';
 
 const live = process.platform === 'linux' && spawnSync('tmux', ['-V'], { stdio: 'ignore' }).status === 0;
 const cleanup: Array<() => Promise<void>> = [];
@@ -66,7 +69,7 @@ describe.skipIf(!live)('tmux control', () => {
       ]).status,
     ).toBe(0);
 
-    const tail = captureTmuxPaneTail(
+    let tail = captureTmuxPaneTail(
       {
         socketPath: socket,
         target: 'tail:0.0',
@@ -75,6 +78,19 @@ describe.skipIf(!live)('tmux control', () => {
       },
       2,
     );
+    const deadline = Date.now() + 3_000;
+    while (tail.text !== 'two\nthree' && Date.now() < deadline) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 50));
+      tail = captureTmuxPaneTail(
+        {
+          socketPath: socket,
+          target: 'tail:0.0',
+          attachCommand: `tmux -S ${socket} attach -t tail`,
+          ownership: 'managed',
+        },
+        2,
+      );
+    }
 
     expect(tail.requestedLines).toBe(2);
     expect(tail.text).toBe('two\nthree');
@@ -124,6 +140,131 @@ describe.skipIf(!live)('tmux control', () => {
     expect(spawnSync('tmux', ['-S', socket, 'has-session', '-t', 'external'], { stdio: 'ignore' }).status).toBe(0);
   });
 
+  it('persists and recovers a managed terminal after the controller is recreated', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'tmux-control-managed-recovery-'));
+    const profile = join(root, 'profile');
+    const scope = 'managed-recovery-scope';
+    const controller = new TmuxBindingController(profile, 'codex-profile', 'codex');
+    const sessionName = controller.managedSessionName(scope);
+    const { socketPath } = liveTmuxIdentity(root, scope, 'managed-recovery-signature', sessionName);
+    const reporter = join(root, 'reporter.sh');
+    cleanup.push(async () => {
+      spawnSync('tmux', ['-S', socketPath, 'kill-server'], { stdio: 'ignore' });
+      await rm(root, { recursive: true, force: true });
+    });
+
+    await writeFile(reporter, "#!/bin/sh\nprintf 'managed-one\\nmanaged-two\\n'\nsleep 30\n", 'utf8');
+    await chmod(reporter, 0o755);
+    expect(
+      spawnSync('tmux', [
+        '-S', socketPath,
+        '-f', '/dev/null',
+        'new-session', '-d', '-s', sessionName, '-c', root,
+        reporter,
+      ]).status,
+    ).toBe(0);
+    const metadata: Array<[string, string]> = [
+      ['@argbridge_managed', '1'],
+      ['@argbridge_profile', 'codex-profile'],
+      ['@argbridge_scope', scope],
+      ['@argbridge_agent', 'codex'],
+      ['@argbridge_cwd', root],
+    ];
+    for (const [key, value] of metadata) {
+      expect(spawnSync('tmux', ['-S', socketPath, 'set-option', '-t', sessionName, key, value]).status).toBe(0);
+    }
+
+    await controller.rememberManaged(scope, root, 'managed-recovery-signature', {
+      socketPath,
+      sessionName,
+      attachCommand: `tmux -S ${socketPath} attach -t ${sessionName}`,
+    });
+
+    const restarted = new TmuxBindingController(profile, 'codex-profile', 'codex');
+    const status = await restarted.managedStatus(scope, root);
+    expect(status).toMatchObject({
+      state: 'managed',
+      terminal: { socketPath, target: sessionName, ownership: 'managed' },
+    });
+    expect(restarted.managedTerminalFor(scope, root, 'managed-recovery-signature')).toMatchObject({
+      socketPath,
+      sessionName,
+      cwdRealpath: root,
+    });
+    expect(captureTmuxPaneTail(status.terminal!, 2).text).toBe('managed-one\nmanaged-two');
+
+    // v0.6.41 and earlier did not have a managed-terminals file. A first
+    // status call must safely discover an already running tagged session.
+    const legacyProfile = join(root, 'legacy-profile');
+    const legacy = new TmuxBindingController(legacyProfile, 'codex-profile', 'codex');
+    expect((await legacy.managedStatus(scope, root)).state).toBe('managed');
+    const legacyRestarted = new TmuxBindingController(legacyProfile, 'codex-profile', 'codex');
+    expect((await legacyRestarted.managedStatus(scope, root)).state).toBe('managed');
+  });
+
+  it('restores Codex and Claude managed terminals after bridge recreation', async () => {
+    for (const agent of ['codex', 'claude'] as const) {
+      const root = await mkdtemp(join(tmpdir(), `managed-tmux-${agent}-recovery-`));
+      const profileStateDir = join(root, 'profile');
+      const binary = join(root, 'fake-agent.mjs');
+      await writeFile(
+        binary,
+        `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', () => process.stdout.write('\\x1b[2J\\x1b[Hpersistent ${agent} reply\\n›\\n'));
+setInterval(() => {}, 1000);
+`,
+        'utf8',
+      );
+      await chmod(binary, 0o755);
+
+      const first = createManagedRecoveryAdapter(agent, binary, profileStateDir);
+      const scope = `${agent}-scope`;
+      let socketPath: string | undefined;
+      try {
+        await collectAgentEvents(first.run({
+          runId: `${agent}-first`,
+          scopeId: scope,
+          sessionMode: 'live',
+          prompt: 'hello',
+          cwd: root,
+        }).events);
+        const firstStatus = await first.tmux!.status(scope, root);
+        expect(firstStatus).toMatchObject({ state: 'managed', terminal: { ownership: 'managed' } });
+        socketPath = firstStatus.terminal?.socketPath;
+        expect(JSON.parse(await readFile(join(profileStateDir, 'tmux-managed-terminals.json'), 'utf8'))).toMatchObject({
+          terminals: { [scope]: { socketPath, agentKind: agent } },
+        });
+        expect(
+          spawnSync(
+            'tmux',
+            [
+              '-S', socketPath!, 'display-message', '-p', '-t', firstStatus.terminal!.target,
+              '#{@argbridge_managed}\t#{@argbridge_agent}',
+            ],
+            { encoding: 'utf8' },
+          ).stdout.trim(),
+        ).toBe(`1\t${agent}`);
+        await first.shutdown?.();
+
+        const restarted = createManagedRecoveryAdapter(agent, binary, profileStateDir);
+        try {
+          const status = await restarted.tmux!.status(scope, root);
+          expect(status).toMatchObject({ state: 'managed', terminal: { ownership: 'managed' } });
+          const tail = await restarted.tmux!.tail!(scope, 27, root);
+          expect(tail.text).toContain(`persistent ${agent} reply`);
+        } finally {
+          await restarted.shutdown?.();
+        }
+      } finally {
+        if (socketPath) {
+          spawnSync('tmux', ['-S', socketPath, 'kill-server'], { stdio: 'ignore' });
+        }
+        await rm(root, { recursive: true, force: true });
+      }
+    }
+  }, 30_000);
+
   it('rejects unsafe socket paths and detects a named -L socket', async () => {
     const root = await mkdtemp(join(tmpdir(), 'tmux-control-named-'));
     const name = `argbridge-test-${process.pid}`;
@@ -165,3 +306,34 @@ describe.skipIf(!live)('tmux control', () => {
     expect(isSafeTmuxSocket(stale)).toBe(false);
   });
 });
+
+function createManagedRecoveryAdapter(
+  agent: 'codex' | 'claude',
+  binary: string,
+  profileStateDir: string,
+): AgentAdapter {
+  if (agent === 'codex') {
+    return new CodexAdapter({
+      binary,
+      profileStateDir,
+      sessionMode: 'live',
+      liveTerminalBackend: 'tmux',
+      liveUsePty: true,
+      liveIdleMs: 200,
+    });
+  }
+  return new ClaudeAdapter({
+    binary,
+    profileStateDir,
+    sessionMode: 'live',
+    liveTerminalBackend: 'tmux',
+    liveUsePty: true,
+    liveIdleMs: 200,
+  });
+}
+
+async function collectAgentEvents(events: AsyncIterable<AgentEvent>): Promise<AgentEvent[]> {
+  const out: AgentEvent[] = [];
+  for await (const event of events) out.push(event);
+  return out;
+}

@@ -390,12 +390,12 @@ describe('Bridge command contracts', () => {
     };
 
     await expect(h.run('/tmux tail')).resolves.toBe(true);
-    expect(tail).toHaveBeenCalledWith('chat-1', 27);
+    expect(tail).toHaveBeenCalledWith('chat-1', 27, await realpath(h.tmp.workspace));
     expect(lastMarkdown(h.channel)).toContain('最多 27 行');
     expect(lastMarkdown(h.channel)).toContain('final answer');
 
     await expect(h.run('/tmux tail 3')).resolves.toBe(true);
-    expect(tail).toHaveBeenLastCalledWith('chat-1', 3);
+    expect(tail).toHaveBeenLastCalledWith('chat-1', 3, await realpath(h.tmp.workspace));
 
     await expect(h.run('/tmux tail 201')).resolves.toBe(true);
     expect(lastMarkdown(h.channel)).toContain('用法');

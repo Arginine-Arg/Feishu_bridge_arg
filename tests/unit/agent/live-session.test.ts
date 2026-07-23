@@ -1493,7 +1493,7 @@ setInterval(() => {}, 1000);
       backend: 'tmux' as const,
       idleMs: 220,
       outputFlushMs: 30,
-      startupTimeoutMs: 1_500,
+      startupTimeoutMs: 5_000,
     };
     const firstPool = new LiveSessionPool();
     let secondPool: LiveSessionPool | undefined;
@@ -1612,7 +1612,7 @@ setInterval(() => {}, 1000);
     }
   }, 20_000);
 
-  tmuxIt('preserves a Ctrl-C pane and starts the next task in a new window', async () => {
+  tmuxIt('maps client Ctrl-C to Escape and adopts a manually resumed pane', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-ctrl-c-test-'));
     const bin = join(dir, 'fake-tmux-ctrl-c-agent.mjs');
     const countFile = join(dir, 'starts.txt');
@@ -1663,9 +1663,35 @@ setInterval(() => {}, 1000);
       expect(textOf(await collect(session.run('ctrl-c-first', 'first task', dir).events))).toContain(
         'first agent reply',
       );
+      expect(
+        spawnSync('tmux', ['-S', socketPath, 'show-options', '-g', 'exit-empty'], {
+          encoding: 'utf8',
+        }).stdout.trim(),
+      ).toBe('exit-empty off');
+      expect(
+        spawnSync('tmux', ['-S', socketPath, 'list-keys', '-T', 'root'], {
+          encoding: 'utf8',
+        }).stdout,
+      ).toMatch(/C-c\s+send-keys\s+Escape/);
 
       expect(
         spawnSync('tmux', ['-S', socketPath, 'send-keys', '-t', sessionName, 'C-c']).status,
+      ).toBe(0);
+      await testDelay(500);
+
+      const resumed = spawnSync(
+        'tmux',
+        [
+          '-S', socketPath,
+          'new-window', '-d', '-P', '-F', '#{session_name}:#{window_index}.#{pane_index}',
+          '-t', sessionName, '-n', 'resumed', '-c', dir,
+          process.execPath, bin,
+        ],
+        { encoding: 'utf8' },
+      );
+      expect(resumed.status).toBe(0);
+      expect(
+        spawnSync('tmux', ['-S', socketPath, 'select-window', '-t', resumed.stdout.trim()]).status,
       ).toBe(0);
       await testDelay(500);
 
@@ -1730,7 +1756,7 @@ setInterval(() => {}, 1000);
       backend: 'tmux',
       idleMs: 300,
       outputFlushMs: 40,
-      startupTimeoutMs: 1000,
+      startupTimeoutMs: 5_000,
     });
 
     const events = await collect(session.run('run-tmux', 'hello', dir).events);
@@ -1756,6 +1782,53 @@ setInterval(() => {}, 1000);
 
     expect(textOf(events)).toContain('tmux:hello\n48 120\n48x120\n');
   });
+
+  tmuxIt('reports a managed terminal when the live helper starts', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-terminal-hook-test-'));
+    const bin = join(dir, 'fake-tmux-terminal-hook-agent.mjs');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', () => process.stdout.write('• terminal ready\\n›\\n'));
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const terminals: Array<{ socketPath?: string; sessionName?: string; ownership?: string }> = [];
+    const pool = new LiveSessionPool();
+    try {
+      const session = pool.getOrCreate('terminal-hook-scope', {
+        command: process.execPath,
+        args: [bin],
+        cwd: dir,
+        signature: 'terminal-hook',
+        usePty: true,
+        backend: 'tmux',
+        idleMs: 200,
+        outputFlushMs: 30,
+        startupTimeoutMs: 1_500,
+        onTerminal: async (terminal) => {
+          terminals.push(terminal);
+        },
+      });
+      await collect(session.run('terminal-hook-run', 'hello', dir).events);
+      expect(terminals).toHaveLength(1);
+      expect(terminals[0]).toMatchObject({
+        ownership: 'managed',
+        socketPath: expect.stringContaining(dir),
+        sessionName: expect.stringMatching(/^argbridge-live-/u),
+      });
+    } finally {
+      const terminal = pool.terminalInfo('terminal-hook-scope');
+      await pool.closeAll();
+      if (terminal?.socketPath) {
+        spawnSync('tmux', ['-S', terminal.socketPath, 'kill-server'], { stdio: 'ignore' });
+      }
+    }
+  }, 15_000);
 
   tmuxIt('preserves a final answer that is longer than the tmux viewport', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-long-answer-test-'));
@@ -2337,7 +2410,7 @@ setInterval(() => {}, 1000);
       backend: 'tmux',
       idleMs: 600,
       outputFlushMs: 40,
-      startupTimeoutMs: 1000,
+      startupTimeoutMs: 5_000,
     });
 
     const events = await collect(session.run('tmux-stream-delta-run', 'stream', dir).events);

@@ -16,6 +16,7 @@ import {
 } from './live-interaction-detection';
 import {
   tmuxAttachCommand,
+  type ManagedTmuxTerminal,
   type TmuxOwnership,
   type TmuxPaneTarget,
 } from './tmux-control';
@@ -64,7 +65,10 @@ export interface LiveSessionCommand {
   tmuxSessionName?: string;
   tmuxProfile?: string;
   tmuxScopeId?: string;
+  tmuxAgentKind?: 'codex' | 'claude';
+  tmuxManagedTerminal?: ManagedTmuxTerminal;
   tmuxTarget?: TmuxPaneTarget;
+  onTerminal?: (terminal: LiveTerminalInfo) => void | Promise<void>;
   cleanup?: () => void;
 }
 
@@ -154,6 +158,7 @@ export class LiveTerminalSession {
   private lastTerminalHistory: LiveHistorySnapshot | undefined;
   private terminalReady: Promise<void> = Promise.resolve();
   private resolveTerminalReady: (() => void) | undefined;
+  private startPromise: Promise<void> | undefined;
 
   constructor(opts: LiveSessionCommand, onClose: () => void = () => {}) {
     this.opts = opts;
@@ -184,15 +189,14 @@ export class LiveTerminalSession {
   }
 
   run(runId: string, prompt: string, cwd: string, inputMode?: LiveTerminalInputMode): AgentRun {
-    void this.ensureStarted();
+    void this.start();
     const events = this.turnEvents(prompt, cwd, inputMode);
     return {
       runId,
       events,
       stop: async () => {
-        // `Ctrl-C` terminates the interactive TUI itself, which also closes
-        // its tmux pane. The TUI's native interrupt key cancels only the
-        // active turn and keeps the persistent session available.
+        // Escape is the native live-TUI interrupt key. It cancels the active
+        // turn while keeping the managed native conversation alive.
         this.write('\x1b');
       },
       waitForExit: async () => true,
@@ -293,6 +297,25 @@ export class LiveTerminalSession {
     child.stdin.on('error', (err) => {
       log.warn('agent-live', 'stdin-error', { message: err.message });
     });
+    try {
+      await this.opts.onTerminal?.(spawned.terminal);
+    } catch (err) {
+      log.warn('agent-live', 'terminal-persist-failed', {
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  private start(): Promise<void> {
+    if (this.startPromise) return this.startPromise;
+    if (this.isAlive()) return Promise.resolve();
+    const pending = this.ensureStarted();
+    let tracked: Promise<void>;
+    tracked = pending.finally(() => {
+      if (this.startPromise === tracked) this.startPromise = undefined;
+    });
+    this.startPromise = tracked;
+    return tracked;
   }
 
   private emitData(chunk: Buffer): void {
@@ -334,6 +357,7 @@ export class LiveTerminalSession {
     inputMode?: LiveTerminalInputMode,
   ): AsyncGenerator<AgentEvent> {
     yield { type: 'system', cwd };
+    await this.start();
 
     const commandMode = inputMode === 'command';
     const idleMs =
@@ -789,7 +813,8 @@ function spawnTmuxLiveProcess(
   const external = opts.tmuxTarget;
   const managedIdentity = external
     ? undefined
-    : liveTmuxIdentity(
+    : opts.tmuxManagedTerminal ??
+      liveTmuxIdentity(
         opts.cwd,
         opts.tmuxScopeId ?? opts.tmuxSessionName ?? opts.cwd,
         opts.signature,
@@ -815,6 +840,7 @@ function spawnTmuxLiveProcess(
       columns,
       opts.tmuxProfile ?? '',
       opts.tmuxScopeId ?? '',
+      opts.tmuxAgentKind ?? '',
       String(process.pid),
     ],
     {
@@ -883,7 +909,7 @@ const TMUX_BRIDGE_HELPER = String.raw`
 const { spawnSync } = require('node:child_process');
 const { existsSync } = require('node:fs');
 
-const [mode, socketPath, session, requestedTarget, commandBase64, cwd, rows, columns, profile, scope, ownerPid] = process.argv.slice(1);
+const [mode, socketPath, session, requestedTarget, commandBase64, cwd, rows, columns, profile, scope, agentKind, ownerPid] = process.argv.slice(1);
 const managed = mode === 'managed';
 let target = managed ? session + ':0.0' : requestedTarget;
 const commandLine = Buffer.from(commandBase64, 'base64').toString('utf8');
@@ -931,6 +957,13 @@ function setManagedLifecycleOptions() {
   if (destroyDefault.status !== 0) writeError('failed to preserve new detached tmux sessions', destroyDefault);
   const exitUnattached = tmux(['set-option', '-s', 'exit-unattached', 'off']);
   if (exitUnattached.status !== 0) writeError('failed to preserve detached tmux live server', exitUnattached);
+  const exitEmpty = tmux(['set-option', '-g', 'exit-empty', 'off']);
+  if (exitEmpty.status !== 0) writeError('failed to preserve empty tmux live server', exitEmpty);
+  // A Ctrl-C typed into an attached managed client should cancel the current
+  // TUI turn (Codex/Claude use Escape for that) rather than terminate the
+  // native process and force a new conversation in another pane.
+  const interrupt = tmux(['bind-key', '-n', 'C-c', 'send-keys', 'Escape']);
+  if (interrupt.status !== 0) writeError('failed to preserve managed Ctrl-C handling', interrupt);
 }
 
 function setPersistentPaneOptions() {
@@ -950,6 +983,8 @@ function setManagedMetadata() {
   tmux(['set-option', '-t', session, '@argbridge_owner_pid', ownerPid], { stdio: 'ignore' });
   tmux(['set-option', '-t', session, '@argbridge_profile', profile], { stdio: 'ignore' });
   tmux(['set-option', '-t', session, '@argbridge_scope', scope], { stdio: 'ignore' });
+  tmux(['set-option', '-t', session, '@argbridge_agent', agentKind], { stdio: 'ignore' });
+  tmux(['set-option', '-t', session, '@argbridge_cwd', cwd], { stdio: 'ignore' });
 }
 
 function createAgentWindow(initial) {
@@ -1023,13 +1058,31 @@ if (managed) {
   }
 }
 
-function paneIsDead() {
-  const result = tmux(['display-message', '-p', '-t', target, '#{pane_dead}']);
+function paneIsDead(pane = target) {
+  const result = tmux(['display-message', '-p', '-t', pane, '#{pane_dead}']);
   return result.status === 0 && result.stdout.trim() === '1';
+}
+
+function resetCaptureState() {
+  lastSnapshot = '';
+  lastHistoryPane = '';
+  lastHistoryEnd = -1;
+}
+
+function adoptSelectedLivePane() {
+  const selected = selectedPaneTarget();
+  if (!selected || selected === target || paneIsDead(selected)) return false;
+  target = selected;
+  setPersistentPaneOptions();
+  resetCaptureState();
+  return true;
 }
 
 function ensureLivePane() {
   if (!managed || !paneIsDead()) return true;
+  // The user may have manually resumed the exact native conversation in a
+  // new window. Prefer that selected live pane over starting a fresh CLI.
+  if (adoptSelectedLivePane()) return true;
   // Preserve the exited pane and its history. A later user message starts a
   // new native agent in another window of the same cwd-bound tmux session.
   return createAgentWindow(false);
@@ -1095,6 +1148,7 @@ function sendInput(input) {
 
 function capture() {
   if (closed) return;
+  if (managed && paneIsDead()) adoptSelectedLivePane();
   const available = tmux([
     'display-message',
     '-p',

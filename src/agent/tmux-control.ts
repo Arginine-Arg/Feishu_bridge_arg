@@ -52,9 +52,9 @@ export interface AgentTmuxControl {
   list(socket?: string): Promise<TmuxPaneTarget[]>;
   bind(scopeId: string, selector: string): Promise<TmuxPaneTarget>;
   unbind(scopeId: string): Promise<boolean>;
-  status(scopeId: string): Promise<TmuxBindingStatus>;
+  status(scopeId: string, cwd?: string): Promise<TmuxBindingStatus>;
   /** Captures only the current scope's active or bound pane. */
-  tail?(scopeId: string, lineCount: number): Promise<TmuxPaneTail>;
+  tail?(scopeId: string, lineCount: number, cwd?: string): Promise<TmuxPaneTail>;
 }
 
 interface TmuxBindingsFile {
@@ -62,7 +62,23 @@ interface TmuxBindingsFile {
   bindings: Record<string, TmuxPaneTarget>;
 }
 
+export interface ManagedTmuxTerminal {
+  socketPath: string;
+  sessionName: string;
+  attachCommand: string;
+  cwdRealpath: string;
+  agentKind: TmuxAgentKind;
+  launchSignature: string;
+  updatedAt: number;
+}
+
+interface ManagedTmuxTerminalsFile {
+  version: 1;
+  terminals: Record<string, ManagedTmuxTerminal>;
+}
+
 const BINDINGS_FILE = 'tmux-bindings.json';
+const MANAGED_TERMINALS_FILE = 'tmux-managed-terminals.json';
 const MAX_TMUX_TAIL_CHARS = 12_000;
 const TMUX_FORMAT = [
   '#{session_name}',
@@ -78,6 +94,9 @@ const TMUX_FORMAT = [
 export class TmuxBindingController {
   private readonly file: string;
   private readonly bindings: Record<string, TmuxPaneTarget>;
+  private readonly managedFile: string;
+  private readonly managedTerminals: Record<string, ManagedTmuxTerminal>;
+  private managedSaving: Promise<void> = Promise.resolve();
 
   constructor(
     private readonly profileStateDir: string,
@@ -86,12 +105,12 @@ export class TmuxBindingController {
   ) {
     this.file = join(profileStateDir, BINDINGS_FILE);
     this.bindings = loadBindings(this.file);
+    this.managedFile = join(profileStateDir, MANAGED_TERMINALS_FILE);
+    this.managedTerminals = loadManagedTerminals(this.managedFile, agentKind);
   }
 
   managedSessionName(scopeId: string): string {
-    const profile = safeTmuxName(this.profile).slice(0, 24) || this.agentKind;
-    const scopeHash = createHash('sha256').update(scopeId).digest('hex').slice(0, 12);
-    return `argbridge-${this.agentKind}-${profile}-${scopeHash}`.slice(0, 96);
+    return managedSessionNameFor(this.profile, this.agentKind, scopeId);
   }
 
   async list(socket?: string): Promise<TmuxPaneTarget[]> {
@@ -156,6 +175,62 @@ export class TmuxBindingController {
     }
   }
 
+  /**
+   * Returns a persisted managed terminal after validating its ownership and
+   * current session metadata. `cwd` is required for recovery/discovery so a
+   * scope cannot accidentally read a terminal from another workspace.
+   */
+  async managedStatus(scopeId: string, cwd?: string): Promise<TmuxBindingStatus> {
+    let saved = this.managedTerminals[scopeId];
+    if (!saved && cwd) {
+      saved = recoverManagedTerminal(cwd, scopeId, this.profile, this.agentKind);
+      if (saved) {
+        this.managedTerminals[scopeId] = saved;
+        await this.flushManaged();
+      }
+    }
+    if (!saved) return { state: 'none' };
+    if (cwd && resolve(saved.cwdRealpath) !== resolve(cwd)) return { state: 'none' };
+    try {
+      const terminal = revalidateManagedTerminal(saved, scopeId, this.profile, this.agentKind);
+      return { state: 'managed', terminal };
+    } catch {
+      // A disappeared tmux server is not an invalid user binding. Keep the
+      // record so a later live run can recreate the same stable socket.
+      return { state: 'none' };
+    }
+  }
+
+  /** Stable identity used by a new bridge process to reconnect to a managed session. */
+  managedTerminalFor(scopeId: string, cwd: string, launchSignature: string): ManagedTmuxTerminal | undefined {
+    const saved = this.managedTerminals[scopeId];
+    if (!saved || resolve(saved.cwdRealpath) !== resolve(cwd)) return undefined;
+    if (saved.launchSignature && saved.launchSignature !== launchSignature) return undefined;
+    if (!isManagedSocketPath(saved.socketPath, cwd)) return undefined;
+    return { ...saved };
+  }
+
+  async rememberManaged(
+    scopeId: string,
+    cwd: string,
+    launchSignature: string,
+    terminal: Pick<ManagedTmuxTerminal, 'socketPath' | 'sessionName' | 'attachCommand'>,
+  ): Promise<void> {
+    if (!isManagedSocketPath(terminal.socketPath, cwd)) return;
+    const expectedSessionName = this.managedSessionName(scopeId);
+    if (terminal.sessionName !== expectedSessionName) return;
+    this.managedTerminals[scopeId] = {
+      socketPath: resolve(terminal.socketPath),
+      sessionName: terminal.sessionName,
+      attachCommand: terminal.attachCommand,
+      cwdRealpath: resolve(cwd),
+      agentKind: this.agentKind,
+      launchSignature,
+      updatedAt: Date.now(),
+    };
+    await this.flushManaged();
+  }
+
   bindingFor(scopeId: string, cwd: string): TmuxPaneTarget | undefined {
     const saved = this.bindings[scopeId];
     if (!saved) return undefined;
@@ -181,6 +256,17 @@ export class TmuxBindingController {
   private async flush(): Promise<void> {
     const content: TmuxBindingsFile = { version: 1, bindings: this.bindings };
     await writeFileAtomic(this.file, `${JSON.stringify(content, null, 2)}\n`, { mode: 0o600 });
+  }
+
+  private async flushManaged(): Promise<void> {
+    this.managedSaving = this.managedSaving.then(async () => {
+      const content: ManagedTmuxTerminalsFile = {
+        version: 1,
+        terminals: this.managedTerminals,
+      };
+      await writeFileAtomic(this.managedFile, `${JSON.stringify(content, null, 2)}\n`, { mode: 0o600 });
+    });
+    await this.managedSaving;
   }
 }
 
@@ -445,11 +531,146 @@ function revalidateTmuxTarget(saved: TmuxPaneTarget, expectedAgent: TmuxAgentKin
   return current;
 }
 
+function revalidateManagedTerminal(
+  saved: ManagedTmuxTerminal,
+  scopeId: string,
+  profile: string,
+  expectedAgent: TmuxAgentKind,
+): TmuxTerminalTarget {
+  if (!isSafeTmuxSocket(saved.socketPath)) throw new Error('socket 不存在或不安全');
+  const expectedSession = managedSessionNameFor(profile, expectedAgent, scopeId);
+  if (saved.sessionName !== expectedSession) throw new Error('managed session 名称不匹配');
+  const metadata = readManagedMetadata(saved.socketPath, saved.sessionName);
+  if (!metadata || metadata.managed !== '1') throw new Error('session 不是 bridge 托管 session');
+  if (metadata.profile !== profile || metadata.scope !== scopeId) {
+    throw new Error('session ownership metadata 不匹配');
+  }
+  if (metadata.agent && metadata.agent !== expectedAgent) {
+    throw new Error('session agent metadata 不匹配');
+  }
+  return {
+    socketPath: saved.socketPath,
+    target: saved.sessionName,
+    attachCommand: saved.attachCommand,
+    ownership: 'managed',
+  };
+}
+
+function readManagedMetadata(
+  socketPath: string,
+  sessionName: string,
+): { managed: string; profile: string; scope: string; agent: string; cwd: string } | undefined {
+  const result = spawnProcessSync(
+    'tmux',
+    [
+      '-S',
+      socketPath,
+      'display-message',
+      '-p',
+      '-t',
+      sessionName,
+      '#{@argbridge_managed}\t#{@argbridge_profile}\t#{@argbridge_scope}\t#{@argbridge_agent}\t#{@argbridge_cwd}',
+    ],
+    { encoding: 'utf8' },
+  );
+  if (result.status !== 0 || typeof result.stdout !== 'string') return undefined;
+  const [managed = '', profile = '', scope = '', agent = '', cwd = ''] = result.stdout.trim().split('\t');
+  if (!managed || !profile || !scope) return undefined;
+  return { managed, profile, scope, agent, cwd };
+}
+
+function recoverManagedTerminal(
+  cwd: string,
+  scopeId: string,
+  profile: string,
+  agentKind: TmuxAgentKind,
+): ManagedTmuxTerminal | undefined {
+  const expectedSessionName = managedSessionNameFor(profile, agentKind, scopeId);
+  let names: string[];
+  try {
+    names = readdirSync(cwd);
+  } catch {
+    return undefined;
+  }
+  for (const name of names.sort()) {
+    if (!/^\.ab-live-[a-f0-9]{12}\.sock$/u.test(name)) continue;
+    const socketPath = join(cwd, name);
+    if (!isSafeTmuxSocket(socketPath)) continue;
+    const hasSession = spawnProcessSync(
+      'tmux',
+      ['-S', socketPath, 'has-session', '-t', expectedSessionName],
+      { stdio: 'ignore' },
+    );
+    if (hasSession.status !== 0) continue;
+    const metadata = readManagedMetadata(socketPath, expectedSessionName);
+    if (!metadata || metadata.managed !== '1') continue;
+    if (metadata.profile !== profile || metadata.scope !== scopeId) continue;
+    if (metadata.agent && metadata.agent !== agentKind) continue;
+    return {
+      socketPath: resolve(socketPath),
+      sessionName: expectedSessionName,
+      attachCommand: `tmux -S ${shellQuote(socketPath)} attach -t ${shellQuote(expectedSessionName)}`,
+      cwdRealpath: resolve(cwd),
+      agentKind,
+      launchSignature: '',
+      updatedAt: Date.now(),
+    };
+  }
+  return undefined;
+}
+
+function isManagedSocketPath(socketPath: string, cwd: string): boolean {
+  return (
+    resolve(dirname(socketPath)) === resolve(cwd) &&
+    /^\.ab-live-[a-f0-9]{12}\.sock$/u.test(basename(socketPath))
+  );
+}
+
+function managedSessionNameFor(profile: string, agentKind: TmuxAgentKind, scopeId: string): string {
+  const safeProfile = safeTmuxName(profile).slice(0, 24) || agentKind;
+  const scopeHash = createHash('sha256').update(scopeId).digest('hex').slice(0, 12);
+  return `argbridge-${agentKind}-${safeProfile}-${scopeHash}`.slice(0, 96);
+}
+
 function loadBindings(file: string): Record<string, TmuxPaneTarget> {
   try {
     const parsed = JSON.parse(readFileSync(file, 'utf8')) as Partial<TmuxBindingsFile>;
     if (parsed.version !== 1 || !parsed.bindings || typeof parsed.bindings !== 'object') return {};
     return parsed.bindings;
+  } catch {
+    return {};
+  }
+}
+
+function loadManagedTerminals(file: string, expectedAgent: TmuxAgentKind): Record<string, ManagedTmuxTerminal> {
+  try {
+    const parsed = JSON.parse(readFileSync(file, 'utf8')) as Partial<ManagedTmuxTerminalsFile>;
+    if (parsed.version !== 1 || !parsed.terminals || typeof parsed.terminals !== 'object') return {};
+    const out: Record<string, ManagedTmuxTerminal> = {};
+    for (const [scopeId, raw] of Object.entries(parsed.terminals)) {
+      if (!raw || typeof raw !== 'object') continue;
+      const item = raw as Partial<ManagedTmuxTerminal>;
+      if (
+        typeof item.socketPath !== 'string' ||
+        typeof item.sessionName !== 'string' ||
+        typeof item.attachCommand !== 'string' ||
+        typeof item.cwdRealpath !== 'string' ||
+        item.agentKind !== expectedAgent ||
+        (item.launchSignature !== undefined && typeof item.launchSignature !== 'string') ||
+        typeof item.updatedAt !== 'number' ||
+        !isManagedSocketPath(item.socketPath, item.cwdRealpath)
+      ) continue;
+      out[scopeId] = {
+        socketPath: resolve(item.socketPath),
+        sessionName: item.sessionName,
+        attachCommand: item.attachCommand,
+        cwdRealpath: resolve(item.cwdRealpath),
+        agentKind: expectedAgent,
+        launchSignature: item.launchSignature ?? '',
+        updatedAt: item.updatedAt,
+      };
+    }
+    return out;
   } catch {
     return {};
   }

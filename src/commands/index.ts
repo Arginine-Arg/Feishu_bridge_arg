@@ -991,7 +991,7 @@ async function handleSession(args: string, ctx: CommandContext): Promise<void> {
     const runStatus = active
       ? `运行中（run \`${active.run.runId.slice(0, 8)}…\`）`
       : '无运行任务';
-    const terminal = await ctx.agent.tmux?.status(ctx.scope);
+    const terminal = await ctx.agent.tmux?.status(ctx.scope, effectiveWorkspaceCwd(ctx));
     const terminalText = formatTmuxStatus(terminal);
     await reply(
       ctx,
@@ -1081,7 +1081,7 @@ async function handleTmux(args: string, ctx: CommandContext): Promise<void> {
       return;
     }
     if (action === 'status') {
-      const status = await tmux.status(ctx.scope);
+      const status = await tmux.status(ctx.scope, effectiveWorkspaceCwd(ctx));
       await reply(ctx, formatTmuxStatus(status) || '当前 scope 尚未创建或绑定 tmux terminal。');
       return;
     }
@@ -1095,7 +1095,7 @@ async function handleTmux(args: string, ctx: CommandContext): Promise<void> {
         await reply(ctx, '当前 agent 不支持读取 tmux 末尾输出。');
         return;
       }
-      const tail = await tmux.tail(ctx.scope, lineCount);
+      const tail = await tmux.tail(ctx.scope, lineCount, effectiveWorkspaceCwd(ctx));
       const content = tail.text || '（当前 pane 暂无可见输出）';
       await reply(
         ctx,
