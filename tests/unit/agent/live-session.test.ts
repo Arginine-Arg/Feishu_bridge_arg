@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
 import { spawn, spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,9 +14,11 @@ import {
   parseLiveControlSequence,
   encodeTmuxInputFrame,
   liveTmuxIdentity,
+  managedTmuxIdentity,
   scopeLiveSnapshotToPrompt,
   undeliveredSnapshotSuffix,
 } from '../../../src/agent/live-session';
+import { defaultTmuxSocketPath } from '../../../src/agent/tmux-control';
 
 beforeAll(async () => {
   if (!process.env.TMUX_TMPDIR || typeof process.getuid !== 'function') return;
@@ -63,6 +65,17 @@ describe('LiveTerminalSession prime slot', () => {
 });
 
 describe('tmux input framing and snapshots', () => {
+  it('uses the user default tmux server for production-managed sessions', () => {
+    const identity = managedTmuxIdentity('/workspace', 'scope', 'signature', 'managed-session');
+    expect(identity).toEqual({
+      socketPath: defaultTmuxSocketPath({ ...process.env, TMUX: undefined }),
+      sessionName: 'managed-session',
+    });
+    expect(defaultTmuxSocketPath({ TMPDIR: '/not-the-tmux-root' })).toBe(
+      `/tmp/tmux-${typeof process.getuid === 'function' ? process.getuid() : 0}/default`,
+    );
+  });
+
   it('requires terminal controls instead of interaction words in ordinary output', () => {
     const academicOutput = [
       '• 我会按你的要求调整摘要，请选择更直接的表达。',
@@ -1612,9 +1625,10 @@ setInterval(() => {}, 1000);
     }
   }, 20_000);
 
-  tmuxIt('maps client Ctrl-C to Escape and adopts a manually resumed pane', async () => {
+  tmuxIt('maps managed Ctrl-C to Escape and adopts a selected resume while the old pane lives', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-ctrl-c-test-'));
     const bin = join(dir, 'fake-tmux-ctrl-c-agent.mjs');
+    const agentBin = join(dir, 'codex');
     const countFile = join(dir, 'starts.txt');
     const scopeKey = 'ctrl-c-scope';
     const signature = 'ctrl-c-signature';
@@ -1645,15 +1659,17 @@ setInterval(() => {}, 1000);
       'utf8',
     );
     await chmod(bin, 0o755);
+    await symlink(process.execPath, agentBin);
 
     const pool = new LiveSessionPool();
     try {
       const session = pool.getOrCreate(scopeKey, {
-        command: process.execPath,
+        command: agentBin,
         args: [bin],
         cwd: dir,
         signature,
         tmuxScopeId: scopeKey,
+        tmuxAgentKind: 'codex',
         usePty: true,
         backend: 'tmux',
         idleMs: 220,
@@ -1668,16 +1684,21 @@ setInterval(() => {}, 1000);
           encoding: 'utf8',
         }).stdout.trim(),
       ).toBe('exit-empty off');
-      expect(
-        spawnSync('tmux', ['-S', socketPath, 'list-keys', '-T', 'root'], {
-          encoding: 'utf8',
-        }).stdout,
-      ).toMatch(/C-c\s+send-keys\s+Escape/);
+      const rootKeys = spawnSync('tmux', ['-S', socketPath, 'list-keys', '-T', 'root'], {
+        encoding: 'utf8',
+      }).stdout;
+      const ctrlCBinding = rootKeys.split('\n').find((line) => /\bC-c\b/u.test(line));
+      expect(ctrlCBinding).toContain('@argbridge_managed');
+      expect(ctrlCBinding).toContain('send-keys Escape');
+      expect(ctrlCBinding).toContain('send-keys C-c');
 
       expect(
-        spawnSync('tmux', ['-S', socketPath, 'send-keys', '-t', sessionName, 'C-c']).status,
-      ).toBe(0);
-      await testDelay(500);
+        spawnSync(
+          'tmux',
+          ['-S', socketPath, 'display-message', '-p', '-t', `${sessionName}:0.0`, '#{pane_dead}|#{pane_current_command}'],
+          { encoding: 'utf8' },
+        ).stdout.trim(),
+      ).toBe('0|codex');
 
       const resumed = spawnSync(
         'tmux',
@@ -1685,7 +1706,7 @@ setInterval(() => {}, 1000);
           '-S', socketPath,
           'new-window', '-d', '-P', '-F', '#{session_name}:#{window_index}.#{pane_index}',
           '-t', sessionName, '-n', 'resumed', '-c', dir,
-          process.execPath, bin,
+          agentBin, bin,
         ],
         { encoding: 'utf8' },
       );
@@ -1705,8 +1726,7 @@ setInterval(() => {}, 1000);
         ['-S', socketPath, 'list-panes', '-a', '-F', '#{pane_dead}'],
         { encoding: 'utf8' },
       ).stdout.trim().split('\n');
-      expect(paneStates).toContain('1');
-      expect(paneStates).toContain('0');
+      expect(paneStates).toEqual(['0', '0']);
       const oldPane = spawnSync(
         'tmux',
         ['-S', socketPath, 'capture-pane', '-p', '-t', `${sessionName}:0.0`],
@@ -1714,6 +1734,14 @@ setInterval(() => {}, 1000);
       );
       expect(oldPane.status).toBe(0);
       expect(oldPane.stdout).toContain('first agent reply');
+      expect(oldPane.stdout).not.toContain('second agent reply');
+      const resumedPane = spawnSync(
+        'tmux',
+        ['-S', socketPath, 'capture-pane', '-p', '-t', resumed.stdout.trim()],
+        { encoding: 'utf8' },
+      );
+      expect(resumedPane.status).toBe(0);
+      expect(resumedPane.stdout).toContain('second agent reply');
     } finally {
       await pool.closeAll();
       spawnSync('tmux', ['-S', socketPath, 'kill-server'], { stdio: 'ignore' });

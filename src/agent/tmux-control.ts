@@ -6,7 +6,6 @@ import {
   unlinkSync,
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
-import { tmpdir } from 'node:os';
 import { writeFileAtomic } from '../platform/atomic-write';
 import { spawnProcessSync } from '../platform/spawn';
 import { resolveWorkingDirectory } from '../policy/workspace';
@@ -182,31 +181,45 @@ export class TmuxBindingController {
    */
   async managedStatus(scopeId: string, cwd?: string): Promise<TmuxBindingStatus> {
     let saved = this.managedTerminals[scopeId];
-    if (!saved && cwd) {
+    if (saved && cwd && resolve(saved.cwdRealpath) !== resolve(cwd)) return { state: 'none' };
+    if (saved) {
+      try {
+        const terminal = revalidateManagedTerminal(saved, scopeId, this.profile, this.agentKind);
+        return { state: 'managed', terminal };
+      } catch {
+        // The record may point to a stale pre-0.6.43 cwd socket. Try the
+        // default server and legacy discovery below before reporting none.
+        saved = undefined;
+      }
+    }
+    if (cwd) {
       saved = recoverManagedTerminal(cwd, scopeId, this.profile, this.agentKind);
       if (saved) {
         this.managedTerminals[scopeId] = saved;
         await this.flushManaged();
+        try {
+          const terminal = revalidateManagedTerminal(saved, scopeId, this.profile, this.agentKind);
+          return { state: 'managed', terminal };
+        } catch {
+          // A concurrent tmux shutdown can race the discovery. Keep the
+          // record and let the next live run recreate/reconnect it.
+        }
       }
     }
-    if (!saved) return { state: 'none' };
-    if (cwd && resolve(saved.cwdRealpath) !== resolve(cwd)) return { state: 'none' };
-    try {
-      const terminal = revalidateManagedTerminal(saved, scopeId, this.profile, this.agentKind);
-      return { state: 'managed', terminal };
-    } catch {
-      // A disappeared tmux server is not an invalid user binding. Keep the
-      // record so a later live run can recreate the same stable socket.
-      return { state: 'none' };
-    }
+    return { state: 'none' };
   }
 
   /** Stable identity used by a new bridge process to reconnect to a managed session. */
   managedTerminalFor(scopeId: string, cwd: string, launchSignature: string): ManagedTmuxTerminal | undefined {
-    const saved = this.managedTerminals[scopeId];
+    let saved = this.managedTerminals[scopeId];
+    if (!saved || resolve(saved.cwdRealpath) !== resolve(cwd) ||
+      (saved.launchSignature && saved.launchSignature !== launchSignature) ||
+      !managedTerminalServerAlive(saved)) {
+      saved = recoverManagedTerminal(cwd, scopeId, this.profile, this.agentKind);
+    }
     if (!saved || resolve(saved.cwdRealpath) !== resolve(cwd)) return undefined;
     if (saved.launchSignature && saved.launchSignature !== launchSignature) return undefined;
-    if (!isManagedSocketPath(saved.socketPath, cwd)) return undefined;
+    if (!managedTerminalServerAlive(saved)) return undefined;
     return { ...saved };
   }
 
@@ -274,7 +287,10 @@ export function defaultTmuxSocketPath(env: NodeJS.ProcessEnv = process.env): str
   const current = env.TMUX?.split(',')[0];
   if (current && isAbsolute(current)) return current;
   const uid = typeof process.getuid === 'function' ? process.getuid() : 0;
-  return join(env.TMUX_TMPDIR || tmpdir(), `tmux-${uid}`, 'default');
+  // tmux consults TMUX_TMPDIR specifically and otherwise uses /tmp. Node's
+  // os.tmpdir() also follows the unrelated TMPDIR variable, which would
+  // silently create a second "default" server that normal tmux cannot see.
+  return join(env.TMUX_TMPDIR || '/tmp', `tmux-${uid}`, 'default');
 }
 
 export function tmuxAttachCommand(target: Pick<TmuxPaneTarget, 'socketPath' | 'sessionName' | 'windowIndex' | 'paneIndex'>): string {
@@ -592,9 +608,14 @@ function recoverManagedTerminal(
   } catch {
     return undefined;
   }
-  for (const name of names.sort()) {
-    if (!/^\.ab-live-[a-f0-9]{12}\.sock$/u.test(name)) continue;
-    const socketPath = join(cwd, name);
+  const sockets = [
+    defaultTmuxSocketPath({ ...process.env, TMUX: undefined }),
+    ...names
+      .sort()
+      .filter((name) => /^\.ab-live-[a-f0-9]{12}\.sock$/u.test(name))
+      .map((name) => join(cwd, name)),
+  ];
+  for (const socketPath of [...new Set(sockets)]) {
     if (!isSafeTmuxSocket(socketPath)) continue;
     const hasSession = spawnProcessSync(
       'tmux',
@@ -621,9 +642,24 @@ function recoverManagedTerminal(
 
 function isManagedSocketPath(socketPath: string, cwd: string): boolean {
   return (
-    resolve(dirname(socketPath)) === resolve(cwd) &&
-    /^\.ab-live-[a-f0-9]{12}\.sock$/u.test(basename(socketPath))
+    isDefaultTmuxSocketPath(socketPath) ||
+    (resolve(dirname(socketPath)) === resolve(cwd) &&
+      /^\.ab-live-[a-f0-9]{12}\.sock$/u.test(basename(socketPath)))
   );
+}
+
+function isDefaultTmuxSocketPath(socketPath: string): boolean {
+  return resolve(socketPath) === resolve(defaultTmuxSocketPath({ ...process.env, TMUX: undefined }));
+}
+
+function managedTerminalServerAlive(terminal: ManagedTmuxTerminal): boolean {
+  if (!isSafeTmuxSocket(terminal.socketPath)) return false;
+  const result = spawnProcessSync(
+    'tmux',
+    ['-S', terminal.socketPath, 'has-session', '-t', terminal.sessionName],
+    { stdio: 'ignore' },
+  );
+  return result.status === 0;
 }
 
 function managedSessionNameFor(profile: string, agentKind: TmuxAgentKind, scopeId: string): string {

@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
-import { join } from 'node:path';
+import { chmodSync, lstatSync, mkdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
 import { log } from '../core/logger';
 import {
@@ -16,6 +17,7 @@ import {
 } from './live-interaction-detection';
 import {
   tmuxAttachCommand,
+  defaultTmuxSocketPath,
   type ManagedTmuxTerminal,
   type TmuxOwnership,
   type TmuxPaneTarget,
@@ -814,14 +816,23 @@ function spawnTmuxLiveProcess(
   const managedIdentity = external
     ? undefined
     : opts.tmuxManagedTerminal ??
-      liveTmuxIdentity(
-        opts.cwd,
-        opts.tmuxScopeId ?? opts.tmuxSessionName ?? opts.cwd,
-        opts.signature,
-        opts.tmuxSessionName,
-      );
+      (opts.tmuxSessionName
+        ? managedTmuxIdentity(
+            opts.cwd,
+            opts.tmuxScopeId ?? opts.tmuxSessionName ?? opts.cwd,
+            opts.signature,
+            opts.tmuxSessionName,
+          )
+        : liveTmuxIdentity(
+            opts.cwd,
+            opts.tmuxScopeId ?? opts.tmuxSessionName ?? opts.cwd,
+            opts.signature,
+            opts.tmuxSessionName,
+          ));
   const socketPath = external?.socketPath ?? managedIdentity!.socketPath;
   const sessionName = external?.sessionName ?? managedIdentity!.sessionName;
+  const defaultSocketPath = defaultTmuxSocketPath({ ...process.env, TMUX: undefined });
+  if (!external && socketPath === defaultSocketPath) ensureDefaultTmuxSocketDirectory(socketPath);
   // Managed panes can be replaced after a native Ctrl-C. Expose the stable
   // session target instead of an initial pane address that can become stale.
   const target = external?.paneId ?? sessionName;
@@ -830,7 +841,11 @@ function spawnTmuxLiveProcess(
     [
       '-e',
       TMUX_BRIDGE_HELPER,
-      external ? 'external' : 'managed',
+      external
+        ? 'external'
+        : socketPath === defaultSocketPath
+          ? 'managed-default'
+          : 'managed-private',
       socketPath,
       sessionName,
       target,
@@ -867,6 +882,19 @@ function spawnTmuxLiveProcess(
   };
 }
 
+function ensureDefaultTmuxSocketDirectory(socketPath: string): void {
+  const directory = dirname(socketPath);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const info = lstatSync(directory);
+  if (info.isSymbolicLink() || !info.isDirectory()) {
+    throw new Error(`默认 tmux socket 目录不安全：${directory}`);
+  }
+  if (typeof process.getuid === 'function' && info.uid !== process.getuid()) {
+    throw new Error(`默认 tmux socket 目录不属于当前用户：${directory}`);
+  }
+  chmodSync(directory, 0o700);
+}
+
 /** Stable managed tmux identity for one cwd, conversation scope, and launch signature. */
 export function liveTmuxIdentity(
   cwd: string,
@@ -885,6 +913,24 @@ export function liveTmuxIdentity(
   return {
     socketPath: join(cwd, `.ab-live-${hash.slice(0, 12)}.sock`),
     sessionName: preferredSessionName ?? `argbridge-live-${hash}`,
+  };
+}
+
+/**
+ * Managed bridge sessions live in the user's default tmux server. The
+ * session name remains cwd/scope/signature-specific, while the server is
+ * shared with normal tmux usage and survives bridge process restarts.
+ */
+export function managedTmuxIdentity(
+  cwd: string,
+  sessionKey: string,
+  signature: string,
+  preferredSessionName?: string,
+): { socketPath: string; sessionName: string } {
+  const identity = liveTmuxIdentity(cwd, sessionKey, signature, preferredSessionName);
+  return {
+    socketPath: defaultTmuxSocketPath({ ...process.env, TMUX: undefined }),
+    sessionName: identity.sessionName,
   };
 }
 
@@ -910,7 +956,8 @@ const { spawnSync } = require('node:child_process');
 const { existsSync } = require('node:fs');
 
 const [mode, socketPath, session, requestedTarget, commandBase64, cwd, rows, columns, profile, scope, agentKind, ownerPid] = process.argv.slice(1);
-const managed = mode === 'managed';
+const managed = mode !== 'external';
+const privateServer = mode === 'managed-private';
 let target = managed ? session + ':0.0' : requestedTarget;
 const commandLine = Buffer.from(commandBase64, 'base64').toString('utf8');
 let closed = false;
@@ -925,7 +972,7 @@ process.on('uncaughtException', (error) => {
 });
 
 function tmux(args, options = {}) {
-  return spawnSync('tmux', ['-S', socketPath, ...(managed ? ['-f', '/dev/null'] : []), ...args], {
+  return spawnSync('tmux', ['-S', socketPath, ...(privateServer ? ['-f', '/dev/null'] : []), ...args], {
     cwd,
     env: process.env,
     encoding: 'utf8',
@@ -936,7 +983,8 @@ function tmux(args, options = {}) {
 
 function writeError(prefix, result) {
   const message = (result.stderr || result.error?.message || '').trim();
-  process.stderr.write(prefix + (message ? ': ' + message : '') + '\n');
+  const reason = message.match(/\(([^()\n]+)\)\s*$/u)?.[1];
+  process.stderr.write(prefix + (message ? ': ' + (reason ? reason + '; ' : '') + message : '') + '\n');
 }
 
 function selectedPaneTarget() {
@@ -962,7 +1010,16 @@ function setManagedLifecycleOptions() {
   // A Ctrl-C typed into an attached managed client should cancel the current
   // TUI turn (Codex/Claude use Escape for that) rather than terminate the
   // native process and force a new conversation in another pane.
-  const interrupt = tmux(['bind-key', '-n', 'C-c', 'send-keys', 'Escape']);
+  const interrupt = tmux([
+    'bind-key',
+    '-n',
+    'C-c',
+    'if-shell',
+    '-F',
+    '#{==:#{@argbridge_managed},1}',
+    'send-keys Escape',
+    'send-keys C-c',
+  ]);
   if (interrupt.status !== 0) writeError('failed to preserve managed Ctrl-C handling', interrupt);
 }
 
@@ -1002,6 +1059,31 @@ function createAgentWindow(initial) {
         'agent',
         '-c',
         cwd,
+        commandLine,
+        // Keep the first detached session alive even when the user's tmux
+        // configuration enables destroy-unattached. tmux executes this
+        // command queue before its creating client disconnects.
+        ';',
+        'set-option',
+        '-g',
+        'destroy-unattached',
+        'off',
+        ';',
+        'set-option',
+        '-s',
+        'exit-unattached',
+        'off',
+        ';',
+        'set-option',
+        '-g',
+        'exit-empty',
+        'off',
+        ';',
+        'set-option',
+        '-t',
+        session,
+        'destroy-unattached',
+        'off',
       ]
     : [
         'new-window',
@@ -1026,10 +1108,12 @@ function createAgentWindow(initial) {
   const selected = tmux(['select-window', '-t', target]);
   if (selected.status !== 0) writeError('failed to select tmux live window', selected);
   setPersistentPaneOptions();
-  const started = tmux(['respawn-pane', '-k', '-t', target, '-c', cwd, commandLine]);
-  if (started.status !== 0) {
-    writeError('failed to start tmux live agent', started);
-    return false;
+  if (!initial) {
+    const started = tmux(['respawn-pane', '-k', '-t', target, '-c', cwd, commandLine]);
+    if (started.status !== 0) {
+      writeError('failed to start tmux live agent', started);
+      return false;
+    }
   }
   lastSnapshot = '';
   lastHistoryPane = '';
@@ -1069,9 +1153,25 @@ function resetCaptureState() {
   lastHistoryEnd = -1;
 }
 
+function selectedPaneIsAgent(pane) {
+  const result = tmux([
+    'display-message',
+    '-p',
+    '-t',
+    pane,
+    '#{pane_dead}|#{pane_current_command}',
+  ]);
+  if (result.status !== 0) return false;
+  const [dead = '1', command = ''] = result.stdout.trim().split('|');
+  if (dead === '1') return false;
+  const expected = agentKind.toLowerCase();
+  const actual = command.toLowerCase().split('/').at(-1)?.replace(/\.(?:exe|cmd)$/u, '') ?? '';
+  return actual === expected;
+}
+
 function adoptSelectedLivePane() {
   const selected = selectedPaneTarget();
-  if (!selected || selected === target || paneIsDead(selected)) return false;
+  if (!selected || selected === target || !selectedPaneIsAgent(selected)) return false;
   target = selected;
   setPersistentPaneOptions();
   resetCaptureState();
@@ -1079,7 +1179,12 @@ function adoptSelectedLivePane() {
 }
 
 function ensureLivePane() {
-  if (!managed || !paneIsDead()) return true;
+  if (!managed) return true;
+  // A user can manually resume Codex or Claude in a newly selected window
+  // while the previous pane is still alive. Prefer that same-family agent
+  // pane before sending the next Feishu prompt.
+  if (adoptSelectedLivePane()) return true;
+  if (!paneIsDead()) return true;
   // The user may have manually resumed the exact native conversation in a
   // new window. Prefer that selected live pane over starting a fresh CLI.
   if (adoptSelectedLivePane()) return true;
@@ -1148,7 +1253,7 @@ function sendInput(input) {
 
 function capture() {
   if (closed) return;
-  if (managed && paneIsDead()) adoptSelectedLivePane();
+  if (managed) adoptSelectedLivePane();
   const available = tmux([
     'display-message',
     '-p',
