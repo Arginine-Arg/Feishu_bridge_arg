@@ -72,7 +72,7 @@ describe('tmux input framing and snapshots', () => {
       sessionName: 'managed-session',
     });
     expect(defaultTmuxSocketPath({ TMPDIR: '/not-the-tmux-root' })).toBe(
-      `/tmp/tmux-${typeof process.getuid === 'function' ? process.getuid() : 0}/default`,
+      join('/tmp', `tmux-${typeof process.getuid === 'function' ? process.getuid() : 0}`, 'default'),
     );
   });
 
