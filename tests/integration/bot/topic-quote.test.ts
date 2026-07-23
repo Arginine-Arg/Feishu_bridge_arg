@@ -595,7 +595,10 @@ function isMarkdownStreamInput(input: unknown): input is MarkdownStreamInput {
   return Boolean(input && typeof input === 'object' && 'markdown' in input);
 }
 
-async function waitFor(predicate: () => boolean, timeoutMs = 1500): Promise<void> {
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMs = process.platform === 'win32' ? 4_000 : 1_500,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (predicate()) return;
