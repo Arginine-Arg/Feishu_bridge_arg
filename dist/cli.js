@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.46",
+  version: "0.6.47",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -6591,7 +6591,7 @@ var COMMAND_STARTUP_TIMEOUT_MS = 25e3;
 var COMMAND_IDLE_MS = 2500;
 var COMMAND_NO_OUTPUT_IDLE_MS = 8e3;
 var COMPACT_NO_OUTPUT_IDLE_MS = 6e4;
-var COMMAND_DRAFT_CONFIRM_DELAY_MS = 650;
+var COMMAND_DRAFT_CONFIRM_DELAY_MS = 2500;
 var CONTROL_LITERAL_CONFIRM_DELAY_MS = 900;
 var NORMAL_SUBMIT_RETRY_DELAY_MS = 1200;
 var MAX_TURN_OUTPUT_CHARS = 12e4;
@@ -6935,10 +6935,10 @@ var LiveTerminalSession = class {
     const scheduleSlashCommandConfirm = () => {
       if (!commandMode || slashConfirmRetried || slashConfirmTimer || sawCommandResultOutput) return;
       if (!prompt.trim().startsWith("/")) return;
-      if (!shouldRetryLiveCommandSubmit(latestCommandTerminalText, prompt)) return;
+      if (!isPendingLiveCommandDraft(latestCommandTerminalText, prompt)) return;
       slashConfirmTimer = setTimeout(() => {
         slashConfirmTimer = void 0;
-        if (done || sawCommandResultOutput || slashConfirmRetried || !shouldRetryLiveCommandSubmit(latestCommandTerminalText, prompt)) {
+        if (done || sawCommandResultOutput || slashConfirmRetried || !isPendingLiveCommandDraft(latestCommandTerminalText, prompt)) {
           return;
         }
         slashConfirmRetried = true;
@@ -6989,7 +6989,7 @@ var LiveTerminalSession = class {
       const terminalState = event.terminalText;
       if (commandMode && terminalState) {
         latestCommandTerminalText = terminalState;
-        if (!shouldRetryLiveCommandSubmit(terminalState, prompt)) cancelSlashCommandConfirm();
+        if (!isPendingLiveCommandDraft(terminalState, prompt)) cancelSlashCommandConfirm();
       }
       const terminalBusy = terminalState ? isLiveTerminalBusy(terminalState) : false;
       if (terminalBusy || terminalState && isLiveTerminalInteraction(terminalState)) {
@@ -7795,9 +7795,6 @@ function isPendingLiveCommandDraft(input, prompt) {
   }
   const draft = new RegExp(`^[\u203A\u276F>]\\s*${escapeRegExp(command)}\\s*$`, "iu");
   return cleaned.split("\n").slice(-12).some((line) => draft.test(line.trim()));
-}
-function shouldRetryLiveCommandSubmit(input, prompt) {
-  return !isLivePickerCommand(prompt) && isPendingLiveCommandDraft(input, prompt);
 }
 function shouldDeferControlLiteralSubmit(input) {
   const trimmed = input.trim();

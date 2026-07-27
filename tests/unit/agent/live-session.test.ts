@@ -12,7 +12,6 @@ import {
   isLiveTerminalBusy,
   isLiveTerminalInteraction,
   isPendingLiveCommandDraft,
-  shouldRetryLiveCommandSubmit,
   parseLiveControlSequence,
   encodeTmuxInputFrame,
   liveTmuxIdentity,
@@ -62,13 +61,6 @@ describe('parseLiveControlSequence', () => {
     ).toBe(false);
     expect(isPendingLiveCommandDraft('› /model\n• Working (1s · esc to interrupt)', '/model')).toBe(false);
     expect(isPendingLiveCommandDraft('› /model\n›', '/model')).toBe(false);
-  });
-
-  it('never retries native picker commands after their first Enter', () => {
-    const draft = '› /model\n25% context left';
-    expect(shouldRetryLiveCommandSubmit(draft, '/model')).toBe(false);
-    expect(shouldRetryLiveCommandSubmit('› /resume\n25% context left', '/resume')).toBe(false);
-    expect(shouldRetryLiveCommandSubmit('› /status\n25% context left', '/status')).toBe(true);
   });
 });
 

@@ -87,7 +87,10 @@ const COMMAND_STARTUP_TIMEOUT_MS = 25_000;
 const COMMAND_IDLE_MS = 2_500;
 const COMMAND_NO_OUTPUT_IDLE_MS = 8_000;
 const COMPACT_NO_OUTPUT_IDLE_MS = 60_000;
-const COMMAND_DRAFT_CONFIRM_DELAY_MS = 650;
+// A real Codex/Claude picker can take well over a second to replace its
+// command draft on a loaded remote terminal. Keep this longer than the normal
+// redraw gap so the fallback cannot accept the highlighted picker option.
+const COMMAND_DRAFT_CONFIRM_DELAY_MS = 2_500;
 const CONTROL_LITERAL_CONFIRM_DELAY_MS = 900;
 const NORMAL_SUBMIT_RETRY_DELAY_MS = 1_200;
 const MAX_TURN_OUTPUT_CHARS = 120_000;
@@ -474,18 +477,14 @@ export class LiveTerminalSession {
     const scheduleSlashCommandConfirm = (): void => {
       if (!commandMode || slashConfirmRetried || slashConfirmTimer || sawCommandResultOutput) return;
       if (!prompt.trim().startsWith('/')) return;
-      // Picker commands redraw their command echo while opening a new screen.
-      // Retrying Enter in that gap accepts the currently highlighted option,
-      // which skips a model/reasoning/resume choice. A user can safely reissue
-      // a picker command if a terminal fails to receive its first submission.
-      if (!shouldRetryLiveCommandSubmit(latestCommandTerminalText, prompt)) return;
+      if (!isPendingLiveCommandDraft(latestCommandTerminalText, prompt)) return;
       slashConfirmTimer = setTimeout(() => {
         slashConfirmTimer = undefined;
         if (
           done ||
           sawCommandResultOutput ||
           slashConfirmRetried ||
-          !shouldRetryLiveCommandSubmit(latestCommandTerminalText, prompt)
+          !isPendingLiveCommandDraft(latestCommandTerminalText, prompt)
         ) {
           return;
         }
@@ -545,7 +544,7 @@ export class LiveTerminalSession {
       const terminalState = event.terminalText;
       if (commandMode && terminalState) {
         latestCommandTerminalText = terminalState;
-        if (!shouldRetryLiveCommandSubmit(terminalState, prompt)) cancelSlashCommandConfirm();
+        if (!isPendingLiveCommandDraft(terminalState, prompt)) cancelSlashCommandConfirm();
       }
       const terminalBusy = terminalState ? isLiveTerminalBusy(terminalState) : false;
       if (terminalBusy || (terminalState && isLiveTerminalInteraction(terminalState))) {
@@ -1446,15 +1445,6 @@ export function isPendingLiveCommandDraft(input: string, prompt: string): boolea
     .split('\n')
     .slice(-12)
     .some((line) => draft.test(line.trim()));
-}
-
-/**
- * Native picker commands must never receive a synthetic second Enter. Their
- * TUI replaces the draft with the first picker frame asynchronously, so an
- * Enter retry can choose the highlighted option before the user sees it.
- */
-export function shouldRetryLiveCommandSubmit(input: string, prompt: string): boolean {
-  return !isLivePickerCommand(prompt) && isPendingLiveCommandDraft(input, prompt);
 }
 
 function shouldDeferControlLiteralSubmit(input: string): boolean {
