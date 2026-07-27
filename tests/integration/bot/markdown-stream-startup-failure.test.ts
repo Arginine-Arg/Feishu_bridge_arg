@@ -183,6 +183,8 @@ describe('markdown stream startup failures', () => {
     h.profileConfig.preferences = {
       ...(h.profileConfig.preferences ?? {}),
       messageReply: 'text',
+      model: 'gpt-5.5',
+      reasoningEffort: 'medium',
     };
     h.controls.profileConfig.preferences = h.profileConfig.preferences;
     h.controls.cfg.preferences = h.profileConfig.preferences;
@@ -206,6 +208,10 @@ describe('markdown stream startup failures', () => {
         { type: 'done', terminationReason: 'normal' },
       ],
       [
+        {
+          type: 'text',
+          delta: '• Model changed to gpt-5.6-sol medium',
+        },
         {
           type: 'text',
           delta: [
@@ -259,6 +265,10 @@ describe('markdown stream startup failures', () => {
       'enter',
       'esc',
     ]);
+    expect(h.controls.profileConfig.preferences).toMatchObject({
+      model: 'gpt-5.5',
+      reasoningEffort: 'medium',
+    });
 
     await h.channel.handlers.message?.(message('om_effort_choice', '/model 6'));
     await waitFor(
@@ -559,8 +569,11 @@ describe('markdown stream startup failures', () => {
         {
           type: 'text',
           delta: [
-            'Resume previous conversation',
-            'Use arrows to choose a thread.',
+            '──────────────────────────────────────── 1 / 16 · 100% ─',
+            'session 1: latest research task',
+            'session 2: benchmark diagnosis',
+            'enter resume   esc exit   ctrl+c exit   tab focus sort/filter   ←/→ change option',
+            'ctrl+o comfortable view   ctrl+t transcript   ctrl+e expand   ↑/↓ browse',
           ].join('\n'),
         },
         { type: 'done', terminationReason: 'normal' },
@@ -576,7 +589,17 @@ describe('markdown stream startup failures', () => {
     await startTestBridge(h);
 
     await h.channel.handlers.message?.(message('om_resume', '/codex /resume'));
-    await waitFor(() => h.agent.runOptions.length === 1);
+    await waitFor(() => h.agent.runOptions.length === 1 && h.channel.sent.length === 1);
+    expect(buttonLabels((h.channel.sent[0]?.content as { card?: unknown }).card)).toEqual([
+      'enter',
+      'esc',
+      'ctrl+c',
+      'tab',
+      'left',
+      'right',
+      'up',
+      'down',
+    ]);
     await h.channel.handlers.message?.(message('om_enter', 'enter'));
     await waitFor(() => h.agent.runOptions.length === 2);
 

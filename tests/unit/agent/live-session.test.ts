@@ -12,6 +12,7 @@ import {
   isLiveTerminalBusy,
   isLiveTerminalInteraction,
   isPendingLiveCommandDraft,
+  shouldRetryLiveCommandSubmit,
   parseLiveControlSequence,
   encodeTmuxInputFrame,
   liveTmuxIdentity,
@@ -38,6 +39,8 @@ describe('parseLiveControlSequence', () => {
     expect(parseLiveControlSequence('down down enter')).toEqual(['\x1B[B', '\x1B[B', '\r']);
     expect(parseLiveControlSequence('UP Enter')).toEqual(['\x1B[A', '\r']);
     expect(parseLiveControlSequence('上 回车')).toEqual(['\x1B[A', '\r']);
+    expect(parseLiveControlSequence('ctrl+c')).toEqual(['\x03']);
+    expect(parseLiveControlSequence('ctrl+o ctrl+t ctrl+e')).toEqual(['\x0F', '\x14', '\x05']);
   });
 
   it('returns null for ordinary text (not a pure control sequence)', () => {
@@ -59,6 +62,13 @@ describe('parseLiveControlSequence', () => {
     ).toBe(false);
     expect(isPendingLiveCommandDraft('› /model\n• Working (1s · esc to interrupt)', '/model')).toBe(false);
     expect(isPendingLiveCommandDraft('› /model\n›', '/model')).toBe(false);
+  });
+
+  it('never retries native picker commands after their first Enter', () => {
+    const draft = '› /model\n25% context left';
+    expect(shouldRetryLiveCommandSubmit(draft, '/model')).toBe(false);
+    expect(shouldRetryLiveCommandSubmit('› /resume\n25% context left', '/resume')).toBe(false);
+    expect(shouldRetryLiveCommandSubmit('› /status\n25% context left', '/status')).toBe(true);
   });
 });
 
@@ -349,6 +359,36 @@ describe('tmux input framing and snapshots', () => {
     expect(scopeLiveSnapshotToPrompt(modelChanged, 'enter')).toBe(
       '• Model changed to gpt-5.6-terra high',
     );
+
+    const modelChangedThenReasoning = [
+      '› an earlier request',
+      '• Model changed to gpt-5.6-terra xhigh',
+      'Select Reasoning Level for gpt-5.6-terra',
+      '1. Low',
+      '2. Medium',
+      '3. High',
+      '› 4. Extra high (current)',
+      'Press enter to confirm or esc to go back',
+    ].join('\n');
+    expect(scopeLiveSnapshotToPrompt(modelChangedThenReasoning, '2')).toBe(
+      [
+        'Select Reasoning Level for gpt-5.6-terra',
+        '1. Low',
+        '2. Medium',
+        '3. High',
+        '› 4. Extra high (current)',
+        'Press enter to confirm or esc to go back',
+      ].join('\n'),
+    );
+
+    const untitledResume = [
+      '──────────────────────────────────────── 1 / 16 · 100% ─',
+      'session 1: latest research task',
+      'session 2: benchmark diagnosis',
+      'enter resume   esc exit   ctrl+c exit   tab focus sort/filter   ←/→ change option',
+      'ctrl+o comfortable view   ctrl+t transcript   ctrl+e expand   ↑/↓ browse',
+    ].join('\n');
+    expect(scopeLiveSnapshotToPrompt(untitledResume, '/resume')).toBe(untitledResume);
     expect(scopeLiveSnapshotToPrompt(modelPicker, '/status')).toBe('');
   });
 
@@ -1659,7 +1699,7 @@ setInterval(() => {}, 1000);
     }
   }, 20_000);
 
-  tmuxIt('maps managed Ctrl-C to Escape and adopts a selected resume while the old pane lives', async () => {
+  tmuxIt('keeps native Ctrl-C unbound and adopts a selected resume while the old pane lives', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-ctrl-c-test-'));
     const bin = join(dir, 'fake-tmux-ctrl-c-agent.mjs');
     const agentBin = join(dir, 'codex');
@@ -1708,7 +1748,7 @@ setInterval(() => {}, 1000);
         backend: 'tmux',
         idleMs: 220,
         outputFlushMs: 30,
-        startupTimeoutMs: 1_500,
+        startupTimeoutMs: 5_000,
       });
       expect(textOf(await collect(session.run('ctrl-c-first', 'first task', dir).events))).toContain(
         'first agent reply',
@@ -1722,9 +1762,7 @@ setInterval(() => {}, 1000);
         encoding: 'utf8',
       }).stdout;
       const ctrlCBinding = rootKeys.split('\n').find((line) => /\bC-c\b/u.test(line));
-      expect(ctrlCBinding).toContain('@argbridge_managed');
-      expect(ctrlCBinding).toContain('send-keys Escape');
-      expect(ctrlCBinding).toContain('send-keys C-c');
+      expect(ctrlCBinding).toBeUndefined();
 
       expect(
         spawnSync(

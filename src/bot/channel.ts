@@ -1239,8 +1239,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const sentInteractionSignatures = new Set<string>();
   const pendingInteractionSignatures = new Set<string>();
   const interactionSends: Promise<void>[] = [];
-  const modelPreferenceSaves: Promise<void>[] = [];
-  const syncedNativeModelSelections = new Set<string>();
+  let observedNativeModelSelection: NativeCodexModelSelection | undefined;
   let interactionTextBuffer = '';
   let startupInteractionDeferred = false;
   let pickerObservedAfterInput = false;
@@ -1266,33 +1265,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     }
     if (useLiveSession && nativeCommand && controls.profileConfig.agentKind === 'codex') {
       const selection = parseNativeCodexModelSelection(delta);
-      if (selection) {
-        const signature = `${selection.model}:${selection.reasoningEffort ?? ''}`;
-        if (!syncedNativeModelSelections.has(signature)) {
-          syncedNativeModelSelections.add(signature);
-          const save = saveProfileModelPreferences(controls, {
-            model: selection.model,
-            reasoningEffort:
-              selection.reasoningEffort ?? controls.profileConfig.preferences.reasoningEffort,
-          })
-            .then(() => {
-              log.info('agent-live', 'model-preference-synced', {
-                scope,
-                model: selection.model,
-                ...(selection.reasoningEffort
-                  ? { reasoningEffort: selection.reasoningEffort }
-                  : {}),
-              });
-            })
-            .catch((err) => {
-              log.warn('agent-live', 'model-preference-sync-failed', {
-                scope,
-                err: err instanceof Error ? err.message : String(err),
-              });
-            });
-          modelPreferenceSaves.push(save);
-        }
-      }
+      if (selection) observedNativeModelSelection = selection;
     }
     interactionTextBuffer = `${interactionTextBuffer}\n${delta}`.slice(-4000);
     const outputKind = bridgeAgent.classifyOutput(interactionTextBuffer);
@@ -1809,7 +1782,33 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     // stream ends); it never rejects, so this can't mask a run error.
     await promptBridge;
     await Promise.allSettled(interactionSends);
-    await Promise.allSettled(modelPreferenceSaves);
+    if (
+      useLiveSession &&
+      nativeCommand &&
+      controls.profileConfig.agentKind === 'codex' &&
+      observedNativeModelSelection &&
+      !pickerObservedAfterInput
+    ) {
+      const selection = observedNativeModelSelection;
+      await saveProfileModelPreferences(controls, {
+        model: selection.model,
+        reasoningEffort:
+          selection.reasoningEffort ?? controls.profileConfig.preferences.reasoningEffort,
+      })
+        .then(() => {
+          log.info('agent-live', 'model-preference-synced', {
+            scope,
+            model: selection.model,
+            ...(selection.reasoningEffort ? { reasoningEffort: selection.reasoningEffort } : {}),
+          });
+        })
+        .catch((err) => {
+          log.warn('agent-live', 'model-preference-sync-failed', {
+            scope,
+            err: err instanceof Error ? err.message : String(err),
+          });
+        });
+    }
     if (useLiveSession && nativeCommand) {
       const opensPicker = opensLivePicker(nativeCommand);
       const closesPicker = closesLivePicker(nativeCommand);
@@ -2446,6 +2445,16 @@ function detectLiveInteraction(
       prompt,
     );
 
+  if (isCodexResumePicker(prompt)) {
+    add('enter', 'enter');
+    add('esc', 'esc');
+    add('ctrl+c', 'ctrl+c');
+    add('tab', 'tab');
+    add('left', 'left');
+    add('right', 'right');
+    add('up', 'up');
+    add('down', 'down');
+  }
   if (!hasNumberedChoices && isBinaryConfirmation) {
     add('yes', 'yes');
     add('no', 'no');
@@ -2522,6 +2531,13 @@ function isClaudeModelPicker(text: string): boolean {
   return (
     /\bselect\s+(?:a\s+)?model\b/i.test(text) &&
     /(?:^|\n)\s*(?:[›❯>▸*+-]\s*)?\d{1,2}[.)、:\s-]+claude-[a-z0-9]/iu.test(text)
+  );
+}
+
+function isCodexResumePicker(text: string): boolean {
+  return (
+    /\benter\s+(?:to\s+)?resume\b/i.test(text) &&
+    /\besc\s+(?:to\s+)?exit\b/i.test(text)
   );
 }
 

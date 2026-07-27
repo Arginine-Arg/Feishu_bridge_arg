@@ -201,6 +201,32 @@ describe('liveInteractionCard', () => {
     ]);
   });
 
+  it('renders an untitled Codex resume screen as live controls', () => {
+    const card = liveInteractionCardForText(
+      [
+        '──────────────────────────────────────── 1 / 16 · 100% ─',
+        'session 1: latest research task',
+        'session 2: benchmark diagnosis',
+        'enter resume   esc exit   ctrl+c exit   tab focus sort/filter   ←/→ change option',
+        'ctrl+o comfortable view   ctrl+t transcript   ctrl+e expand   ↑/↓ browse',
+      ].join('\n'),
+      () => 'resume-token',
+    );
+
+    expect(card).toBeDefined();
+    expect(buttonValues(card).map((value) => value.input)).toEqual([
+      'enter',
+      'esc',
+      'ctrl+c',
+      'tab',
+      'left',
+      'right',
+      'up',
+      'down',
+    ]);
+    expect(JSON.stringify(card)).toContain('session 1: latest research task');
+  });
+
   it('keeps all model choices when descriptions wrap and terminal rows are joined', () => {
     const card = liveInteractionCardForText(
       [

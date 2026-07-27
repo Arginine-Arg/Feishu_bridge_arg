@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.45",
+  version: "0.6.46",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -5963,6 +5963,7 @@ var FALLBACK_INTERACTION_LINES = 12;
 var NUMBERED_CHOICE_RE = /^(?:[›❯>▸*+-]\s*)?\d{1,2}[.)、:\s-]+\S/u;
 var BINARY_CONTROL_RE = /\b(?:y\/n|yes\/no|no\/yes)\b|\[(?:y|yes)\/(?:n|no)\]|\((?:y|yes)\/(?:n|no)\)/iu;
 var KEY_HINT_RE = /(?:press\s+)?enter\s+to\s+(?:confirm|continue)|esc(?:ape)?\s+to\s+(?:go\s+back|cancel)|(?:↑|↓|up\/down|arrow keys?|use .*arrows?)|(?:按下?|点击)回车(?:键)?.*确认|(?:按下?|点击).*(?:esc|取消|返回)/iu;
+var CODEX_RESUME_CONTROLS_RE = /\benter\s+(?:to\s+)?resume\b[\s\S]{0,600}\besc\s+(?:to\s+)?exit\b/iu;
 function liveInteractionSurface(input) {
   const recent = input.split("\n").map((line) => line.trim()).filter(Boolean).filter((line) => !/^_(?:🧠 正在思考…|🧰 正在调用工具…|✍️ 正在输出…)_$/u.test(line)).slice(-MAX_INTERACTION_LINES);
   if (recent.length === 0) return void 0;
@@ -5970,7 +5971,7 @@ function liveInteractionSurface(input) {
   for (let index = 0; index < recent.length; index += 1) {
     if (isLiveInteractionPromptStart(recent[index])) start = index;
   }
-  const candidate = start >= 0 ? recent.slice(start) : recent.slice(-FALLBACK_INTERACTION_LINES);
+  const candidate = start >= 0 && isCodexResumeControlLine(recent[start]) ? recent.slice(Math.max(0, start - 24)) : start >= 0 ? recent.slice(start) : recent.slice(-FALLBACK_INTERACTION_LINES);
   if (!isStructuredInteraction(candidate)) return void 0;
   return candidate.join("\n");
 }
@@ -5984,14 +5985,15 @@ function isBareAgentConfirmation(input) {
   );
 }
 function isLiveInteractionPromptStart(line) {
-  return /claude\s+code\s+running\s+in\s+bypass\s+permissions\s+mode/iu.test(line) || /\bupdate\s+available\b/iu.test(line) || /\bselect\s+(?:a\s+)?(?:model|reasoning|option|permission|session)\b/iu.test(line) || /^(?:reasoning (?:effort|level)|skills?)\b/iu.test(line) || /\bchoose\s+an\s+action\b/iu.test(line) || /\b(?:command )?requires?\s+(?:approval|confirmation)\b/iu.test(line) || /\bresume\s+previous\s+conversation\b/iu.test(line) || /^(?:请选择|请(?:输入|回复).*(?:选项|编号|是|否)|等待(?:你|用户)(?:的)?(?:输入|选择|确认)|是否.*[？?])/u.test(
+  return /claude\s+code\s+running\s+in\s+bypass\s+permissions\s+mode/iu.test(line) || /\bupdate\s+available\b/iu.test(line) || /\bselect\s+(?:a\s+)?(?:model|reasoning|option|permission|session)\b/iu.test(line) || /^(?:reasoning (?:effort|level)|skills?)\b/iu.test(line) || /\bchoose\s+an\s+action\b/iu.test(line) || /\b(?:command )?requires?\s+(?:approval|confirmation)\b/iu.test(line) || /\bresume\s+previous\s+conversation\b/iu.test(line) || isCodexResumeControlLine(line) || /^(?:请选择|请(?:输入|回复).*(?:选项|编号|是|否)|等待(?:你|用户)(?:的)?(?:输入|选择|确认)|是否.*[？?])/u.test(
     line
   );
 }
 function isStructuredInteraction(lines) {
   const text = lines.join("\n");
   const tail = lines.at(-1) ?? "";
-  const tailIsControl = NUMBERED_CHOICE_RE.test(tail) || BINARY_CONTROL_RE.test(tail) || KEY_HINT_RE.test(tail);
+  const codexResume = CODEX_RESUME_CONTROLS_RE.test(text);
+  const tailIsControl = codexResume || NUMBERED_CHOICE_RE.test(tail) || BINARY_CONTROL_RE.test(tail) || KEY_HINT_RE.test(tail);
   if (!tailIsControl) return false;
   const hasNumberedChoice = lines.some((line) => NUMBERED_CHOICE_RE.test(line));
   const hasBinaryControl = BINARY_CONTROL_RE.test(text);
@@ -6002,7 +6004,10 @@ function isStructuredInteraction(lines) {
   );
   const claudeBypass = /claude\s+code\s+running\s+in\s+bypass\s+permissions\s+mode/iu.test(text) && /\b(?:no,?\s+exit|yes,?\s+i\s+accept)\b/iu.test(text);
   const codexUpdate = /\bupdate\s+available\b/iu.test(text) && /\bskip(?:\s+until\s+next\s+version)?\b/iu.test(text);
-  return claudeBypass || codexUpdate || hasPromptTitle && (hasNumberedChoice || hasBinaryControl || hasKeyHint) || hasConfirmationQuestion && (hasNumberedChoice || hasBinaryControl) || hasNumberedChoice && hasKeyHint || hasBinaryControl && /(?:approval|confirmation|allow|proceed|continue|确认|允许|继续)/iu.test(text);
+  return claudeBypass || codexUpdate || codexResume || hasPromptTitle && (hasNumberedChoice || hasBinaryControl || hasKeyHint) || hasConfirmationQuestion && (hasNumberedChoice || hasBinaryControl) || hasNumberedChoice && hasKeyHint || hasBinaryControl && /(?:approval|confirmation|allow|proceed|continue|确认|允许|继续)/iu.test(text);
+}
+function isCodexResumeControlLine(line) {
+  return /\benter\s+(?:to\s+)?resume\b.*\besc\s+(?:to\s+)?exit\b/iu.test(line);
 }
 
 // src/agent/tmux-control.ts
@@ -6930,10 +6935,10 @@ var LiveTerminalSession = class {
     const scheduleSlashCommandConfirm = () => {
       if (!commandMode || slashConfirmRetried || slashConfirmTimer || sawCommandResultOutput) return;
       if (!prompt.trim().startsWith("/")) return;
-      if (!isPendingLiveCommandDraft(latestCommandTerminalText, prompt)) return;
+      if (!shouldRetryLiveCommandSubmit(latestCommandTerminalText, prompt)) return;
       slashConfirmTimer = setTimeout(() => {
         slashConfirmTimer = void 0;
-        if (done || sawCommandResultOutput || slashConfirmRetried || !isPendingLiveCommandDraft(latestCommandTerminalText, prompt)) {
+        if (done || sawCommandResultOutput || slashConfirmRetried || !shouldRetryLiveCommandSubmit(latestCommandTerminalText, prompt)) {
           return;
         }
         slashConfirmRetried = true;
@@ -6984,7 +6989,7 @@ var LiveTerminalSession = class {
       const terminalState = event.terminalText;
       if (commandMode && terminalState) {
         latestCommandTerminalText = terminalState;
-        if (!isPendingLiveCommandDraft(terminalState, prompt)) cancelSlashCommandConfirm();
+        if (!shouldRetryLiveCommandSubmit(terminalState, prompt)) cancelSlashCommandConfirm();
       }
       const terminalBusy = terminalState ? isLiveTerminalBusy(terminalState) : false;
       if (terminalBusy || terminalState && isLiveTerminalInteraction(terminalState)) {
@@ -7381,20 +7386,26 @@ function setManagedLifecycleOptions() {
   if (exitUnattached.status !== 0) writeError('failed to preserve detached tmux live server', exitUnattached);
   const exitEmpty = tmux(['set-option', '-g', 'exit-empty', 'off']);
   if (exitEmpty.status !== 0) writeError('failed to preserve empty tmux live server', exitEmpty);
-  // A Ctrl-C typed into an attached managed client should cancel the current
-  // TUI turn (Codex/Claude use Escape for that) rather than terminate the
-  // native process and force a new conversation in another pane.
-  const interrupt = tmux([
-    'bind-key',
-    '-n',
-    'C-c',
-    'if-shell',
-    '-F',
-    '#{==:#{@argbridge_managed},1}',
-    'send-keys Escape',
-    'send-keys C-c',
-  ]);
-  if (interrupt.status !== 0) writeError('failed to preserve managed Ctrl-C handling', interrupt);
+  removeLegacyManagedCtrlCBinding();
+}
+
+function removeLegacyManagedCtrlCBinding() {
+  // v0.6.44 and earlier rewrote Ctrl-C to Escape in the root key table. That
+  // protected older CLI builds from exiting, but also prevented an attached
+  // user from sending the native Ctrl-C that current Codex and Claude TUIs
+  // handle without terminating their pane. Only remove our recognizable old
+  // binding; never erase an unrelated user-defined Ctrl-C binding.
+  const rootKeys = tmux(['list-keys', '-T', 'root']);
+  if (
+    rootKeys.status !== 0 ||
+    !rootKeys.stdout.includes('C-c') ||
+    !rootKeys.stdout.includes('@argbridge_managed') ||
+    !rootKeys.stdout.includes('send-keys Escape')
+  ) {
+    return;
+  }
+  const unbind = tmux(['unbind-key', '-n', 'C-c']);
+  if (unbind.status !== 0) writeError('failed to remove legacy managed Ctrl-C binding', unbind);
 }
 
 function setPersistentPaneOptions() {
@@ -7588,6 +7599,18 @@ function sendInput(input) {
     sendKeys(['C-c']);
     return;
   }
+  if (input === '\x05') {
+    sendKeys(['C-e']);
+    return;
+  }
+  if (input === '\x0f') {
+    sendKeys(['C-o']);
+    return;
+  }
+  if (input === '\x14') {
+    sendKeys(['C-t']);
+    return;
+  }
   if (input === '\x01') {
     sendKeys(['C-a']);
     return;
@@ -7714,6 +7737,18 @@ process.on('SIGINT', () => {
 process.on('exit', () => clearInterval(timer));
 `;
 var CONTROL_KEYS = {
+  "ctrl+c": "",
+  "ctrl-c": "",
+  "^c": "",
+  "ctrl+e": "",
+  "ctrl-e": "",
+  "^e": "",
+  "ctrl+o": "",
+  "ctrl-o": "",
+  "^o": "",
+  "ctrl+t": "",
+  "ctrl-t": "",
+  "^t": "",
   up: "\x1B[A",
   "\u2191": "\x1B[A",
   \u4E0A: "\x1B[A",
@@ -7760,6 +7795,9 @@ function isPendingLiveCommandDraft(input, prompt) {
   }
   const draft = new RegExp(`^[\u203A\u276F>]\\s*${escapeRegExp(command)}\\s*$`, "iu");
   return cleaned.split("\n").slice(-12).some((line) => draft.test(line.trim()));
+}
+function shouldRetryLiveCommandSubmit(input, prompt) {
+  return !isLivePickerCommand(prompt) && isPendingLiveCommandDraft(input, prompt);
 }
 function shouldDeferControlLiteralSubmit(input) {
   const trimmed = input.trim();
@@ -8435,6 +8473,8 @@ function compactTerminalPrompt(input) {
 }
 function scopeKnownLiveControlResultSnapshot(lines, prompt) {
   if (!isLiveControlInput(prompt) && !shouldDeferControlLiteralSubmit(prompt)) return void 0;
+  const picker = scopeLivePickerSnapshot(lines);
+  if (picker !== void 0) return picker;
   const index = findLastLine(
     lines,
     (line) => /^(?:[•*+-]\s*)?Model changed to\b/i.test(line.trim())
@@ -8513,6 +8553,14 @@ function scopeControlLiteralPickerSnapshot(lines, prompt) {
   return scopeLivePickerSnapshot(lines);
 }
 function scopeLivePickerSnapshot(lines) {
+  const resumeControlIndex = findLastLine(
+    lines,
+    (line) => /\benter\s+(?:to\s+)?resume\b.*\besc\s+(?:to\s+)?exit\b/iu.test(line)
+  );
+  if (resumeControlIndex >= 0) {
+    const resume = lines.slice(Math.max(0, resumeControlIndex - 24)).join("\n");
+    if (isLikelyLivePickerOutput(resume)) return resume;
+  }
   let start = -1;
   for (let index = 0; index < lines.length; index += 1) {
     if (isLivePickerStartLine(lines[index] ?? "")) start = index;
@@ -8528,7 +8576,8 @@ function isLivePickerStartLine(line) {
   return isLiveInteractionPromptStart(line.trim());
 }
 function isLikelyLivePickerOutput(text) {
-  return /press\s+enter\s+to\s+(?:confirm|continue)/i.test(text) || /esc\s+to\s+(?:go\s+back|cancel)/i.test(text) || /\b(?:y\/n|yes\/no|no\/yes)\b/i.test(text) || /(?:↑|↓|up\/down|arrow keys?|use .*arrows?)/i.test(text) || /(?:^|\n)\s*(?:[›>▸*+-]\s*)?\d{1,2}[.)、:\s-]+\S/u.test(text);
+  const resumeControls = /\benter\s+(?:to\s+)?resume\b/i.test(text) && /\besc\s+(?:to\s+)?exit\b/i.test(text);
+  return resumeControls || /press\s+enter\s+to\s+(?:confirm|continue)/i.test(text) || /esc\s+to\s+(?:go\s+back|cancel)/i.test(text) || /\b(?:y\/n|yes\/no|no\/yes)\b/i.test(text) || /(?:↑|↓|up\/down|arrow keys?|use .*arrows?)/i.test(text) || /(?:^|\n)\s*(?:[›>▸*+-]\s*)?\d{1,2}[.)、:\s-]+\S/u.test(text);
 }
 function isPromptEchoLine(line, echo) {
   const normalized = line.trim();
@@ -17839,8 +17888,7 @@ async function runAgentBatch(deps) {
   const sentInteractionSignatures = /* @__PURE__ */ new Set();
   const pendingInteractionSignatures = /* @__PURE__ */ new Set();
   const interactionSends = [];
-  const modelPreferenceSaves = [];
-  const syncedNativeModelSelections = /* @__PURE__ */ new Set();
+  let observedNativeModelSelection;
   let interactionTextBuffer = "";
   let startupInteractionDeferred = false;
   let pickerObservedAfterInput = false;
@@ -17866,28 +17914,7 @@ async function runAgentBatch(deps) {
     }
     if (useLiveSession && nativeCommand && controls.profileConfig.agentKind === "codex") {
       const selection = parseNativeCodexModelSelection(delta);
-      if (selection) {
-        const signature = `${selection.model}:${selection.reasoningEffort ?? ""}`;
-        if (!syncedNativeModelSelections.has(signature)) {
-          syncedNativeModelSelections.add(signature);
-          const save = saveProfileModelPreferences(controls, {
-            model: selection.model,
-            reasoningEffort: selection.reasoningEffort ?? controls.profileConfig.preferences.reasoningEffort
-          }).then(() => {
-            log.info("agent-live", "model-preference-synced", {
-              scope,
-              model: selection.model,
-              ...selection.reasoningEffort ? { reasoningEffort: selection.reasoningEffort } : {}
-            });
-          }).catch((err) => {
-            log.warn("agent-live", "model-preference-sync-failed", {
-              scope,
-              err: err instanceof Error ? err.message : String(err)
-            });
-          });
-          modelPreferenceSaves.push(save);
-        }
-      }
+      if (selection) observedNativeModelSelection = selection;
     }
     interactionTextBuffer = `${interactionTextBuffer}
 ${delta}`.slice(-4e3);
@@ -18332,7 +18359,24 @@ ${delta}`.slice(-4e3);
   } finally {
     await promptBridge;
     await Promise.allSettled(interactionSends);
-    await Promise.allSettled(modelPreferenceSaves);
+    if (useLiveSession && nativeCommand && controls.profileConfig.agentKind === "codex" && observedNativeModelSelection && !pickerObservedAfterInput) {
+      const selection = observedNativeModelSelection;
+      await saveProfileModelPreferences(controls, {
+        model: selection.model,
+        reasoningEffort: selection.reasoningEffort ?? controls.profileConfig.preferences.reasoningEffort
+      }).then(() => {
+        log.info("agent-live", "model-preference-synced", {
+          scope,
+          model: selection.model,
+          ...selection.reasoningEffort ? { reasoningEffort: selection.reasoningEffort } : {}
+        });
+      }).catch((err) => {
+        log.warn("agent-live", "model-preference-sync-failed", {
+          scope,
+          err: err instanceof Error ? err.message : String(err)
+        });
+      });
+    }
     if (useLiveSession && nativeCommand) {
       const opensPicker = opensLivePicker(nativeCommand);
       const closesPicker = closesLivePicker(nativeCommand);
@@ -18773,6 +18817,16 @@ function detectLiveInteraction(text, allowBareConfirmation = false) {
   const isBinaryConfirmation = /\b(?:y\/n|yes\/no|no\/yes)\b|(?:\[y\/n\]|\(y\/n\))/i.test(prompt) || /(?:do you want to|would you like to|shall i|requires? (?:approval|confirmation)|approve|allow).*(?:\?|proceed|continue|run|execute|apply|approve|allow)/i.test(
     prompt
   );
+  if (isCodexResumePicker(prompt)) {
+    add("enter", "enter");
+    add("esc", "esc");
+    add("ctrl+c", "ctrl+c");
+    add("tab", "tab");
+    add("left", "left");
+    add("right", "right");
+    add("up", "up");
+    add("down", "down");
+  }
   if (!hasNumberedChoices && isBinaryConfirmation) {
     add("yes", "yes");
     add("no", "no");
@@ -18826,6 +18880,9 @@ function isClaudeBypassPermissionsPrompt(text) {
 }
 function isClaudeModelPicker(text) {
   return /\bselect\s+(?:a\s+)?model\b/i.test(text) && /(?:^|\n)\s*(?:[›❯>▸*+-]\s*)?\d{1,2}[.)、:\s-]+claude-[a-z0-9]/iu.test(text);
+}
+function isCodexResumePicker(text) {
+  return /\benter\s+(?:to\s+)?resume\b/i.test(text) && /\besc\s+(?:to\s+)?exit\b/i.test(text);
 }
 function isCodexUpdatePrompt(text) {
   return /\bupdate\s+available\b/i.test(text) && /\bskip(?:\s+until\s+next\s+version)?\b/i.test(text);

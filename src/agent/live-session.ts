@@ -474,14 +474,18 @@ export class LiveTerminalSession {
     const scheduleSlashCommandConfirm = (): void => {
       if (!commandMode || slashConfirmRetried || slashConfirmTimer || sawCommandResultOutput) return;
       if (!prompt.trim().startsWith('/')) return;
-      if (!isPendingLiveCommandDraft(latestCommandTerminalText, prompt)) return;
+      // Picker commands redraw their command echo while opening a new screen.
+      // Retrying Enter in that gap accepts the currently highlighted option,
+      // which skips a model/reasoning/resume choice. A user can safely reissue
+      // a picker command if a terminal fails to receive its first submission.
+      if (!shouldRetryLiveCommandSubmit(latestCommandTerminalText, prompt)) return;
       slashConfirmTimer = setTimeout(() => {
         slashConfirmTimer = undefined;
         if (
           done ||
           sawCommandResultOutput ||
           slashConfirmRetried ||
-          !isPendingLiveCommandDraft(latestCommandTerminalText, prompt)
+          !shouldRetryLiveCommandSubmit(latestCommandTerminalText, prompt)
         ) {
           return;
         }
@@ -541,7 +545,7 @@ export class LiveTerminalSession {
       const terminalState = event.terminalText;
       if (commandMode && terminalState) {
         latestCommandTerminalText = terminalState;
-        if (!isPendingLiveCommandDraft(terminalState, prompt)) cancelSlashCommandConfirm();
+        if (!shouldRetryLiveCommandSubmit(terminalState, prompt)) cancelSlashCommandConfirm();
       }
       const terminalBusy = terminalState ? isLiveTerminalBusy(terminalState) : false;
       if (terminalBusy || (terminalState && isLiveTerminalInteraction(terminalState))) {
@@ -1030,20 +1034,26 @@ function setManagedLifecycleOptions() {
   if (exitUnattached.status !== 0) writeError('failed to preserve detached tmux live server', exitUnattached);
   const exitEmpty = tmux(['set-option', '-g', 'exit-empty', 'off']);
   if (exitEmpty.status !== 0) writeError('failed to preserve empty tmux live server', exitEmpty);
-  // A Ctrl-C typed into an attached managed client should cancel the current
-  // TUI turn (Codex/Claude use Escape for that) rather than terminate the
-  // native process and force a new conversation in another pane.
-  const interrupt = tmux([
-    'bind-key',
-    '-n',
-    'C-c',
-    'if-shell',
-    '-F',
-    '#{==:#{@argbridge_managed},1}',
-    'send-keys Escape',
-    'send-keys C-c',
-  ]);
-  if (interrupt.status !== 0) writeError('failed to preserve managed Ctrl-C handling', interrupt);
+  removeLegacyManagedCtrlCBinding();
+}
+
+function removeLegacyManagedCtrlCBinding() {
+  // v0.6.44 and earlier rewrote Ctrl-C to Escape in the root key table. That
+  // protected older CLI builds from exiting, but also prevented an attached
+  // user from sending the native Ctrl-C that current Codex and Claude TUIs
+  // handle without terminating their pane. Only remove our recognizable old
+  // binding; never erase an unrelated user-defined Ctrl-C binding.
+  const rootKeys = tmux(['list-keys', '-T', 'root']);
+  if (
+    rootKeys.status !== 0 ||
+    !rootKeys.stdout.includes('C-c') ||
+    !rootKeys.stdout.includes('@argbridge_managed') ||
+    !rootKeys.stdout.includes('send-keys Escape')
+  ) {
+    return;
+  }
+  const unbind = tmux(['unbind-key', '-n', 'C-c']);
+  if (unbind.status !== 0) writeError('failed to remove legacy managed Ctrl-C binding', unbind);
 }
 
 function setPersistentPaneOptions() {
@@ -1237,6 +1247,18 @@ function sendInput(input) {
     sendKeys(['C-c']);
     return;
   }
+  if (input === '\x05') {
+    sendKeys(['C-e']);
+    return;
+  }
+  if (input === '\x0f') {
+    sendKeys(['C-o']);
+    return;
+  }
+  if (input === '\x14') {
+    sendKeys(['C-t']);
+    return;
+  }
   if (input === '\x01') {
     sendKeys(['C-a']);
     return;
@@ -1366,6 +1388,10 @@ process.on('exit', () => clearInterval(timer));
 // Word → terminal key. Lets users drive an agent's interactive picker
 // (e.g. Codex `/model`) from chat by sending navigation words.
 const CONTROL_KEYS: Record<string, string> = {
+  'ctrl+c': '\x03', 'ctrl-c': '\x03', '^c': '\x03',
+  'ctrl+e': '\x05', 'ctrl-e': '\x05', '^e': '\x05',
+  'ctrl+o': '\x0F', 'ctrl-o': '\x0F', '^o': '\x0F',
+  'ctrl+t': '\x14', 'ctrl-t': '\x14', '^t': '\x14',
   up: '\x1B[A', '↑': '\x1B[A', 上: '\x1B[A',
   down: '\x1B[B', '↓': '\x1B[B', 下: '\x1B[B',
   left: '\x1B[D', '←': '\x1B[D', 左: '\x1B[D',
@@ -1420,6 +1446,15 @@ export function isPendingLiveCommandDraft(input: string, prompt: string): boolea
     .split('\n')
     .slice(-12)
     .some((line) => draft.test(line.trim()));
+}
+
+/**
+ * Native picker commands must never receive a synthetic second Enter. Their
+ * TUI replaces the draft with the first picker frame asynchronously, so an
+ * Enter retry can choose the highlighted option before the user sees it.
+ */
+export function shouldRetryLiveCommandSubmit(input: string, prompt: string): boolean {
+  return !isLivePickerCommand(prompt) && isPendingLiveCommandDraft(input, prompt);
 }
 
 function shouldDeferControlLiteralSubmit(input: string): boolean {
@@ -2244,6 +2279,11 @@ function compactTerminalPrompt(input: string): string {
 
 function scopeKnownLiveControlResultSnapshot(lines: string[], prompt: string): string | undefined {
   if (!isLiveControlInput(prompt) && !shouldDeferControlLiteralSubmit(prompt)) return undefined;
+  // A model choice in recent Codex first prints a transient "Model changed"
+  // line and then immediately replaces the screen with the reasoning picker.
+  // The picker is the actionable current surface and must win over that line.
+  const picker = scopeLivePickerSnapshot(lines);
+  if (picker !== undefined) return picker;
   const index = findLastLine(
     lines,
     (line) => /^(?:[•*+-]\s*)?Model changed to\b/i.test(line.trim()),
@@ -2353,6 +2393,17 @@ function scopeControlLiteralPickerSnapshot(lines: string[], prompt: string): str
 }
 
 function scopeLivePickerSnapshot(lines: string[]): string | undefined {
+  const resumeControlIndex = findLastLine(
+    lines,
+    (line) => /\benter\s+(?:to\s+)?resume\b.*\besc\s+(?:to\s+)?exit\b/iu.test(line),
+  );
+  if (resumeControlIndex >= 0) {
+    // Current Codex resumes through a full-screen table that may lack a title.
+    // Keep nearby rows together with its control legend.
+    const resume = lines.slice(Math.max(0, resumeControlIndex - 24)).join('\n');
+    if (isLikelyLivePickerOutput(resume)) return resume;
+  }
+
   let start = -1;
   for (let index = 0; index < lines.length; index += 1) {
     if (isLivePickerStartLine(lines[index] ?? '')) start = index;
@@ -2372,7 +2423,10 @@ function isLivePickerStartLine(line: string): boolean {
 }
 
 function isLikelyLivePickerOutput(text: string): boolean {
+  const resumeControls = /\benter\s+(?:to\s+)?resume\b/i.test(text) &&
+    /\besc\s+(?:to\s+)?exit\b/i.test(text);
   return (
+    resumeControls ||
     /press\s+enter\s+to\s+(?:confirm|continue)/i.test(text) ||
     /esc\s+to\s+(?:go\s+back|cancel)/i.test(text) ||
     /\b(?:y\/n|yes\/no|no\/yes)\b/i.test(text) ||
