@@ -87,6 +87,7 @@ const COMMAND_STARTUP_TIMEOUT_MS = 25_000;
 const COMMAND_IDLE_MS = 2_500;
 const COMMAND_NO_OUTPUT_IDLE_MS = 8_000;
 const COMPACT_NO_OUTPUT_IDLE_MS = 60_000;
+const COMMAND_DRAFT_CONFIRM_DELAY_MS = 650;
 const CONTROL_LITERAL_CONFIRM_DELAY_MS = 900;
 const NORMAL_SUBMIT_RETRY_DELAY_MS = 1_200;
 const MAX_TURN_OUTPUT_CHARS = 120_000;
@@ -387,7 +388,8 @@ export class LiveTerminalSession {
     let sawAcceptedOutput = false;
     let sawCommandResultOutput = false;
     let deliveredText = false;
-    let slashConfirmCount = 0;
+    let slashConfirmRetried = false;
+    let latestCommandTerminalText = '';
     let terminalWasBusy = false;
     let sawNormalSubmitProgress = false;
     let normalSubmitRetried = false;
@@ -432,6 +434,11 @@ export class LiveTerminalSession {
       clearTimeout(normalSubmitRetryTimer);
       normalSubmitRetryTimer = undefined;
     };
+    const cancelSlashCommandConfirm = (): void => {
+      if (!slashConfirmTimer) return;
+      clearTimeout(slashConfirmTimer);
+      slashConfirmTimer = undefined;
+    };
     const markNormalSubmitProgress = (): void => {
       if (commandMode || inputMode === 'control') return;
       sawNormalSubmitProgress = true;
@@ -442,6 +449,7 @@ export class LiveTerminalSession {
       done = true;
       if (commandMode) log.info('agent-live', 'command-finish', { reason: 'idle-or-startup' });
       if (timer) clearTimeout(timer);
+      cancelSlashCommandConfirm();
       if (controlLiteralConfirmTimer) clearTimeout(controlLiteralConfirmTimer);
       cancelNormalSubmitRetry();
       flushOutput();
@@ -464,16 +472,24 @@ export class LiveTerminalSession {
       timer = undefined;
     };
     const scheduleSlashCommandConfirm = (): void => {
-      if (!commandMode || slashConfirmCount >= 2 || slashConfirmTimer || sawCommandResultOutput) return;
+      if (!commandMode || slashConfirmRetried || slashConfirmTimer || sawCommandResultOutput) return;
       if (!prompt.trim().startsWith('/')) return;
+      if (!isPendingLiveCommandDraft(latestCommandTerminalText, prompt)) return;
       slashConfirmTimer = setTimeout(() => {
         slashConfirmTimer = undefined;
-        if (done || sawCommandResultOutput || slashConfirmCount >= 2) return;
-        slashConfirmCount += 1;
-        log.info('agent-live', 'command-confirm', { commandText: prompt, attempt: slashConfirmCount });
+        if (
+          done ||
+          sawCommandResultOutput ||
+          slashConfirmRetried ||
+          !isPendingLiveCommandDraft(latestCommandTerminalText, prompt)
+        ) {
+          return;
+        }
+        slashConfirmRetried = true;
+        log.info('agent-live', 'command-confirm-draft', { commandText: prompt });
         this.write('\r');
-        if (isStatusLiveCommand(prompt) && slashConfirmCount >= 2) arm(idleMs);
-      }, 200);
+        if (isStatusLiveCommand(prompt)) arm(idleMs);
+      }, COMMAND_DRAFT_CONFIRM_DELAY_MS);
     };
     const scheduleNormalSubmitRetry = (): void => {
       if (commandMode || inputMode === 'control' || normalSubmitRetried || normalSubmitRetryTimer) return;
@@ -523,6 +539,10 @@ export class LiveTerminalSession {
       // adapters can legitimately print words such as "Working" as ordinary
       // task output and must retain the normal idle completion behavior.
       const terminalState = event.terminalText;
+      if (commandMode && terminalState) {
+        latestCommandTerminalText = terminalState;
+        if (!isPendingLiveCommandDraft(terminalState, prompt)) cancelSlashCommandConfirm();
+      }
       const terminalBusy = terminalState ? isLiveTerminalBusy(terminalState) : false;
       if (terminalBusy || (terminalState && isLiveTerminalInteraction(terminalState))) {
         markNormalSubmitProgress();
@@ -554,6 +574,7 @@ export class LiveTerminalSession {
       if (!text) {
         if (terminalWasBusy) return;
         if (commandMode) {
+          scheduleSlashCommandConfirm();
           arm(isStatusLiveCommand(prompt) || sawAcceptedOutput || isKnownSilentLiveCommand(prompt)
             ? idleMs
             : noOutputIdleMs(prompt, idleMs));
@@ -580,7 +601,10 @@ export class LiveTerminalSession {
           log.info('agent-live', 'control-literal-output-before-enter', { input: prompt });
         }
         sawAcceptedOutput = true;
-        if (resultOutput) sawCommandResultOutput = true;
+        if (resultOutput) {
+          sawCommandResultOutput = true;
+          cancelSlashCommandConfirm();
+        }
         scheduleOutputFlush();
         if (!terminalWasBusy) arm(idleMs);
         if (commandMode && !resultOutput) scheduleSlashCommandConfirm();
@@ -678,7 +702,6 @@ export class LiveTerminalSession {
               }, CONTROL_LITERAL_CONFIRM_DELAY_MS);
             } else {
               this.write(`${prompt}\r`);
-              scheduleSlashCommandConfirm();
               scheduleNormalSubmitRetry();
             }
           }
@@ -1374,6 +1397,29 @@ export function parseLiveControlSequence(input: string): string[] | null {
 /** True when the whole message is a navigation/control key sequence. */
 export function isLiveControlInput(input: string): boolean {
   return parseLiveControlSequence(input) !== null;
+}
+
+/**
+ * Only re-submit a slash command while the current editor still contains the
+ * exact command draft. Historical echoes, busy/ready screens, and pickers must
+ * never trigger another Enter because that key would act on the next surface.
+ */
+export function isPendingLiveCommandDraft(input: string, prompt: string): boolean {
+  const command = prompt.trim();
+  if (!command.startsWith('/') || !input.trim()) return false;
+  const cleaned = cleanTerminalOutput(input);
+  if (
+    isLiveTerminalBusy(cleaned) ||
+    isLiveTerminalReady(cleaned) ||
+    isStructuredLiveInteraction(cleaned)
+  ) {
+    return false;
+  }
+  const draft = new RegExp(`^[›❯>]\\s*${escapeRegExp(command)}\\s*$`, 'iu');
+  return cleaned
+    .split('\n')
+    .slice(-12)
+    .some((line) => draft.test(line.trim()));
 }
 
 function shouldDeferControlLiteralSubmit(input: string): boolean {

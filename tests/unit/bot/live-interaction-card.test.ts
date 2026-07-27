@@ -159,6 +159,27 @@ describe('liveInteractionCard', () => {
     ]);
   });
 
+  it('maps Claude model choices to arrow navigation instead of literal numbers', () => {
+    const card = liveInteractionCardForText(
+      [
+        'Select Model',
+        '› 1. claude-opus-4-8 (current)',
+        '2. claude-sonnet-5',
+        '3. claude-haiku-4-5-20251001',
+        'Press enter to confirm or esc to go back',
+      ].join('\n'),
+      () => 'claude-model-token',
+    );
+
+    expect(card).toBeDefined();
+    expect(buttonValues(card).map((value) => value.input)).toEqual([
+      'enter',
+      'down enter',
+      'down down enter',
+      'esc',
+    ]);
+  });
+
   it('maps the Codex update picker to explicit navigation choices', () => {
     const card = liveInteractionCardForText(
       [

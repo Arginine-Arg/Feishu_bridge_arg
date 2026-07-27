@@ -747,11 +747,17 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   }
 
   const route = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
-  const nativeCodexModelCommand =
-    controls.profileConfig.agentKind === 'codex' && route.msg.content.trim() === '/model';
+  const pickerActive = liveInteractionByScope.has(scope);
+  const pickerFollowup = pickerActive
+    ? normalizeLivePickerFollowup(route.msg.content)
+    : undefined;
+  const routedMsg = pickerFollowup
+    ? { ...route.msg, content: pickerFollowup }
+    : route.msg;
+  const nativeModelCommand = routedMsg.content.trim() === '/model';
 
   if (
-    nativeCodexModelCommand &&
+    nativeModelCommand &&
     !canRunAdminCommand(controls.profileConfig, controls, msg.senderId).ok
   ) {
     log.info('command', 'admin-deny', {
@@ -769,10 +775,10 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     return;
   }
 
-  if (!route.forceNative && !nativeCodexModelCommand) {
+  if (!route.forceNative && !nativeModelCommand && !pickerFollowup) {
     const handled = await tryHandleCommand({
       channel,
-      msg: route.msg,
+      msg: routedMsg,
       scope,
       chatMode,
       sessions,
@@ -794,7 +800,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
       allowLocalFileRoot,
     });
     if (handled) {
-      const preservePending = commandPreservesPendingMessages(route.msg.content);
+      const preservePending = commandPreservesPendingMessages(routedMsg.content);
       const dropped = preservePending ? [] : pending.cancel(scope);
       log.info('intake', 'command', {
         scope,
@@ -810,26 +816,29 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   // persistent CLI; picker controls go there only while this scope is known to
   // be inside a picker. Ordinary chat stays on turn-mode runs instead of being
   // typed into a TUI.
-  const pickerActive = liveInteractionByScope.has(scope);
   const nativeInputActive =
     pickerActive || getAgentSessionMode(controls.cfg) === 'live';
-  const forceNative = route.forceNative || nativeCodexModelCommand;
+  const forceNative = route.forceNative || nativeModelCommand || Boolean(pickerFollowup);
   const agentMsg = forceNative
     ? markNativeAgentCommand(
-        route.msg,
-        nativeCodexModelCommand ? 'command' : (route.nativeMode ?? 'command'),
+        routedMsg,
+        pickerFollowup
+          ? 'control'
+          : nativeModelCommand
+            ? 'command'
+            : (route.nativeMode ?? 'command'),
       )
     : nativeInputActive &&
-        isNativeAgentInputText(route.msg.content, pickerActive)
+        isNativeAgentInputText(routedMsg.content, pickerActive)
       ? markNativeAgentCommand(
-          route.msg,
-          route.msg.content.trimStart().startsWith('/')
+          routedMsg,
+          routedMsg.content.trimStart().startsWith('/')
             ? 'command'
             : pickerActive
               ? 'control'
               : undefined,
         )
-      : route.msg;
+      : routedMsg;
   const priorityLiveControl =
     pickerActive && liveInputModeForMessage(agentMsg) === 'control';
   const size = priorityLiveControl
@@ -925,6 +934,14 @@ function isNativeAgentInputText(text: string, pickerActive: boolean): boolean {
 function isLivePickerInput(text: string): boolean {
   const trimmed = text.trim();
   return isLiveControlInput(trimmed) || /^\d{1,2}$/u.test(trimmed) || /^(?:y|yes|n|no)$/iu.test(trimmed);
+}
+
+function normalizeLivePickerFollowup(text: string): string | undefined {
+  const trimmed = text.trim();
+  if (isLivePickerInput(trimmed)) return trimmed;
+  const match = /^\/model\s+(.+)$/iu.exec(trimmed);
+  const input = match?.[1]?.trim();
+  return input && isLivePickerInput(input) ? input : undefined;
 }
 
 function splitNativeLiveBatches(
@@ -1226,6 +1243,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const syncedNativeModelSelections = new Set<string>();
   let interactionTextBuffer = '';
   let startupInteractionDeferred = false;
+  let pickerObservedAfterInput = false;
   if (useLiveSession && nativeCommand && opensLivePicker(nativeCommand)) {
     const wasActive = liveInteractionByScope.has(scope);
     liveInteractionByScope.set(scope, { picker: true, updatedAt: Date.now() });
@@ -1280,6 +1298,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     const outputKind = bridgeAgent.classifyOutput(interactionTextBuffer);
     const pickerLike = isStartupInteraction || outputKind === 'picker';
     const interaction = pickerLike ? detectLiveInteraction(interactionTextBuffer) : undefined;
+    if (!isStartupInteraction && (interaction || pickerLike)) {
+      pickerObservedAfterInput = true;
+    }
     if (useLiveSession && (interaction || pickerLike)) {
       const wasActive = liveInteractionByScope.has(scope);
       const previous = liveInteractionByScope.get(scope);
@@ -1789,9 +1810,15 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     await promptBridge;
     await Promise.allSettled(interactionSends);
     await Promise.allSettled(modelPreferenceSaves);
-    if (useLiveSession && nativeCommand && closesLivePicker(nativeCommand)) {
-      if (liveInteractionByScope.delete(scope)) {
-        log.info('agent-live', 'picker-exit', { scope, input: nativeCommand });
+    if (useLiveSession && nativeCommand) {
+      const opensPicker = opensLivePicker(nativeCommand);
+      const closesPicker = closesLivePicker(nativeCommand);
+      if ((opensPicker || closesPicker) && !pickerObservedAfterInput) {
+        if (liveInteractionByScope.delete(scope)) {
+          log.info('agent-live', 'picker-exit', { scope, input: nativeCommand });
+        }
+      } else if (closesPicker && pickerObservedAfterInput) {
+        log.info('agent-live', 'picker-advance', { scope, input: nativeCommand });
       }
     }
     activePolicyFingerprints.delete(scope);
@@ -2399,7 +2426,9 @@ function detectLiveInteraction(
   };
 
   const arrowNumberedPrompt =
-    isClaudeBypassPermissionsPrompt(prompt) || isCodexUpdatePrompt(prompt);
+    isClaudeBypassPermissionsPrompt(prompt) ||
+    isClaudeModelPicker(prompt) ||
+    isCodexUpdatePrompt(prompt);
   const selectedChoice = numberedChoices.findIndex((choice) => choice.selected);
   for (const [index, choice] of numberedChoices.slice(0, 8).entries()) {
     if (!arrowNumberedPrompt) {
@@ -2486,6 +2515,13 @@ function isClaudeBypassPermissionsPrompt(text: string): boolean {
   return (
     /claude\s+code\s+running\s+in\s+bypass\s+permissions\s+mode/i.test(text) &&
     /\b(?:no,?\s+exit|yes,?\s+i\s+accept)\b/i.test(text)
+  );
+}
+
+function isClaudeModelPicker(text: string): boolean {
+  return (
+    /\bselect\s+(?:a\s+)?model\b/i.test(text) &&
+    /(?:^|\n)\s*(?:[›❯>▸*+-]\s*)?\d{1,2}[.)、:\s-]+claude-[a-z0-9]/iu.test(text)
   );
 }
 

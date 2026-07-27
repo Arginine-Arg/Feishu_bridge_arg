@@ -11,6 +11,7 @@ import {
   LiveTerminalSession,
   isLiveTerminalBusy,
   isLiveTerminalInteraction,
+  isPendingLiveCommandDraft,
   parseLiveControlSequence,
   encodeTmuxInputFrame,
   liveTmuxIdentity,
@@ -46,6 +47,18 @@ describe('parseLiveControlSequence', () => {
     expect(parseLiveControlSequence('')).toBeNull();
     expect(isLiveControlInput('down enter')).toBe(true);
     expect(isLiveControlInput('summarize commits')).toBe(false);
+  });
+
+  it('retries slash commands only while the exact command remains the active draft', () => {
+    expect(isPendingLiveCommandDraft('› /model\n25% context left', '/model')).toBe(true);
+    expect(
+      isPendingLiveCommandDraft(
+        '› /model\nSelect Model\n› 1. gpt-5.6-sol\n2. gpt-5.6-terra\nPress enter to confirm or esc to go back',
+        '/model',
+      ),
+    ).toBe(false);
+    expect(isPendingLiveCommandDraft('› /model\n• Working (1s · esc to interrupt)', '/model')).toBe(false);
+    expect(isPendingLiveCommandDraft('› /model\n›', '/model')).toBe(false);
   });
 });
 
@@ -865,25 +878,29 @@ setInterval(() => {}, 1000);
     expect(text).toContain('Terminal backend: pipe');
   }, 15_000);
 
-  it('presses enter again when a slash command only produces a non-result redraw', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'live-session-slash-confirm-redraw-test-'));
-    const bin = join(dir, 'fake-slash-confirm-redraw-agent.mjs');
+  it('does not blindly send a second enter while a slash-command picker is rendering', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-slash-single-submit-test-'));
+    const bin = join(dir, 'fake-slash-single-submit-agent.mjs');
+    const traceFile = join(dir, 'input-trace.txt');
     await writeFile(
       bin,
       `#!/usr/bin/env node
+import { appendFileSync, writeFileSync } from 'node:fs';
+writeFileSync(${JSON.stringify(traceFile)}, '');
 process.stdin.setEncoding('utf8');
 let sawModel = false;
 process.stdin.on('data', (chunk) => {
+  for (const char of chunk) {
+    if (char === '\\r' || char === '\\n') appendFileSync(${JSON.stringify(traceFile)}, 'enter\\n');
+  }
   if (!sawModel && chunk.includes('/model')) {
     sawModel = true;
-    process.stdout.write('redraw-only\\n');
-    return;
-  }
-  if (sawModel && /[\\r\\n]/.test(chunk)) {
-    process.stdout.write('Select Model and Effort\\n');
-    process.stdout.write('› 1. gpt-5.5 (current)\\n');
-    process.stdout.write('2. gpt-5.4\\n');
-    process.stdout.write('Press enter to confirm or esc to go back\\n');
+    setTimeout(() => {
+      process.stdout.write('Select Model and Effort\\n');
+      process.stdout.write('› 1. gpt-5.6-sol (current)\\n');
+      process.stdout.write('2. gpt-5.6-terra\\n');
+      process.stdout.write('Press enter to confirm or esc to go back\\n');
+    }, 450);
   }
 });
 setInterval(() => {}, 1000);
@@ -893,45 +910,58 @@ setInterval(() => {}, 1000);
     await chmod(bin, 0o755);
 
     const pool = new LiveSessionPool();
-    const session = pool.getOrCreate('slash-confirm-redraw-scope', {
+    const session = pool.getOrCreate('slash-single-submit-scope', {
       command: process.execPath,
       args: [bin],
       cwd: dir,
-      signature: 'slash-confirm-redraw',
+      signature: 'slash-single-submit',
       usePty: false,
       idleMs: 60,
       outputFlushMs: 10,
       startupTimeoutMs: 500,
     });
 
-    const events = await collect(session.run('slash-confirm-redraw-run', '/model', dir, 'command').events);
+    const events = await collect(session.run('slash-single-submit-run', '/model', dir, 'command').events);
     await pool.closeAll();
 
     const text = textOf(events);
-    expect(text).toContain('redraw-only');
     expect(text).toContain('Select Model and Effort');
     expect(text).toContain('Press enter to confirm or esc to go back');
+    expect((await readFile(traceFile, 'utf8')).trim().split('\n')).toEqual(['enter']);
   }, 15_000);
 
-  it('presses enter again when the initial slash command submit produces no redraw', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'live-session-slash-confirm-silent-test-'));
-    const bin = join(dir, 'fake-slash-confirm-silent-agent.mjs');
+  linuxIt('retries one stuck slash draft without confirming the picker itself', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-slash-draft-retry-test-'));
+    const bin = join(dir, 'fake-slash-draft-retry-agent.mjs');
+    const traceFile = join(dir, 'input-trace.txt');
     await writeFile(
       bin,
       `#!/usr/bin/env node
+import { appendFileSync, writeFileSync } from 'node:fs';
+writeFileSync(${JSON.stringify(traceFile)}, '');
 process.stdin.setEncoding('utf8');
-let sawModel = false;
-let submitCount = 0;
-let sent = false;
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+let input = '';
+let enters = 0;
 process.stdin.on('data', (chunk) => {
-  if (chunk.includes('/model')) sawModel = true;
-  if (!sawModel) return;
-  submitCount += (chunk.match(/[\\r\\n]/g) || []).length;
-  if (!sent && submitCount >= 2) {
-    sent = true;
-    process.stdout.write('Select Model and Effort\\n');
-    process.stdout.write('› 1. gpt-5.6-sol (current)\\n');
-    process.stdout.write('Press enter to confirm or esc to go back\\n');
+  for (const char of chunk) {
+    if (char === '\\r' || char === '\\n') {
+      if (!input.includes('/model')) continue;
+      enters += 1;
+      appendFileSync(${JSON.stringify(traceFile)}, 'enter\\n');
+      if (enters === 1) {
+        process.stdout.write('\\x1b[2J\\x1b[H› /model');
+      } else if (enters === 2) {
+        process.stdout.write('\\x1b[2J\\x1b[HSelect Model and Effort\\n');
+        process.stdout.write('› 1. gpt-5.6-sol (default)\\n');
+        process.stdout.write('2. gpt-5.6-terra (current)\\n');
+        process.stdout.write('Press enter to confirm or esc to go back');
+      } else {
+        process.stdout.write('\\x1b[2J\\x1b[HSelect Reasoning Level for gpt-5.6-terra\\n');
+      }
+      continue;
+    }
+    if (char >= ' ') input += char;
   }
 });
 setInterval(() => {}, 1000);
@@ -941,22 +971,26 @@ setInterval(() => {}, 1000);
     await chmod(bin, 0o755);
 
     const pool = new LiveSessionPool();
-    const session = pool.getOrCreate('slash-confirm-silent-scope', {
+    const session = pool.getOrCreate('slash-draft-retry-scope', {
       command: process.execPath,
       args: [bin],
       cwd: dir,
-      signature: 'slash-confirm-silent',
-      usePty: false,
-      idleMs: 60,
-      outputFlushMs: 10,
-      startupTimeoutMs: 500,
+      signature: 'slash-draft-retry',
+      usePty: true,
+      backend: 'pty',
+      idleMs: 120,
+      outputFlushMs: 20,
+      startupTimeoutMs: 1_500,
     });
 
-    const events = await collect(session.run('slash-confirm-silent-run', '/model', dir, 'command').events);
+    const events = await collect(session.run('slash-draft-retry-run', '/model', dir, 'command').events);
     await pool.closeAll();
 
-    expect(textOf(events)).toContain('Select Model and Effort');
-  }, 15_000);
+    const text = textOf(events);
+    expect(text).toContain('Select Model and Effort');
+    expect(text).not.toContain('Select Reasoning Level');
+    expect((await readFile(traceFile, 'utf8')).trim().split('\n')).toEqual(['enter', 'enter']);
+  }, 20_000);
 
   it('uses one escape before clearing pending slash-command input', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-command-clear-sequence-test-'));

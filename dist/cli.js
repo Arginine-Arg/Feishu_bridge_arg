@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.44",
+  version: "0.6.45",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -6586,6 +6586,7 @@ var COMMAND_STARTUP_TIMEOUT_MS = 25e3;
 var COMMAND_IDLE_MS = 2500;
 var COMMAND_NO_OUTPUT_IDLE_MS = 8e3;
 var COMPACT_NO_OUTPUT_IDLE_MS = 6e4;
+var COMMAND_DRAFT_CONFIRM_DELAY_MS = 650;
 var CONTROL_LITERAL_CONFIRM_DELAY_MS = 900;
 var NORMAL_SUBMIT_RETRY_DELAY_MS = 1200;
 var MAX_TURN_OUTPUT_CHARS = 12e4;
@@ -6847,7 +6848,8 @@ var LiveTerminalSession = class {
     let sawAcceptedOutput = false;
     let sawCommandResultOutput = false;
     let deliveredText = false;
-    let slashConfirmCount = 0;
+    let slashConfirmRetried = false;
+    let latestCommandTerminalText = "";
     let terminalWasBusy = false;
     let sawNormalSubmitProgress = false;
     let normalSubmitRetried = false;
@@ -6890,6 +6892,11 @@ var LiveTerminalSession = class {
       clearTimeout(normalSubmitRetryTimer);
       normalSubmitRetryTimer = void 0;
     };
+    const cancelSlashCommandConfirm = () => {
+      if (!slashConfirmTimer) return;
+      clearTimeout(slashConfirmTimer);
+      slashConfirmTimer = void 0;
+    };
     const markNormalSubmitProgress = () => {
       if (commandMode || inputMode === "control") return;
       sawNormalSubmitProgress = true;
@@ -6900,6 +6907,7 @@ var LiveTerminalSession = class {
       done = true;
       if (commandMode) log.info("agent-live", "command-finish", { reason: "idle-or-startup" });
       if (timer) clearTimeout(timer);
+      cancelSlashCommandConfirm();
       if (controlLiteralConfirmTimer) clearTimeout(controlLiteralConfirmTimer);
       cancelNormalSubmitRetry();
       flushOutput();
@@ -6920,16 +6928,19 @@ var LiveTerminalSession = class {
       timer = void 0;
     };
     const scheduleSlashCommandConfirm = () => {
-      if (!commandMode || slashConfirmCount >= 2 || slashConfirmTimer || sawCommandResultOutput) return;
+      if (!commandMode || slashConfirmRetried || slashConfirmTimer || sawCommandResultOutput) return;
       if (!prompt.trim().startsWith("/")) return;
+      if (!isPendingLiveCommandDraft(latestCommandTerminalText, prompt)) return;
       slashConfirmTimer = setTimeout(() => {
         slashConfirmTimer = void 0;
-        if (done || sawCommandResultOutput || slashConfirmCount >= 2) return;
-        slashConfirmCount += 1;
-        log.info("agent-live", "command-confirm", { commandText: prompt, attempt: slashConfirmCount });
+        if (done || sawCommandResultOutput || slashConfirmRetried || !isPendingLiveCommandDraft(latestCommandTerminalText, prompt)) {
+          return;
+        }
+        slashConfirmRetried = true;
+        log.info("agent-live", "command-confirm-draft", { commandText: prompt });
         this.write("\r");
-        if (isStatusLiveCommand(prompt) && slashConfirmCount >= 2) arm(idleMs);
-      }, 200);
+        if (isStatusLiveCommand(prompt)) arm(idleMs);
+      }, COMMAND_DRAFT_CONFIRM_DELAY_MS);
     };
     const scheduleNormalSubmitRetry = () => {
       if (commandMode || inputMode === "control" || normalSubmitRetried || normalSubmitRetryTimer) return;
@@ -6971,6 +6982,10 @@ var LiveTerminalSession = class {
         return;
       }
       const terminalState = event.terminalText;
+      if (commandMode && terminalState) {
+        latestCommandTerminalText = terminalState;
+        if (!isPendingLiveCommandDraft(terminalState, prompt)) cancelSlashCommandConfirm();
+      }
       const terminalBusy = terminalState ? isLiveTerminalBusy(terminalState) : false;
       if (terminalBusy || terminalState && isLiveTerminalInteraction(terminalState)) {
         markNormalSubmitProgress();
@@ -6993,6 +7008,7 @@ var LiveTerminalSession = class {
       if (!text) {
         if (terminalWasBusy) return;
         if (commandMode) {
+          scheduleSlashCommandConfirm();
           arm(isStatusLiveCommand(prompt) || sawAcceptedOutput || isKnownSilentLiveCommand(prompt) ? idleMs : noOutputIdleMs(prompt, idleMs));
         }
         return;
@@ -7015,7 +7031,10 @@ var LiveTerminalSession = class {
           log.info("agent-live", "control-literal-output-before-enter", { input: prompt });
         }
         sawAcceptedOutput = true;
-        if (resultOutput) sawCommandResultOutput = true;
+        if (resultOutput) {
+          sawCommandResultOutput = true;
+          cancelSlashCommandConfirm();
+        }
         scheduleOutputFlush();
         if (!terminalWasBusy) arm(idleMs);
         if (commandMode && !resultOutput) scheduleSlashCommandConfirm();
@@ -7103,7 +7122,6 @@ var LiveTerminalSession = class {
               }, CONTROL_LITERAL_CONFIRM_DELAY_MS);
             } else {
               this.write(`${prompt}\r`);
-              scheduleSlashCommandConfirm();
               scheduleNormalSubmitRetry();
             }
           }
@@ -7732,6 +7750,16 @@ function parseLiveControlSequence(input) {
 }
 function isLiveControlInput(input) {
   return parseLiveControlSequence(input) !== null;
+}
+function isPendingLiveCommandDraft(input, prompt) {
+  const command = prompt.trim();
+  if (!command.startsWith("/") || !input.trim()) return false;
+  const cleaned = cleanTerminalOutput(input);
+  if (isLiveTerminalBusy(cleaned) || isLiveTerminalReady(cleaned) || isStructuredLiveInteraction(cleaned)) {
+    return false;
+  }
+  const draft = new RegExp(`^[\u203A\u276F>]\\s*${escapeRegExp(command)}\\s*$`, "iu");
+  return cleaned.split("\n").slice(-12).some((line) => draft.test(line.trim()));
 }
 function shouldDeferControlLiteralSubmit(input) {
   const trimmed = input.trim();
@@ -17465,8 +17493,11 @@ async function intakeMessage(deps) {
     return;
   }
   const route = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
-  const nativeCodexModelCommand = controls.profileConfig.agentKind === "codex" && route.msg.content.trim() === "/model";
-  if (nativeCodexModelCommand && !canRunAdminCommand(controls.profileConfig, controls, msg.senderId).ok) {
+  const pickerActive = liveInteractionByScope.has(scope);
+  const pickerFollowup = pickerActive ? normalizeLivePickerFollowup(route.msg.content) : void 0;
+  const routedMsg = pickerFollowup ? { ...route.msg, content: pickerFollowup } : route.msg;
+  const nativeModelCommand = routedMsg.content.trim() === "/model";
+  if (nativeModelCommand && !canRunAdminCommand(controls.profileConfig, controls, msg.senderId).ok) {
     log.info("command", "admin-deny", {
       cmd: "/model",
       sender: msg.senderId.slice(-6)
@@ -17481,10 +17512,10 @@ async function intakeMessage(deps) {
     );
     return;
   }
-  if (!route.forceNative && !nativeCodexModelCommand) {
+  if (!route.forceNative && !nativeModelCommand && !pickerFollowup) {
     const handled = await tryHandleCommand({
       channel,
-      msg: route.msg,
+      msg: routedMsg,
       scope,
       chatMode,
       sessions,
@@ -17506,7 +17537,7 @@ async function intakeMessage(deps) {
       allowLocalFileRoot
     });
     if (handled) {
-      const preservePending = commandPreservesPendingMessages(route.msg.content);
+      const preservePending = commandPreservesPendingMessages(routedMsg.content);
       const dropped = preservePending ? [] : pending.cancel(scope);
       log.info("intake", "command", {
         scope,
@@ -17516,16 +17547,15 @@ async function intakeMessage(deps) {
       return;
     }
   }
-  const pickerActive = liveInteractionByScope.has(scope);
   const nativeInputActive = pickerActive || getAgentSessionMode(controls.cfg) === "live";
-  const forceNative = route.forceNative || nativeCodexModelCommand;
+  const forceNative = route.forceNative || nativeModelCommand || Boolean(pickerFollowup);
   const agentMsg = forceNative ? markNativeAgentCommand(
-    route.msg,
-    nativeCodexModelCommand ? "command" : route.nativeMode ?? "command"
-  ) : nativeInputActive && isNativeAgentInputText(route.msg.content, pickerActive) ? markNativeAgentCommand(
-    route.msg,
-    route.msg.content.trimStart().startsWith("/") ? "command" : pickerActive ? "control" : void 0
-  ) : route.msg;
+    routedMsg,
+    pickerFollowup ? "control" : nativeModelCommand ? "command" : route.nativeMode ?? "command"
+  ) : nativeInputActive && isNativeAgentInputText(routedMsg.content, pickerActive) ? markNativeAgentCommand(
+    routedMsg,
+    routedMsg.content.trimStart().startsWith("/") ? "command" : pickerActive ? "control" : void 0
+  ) : routedMsg;
   const priorityLiveControl = pickerActive && liveInputModeForMessage(agentMsg) === "control";
   const size = priorityLiveControl ? pending.pushFront(scope, agentMsg) : pending.push(scope, agentMsg);
   log.info("intake", "queued", { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
@@ -17584,6 +17614,13 @@ function isNativeAgentInputText(text, pickerActive) {
 function isLivePickerInput(text) {
   const trimmed = text.trim();
   return isLiveControlInput(trimmed) || /^\d{1,2}$/u.test(trimmed) || /^(?:y|yes|n|no)$/iu.test(trimmed);
+}
+function normalizeLivePickerFollowup(text) {
+  const trimmed = text.trim();
+  if (isLivePickerInput(trimmed)) return trimmed;
+  const match = /^\/model\s+(.+)$/iu.exec(trimmed);
+  const input = match?.[1]?.trim();
+  return input && isLivePickerInput(input) ? input : void 0;
 }
 function splitNativeLiveBatches(batch, splitEveryMessage = false) {
   const out = [];
@@ -17806,6 +17843,7 @@ async function runAgentBatch(deps) {
   const syncedNativeModelSelections = /* @__PURE__ */ new Set();
   let interactionTextBuffer = "";
   let startupInteractionDeferred = false;
+  let pickerObservedAfterInput = false;
   if (useLiveSession && nativeCommand && opensLivePicker(nativeCommand)) {
     const wasActive = liveInteractionByScope.has(scope);
     liveInteractionByScope.set(scope, { picker: true, updatedAt: Date.now() });
@@ -17856,6 +17894,9 @@ ${delta}`.slice(-4e3);
     const outputKind = bridgeAgent.classifyOutput(interactionTextBuffer);
     const pickerLike = isStartupInteraction || outputKind === "picker";
     const interaction = pickerLike ? detectLiveInteraction(interactionTextBuffer) : void 0;
+    if (!isStartupInteraction && (interaction || pickerLike)) {
+      pickerObservedAfterInput = true;
+    }
     if (useLiveSession && (interaction || pickerLike)) {
       const wasActive = liveInteractionByScope.has(scope);
       const previous = liveInteractionByScope.get(scope);
@@ -18292,9 +18333,15 @@ ${delta}`.slice(-4e3);
     await promptBridge;
     await Promise.allSettled(interactionSends);
     await Promise.allSettled(modelPreferenceSaves);
-    if (useLiveSession && nativeCommand && closesLivePicker(nativeCommand)) {
-      if (liveInteractionByScope.delete(scope)) {
-        log.info("agent-live", "picker-exit", { scope, input: nativeCommand });
+    if (useLiveSession && nativeCommand) {
+      const opensPicker = opensLivePicker(nativeCommand);
+      const closesPicker = closesLivePicker(nativeCommand);
+      if ((opensPicker || closesPicker) && !pickerObservedAfterInput) {
+        if (liveInteractionByScope.delete(scope)) {
+          log.info("agent-live", "picker-exit", { scope, input: nativeCommand });
+        }
+      } else if (closesPicker && pickerObservedAfterInput) {
+        log.info("agent-live", "picker-advance", { scope, input: nativeCommand });
       }
     }
     activePolicyFingerprints.delete(scope);
@@ -18711,7 +18758,7 @@ function detectLiveInteraction(text, allowBareConfirmation = false) {
     seenInputs.add(input);
     buttons.push({ label, input });
   };
-  const arrowNumberedPrompt = isClaudeBypassPermissionsPrompt(prompt) || isCodexUpdatePrompt(prompt);
+  const arrowNumberedPrompt = isClaudeBypassPermissionsPrompt(prompt) || isClaudeModelPicker(prompt) || isCodexUpdatePrompt(prompt);
   const selectedChoice = numberedChoices.findIndex((choice) => choice.selected);
   for (const [index, choice] of numberedChoices.slice(0, 8).entries()) {
     if (!arrowNumberedPrompt) {
@@ -18776,6 +18823,9 @@ function isLiveInteractionPromptStart2(line) {
 }
 function isClaudeBypassPermissionsPrompt(text) {
   return /claude\s+code\s+running\s+in\s+bypass\s+permissions\s+mode/i.test(text) && /\b(?:no,?\s+exit|yes,?\s+i\s+accept)\b/i.test(text);
+}
+function isClaudeModelPicker(text) {
+  return /\bselect\s+(?:a\s+)?model\b/i.test(text) && /(?:^|\n)\s*(?:[›❯>▸*+-]\s*)?\d{1,2}[.)、:\s-]+claude-[a-z0-9]/iu.test(text);
 }
 function isCodexUpdatePrompt(text) {
   return /\bupdate\s+available\b/i.test(text) && /\bskip(?:\s+until\s+next\s+version)?\b/i.test(text);

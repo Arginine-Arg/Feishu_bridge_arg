@@ -260,13 +260,14 @@ describe('markdown stream startup failures', () => {
       'esc',
     ]);
 
-    await h.channel.handlers.message?.(message('om_effort_choice', '/codex 6'));
+    await h.channel.handlers.message?.(message('om_effort_choice', '/model 6'));
     await waitFor(
       () =>
         h.controls.profileConfig.preferences.model === 'gpt-5.6-sol' &&
         h.controls.profileConfig.preferences.reasoningEffort === 'ultra',
       4000,
     );
+    expect(h.agent.runOptions[2]).toMatchObject({ prompt: '6', liveInputMode: 'control' });
 
     const root = await loadRootConfig(h.controls.configPath);
     expect(root?.profiles.codex?.preferences).toMatchObject({
@@ -294,6 +295,46 @@ describe('markdown stream startup failures', () => {
 
     expect(h.agent.runOptions).toHaveLength(0);
     expect(lastMarkdown(h.channel)).toContain('仅管理员可用');
+  });
+
+  it('routes plain Claude /model to the native live picker', async () => {
+    const h = await createHarness({
+      agentKind: 'claude',
+      stream: async () => {
+        throw new Error('native Claude model picker output should not use stream');
+      },
+    });
+    h.agent.setEvents([
+      [
+        {
+          type: 'text',
+          delta: [
+            'Select Model',
+            '› 1. claude-opus-4-8 (current)',
+            '2. claude-sonnet-5',
+            '3. claude-haiku-4-5-20251001',
+            'Press enter to confirm or esc to go back',
+          ].join('\n'),
+        },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+    ]);
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_claude_model', '/model'));
+    await waitFor(() => h.agent.runOptions.length === 1 && h.channel.sent.length === 1);
+
+    expect(h.agent.runOptions[0]).toMatchObject({
+      prompt: '/model',
+      liveInputMode: 'command',
+      sessionMode: 'live',
+    });
+    expect(buttonLabels((h.channel.sent[0]?.content as { card?: unknown }).card)).toEqual([
+      '1',
+      '2',
+      '3',
+      'esc',
+    ]);
   });
 
   it('sends native live skills picker output as a final button card without explicit enter hint', async () => {
@@ -626,6 +667,7 @@ async function createHarness(options: {
   reactionCreate?: () => Promise<{ data: { reaction_id: string } }>;
   stream?: StreamFn;
   failCardSendOnce?: boolean;
+  agentKind?: 'claude' | 'codex';
 } = {}): Promise<{
   tmp: TmpProfile;
   channel: FakeLarkChannel;
@@ -637,8 +679,9 @@ async function createHarness(options: {
 }> {
   const tmp = await createTmpProfile('markdown-stream-startup-failure-');
   const workspace = await realpath(tmp.workspace);
+  const agentKind = options.agentKind ?? 'codex';
   const baseProfileConfig = createDefaultProfileConfig({
-    agentKind: 'codex',
+    agentKind,
     accounts: {
       app: {
         id: 'cli_test',
@@ -650,9 +693,7 @@ async function createHarness(options: {
       allowedUsers: ['ou_user'],
       admins: ['ou_user'],
     },
-    codex: {
-      binaryPath: '/usr/local/bin/codex',
-    },
+    ...(agentKind === 'codex' ? { codex: { binaryPath: '/usr/local/bin/codex' } } : {}),
   });
   const profileConfig = {
     ...baseProfileConfig,
@@ -662,17 +703,17 @@ async function createHarness(options: {
     },
   };
   const configPath = join(tmp.root, 'config.json');
-  await saveRootConfig(createRootConfig('codex', profileConfig), configPath);
+  await saveRootConfig(createRootConfig(agentKind, profileConfig), configPath);
   const sessions = new SessionStore(join(tmp.profile, 'sessions.json'));
   const workspaces = new WorkspaceStore(join(tmp.profile, 'workspaces.json'));
   const agent = new FakeAgentAdapter({
-    id: 'codex',
-    displayName: 'Codex',
+    id: agentKind,
+    displayName: agentKind === 'codex' ? 'Codex' : 'Claude Code',
     events: [
       [
         {
           type: 'error',
-          message: 'codex exited with code 1: Error loading config.toml',
+          message: `${agentKind} exited with code 1: Error loading config`,
           terminationReason: 'failed',
         },
       ],
