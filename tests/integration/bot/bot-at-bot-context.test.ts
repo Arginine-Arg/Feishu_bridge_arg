@@ -225,7 +225,7 @@ describe('sender identity in bridge_context', () => {
     expect(userInput.text).toContain('看下这个');
   });
 
-  it('routes ordinary messages as raw input through the persistent terminal', async () => {
+  it('routes ordinary live messages through the same structured input envelope', async () => {
     const h = await createHarness({ sessionMode: 'live' });
     await startTestBridge(h);
 
@@ -239,9 +239,13 @@ describe('sender identity in bridge_context', () => {
     );
     await waitFor(() => h.agent.runOptions.length === 1);
 
-    expect(h.agent.runOptions[0]).toMatchObject({
-      prompt: input,
-      sessionMode: 'live',
+    expect(h.agent.runOptions[0]?.sessionMode).toBe('live');
+    expect(readSection(h.agent.runOptions[0]?.prompt ?? '', 'bridge_context')).toMatchObject({
+      senderId: 'ou_user',
+      source: 'im',
+    });
+    expect(readSection(h.agent.runOptions[0]?.prompt ?? '', 'user_input')).toMatchObject({
+      text: input,
     });
   });
 });

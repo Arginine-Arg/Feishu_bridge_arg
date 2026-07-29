@@ -241,6 +241,7 @@ arg-bridge profile export <name> --include-secrets --yes
 | `/model` | 选择模型；Codex 直接使用 CLI 原生模型/reasoning 选项，并把结果同步到当前 profile |
 | `/session [status\|live\|turn]` | 查看终端执行状态。tmux/live 为默认模式；`turn` 仅作为兼容回退 |
 | `/tmux tail [N]` | 仅管理员：显示当前 scope tmux pane 的末尾 `N` 行（默认 27，最大 200） |
+| `/output [live\|final\|off\|status]` | 设置当前 scope 的投递策略：流式过程、仅最终答复，或静默 agent 输出但不中断任务 |
 | `/invite user @某人` | 允许用户私聊使用 bot |
 | `/invite admin @某人` | 添加访问控制管理员 |
 | `/invite group` | 允许当前群使用 bot |
@@ -260,7 +261,7 @@ arg-bridge profile export <name> --include-secrets --yes
 
 ## 执行与路由
 
-tmux 只接收原始用户文本，不接收 bridge 的 XML 上下文或排版提示。Bridge Agent 可选调用 OpenAI 兼容的轻量模型，只生成路由和展示元数据；其输出会校验原始输入的 SHA-256，且没有改写 stdin 的字段。
+普通用户任务会以一份带类型且转义的上下文信封送入 agent：正文、引用消息、CardKit JSON、话题上下文和已下载附件路径会连同来源一起保留。原生 CLI 斜杠命令和选择器按键则有意原样发送到终端，因为它们控制的是 Codex/Claude TUI，而不是对话提示词。Bridge Agent 可选调用 OpenAI 兼容的轻量模型，只生成路由和展示元数据；其输出会校验原始输入的 SHA-256，且没有改写 stdin 的字段。
 
 同时设置以下三个变量可启用该可选分类器：
 
@@ -280,6 +281,8 @@ export ARG_BRIDGE_AGENT_API_KEY=your-api-key
 
 - **消息排队(看起来没反应)**:同一个 chat / 话题已经有任务在跑时,你新发的普通消息**不会打断它,会排队**到当前任务结束后处理。忙时提示按 30 秒限频,所以稍后再次询问仍会收到存活回执,短时间连发又不会刷屏。只读的 `/status` 和 `/session status` 不会再清空已排队消息。**要立刻打断,发 `/stop`。**
 - **流式卡片续接与失效降级**:飞书/Lark 会在约 10 分钟后自动关闭流式卡片。任务仍在运行时,bridge 每 8 分钟新建一张续接卡片；如果卡片被撤回或失效(飞书 `230011 withdrawn`),bridge 仍会继续消费 agent 输出,并**把完整答案作为一条全新消息补发**。
+- **投递策略（不中断控制）**：`/output live` 持续显示过程和最终答复，`/output final` 只发送最终答复，`/output off` 静默 agent 发出的消息但让任务继续运行；它和 `/timeout` 完全独立。
+- **持久 tmux 身份**：每个 scope 会保存 bridge 托管 tmux session 及已接管的 agent pane。关闭本地终端、detach tmux 或重启 arg-bridge 不会创建新的原生对话。tmux 所在主机真的重启时，进程必然结束；需要跨客户端关机持续执行时，应把 bridge 和 tmux 部署在稳定的服务器主机上。
 
 **长任务最佳实践**:
 
@@ -332,6 +335,8 @@ bridge 会检查所选目录存在、是目录，并且不是 `/`、Home 根、�
 ```
 
 每个目录都会经过与工作目录相同的宽泛根目录检查。bridge 和 channel SDK 仍会执行普通文件、符号链接、realpath 目录归属及 `attachments.maxFileBytes` 双重校验。不要加入 `/`、Home 根或整个共享磁盘。
+
+agent 在任务中产出文件时，应调用 bridge 能力而不是直接上传：`arg-bridge sendfile <相对当前 cwd 的路径> [--caption "..."]`。bridge 会把请求固定到当前 scope、回复目标、工作目录根和文件大小策略。live 终端可跨轮次和 bridge 重启保留 profile 本地的不透明能力令牌，而 bridge 会在每个获准运行开始时刷新允许目录和回复目标。
 
 ## 权限模式
 

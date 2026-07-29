@@ -8,6 +8,11 @@ export interface LarkChannelEnvContext {
   larkCliSourceConfigFile?: string;
 }
 
+export interface ArtifactDeliveryEnv {
+  socketPath: string;
+  token: string;
+}
+
 export function buildLarkChannelEnv(context?: LarkChannelEnvContext): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     LARK_CHANNEL: '1',
@@ -28,6 +33,18 @@ export function buildLarkChannelEnv(context?: LarkChannelEnvContext): NodeJS.Pro
   if (larkCliConfigDir) env.LARKSUITE_CLI_CONFIG_DIR = larkCliConfigDir;
 
   return env;
+}
+
+export function withArtifactDeliveryEnv(
+  base: NodeJS.ProcessEnv,
+  artifact: ArtifactDeliveryEnv | undefined,
+): NodeJS.ProcessEnv {
+  if (!artifact) return base;
+  return {
+    ...base,
+    ARG_BRIDGE_ARTIFACT_SOCKET: artifact.socketPath,
+    ARG_BRIDGE_ARTIFACT_TOKEN: artifact.token,
+  };
 }
 
 function nonEmpty(value: string | undefined): string | undefined {

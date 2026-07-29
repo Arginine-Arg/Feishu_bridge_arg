@@ -38,6 +38,7 @@ export interface StartRunFlowInput {
   executor: RunExecutor;
   now: number;
   stopGraceMs?: number;
+  artifactDelivery?: { socketPath: string; token: string };
   observability?: {
     profile: string;
     agent: string;
@@ -166,6 +167,7 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
               .map((attachment) => attachment.path)
               .filter((path): path is string => Boolean(path))
           : undefined,
+      artifactDelivery: input.artifactDelivery,
       stopGraceMs: input.stopGraceMs,
       observability: input.observability,
     });

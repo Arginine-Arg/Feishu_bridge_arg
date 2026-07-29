@@ -7,7 +7,12 @@ import { AsyncEventQueue } from '../event-queue';
 import { mergeProcessEnv, spawnProcess, type SpawnedProcessByStdio } from '../../platform/spawn';
 import { SpawnFailed } from '../../runtime/errors';
 import { prefixBridgeSystemPrompt } from '../bridge-system-prompt';
-import { buildLarkChannelEnv, type LarkChannelEnvContext } from '../lark-channel-env';
+import { ensureBundledCodexSkill } from '../bundled-skill';
+import {
+  buildLarkChannelEnv,
+  withArtifactDeliveryEnv,
+  type LarkChannelEnvContext,
+} from '../lark-channel-env';
 import { LiveSessionPool, type LiveTerminalBackend } from '../live-session';
 import {
   captureTmuxPaneTail,
@@ -152,6 +157,13 @@ export class CodexAdapter implements AgentAdapter {
         availability.diagnostic,
       );
     }
+    await ensureBundledCodexSkill(this.effectiveCodexHome());
+  }
+
+  private effectiveCodexHome(): string | undefined {
+    if (this.codexHome) return this.codexHome;
+    if (!this.inheritCodexHome) return join(this.profileStateDir, 'codex-home');
+    return process.env.CODEX_HOME;
   }
 
   run(opts: AgentRunOptions): AgentRun {
@@ -173,12 +185,12 @@ export class CodexAdapter implements AgentAdapter {
       model: opts.model,
       reasoningEffort: opts.reasoningEffort,
     });
-    const envOverrides: NodeJS.ProcessEnv = buildLarkChannelEnv(this.larkChannel);
-    if (this.codexHome) {
-      envOverrides.CODEX_HOME = this.codexHome;
-    } else if (!this.inheritCodexHome) {
-      envOverrides.CODEX_HOME = join(this.profileStateDir, 'codex-home');
-    }
+    const envOverrides: NodeJS.ProcessEnv = withArtifactDeliveryEnv(
+      buildLarkChannelEnv(this.larkChannel),
+      opts.artifactDelivery,
+    );
+    const codexHome = this.effectiveCodexHome();
+    if (codexHome) envOverrides.CODEX_HOME = codexHome;
     const child = spawnProcess(this.binary, args, {
       cwd: opts.cwd,
       env: mergeProcessEnv(process.env, envOverrides),
@@ -296,12 +308,12 @@ export class CodexAdapter implements AgentAdapter {
       '-C',
       opts.cwd,
     ];
-    const envOverrides: NodeJS.ProcessEnv = buildLarkChannelEnv(this.larkChannel);
-    if (this.codexHome) {
-      envOverrides.CODEX_HOME = this.codexHome;
-    } else if (!this.inheritCodexHome) {
-      envOverrides.CODEX_HOME = join(this.profileStateDir, 'codex-home');
-    }
+    const envOverrides: NodeJS.ProcessEnv = withArtifactDeliveryEnv(
+      buildLarkChannelEnv(this.larkChannel),
+      opts.artifactDelivery,
+    );
+    const codexHome = this.effectiveCodexHome();
+    if (codexHome) envOverrides.CODEX_HOME = codexHome;
     const signature = JSON.stringify({
       cwd: opts.cwd,
       sandbox,

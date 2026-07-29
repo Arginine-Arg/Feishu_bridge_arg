@@ -1,0 +1,4 @@
+interface:
+  display_name: "Arg Bridge Send File"
+  short_description: "Deliver task files through the active Feishu bridge"
+  default_prompt: "Use $arg-bridge-sendfile to deliver the requested task artifact to Feishu."

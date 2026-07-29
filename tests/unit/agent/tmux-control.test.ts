@@ -174,6 +174,22 @@ describe.skipIf(!live)('tmux control', () => {
     for (const [key, value] of metadata) {
       expect(spawnSync('tmux', ['-S', socketPath, 'set-option', '-t', sessionName, key, value]).status).toBe(0);
     }
+    // Simulate a user manually running `codex resume` in a new window. The
+    // managed terminal must retain that pane as the bridge target after a
+    // process restart instead of tailing the dead/original pane.
+    expect(
+      spawnSync('tmux', [
+        '-S', socketPath,
+        'new-window', '-d', '-t', sessionName, '-n', 'resumed', '-c', root,
+        'sh', '-c', "printf 'resumed-session-tail\\n'; sleep 30",
+      ]).status,
+    ).toBe(0);
+    expect(
+      spawnSync(
+        'tmux',
+        ['-S', socketPath, 'set-option', '-t', sessionName, '@argbridge_active_target', `${sessionName}:1.0`],
+      ).status,
+    ).toBe(0);
 
     await controller.rememberManaged(scope, root, 'managed-recovery-signature', {
       socketPath,
@@ -185,14 +201,14 @@ describe.skipIf(!live)('tmux control', () => {
     const status = await restarted.managedStatus(scope, root);
     expect(status).toMatchObject({
       state: 'managed',
-      terminal: { socketPath, target: sessionName, ownership: 'managed' },
+      terminal: { socketPath, target: `${sessionName}:1.0`, ownership: 'managed' },
     });
     expect(restarted.managedTerminalFor(scope, root, 'managed-recovery-signature')).toMatchObject({
       socketPath,
       sessionName,
       cwdRealpath: root,
     });
-    expect(captureTmuxPaneTail(status.terminal!, 2).text).toBe('managed-one\nmanaged-two');
+    expect(captureTmuxPaneTail(status.terminal!, 2).text).toBe('resumed-session-tail');
 
     // v0.6.41 and earlier did not have a managed-terminals file. A first
     // status call must safely discover an already running tagged session.

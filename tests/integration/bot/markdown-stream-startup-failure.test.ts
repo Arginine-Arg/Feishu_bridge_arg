@@ -117,7 +117,7 @@ describe('markdown stream startup failures', () => {
     await waitFor(() => h.agent.runOptions.length === 1 && h.channel.sent.length === 1);
     await new Promise((resolve) => setTimeout(resolve, 800));
 
-    expect(h.agent.runOptions.map((options) => options.prompt)).toEqual(['original task']);
+    expect(h.agent.runOptions.map((options) => userTextOrNative(options.prompt))).toEqual(['original task']);
     expect(buttonLabels((h.channel.sent[0]?.content as { card?: unknown }).card)).toEqual([
       '1',
       '2',
@@ -127,7 +127,7 @@ describe('markdown stream startup failures', () => {
     await h.channel.handlers.message?.(message('om_startup_choice', 'down enter'));
     await waitFor(() => h.agent.runOptions.length === 3, 4000);
 
-    expect(h.agent.runOptions.map((options) => options.prompt)).toEqual([
+    expect(h.agent.runOptions.map((options) => userTextOrNative(options.prompt))).toEqual([
       'original task',
       'down enter',
       'original task',
@@ -137,7 +137,7 @@ describe('markdown stream startup failures', () => {
       'control',
       undefined,
     ]);
-  });
+  }, 10_000);
 
   it('sends native live picker output as a final button card without streaming', async () => {
     const h = await createHarness({
@@ -545,13 +545,91 @@ describe('markdown stream startup failures', () => {
     await h.channel.handlers.message?.(message('om_group_status', '/codex /status', 'group', true));
     await waitFor(() => h.agent.runOptions.length === 3, 4000);
 
-    expect(h.agent.runOptions.map((opts) => opts.prompt)).toEqual(['nihao', '你好', '/status']);
+    expect(h.agent.runOptions.map((opts) => userTextOrNative(opts.prompt))).toEqual(['nihao', '你好', '/status']);
     expect(h.agent.runOptions.map((opts) => opts.sessionMode)).toEqual(['live', 'live', 'live']);
     expect(h.agent.runOptions.map((opts) => opts.liveInputMode)).toEqual([
       undefined,
       undefined,
       'command',
     ]);
+  });
+
+  it('drains a muted live run without sending output and resumes delivery later', async () => {
+    const h = await createHarness();
+    h.profileConfig.preferences = {
+      ...(h.profileConfig.preferences ?? {}),
+      agentSessionMode: 'live',
+      messageReply: 'text',
+      messageReplyMigrated: true,
+    };
+    h.controls.profileConfig.preferences = h.profileConfig.preferences;
+    h.controls.cfg.preferences = h.profileConfig.preferences;
+    h.agent.setEvents([
+      [{ type: 'text', delta: 'this must stay in the terminal\n' }, { type: 'done', terminationReason: 'normal' }],
+      [{ type: 'text', delta: 'delivery restored\n' }, { type: 'done', terminationReason: 'normal' }],
+    ]);
+    h.sessions.setOutputMode('oc_dm', 'off');
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_muted', 'run quietly'));
+    await waitFor(() => h.agent.runOptions.length === 1);
+    await settle();
+    expect(h.channel.sent).toHaveLength(0);
+    expect(userTextOrNative(h.agent.runOptions[0]?.prompt ?? '')).toBe('run quietly');
+
+    h.sessions.setOutputMode('oc_dm', 'final');
+    await h.channel.handlers.message?.(message('om_restored', 'show the result'));
+    await waitFor(() => h.agent.runOptions.length === 2 && h.channel.sent.length === 1);
+    expect(lastMarkdown(h.channel)).toContain('delivery restored');
+  });
+
+  it('applies output policy changes to an already-running live task', async () => {
+    const h = await createHarness();
+    h.profileConfig.preferences = {
+      ...(h.profileConfig.preferences ?? {}),
+      agentSessionMode: 'live',
+      messageReply: 'text',
+      messageReplyMigrated: true,
+    };
+    h.controls.profileConfig.preferences = h.profileConfig.preferences;
+    h.controls.cfg.preferences = h.profileConfig.preferences;
+    h.agent.setEvents([
+      [{ type: 'text', delta: 'this final answer must stay muted\n' }, { type: 'done', terminationReason: 'normal' }],
+    ]);
+    delayFakeAgentEvents(h.agent, 80);
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_running_muted', 'run while I change delivery'));
+    await waitFor(() => h.agent.runOptions.length === 1);
+    h.sessions.setOutputMode('oc_dm', 'off');
+    await settle(250);
+
+    expect(JSON.stringify(h.channel.sent)).not.toContain('this final answer must stay muted');
+  });
+
+  it('recovers only the final answer when output is re-enabled during a muted live task', async () => {
+    const h = await createHarness();
+    h.profileConfig.preferences = {
+      ...(h.profileConfig.preferences ?? {}),
+      agentSessionMode: 'live',
+      messageReply: 'text',
+      messageReplyMigrated: true,
+    };
+    h.controls.profileConfig.preferences = h.profileConfig.preferences;
+    h.controls.cfg.preferences = h.profileConfig.preferences;
+    h.agent.setEvents([
+      [{ type: 'text', delta: 'recovered terminal answer\n' }, { type: 'done', terminationReason: 'normal' }],
+    ]);
+    h.sessions.setOutputMode('oc_dm', 'off');
+    delayFakeAgentEvents(h.agent, 80);
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_running_reenabled', 'run silently first'));
+    await waitFor(() => h.agent.runOptions.length === 1);
+    h.sessions.setOutputMode('oc_dm', 'final');
+    await waitFor(() => JSON.stringify(h.channel.sent).includes('recovered terminal answer'));
+
+    expect(JSON.stringify(h.channel.sent)).toContain('recovered terminal answer');
   });
 
   it('routes enter after native resume as a live control even before picker text is recognized', async () => {
@@ -913,8 +991,8 @@ function lastMarkdown(channel: FakeLarkChannel): string {
   return content?.markdown ?? '';
 }
 
-async function settle(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 20));
+async function settle(ms = 20): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function buttonLabels(card: unknown): string[] {
@@ -934,6 +1012,31 @@ function buttonLabels(card: unknown): string[] {
   };
   walk(card);
   return labels;
+}
+
+function userTextOrNative(prompt: string): string {
+  const match = prompt.match(/<user_input>\n([\s\S]*?)\n<\/user_input>/u);
+  if (!match) return prompt;
+  const input = JSON.parse(match[1] ?? 'null') as { text?: unknown };
+  return typeof input.text === 'string' ? input.text : prompt;
+}
+
+function delayFakeAgentEvents(agent: FakeAgentAdapter, delayMs: number): void {
+  const run = agent.run.bind(agent);
+  agent.run = (opts) => {
+    const result = run(opts);
+    return {
+      runId: result.runId,
+      stop: () => result.stop(),
+      waitForExit: (timeoutMs) => result.waitForExit(timeoutMs),
+      events: (async function* () {
+        for await (const event of result.events) {
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+          yield event;
+        }
+      })(),
+    };
+  };
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 3000): Promise<void> {

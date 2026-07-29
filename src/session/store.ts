@@ -14,7 +14,16 @@ export interface SessionEntry {
    * scope, undefined = follow global default. Session resets preserve this
    * scope preference while removing the resumable session id/cwd. */
   idleTimeoutMinutes?: number;
+  /**
+   * Per-scope presentation policy. This is deliberately independent from the
+   * idle watchdog: muting Feishu delivery must never change agent execution.
+   * `live` streams progress, `final` emits only the terminal answer and
+   * `off` suppresses agent-originated delivery altogether.
+   */
+  outputMode?: OutputMode;
 }
+
+export type OutputMode = 'live' | 'final' | 'off';
 
 type SessionMap = Record<string, SessionEntry>;
 
@@ -43,13 +52,15 @@ export class SessionStore {
         const cwd = typeof entry.cwd === 'string' ? entry.cwd : undefined;
         const idleTimeoutMinutes =
           typeof entry.idleTimeoutMinutes === 'number' ? entry.idleTimeoutMinutes : undefined;
+        const outputMode = isOutputMode(entry.outputMode) ? entry.outputMode : undefined;
         const hasSession = sessionId !== undefined && cwd !== undefined;
-        if (!hasSession && idleTimeoutMinutes === undefined) continue;
+        if (!hasSession && idleTimeoutMinutes === undefined && outputMode === undefined) continue;
         this.data[chatId] = {
           ...(sessionId !== undefined ? { sessionId } : {}),
           ...(cwd !== undefined ? { cwd } : {}),
           updatedAt: entry.updatedAt,
           ...(idleTimeoutMinutes !== undefined ? { idleTimeoutMinutes } : {}),
+          ...(outputMode !== undefined ? { outputMode } : {}),
         };
       }
     } catch (err) {
@@ -75,8 +86,8 @@ export class SessionStore {
   }
 
   set(chatId: string, sessionId: string, cwd: string): void {
-    // Preserve idleTimeoutMinutes across run starts — it's a per-scope
-    // preference, not per-run-instance state. /new (clear) wipes it.
+    // Preserve per-scope controls across run starts. They are delivery and
+    // watchdog preferences, not a native agent-session identity.
     const prev = this.data[chatId];
     this.data[chatId] = {
       sessionId,
@@ -85,6 +96,7 @@ export class SessionStore {
       ...(prev?.idleTimeoutMinutes !== undefined
         ? { idleTimeoutMinutes: prev.idleTimeoutMinutes }
         : {}),
+      ...(prev?.outputMode !== undefined ? { outputMode: prev.outputMode } : {}),
     };
     this.schedulePersist();
   }
@@ -95,6 +107,12 @@ export class SessionStore {
     if (prev.idleTimeoutMinutes !== undefined) {
       this.data[chatId] = {
         idleTimeoutMinutes: prev.idleTimeoutMinutes,
+        updatedAt: Date.now(),
+        ...(prev.outputMode !== undefined ? { outputMode: prev.outputMode } : {}),
+      };
+    } else if (prev.outputMode !== undefined) {
+      this.data[chatId] = {
+        outputMode: prev.outputMode,
         updatedAt: Date.now(),
       };
     } else {
@@ -130,6 +148,20 @@ export class SessionStore {
     return true;
   }
 
+  getOutputMode(chatId: string): OutputMode {
+    return this.data[chatId]?.outputMode ?? 'live';
+  }
+
+  setOutputMode(chatId: string, outputMode: OutputMode): void {
+    const prev = this.data[chatId];
+    this.data[chatId] = {
+      ...(prev ?? { updatedAt: Date.now() }),
+      outputMode,
+      updatedAt: Date.now(),
+    };
+    this.schedulePersist();
+  }
+
   async flush(): Promise<void> {
     await this.saving;
   }
@@ -145,4 +177,8 @@ export class SessionStore {
         log.fail('session', err, { step: 'persist' });
       });
   }
+}
+
+function isOutputMode(value: unknown): value is OutputMode {
+  return value === 'live' || value === 'final' || value === 'off';
 }

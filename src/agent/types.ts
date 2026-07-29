@@ -44,6 +44,11 @@ export interface AgentRunOptions {
   images?: readonly string[];
   sandbox?: CodexSandboxMode;
   permissionMode?: ClaudePermissionMode;
+  /** Run-scoped capability for asking the bridge to deliver a local file. */
+  artifactDelivery?: {
+    socketPath: string;
+    token: string;
+  };
   /**
    * Grace period (ms) between SIGTERM and SIGKILL when stop() is called on
    * the returned run. Lets the agent (and any subprocess it spawned, e.g.

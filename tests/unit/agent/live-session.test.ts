@@ -1166,9 +1166,9 @@ function screen(lines) {
 }
 process.stdin.on('data', (chunk) => {
   for (const char of chunk) {
-    if (char === '\\x1b' || char === '\\x01' || char === '\\x0b') {
-      if (state === 'working' && char === '\\x1b') {
-        appendFileSync(${JSON.stringify(inputTrace)}, 'esc\\n');
+    if (char === '\\x03' || char === '\\x1b' || char === '\\x01' || char === '\\x0b') {
+      if (state === 'working' && (char === '\\x03' || char === '\\x1b')) {
+        appendFileSync(${JSON.stringify(inputTrace)}, 'interrupt\\n');
         state = 'ready';
         screen(['• Interrupted current task.', '› ']);
       }
@@ -1221,7 +1221,7 @@ setInterval(() => {}, 1000);
       await interruptedTurn.stop();
       await testDelay(250);
       await interruptedIterator.return?.();
-      expect(await readFile(inputTrace, 'utf8')).toContain('esc');
+      expect(await readFile(inputTrace, 'utf8')).toContain('interrupt');
       expect(session.isAlive()).toBe(true);
 
       const status = await collect(session.run('tmux-stop-status', '/status', dir, 'command').events);
@@ -1870,6 +1870,11 @@ setInterval(() => {}, 1000);
         ['-S', terminal!.socketPath!, 'has-session', '-t', terminal!.sessionName!],
         { stdio: 'ignore' },
       ).status,
+    ).not.toBe(0);
+    expect(
+      spawnSync('tmux', ['-S', terminal!.socketPath!, 'list-sessions'], {
+        stdio: 'ignore',
+      }).status,
     ).not.toBe(0);
 
     expect(textOf(events)).toContain('tmux:hello\n48 120\n48x120\n');
@@ -2672,7 +2677,7 @@ setInterval(() => {}, 1000);
 
     expect(textOf(events)).toContain('submitted:"alpha\\nbeta"\n');
     expect(textOf(ordinaryControlWord)).toContain('submitted:"yes"\n');
-  });
+  }, 20_000);
 
   tmuxIt('does not send enter after a tmux picker literal when the screen changes first', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-control-literal-test-'));

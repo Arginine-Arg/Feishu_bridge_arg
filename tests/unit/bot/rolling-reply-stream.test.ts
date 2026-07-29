@@ -11,13 +11,15 @@ describe('rolling reply stream', () => {
         resolveRender = resolve;
       });
       let segments = 0;
+      const segmentIds: number[] = [];
       const fallback = vi.fn(async () => {});
       const running = runRollingReplyStream({
         mode: 'markdown',
         renderDone,
         rolloverMs: 1_000,
-        startSegment: async (segmentDone, markProducerStarted) => {
+        startSegment: async (segmentDone, markProducerStarted, segment) => {
           segments += 1;
+          segmentIds.push(segment);
           markProducerStarted();
           await segmentDone;
         },
@@ -28,6 +30,7 @@ describe('rolling reply stream', () => {
       expect(segments).toBe(1);
       await vi.advanceTimersByTimeAsync(1_000);
       expect(segments).toBe(2);
+      expect(segmentIds).toEqual([1, 2]);
 
       resolveRender(reduce(initialState, { type: 'done', terminationReason: 'normal' }));
       await running;

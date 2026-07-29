@@ -241,6 +241,7 @@ If a profile was created with the wrong agent kind, stop or unregister any match
 | `/model` | Choose the model; Codex uses its native model/reasoning picker and syncs the result to the active profile |
 | `/session [status\|live\|turn]` | Inspect terminal execution. tmux/live is the default; `turn` remains a legacy compatibility fallback |
 | `/tmux tail [N]` | Admin-only: display the final `N` lines from the current scope's tmux pane (default: 27; maximum: 200) |
+| `/output [live\|final\|off\|status]` | Set per-scope delivery: stream progress, deliver final only, or mute agent-originated output without stopping execution |
 | `/invite user @name` | Allow a user to use the bot in DMs |
 | `/invite admin @name` | Add an access-control admin |
 | `/invite group` | Allow the current group to use the bot |
@@ -260,7 +261,7 @@ DMs do not require an @ mention. Groups and topic groups require `@bot` by defau
 
 ## Execution and routing
 
-The terminal receives raw user text, never the bridge's XML context or formatting prompt. The Bridge Agent can optionally use an OpenAI-compatible lightweight model to classify route and presentation metadata, but its response is validated against a SHA-256 of the original input and has no field that can modify stdin.
+Normal user turns are delivered as one typed, escaped envelope: text, reply quotes, CardKit JSON, topic context, and downloaded attachment paths stay together with their provenance. Native CLI slash commands and picker controls are intentionally sent raw to the terminal because they target the Codex/Claude TUI rather than the conversational prompt. The optional Bridge Agent can only classify route and presentation metadata; its response is validated against a SHA-256 of the original input and cannot rewrite terminal stdin.
 
 Set all three variables to enable that optional classifier:
 
@@ -280,6 +281,8 @@ Long conversations / tasks are not cut off by a fixed time limit, but two behavi
 
 - **Queued messages (looks unresponsive)**: while a run is active on the same chat/topic, a new ordinary message does **not** interrupt it — it queues for after the current run. Busy notices are limited to one per 30 seconds, so later progress checks still receive a liveness reply without spamming rapid bursts. Read-only `/status` and `/session status` checks do not discard queued work. **Send `/stop` to interrupt now.**
 - **Streaming-card rollover and degradation**: Feishu/Lark automatically closes streaming cards after about 10 minutes. The bridge starts a continuation card every 8 minutes while the run is still active. If a card is withdrawn or invalidated mid-run (Feishu `230011`), the bridge keeps draining the agent and **posts the full answer as a fresh message**.
+- **Delivery policy (control without interruption)**: `/output live` streams progress and the final answer, `/output final` posts only the terminal answer, and `/output off` keeps the agent running while suppressing agent-originated chat output. This is independent of `/timeout`.
+- **Persistent tmux identity**: a scope records its managed tmux session and currently adopted agent pane. Closing a local terminal, detaching tmux, or restarting arg-bridge does not create a new native conversation. A real reboot of the host that runs tmux necessarily ends its processes; move the bridge and tmux to the durable server host for work that must survive client shutdowns.
 
 **Best practices for long tasks**: have the agent write full logs/reports to project files (`report.md`, `task.log`) and only post short progress + a final summary to Lark (cards have length limits); use `/status` for a non-destructive liveness check; use `/stop` to interrupt.
 
@@ -328,6 +331,8 @@ The bridge checks that a selected directory exists, is a directory, and is not a
 ```
 
 Every directory is resolved through the same broad-root policy as a workspace. Files remain subject to regular-file, symlink, realpath containment, and `attachments.maxFileBytes` checks in both the bridge and channel SDK. Do not add `/`, the home root, or an entire shared volume.
+
+When an agent produces a file during a task, it uses the bridge capability rather than a direct Lark upload: `arg-bridge sendfile <cwd-relative-path> [--caption "..."]`. The bridge binds that request to the current scope, reply target, workspace root, and file-size policy. Live terminals retain a profile-local opaque capability across turns and bridge restarts; the bridge refreshes its permitted root and reply target for each accepted run.
 
 ## Permission modes
 

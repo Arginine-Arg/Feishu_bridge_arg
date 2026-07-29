@@ -191,6 +191,7 @@ const handlers: Record<string, Handler> = {
   '/session': handleSession,
   '/tmux': handleTmux,
   '/timeout': handleTimeout,
+  '/output': handleOutput,
   '/ps': handlePs,
   '/exit': handleExit,
   '/doctor': handleDoctor,
@@ -1334,6 +1335,41 @@ async function handleTimeout(args: string, ctx: CommandContext): Promise<void> {
   ctx.sessions.setIdleTimeoutMinutes(scope, n);
   log.info('command', 'timeout-set', { scope, minutes: n, targeted: parsed.targeted });
   await reply(ctx, `✅ 当前 session 探活已设为 ${n} 分钟。`);
+}
+
+/**
+ * Presentation policy is intentionally separate from `/timeout`: a user may
+ * mute noisy progress while keeping the native agent and its idle watchdog
+ * fully active.  Commands and explicit diagnostics still reply normally.
+ */
+async function handleOutput(args: string, ctx: CommandContext): Promise<void> {
+  const value = args.trim().toLowerCase();
+  const current = ctx.sessions.getOutputMode(ctx.scope);
+  if (!value || value === 'status') {
+    await reply(
+      ctx,
+      [
+        `当前输出策略：\`${current}\``,
+        '',
+        '- `/output live`：持续显示进度、交互卡与最终答复',
+        '- `/output final`：不发送过程输出，只发送最终答复',
+        '- `/output off`：不发送 agent 输出；任务仍继续运行，`/status` 与 `/tmux tail` 仍可用',
+      ].join('\n'),
+    );
+    return;
+  }
+  if (value !== 'live' && value !== 'final' && value !== 'off') {
+    await reply(ctx, '用法：`/output [live|final|off|status]`');
+    return;
+  }
+  ctx.sessions.setOutputMode(ctx.scope, value);
+  const label = value === 'live'
+    ? '实时输出'
+    : value === 'final'
+      ? '仅最终答复'
+      : '已静默 agent 输出';
+  log.info('command', 'output-mode', { scope: ctx.scope, mode: value });
+  await reply(ctx, `✅ 输出策略已设为：${label}。`);
 }
 
 function parseTimeoutTarget(input: string, currentScope: string): {

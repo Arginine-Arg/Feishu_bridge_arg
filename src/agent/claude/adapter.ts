@@ -7,7 +7,11 @@ import { log } from '../../core/logger';
 import { AsyncEventQueue } from '../event-queue';
 import { mergeProcessEnv, spawnProcess, type SpawnedProcessByStdio } from '../../platform/spawn';
 import { buildBridgeSystemPrompt } from '../bridge-system-prompt';
-import { buildLarkChannelEnv, type LarkChannelEnvContext } from '../lark-channel-env';
+import {
+  buildLarkChannelEnv,
+  withArtifactDeliveryEnv,
+  type LarkChannelEnvContext,
+} from '../lark-channel-env';
 import { LiveSessionPool, type LiveTerminalBackend } from '../live-session';
 import {
   captureTmuxPaneTail,
@@ -157,7 +161,10 @@ export class ClaudeAdapter implements AgentAdapter {
 
     const child = spawnProcess(this.binary, args, {
       cwd: opts.cwd,
-      env: mergeProcessEnv(process.env, buildLarkChannelEnv(this.larkChannel)),
+      env: mergeProcessEnv(
+        process.env,
+        withArtifactDeliveryEnv(buildLarkChannelEnv(this.larkChannel), opts.artifactDelivery),
+      ),
       stdio: ['pipe', 'pipe', 'pipe'],
     }) as ClaudeChild;
 
@@ -286,7 +293,7 @@ export class ClaudeAdapter implements AgentAdapter {
       command: this.binary,
       args,
       cwd: opts.cwd,
-      env: buildLarkChannelEnv(this.larkChannel),
+      env: withArtifactDeliveryEnv(buildLarkChannelEnv(this.larkChannel), opts.artifactDelivery),
       signature: liveSignature,
       usePty: this.liveUsePty,
       backend: this.liveTerminalBackend ?? 'tmux',

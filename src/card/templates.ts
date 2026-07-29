@@ -196,6 +196,7 @@ export function helpCard(agentName = 'Agent'): object {
         '- `/session` — 查看或切换后台 agent session 模式',
         '- `/tmux list|bind <编号或 pane id>|status|tail [N]|unbind` — 管理员管理 tmux；`tail` 默认显示当前 pane 末尾 27 行',
         '- `/sendfile <path>` — 管理员直接回复当前消息发送工作目录内的文件',
+        '- `/output [live|final|off|status]` — 设置当前会话的输出投递策略，不影响 agent 继续运行',
         '- `/stop` — 结束当前正在跑的任务（也可点卡片底部 ⏹ 终止 按钮）',
         '- `/stop comment:<scopeHash>` — 管理员停止云文档评论任务',
         '- `/timeout [N|off|default]` — 当前 session 的探活分钟数,`/config` 改全局默认',

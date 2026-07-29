@@ -65,6 +65,11 @@ describe('agent command routing aliases', () => {
       forceNative: true,
       nativeMode: 'control',
     });
+    expect(rewriteAgentCommandMessage(message('/codex ctrl+c'), 'codex')).toMatchObject({
+      msg: { content: 'ctrl+c' },
+      forceNative: true,
+      nativeMode: 'control',
+    });
   });
 
   it('leaves non-matching agent aliases untouched', () => {

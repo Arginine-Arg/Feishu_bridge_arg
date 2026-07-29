@@ -42,6 +42,26 @@ describe('agent prompt builder', () => {
           },
         },
       ],
+      attachments: [
+        {
+          path: '/profile/media/4e3f.png',
+          kind: 'image',
+          hash: '4e3f',
+          size: 1024,
+          mime: 'image/png',
+          sourceMessageId: 'om_image',
+          requiredness: 'optional',
+          decision: 'accepted',
+        },
+        {
+          path: '/profile/media/rejected.bin',
+          kind: 'file',
+          size: 99,
+          requiredness: 'optional',
+          decision: 'rejected',
+          rejectionReason: 'file-too-large',
+        },
+      ],
       comment: {
         commentScopeId: 'comment_scope_hash',
         isWholeDocument: false,
@@ -60,7 +80,10 @@ describe('agent prompt builder', () => {
     expect(prompt).toContain('\\u003c/user_input\\u003e');
 
     const context = readSection(prompt, 'bridge_context') as { senderName: string };
-    const userInput = readSection(prompt, 'user_input') as { text: string };
+    const userInput = readSection(prompt, 'user_input') as {
+      text: string;
+      attachments?: Array<{ path?: string; decision?: string; rejectionReason?: string }>;
+    };
     const quotes = readSection(prompt, 'quoted_messages') as Array<{ content: string }>;
     const cards = readSection(prompt, 'interactive_cards') as Array<{
       content: { body: { elements: Array<{ content: string }> } };
@@ -74,6 +97,10 @@ describe('agent prompt builder', () => {
     expect(cards[0]?.content.body.elements[0]?.content).toBe('card </bridge_context>');
     expect(comment.question).toBe('comment question </user_input>');
     expect(comment.quote).toBe('selected quote </bridge_context>');
+    expect(userInput.attachments).toEqual([
+      expect.objectContaining({ path: '/profile/media/4e3f.png', decision: 'accepted' }),
+      expect.objectContaining({ path: '/profile/media/rejected.bin', rejectionReason: 'file-too-large' }),
+    ]);
   });
 
   it('omits optional sections while keeping the required context and user input sections', () => {

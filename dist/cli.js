@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.48",
+  version: "0.6.49",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -33,6 +33,7 @@ var package_default = {
   files: [
     "dist",
     "bin",
+    "skills",
     "README.md",
     "README.zh.md",
     "LICENSE"
@@ -135,7 +136,7 @@ async function checkAgentVersion(input) {
   const args = input.args ?? ["--version"];
   const timeoutMs = input.timeoutMs ?? 5e3;
   const executable = input.realpath ?? input.binaryPath;
-  return new Promise((resolve3, reject4) => {
+  return new Promise((resolve5, reject4) => {
     let settled = false;
     let stdout = "";
     let stderr = "";
@@ -240,7 +241,7 @@ async function checkAgentVersion(input) {
           );
           return;
         }
-        resolve3(version);
+        resolve5(version);
       });
     });
   });
@@ -880,7 +881,7 @@ function codexBootstrapBinaryErrorCode(errno) {
 import { createInterface } from "readline";
 import { Writable } from "stream";
 async function promptLine(prompt) {
-  return new Promise((resolve3) => {
+  return new Promise((resolve5) => {
     const rl = createInterface({
       input: process.stdin,
       output: process.stdout,
@@ -888,13 +889,13 @@ async function promptLine(prompt) {
     });
     rl.question(prompt, (answer) => {
       rl.close();
-      resolve3(answer.trim());
+      resolve5(answer.trim());
     });
   });
 }
 async function promptPassword(prompt) {
   const isTTY = Boolean(process.stdin.isTTY);
-  return new Promise((resolve3) => {
+  return new Promise((resolve5) => {
     const muted = new Writable({
       write(_chunk, _enc, cb) {
         cb();
@@ -909,7 +910,7 @@ async function promptPassword(prompt) {
     rl.question("", (answer) => {
       rl.close();
       process.stdout.write("\n");
-      resolve3(answer.trim());
+      resolve5(answer.trim());
     });
   });
 }
@@ -1079,7 +1080,7 @@ async function fsyncDir(path) {
   }
 }
 function sleep(ms) {
-  return new Promise((resolve3) => setTimeout(resolve3, ms));
+  return new Promise((resolve5) => setTimeout(resolve5, ms));
 }
 
 // src/runtime/locks.ts
@@ -2637,13 +2638,13 @@ async function listSecretProfiles(rootDir) {
 }
 async function readAllStdin() {
   if (process.stdin.isTTY) return "";
-  return new Promise((resolve3, reject4) => {
+  return new Promise((resolve5, reject4) => {
     let data = "";
     process.stdin.setEncoding("utf8");
     process.stdin.on("data", (chunk) => {
       data += chunk;
     });
-    process.stdin.on("end", () => resolve3(data));
+    process.stdin.on("end", () => resolve5(data));
     process.stdin.on("error", reject4);
   });
 }
@@ -2742,7 +2743,7 @@ async function spawnExecProvider(pc, ref) {
   const timeoutMs = pc.noOutputTimeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
   const maxOutput = pc.maxOutputBytes ?? DEFAULT_EXEC_MAX_OUTPUT;
   const providerName = ref.provider ?? DEFAULT_PROVIDER;
-  return new Promise((resolve3, reject4) => {
+  return new Promise((resolve5, reject4) => {
     const env = {};
     if (pc.passEnv) {
       for (const k of pc.passEnv) {
@@ -2800,7 +2801,7 @@ async function spawnExecProvider(pc, ref) {
         const parsed = JSON.parse(stdout);
         const value = parsed.values?.[ref.id];
         if (typeof value === "string") {
-          resolve3(value);
+          resolve5(value);
           return;
         }
         const err = parsed.errors?.[ref.id]?.message;
@@ -2827,7 +2828,7 @@ import * as p from "@clack/prompts";
 import { registerApp } from "@larksuite/channel";
 import qrcode from "qrcode-terminal";
 async function requestScopeGrantLink(opts) {
-  return new Promise((resolve3, reject4) => {
+  return new Promise((resolve5, reject4) => {
     let urlDelivered = false;
     const completion = registerApp({
       source: "arg-bridge",
@@ -2836,7 +2837,7 @@ async function requestScopeGrantLink(opts) {
       ...opts.signal ? { signal: opts.signal } : {},
       onQRCodeReady: (info) => {
         urlDelivered = true;
-        resolve3({ url: info.url, expireIn: info.expireIn, completion });
+        resolve5({ url: info.url, expireIn: info.expireIn, completion });
       }
     }).then(() => void 0);
     completion.catch((err) => {
@@ -4763,6 +4764,14 @@ function buildLarkChannelEnv(context) {
   if (larkCliConfigDir) env.LARKSUITE_CLI_CONFIG_DIR = larkCliConfigDir;
   return env;
 }
+function withArtifactDeliveryEnv(base, artifact) {
+  if (!artifact) return base;
+  return {
+    ...base,
+    ARG_BRIDGE_ARTIFACT_SOCKET: artifact.socketPath,
+    ARG_BRIDGE_ARTIFACT_TOKEN: artifact.token
+  };
+}
 function nonEmpty(value) {
   const trimmed = value?.trim();
   return trimmed ? value : void 0;
@@ -4806,7 +4815,7 @@ async function applyLarkCliIdentityPolicy(context, identityPreset) {
 }
 async function runQuiet(cmd, args, env) {
   let timedOut = false;
-  const exitCode = await new Promise((resolve3) => {
+  const exitCode = await new Promise((resolve5) => {
     const child = spawnProcess(cmd, args, {
       env: mergeProcessEnv(process.env, env),
       stdio: ["ignore", "ignore", "ignore"]
@@ -4817,11 +4826,11 @@ async function runQuiet(cmd, args, env) {
     }, POLICY_TIMEOUT_MS);
     child.once("error", () => {
       clearTimeout(timer);
-      resolve3(null);
+      resolve5(null);
     });
     child.once("exit", (code) => {
       clearTimeout(timer);
-      resolve3(code);
+      resolve5(code);
     });
   });
   return !timedOut && exitCode === 0;
@@ -5402,7 +5411,7 @@ function isLarkCliInstalled() {
 async function runCapture(cmd, args, timeoutMs, env) {
   let captured = "";
   let timedOut = false;
-  const exitCode = await new Promise((resolve3) => {
+  const exitCode = await new Promise((resolve5) => {
     const child = spawnProcess(cmd, args, {
       env: env ? mergeProcessEnv(process.env, env) : void 0,
       stdio: ["ignore", "pipe", "pipe"]
@@ -5419,11 +5428,11 @@ async function runCapture(cmd, args, timeoutMs, env) {
     }, timeoutMs);
     child.once("error", () => {
       clearTimeout(timer);
-      resolve3(null);
+      resolve5(null);
     });
     child.once("exit", (code) => {
       clearTimeout(timer);
-      resolve3(code);
+      resolve5(code);
     });
   });
   return { success: !timedOut && exitCode === 0, output: captured };
@@ -5526,7 +5535,7 @@ async function confirmStopRuntimeLockProcess() {
   const rl = createInterface2({ input: process.stdin, output: process.stdout });
   try {
     const answer = await new Promise(
-      (resolve3) => rl.question("\u662F\u5426\u505C\u6B62\u65E7\u8FDB\u7A0B\u5E76\u7EE7\u7EED\u542F\u52A8\u540E\u53F0\u670D\u52A1? [y/N]: ", resolve3)
+      (resolve5) => rl.question("\u662F\u5426\u505C\u6B62\u65E7\u8FDB\u7A0B\u5E76\u7EE7\u7EED\u542F\u52A8\u540E\u53F0\u670D\u52A1? [y/N]: ", resolve5)
     );
     const normalized = answer.trim().toLowerCase();
     return normalized === "y" || normalized === "yes";
@@ -5761,7 +5770,7 @@ var AsyncEventQueue = class {
         const value = this.values.shift();
         if (value !== void 0) return Promise.resolve({ value, done: false });
         if (this.closed) return Promise.resolve({ value: void 0, done: true });
-        return new Promise((resolve3) => this.waiters.push(resolve3));
+        return new Promise((resolve5) => this.waiters.push(resolve5));
       }
     };
   }
@@ -5868,34 +5877,23 @@ var BRIDGE_SYSTEM_PROMPT = `# arg-bridge \u8FD0\u884C\u7EA6\u5B9A
 
 ## \u628A\u672C\u5730\u6587\u4EF6\u53D1\u7ED9\u7528\u6237
 
-\u5F53\u4F60\u5728\u5DE5\u4F5C\u4E2D**\u5199\u51FA\u4E86**\u4E00\u4E2A\u672C\u5730\u6587\u4EF6\uFF08\u5982 \`output.png\` / \`report.pdf\` / \`data.csv\`\uFF09\uFF0C\u7528\u6237\u9700\u8981\u770B\u5230\u6587\u4EF6\u672C\u4F53\u65F6\uFF08\u4E0D\u662F\u4EC5\u5728\u6587\u672C\u91CC\u63D0\u4E00\u4E0B\uFF09\uFF0C\u7528 lark-cli \u7684 reply API\uFF1A
+\u5F53\u4F60\u5728\u5DE5\u4F5C\u4E2D**\u5199\u51FA\u4E86**\u4E00\u4E2A\u672C\u5730\u6587\u4EF6\uFF08\u5982 \`output.png\` / \`report.pdf\` / \`data.csv\`\uFF09\uFF0C\u7528\u6237\u9700\u8981\u770B\u5230\u6587\u4EF6\u672C\u4F53\u65F6\uFF08\u4E0D\u662F\u4EC5\u5728\u6587\u672C\u91CC\u63D0\u4E00\u4E0B\uFF09\uFF0C\u8C03\u7528 bridge \u63D0\u4F9B\u7684\u6587\u4EF6\u6295\u9012\u80FD\u529B\uFF1A
 
-    lark-cli im +messages-reply \\
-      --message-id <user_msg_id> \\
-      --file <relative_path> \\
-      [--markdown "\u7B80\u77ED\u8BF4\u660E"]
+    arg-bridge sendfile <\u76F8\u5BF9\u5F53\u524D cwd \u7684\u8DEF\u5F84> [--caption "\u7B80\u77ED\u8BF4\u660E"]
 
 \u7EA6\u675F\uFF1A
 
-- \`--file\` \u8DEF\u5F84**\u5FC5\u987B\u76F8\u5BF9\u5F53\u524D cwd**\uFF08agent process \u7684 cwd\uFF0C\u5373 \`bridge_context.cwd\`\uFF09\uFF0C\u7EDD\u5BF9\u8DEF\u5F84\u548C \`..\` \u90FD\u4F1A\u88AB lark-cli \u62D2\u7EDD\u3002\u5982\u679C\u6587\u4EF6\u5728 cwd \u5916\u7684\u5B50\u76EE\u5F55\u91CC\uFF0C\u5148 \`cd <dir>\` \u518D\u8C03\u3002
-- \`--message-id\` \u5FC5\u987B\u662F\u7528\u6237\u7684\u67D0\u6761\u5177\u4F53\u6D88\u606F id\uFF08\`bridge_context.last_user_message_id\`\uFF09\uFF0C\u4E0D\u662F\u7FA4\u91CC\u7B2C\u4E00\u6761 / \u7CFB\u7EDF\u6D88\u606F / \u4F60\u81EA\u5DF1\u53D1\u8FC7\u7684\u6D88\u606F\u2014\u2014bot \u53EA\u80FD reply \u5230\u7528\u6237\u7684\u6D88\u606F\u3002
-- \u6587\u4EF6\u5927\u5C0F\u4E0A\u9650\u89C1 lark-cli \u6587\u6863\uFF08\u9ED8\u8BA4 30MB\uFF09\u3002
+- \u8DEF\u5F84**\u5FC5\u987B\u76F8\u5BF9\u5F53\u524D cwd**\uFF0C\u7EDD\u5BF9\u8DEF\u5F84\u3001\`..\` \u548C\u7B26\u53F7\u94FE\u63A5\u4F1A\u88AB bridge \u62D2\u7EDD\u3002
+- bridge \u5DF2\u628A\u5F53\u524D chat\u3001\u56DE\u590D\u76EE\u6807\u3001\u7EBF\u7A0B\u548C\u5141\u8BB8\u76EE\u5F55\u7ED1\u5B9A\u5230\u672C\u6B21 run\uFF1B\u4E0D\u8981\u81EA\u884C\u9009\u62E9 message id\u3001chat id \u6216\u6539\u7528 \`lark-cli\` \u4E0A\u4F20\u3002
+- \u6587\u4EF6\u5927\u5C0F\u4E0A\u9650\u7531\u5F53\u524D bridge profile \u7684\u9644\u4EF6\u7B56\u7565\u51B3\u5B9A\u3002
 
 \u5E38\u89C1\u9519\u8BEF\uFF1A
 
-- \`absolute paths are rejected\` \u2192 \u6539\u7528 cwd-\u76F8\u5BF9\u8DEF\u5F84\uFF0C\u6216\u5148 \`cd\` \u518D\u8C03\u3002
-- \`chat not found\` / \`permission denied\` \u2192 \u786E\u8BA4 bot \u5728 chat \u91CC\u3001\u5FC5\u8981\u65F6\u8BA9\u7528\u6237\u52A0 bot \u8FDB\u7FA4\u3002
-- \`file not found\` \u2192 \`--file\` \u8DEF\u5F84\u76F8\u5BF9\u5F53\u524D cwd\uFF1B\u7528 \`Bash\` \u7684 \`ls\` \u5148\u786E\u8BA4\u6587\u4EF6\u5B58\u5728\u3002
-- \`cannot reply to root message\` \u2192 \`--message-id\` \u5FC5\u987B\u662F\u7528\u6237\u7684\u67D0\u6761\u5177\u4F53\u6D88\u606F id\u3002
+- \`\u6587\u4EF6\u8DEF\u5F84\u5FC5\u987B\u76F8\u5BF9\u5F53\u524D\u5DE5\u4F5C\u76EE\u5F55\` \u2192 \u6539\u7528 cwd-\u76F8\u5BF9\u8DEF\u5F84\uFF0C\u6216\u5148 \`cd\` \u518D\u8C03\u7528\u3002
+- \`\u6587\u4EF6\u80FD\u529B\u4EE4\u724C\u5DF2\u5931\u6548\` \u2192 \u5F53\u524D\u4EFB\u52A1\u5DF2\u7ECF\u7ED3\u675F\uFF1B\u8BF7\u5728\u4E0B\u4E00\u8F6E\u4EFB\u52A1\u4E2D\u91CD\u65B0\u751F\u6210\u6587\u4EF6\u540E\u518D\u53D1\u9001\u3002
+- \`\u6587\u4EF6\u4E0D\u5B58\u5728\` \u2192 \u7528 \`Bash\` \u7684 \`ls\` \u5148\u786E\u8BA4\u6587\u4EF6\u5B58\u5728\u3002
 
 \u53EA\u5728\u7528\u6237**\u660E\u786E\u9700\u8981\u6587\u4EF6\u672C\u4F53**\u65F6\u624D\u53D1\u6587\u4EF6\uFF08\u56FE\u8868 / \u62A5\u544A / \u6570\u636E\u5BFC\u51FA\uFF09\u3002\u53EA\u662F\u6587\u672C\u91CC"\u53C2\u8003 X.csv"\u5C31\u591F\u4E86\u65F6\u4E0D\u8981\u987A\u624B\u53D1\u6587\u4EF6\u2014\u2014\u98DE\u4E66\u7FA4\u6D88\u606F\u4F1A\u88AB\u53CD\u590D PATCH \u591A\u6B21\uFF0C\u6BCF\u6B21\u90FD\u53D1\u6587\u4EF6\u4F1A\u8BA9\u7528\u6237 chat \u88AB\u5237\u5C4F\u3002
-
-## lark-cli \u8FD0\u884C\u73AF\u5883
-
-    lark-cli im +messages-reply \\
-      --message-id <user_msg_id> \\
-      --file <relative_path>
-      [--markdown "\u7B80\u77ED\u8BF4\u660E"]
 
 ## lark-cli \u8FD0\u884C\u73AF\u5883
 
@@ -5955,7 +5953,7 @@ ${prompt}`;
 import { EventEmitter } from "events";
 import { createHash as createHash2 } from "crypto";
 import { chmodSync, lstatSync as lstatSync2, mkdirSync as mkdirSync3 } from "fs";
-import { dirname as dirname15, join as join17 } from "path";
+import { dirname as dirname15, join as join17, resolve as resolve3 } from "path";
 
 // src/agent/live-interaction-detection.ts
 var MAX_INTERACTION_LINES = 40;
@@ -6437,7 +6435,12 @@ function revalidateManagedTerminal(saved, scopeId, profile2, expectedAgent) {
   }
   return {
     socketPath: saved.socketPath,
-    target: saved.sessionName,
+    // A manual `codex resume`/`claude --resume` can run in a new pane of the
+    // same managed session. The helper persists that pane in tmux metadata so
+    // a bridge restart tails and controls the resumed conversation, rather
+    // than silently falling back to the session's original (possibly dead)
+    // pane.
+    target: revalidateManagedActiveTarget(saved.socketPath, saved.sessionName, metadata.activeTarget),
     attachCommand: saved.attachCommand,
     ownership: "managed"
   };
@@ -6452,14 +6455,24 @@ function readManagedMetadata(socketPath, sessionName) {
       "-p",
       "-t",
       sessionName,
-      "#{@argbridge_managed}	#{@argbridge_profile}	#{@argbridge_scope}	#{@argbridge_agent}	#{@argbridge_cwd}"
+      "#{@argbridge_managed}	#{@argbridge_profile}	#{@argbridge_scope}	#{@argbridge_agent}	#{@argbridge_cwd}	#{@argbridge_active_target}"
     ],
     { encoding: "utf8" }
   );
   if (result.status !== 0 || typeof result.stdout !== "string") return void 0;
-  const [managed = "", profile2 = "", scope = "", agent = "", cwd = ""] = result.stdout.trim().split("	");
+  const [managed = "", profile2 = "", scope = "", agent = "", cwd = "", activeTarget = ""] = result.stdout.trim().split("	");
   if (!managed || !profile2 || !scope) return void 0;
-  return { managed, profile: profile2, scope, agent, cwd };
+  return { managed, profile: profile2, scope, agent, cwd, activeTarget };
+}
+function revalidateManagedActiveTarget(socketPath, sessionName, activeTarget) {
+  const candidate = activeTarget.trim();
+  if (!candidate) return sessionName;
+  const result = spawnProcessSync(
+    "tmux",
+    ["-S", socketPath, "display-message", "-p", "-t", candidate, "#{session_name}"],
+    { encoding: "utf8" }
+  );
+  return result.status === 0 && typeof result.stdout === "string" && result.stdout.trim() === sessionName ? candidate : sessionName;
 }
 function recoverManagedTerminal(cwd, scopeId, profile2, agentKind) {
   const expectedSessionName = managedSessionNameFor(profile2, agentKind, scopeId);
@@ -6691,7 +6704,7 @@ var LiveTerminalSession = class {
       runId,
       events,
       stop: async () => {
-        this.write("\x1B");
+        this.write("");
       },
       waitForExit: async () => true
     };
@@ -6705,6 +6718,11 @@ var LiveTerminalSession = class {
         ["-S", terminal.socketPath, "kill-session", "-t", terminal.sessionName],
         { stdio: "ignore" }
       );
+      if (!isDefaultTmuxSocket(terminal.socketPath)) {
+        spawnProcessSync("tmux", ["-S", terminal.socketPath, "kill-server"], {
+          stdio: "ignore"
+        });
+      }
     }
   }
   /** Stop only the bridge-side relay; the managed tmux session keeps running. */
@@ -6718,14 +6736,14 @@ var LiveTerminalSession = class {
     if (child && child.exitCode === null && child.signalCode === null) {
       log.info("agent-live", "close", { pid: child.pid ?? null, reason });
       child.kill("SIGTERM");
-      await new Promise((resolve3) => {
+      await new Promise((resolve5) => {
         const timer = setTimeout(() => {
           if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-          resolve3();
+          resolve5();
         }, 2e3);
         child.once("exit", () => {
           clearTimeout(timer);
-          resolve3();
+          resolve5();
         });
       });
     }
@@ -6741,8 +6759,8 @@ var LiveTerminalSession = class {
     if (this.isAlive()) return;
     if (this.closed) throw new Error("live session is closed");
     const spawned = spawnLiveProcess(this.opts);
-    this.terminalReady = new Promise((resolve3) => {
-      this.resolveTerminalReady = resolve3;
+    this.terminalReady = new Promise((resolve5) => {
+      this.resolveTerminalReady = resolve5;
     });
     this.child = spawned.child;
     this.terminalInfo = spawned.terminal;
@@ -6859,7 +6877,6 @@ var LiveTerminalSession = class {
     let sawNormalSubmitProgress = false;
     let normalSubmitRetried = false;
     const inputGraceMs = this.inputGraceMs(commandMode);
-    const inputReadyAt = Date.now() + inputGraceMs;
     if (commandMode) {
       log.info("agent-live", "command-start", {
         commandText: prompt,
@@ -6983,7 +7000,6 @@ var LiveTerminalSession = class {
             textPreview: previewLiveText(event.text)
           });
         }
-        arm(startupTimeoutMs + Math.max(0, inputReadyAt - Date.now()));
         return;
       }
       const terminalState = event.terminalText;
@@ -7091,7 +7107,6 @@ var LiveTerminalSession = class {
     this.emitter.once("error", onError);
     for (const event of this.pendingTerminalOutput.splice(0)) onData(event);
     try {
-      arm(startupTimeoutMs + inputGraceMs);
       await this.waitForInputReady(inputGraceMs);
       if (!done) {
         if (startupInteractionText && inputMode !== "control") {
@@ -7134,13 +7149,13 @@ var LiveTerminalSession = class {
           else if (commandMode && isKnownSilentLiveCommand(prompt)) arm(idleMs);
           else if (commandMode && isSlowSilentLiveCommand(prompt)) {
             arm(noOutputIdleMs(prompt, idleMs));
-          }
+          } else arm(startupTimeoutMs);
         }
       }
       while (!done || queue.length > 0) {
         if (queue.length === 0) {
-          await new Promise((resolve3) => {
-            wake = resolve3;
+          await new Promise((resolve5) => {
+            wake = resolve5;
           });
           wake = void 0;
           continue;
@@ -7302,6 +7317,9 @@ function ensureDefaultTmuxSocketDirectory(socketPath) {
   }
   chmodSync(directory, 448);
 }
+function isDefaultTmuxSocket(socketPath) {
+  return resolve3(socketPath) === resolve3(defaultTmuxSocketPath({ ...process.env, TMUX: void 0 }));
+}
 function liveTmuxIdentity(cwd, sessionKey, signature, preferredSessionName) {
   const hash = createHash2("sha256").update(cwd).update("\0").update(sessionKey).update("\0").update(signature).digest("hex").slice(0, 20);
   return {
@@ -7427,6 +7445,15 @@ function setManagedMetadata() {
   tmux(['set-option', '-t', session, '@argbridge_scope', scope], { stdio: 'ignore' });
   tmux(['set-option', '-t', session, '@argbridge_agent', agentKind], { stdio: 'ignore' });
   tmux(['set-option', '-t', session, '@argbridge_cwd', cwd], { stdio: 'ignore' });
+  setManagedActiveTarget();
+}
+
+function setManagedActiveTarget() {
+  if (!managed || !target) return;
+  // This is deliberately tmux session metadata, not bridge-process memory.
+  // It survives a bridge restart and records the pane adopted after a user
+  // manually resumes a native Codex/Claude conversation.
+  tmux(['set-option', '-t', session, '@argbridge_active_target', target], { stdio: 'ignore' });
 }
 
 function createAgentWindow(initial) {
@@ -7503,6 +7530,7 @@ function createAgentWindow(initial) {
   lastSnapshot = '';
   lastHistoryPane = '';
   lastHistoryEnd = -1;
+  setManagedActiveTarget();
   return true;
 }
 
@@ -7559,6 +7587,7 @@ function adoptSelectedLivePane() {
   if (!selected || selected === target || !selectedPaneIsAgent(selected)) return false;
   target = selected;
   setPersistentPaneOptions();
+  setManagedActiveTarget();
   resetCaptureState();
   return true;
 }
@@ -7785,6 +7814,10 @@ function parseLiveControlSequence(input) {
 }
 function isLiveControlInput(input) {
   return parseLiveControlSequence(input) !== null;
+}
+function isLiveInterruptInput(input) {
+  const sequence = parseLiveControlSequence(input);
+  return sequence !== null && sequence.length > 0 && sequence.every((key) => key === "");
 }
 function isPendingLiveCommandDraft(input, prompt) {
   const command = prompt.trim();
@@ -8818,7 +8851,7 @@ function isIncompleteEscapeSequence(seq) {
   return false;
 }
 function delay(ms) {
-  return new Promise((resolve3) => setTimeout(resolve3, ms));
+  return new Promise((resolve5) => setTimeout(resolve5, ms));
 }
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -8983,7 +9016,10 @@ var ClaudeAdapter = class {
     if (opts.model) args.push("--model", opts.model);
     const child = spawnProcess(this.binary, args, {
       cwd: opts.cwd,
-      env: mergeProcessEnv(process.env, buildLarkChannelEnv(this.larkChannel)),
+      env: mergeProcessEnv(
+        process.env,
+        withArtifactDeliveryEnv(buildLarkChannelEnv(this.larkChannel), opts.artifactDelivery)
+      ),
       stdio: ["pipe", "pipe", "pipe"]
     });
     log.info("agent", "spawn", {
@@ -9033,7 +9069,7 @@ var ClaudeAdapter = class {
         if (child.exitCode !== null || child.signalCode !== null) return;
         log.info("agent", "stop-sigterm", { pid: child.pid ?? null, graceMs: stopGraceMs });
         child.kill("SIGTERM");
-        await new Promise((resolve3) => {
+        await new Promise((resolve5) => {
           const timer = setTimeout(() => {
             if (child.exitCode === null && child.signalCode === null) {
               log.warn("agent", "stop-sigkill", {
@@ -9043,11 +9079,11 @@ var ClaudeAdapter = class {
               });
               child.kill("SIGKILL");
             }
-            resolve3();
+            resolve5();
           }, stopGraceMs);
           child.once("exit", () => {
             clearTimeout(timer);
-            resolve3();
+            resolve5();
           });
         });
       },
@@ -9055,14 +9091,14 @@ var ClaudeAdapter = class {
         if (child.exitCode !== null || child.signalCode !== null) {
           return Promise.resolve(true);
         }
-        return new Promise((resolve3) => {
+        return new Promise((resolve5) => {
           const onExit = () => {
             clearTimeout(timer);
-            resolve3(true);
+            resolve5(true);
           };
           const timer = setTimeout(() => {
             child.removeListener("exit", onExit);
-            resolve3(false);
+            resolve5(false);
           }, timeoutMs);
           child.once("exit", onExit);
         });
@@ -9094,7 +9130,7 @@ var ClaudeAdapter = class {
       command: this.binary,
       args,
       cwd: opts.cwd,
-      env: buildLarkChannelEnv(this.larkChannel),
+      env: withArtifactDeliveryEnv(buildLarkChannelEnv(this.larkChannel), opts.artifactDelivery),
       signature: liveSignature,
       usePty: this.liveUsePty,
       backend: this.liveTerminalBackend ?? "tmux",
@@ -9217,7 +9253,7 @@ function isWindowsCommandNotFoundLine(line) {
 
 // src/agent/codex/adapter.ts
 import { createInterface as createInterface4 } from "readline";
-import { join as join19 } from "path";
+import { join as join20 } from "path";
 
 // src/runtime/errors.ts
 var RunRejected = class extends Error {
@@ -9240,6 +9276,47 @@ var SpawnFailed = class extends Error {
     this.diagnostic = diagnostic;
   }
 };
+
+// src/agent/bundled-skill.ts
+import { copyFile as copyFile2, mkdir as mkdir13, readFile as readFile11 } from "fs/promises";
+import { homedir as homedir5 } from "os";
+import { dirname as dirname16, join as join19 } from "path";
+import { fileURLToPath } from "url";
+var SKILL_NAME = "arg-bridge-sendfile";
+async function ensureBundledCodexSkill(codexHome) {
+  const source = await bundledSkillSource();
+  if (!source) return;
+  const root = codexHome ?? process.env.CODEX_HOME ?? join19(homedir5(), ".codex");
+  const target = join19(root, "skills", SKILL_NAME, "SKILL.md");
+  try {
+    const sourceContent = await readFile11(source, "utf8");
+    const current = await readFile11(target, "utf8").catch(() => void 0);
+    if (current === sourceContent) return;
+    await mkdir13(dirname16(target), { recursive: true, mode: 448 });
+    await copyFile2(source, target);
+    log.info("agent-skill", "installed", { name: SKILL_NAME, target });
+  } catch (err) {
+    log.warn("agent-skill", "install-failed", {
+      name: SKILL_NAME,
+      message: err instanceof Error ? err.message : String(err)
+    });
+  }
+}
+async function bundledSkillSource() {
+  const moduleDir = dirname16(fileURLToPath(import.meta.url));
+  const candidates = [
+    join19(moduleDir, "..", "..", "skills", SKILL_NAME, "SKILL.md"),
+    join19(moduleDir, "..", "skills", SKILL_NAME, "SKILL.md")
+  ];
+  for (const candidate of candidates) {
+    try {
+      await readFile11(candidate, "utf8");
+      return candidate;
+    } catch {
+    }
+  }
+  return void 0;
+}
 
 // src/agent/codex/argv.ts
 function buildCodexArgs(input) {
@@ -9560,6 +9637,12 @@ var CodexAdapter = class {
         availability.diagnostic
       );
     }
+    await ensureBundledCodexSkill(this.effectiveCodexHome());
+  }
+  effectiveCodexHome() {
+    if (this.codexHome) return this.codexHome;
+    if (!this.inheritCodexHome) return join20(this.profileStateDir, "codex-home");
+    return process.env.CODEX_HOME;
   }
   run(opts) {
     if (!opts.cwd) {
@@ -9579,12 +9662,12 @@ var CodexAdapter = class {
       model: opts.model,
       reasoningEffort: opts.reasoningEffort
     });
-    const envOverrides = buildLarkChannelEnv(this.larkChannel);
-    if (this.codexHome) {
-      envOverrides.CODEX_HOME = this.codexHome;
-    } else if (!this.inheritCodexHome) {
-      envOverrides.CODEX_HOME = join19(this.profileStateDir, "codex-home");
-    }
+    const envOverrides = withArtifactDeliveryEnv(
+      buildLarkChannelEnv(this.larkChannel),
+      opts.artifactDelivery
+    );
+    const codexHome = this.effectiveCodexHome();
+    if (codexHome) envOverrides.CODEX_HOME = codexHome;
     const child = spawnProcess(this.binary, args, {
       cwd: opts.cwd,
       env: mergeProcessEnv(process.env, envOverrides),
@@ -9641,7 +9724,7 @@ var CodexAdapter = class {
         stopReason = "interrupted";
         log.info("agent", "stop-sigterm", { pid: child.pid ?? null, graceMs: stopGraceMs });
         child.kill("SIGTERM");
-        await new Promise((resolve3) => {
+        await new Promise((resolve5) => {
           const timer = setTimeout(() => {
             if (child.exitCode === null && child.signalCode === null) {
               log.warn("agent", "stop-sigkill", {
@@ -9651,11 +9734,11 @@ var CodexAdapter = class {
               });
               child.kill("SIGKILL");
             }
-            resolve3();
+            resolve5();
           }, stopGraceMs);
           child.once("exit", () => {
             clearTimeout(timer);
-            resolve3();
+            resolve5();
           });
         });
       },
@@ -9663,14 +9746,14 @@ var CodexAdapter = class {
         if (child.exitCode !== null || child.signalCode !== null) {
           return Promise.resolve(true);
         }
-        return new Promise((resolve3) => {
+        return new Promise((resolve5) => {
           const onExit = () => {
             clearTimeout(timer);
-            resolve3(true);
+            resolve5(true);
           };
           const timer = setTimeout(() => {
             child.removeListener("exit", onExit);
-            resolve3(false);
+            resolve5(false);
           }, timeoutMs);
           child.once("exit", onExit);
         });
@@ -9693,12 +9776,12 @@ var CodexAdapter = class {
       "-C",
       opts.cwd
     ];
-    const envOverrides = buildLarkChannelEnv(this.larkChannel);
-    if (this.codexHome) {
-      envOverrides.CODEX_HOME = this.codexHome;
-    } else if (!this.inheritCodexHome) {
-      envOverrides.CODEX_HOME = join19(this.profileStateDir, "codex-home");
-    }
+    const envOverrides = withArtifactDeliveryEnv(
+      buildLarkChannelEnv(this.larkChannel),
+      opts.artifactDelivery
+    );
+    const codexHome = this.effectiveCodexHome();
+    if (codexHome) envOverrides.CODEX_HOME = codexHome;
     const signature = JSON.stringify({
       cwd: opts.cwd,
       sandbox,
@@ -9830,8 +9913,8 @@ function isWindowsCommandNotFoundLine2(line) {
 
 // src/bot/channel.ts
 import { createLarkChannel } from "@larksuite/channel";
-import { homedir as homedir7 } from "os";
-import { dirname as dirname18, join as join23 } from "path";
+import { homedir as homedir8 } from "os";
+import { dirname as dirname20, join as join24 } from "path";
 
 // src/agent/capability.ts
 function claudeCapability(profile2) {
@@ -10078,9 +10161,9 @@ function safeJsonStringify(value) {
 
 // src/commands/index.ts
 import { randomUUID } from "crypto";
-import { lstat, readFile as readFile11, realpath as realpath4 } from "fs/promises";
-import { homedir as homedir6 } from "os";
-import { basename as basename5, dirname as dirname16, isAbsolute as isAbsolute3, relative, sep } from "path";
+import { lstat, readFile as readFile12, realpath as realpath4 } from "fs/promises";
+import { homedir as homedir7 } from "os";
+import { basename as basename5, dirname as dirname17, isAbsolute as isAbsolute3, relative, sep } from "path";
 
 // src/card/account-cards.ts
 function maskAppId(id) {
@@ -10906,6 +10989,7 @@ function helpCard(agentName = "Agent") {
         "- `/session` \u2014 \u67E5\u770B\u6216\u5207\u6362\u540E\u53F0 agent session \u6A21\u5F0F",
         "- `/tmux list|bind <\u7F16\u53F7\u6216 pane id>|status|tail [N]|unbind` \u2014 \u7BA1\u7406\u5458\u7BA1\u7406 tmux\uFF1B`tail` \u9ED8\u8BA4\u663E\u793A\u5F53\u524D pane \u672B\u5C3E 27 \u884C",
         "- `/sendfile <path>` \u2014 \u7BA1\u7406\u5458\u76F4\u63A5\u56DE\u590D\u5F53\u524D\u6D88\u606F\u53D1\u9001\u5DE5\u4F5C\u76EE\u5F55\u5185\u7684\u6587\u4EF6",
+        "- `/output [live|final|off|status]` \u2014 \u8BBE\u7F6E\u5F53\u524D\u4F1A\u8BDD\u7684\u8F93\u51FA\u6295\u9012\u7B56\u7565\uFF0C\u4E0D\u5F71\u54CD agent \u7EE7\u7EED\u8FD0\u884C",
         "- `/stop` \u2014 \u7ED3\u675F\u5F53\u524D\u6B63\u5728\u8DD1\u7684\u4EFB\u52A1\uFF08\u4E5F\u53EF\u70B9\u5361\u7247\u5E95\u90E8 \u23F9 \u7EC8\u6B62 \u6309\u94AE\uFF09",
         "- `/stop comment:<scopeHash>` \u2014 \u7BA1\u7406\u5458\u505C\u6B62\u4E91\u6587\u6863\u8BC4\u8BBA\u4EFB\u52A1",
         "- `/timeout [N|off|default]` \u2014 \u5F53\u524D session \u7684\u63A2\u6D3B\u5206\u949F\u6570,`/config` \u6539\u5168\u5C40\u9ED8\u8BA4",
@@ -11587,8 +11671,8 @@ function finalizeIfRunning(state) {
 // src/session/history.ts
 import { createReadStream } from "fs";
 import { readdir as readdir4, stat as stat6 } from "fs/promises";
-import { homedir as homedir5 } from "os";
-import { join as join20 } from "path";
+import { homedir as homedir6 } from "os";
+import { join as join21 } from "path";
 import { createInterface as createInterface5 } from "readline";
 
 // src/session/preview.ts
@@ -11627,7 +11711,7 @@ function encodeCwd(cwd) {
   return cwd.replace(/[^A-Za-z0-9]/g, "-");
 }
 function claudeProjectDir(cwd) {
-  return join20(homedir5(), ".claude", "projects", encodeCwd(cwd));
+  return join21(homedir6(), ".claude", "projects", encodeCwd(cwd));
 }
 async function listRecentSessions(cwd, limit = 5) {
   const dir = claudeProjectDir(cwd);
@@ -11641,7 +11725,7 @@ async function listRecentSessions(cwd, limit = 5) {
   const jsonls = files.filter((f) => f.endsWith(".jsonl"));
   const withStats = await Promise.all(
     jsonls.map(async (f) => {
-      const path = join20(dir, f);
+      const path = join21(dir, f);
       try {
         const st = await stat6(path);
         return { file: f, path, mtime: st.mtimeMs };
@@ -11712,7 +11796,7 @@ function formatRelTime(mtime) {
 
 // src/session/codex-history.ts
 import { createInterface as createInterface6 } from "readline";
-import { join as join21 } from "path";
+import { join as join22 } from "path";
 var CodexHistoryError = class extends Error {
   code;
   constructor(code, message, options) {
@@ -11734,7 +11818,7 @@ async function listCodexThreadHistory(options) {
   const timeoutMs = options.timeoutMs ?? DEFAULT_HISTORY_TIMEOUT_MS;
   const stderrChunks = [];
   let settled = false;
-  const result = await new Promise((resolve3, reject4) => {
+  const result = await new Promise((resolve5, reject4) => {
     const rl = createInterface6({ input: child.stdout, crlfDelay: Infinity });
     let timer;
     const fail = (err) => {
@@ -11791,7 +11875,7 @@ async function listCodexThreadHistory(options) {
         cleanup({ kill: true });
         return;
       }
-      resolve3(parsed.entries);
+      resolve5(parsed.entries);
       cleanup({ kill: true });
     });
     child.once("exit", (code) => {
@@ -11827,7 +11911,7 @@ function spawnCodexAppServer(options) {
   if (options.codexHome) {
     envOverrides.CODEX_HOME = options.codexHome;
   } else if (options.inheritCodexHome === false) {
-    envOverrides.CODEX_HOME = join21(options.profileStateDir, "codex-home");
+    envOverrides.CODEX_HOME = join22(options.profileStateDir, "codex-home");
   }
   return spawnProcess(options.binary, ["app-server", "--listen", "stdio://"], {
     env: mergeProcessEnv(process.env, envOverrides),
@@ -11897,14 +11981,14 @@ function normalizeThread(input) {
 }
 async function waitForChildExit(child, timeoutMs) {
   if (child.exitCode !== null || child.signalCode !== null) return;
-  await new Promise((resolve3) => {
+  await new Promise((resolve5) => {
     const timer = setTimeout(() => {
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
-      resolve3();
+      resolve5();
     }, timeoutMs);
     child.once("exit", () => {
       clearTimeout(timer);
-      resolve3();
+      resolve5();
     });
   });
 }
@@ -12049,6 +12133,7 @@ var handlers = {
   "/session": handleSession,
   "/tmux": handleTmux,
   "/timeout": handleTimeout,
+  "/output": handleOutput,
   "/ps": handlePs,
   "/exit": handleExit,
   "/doctor": handleDoctor,
@@ -12152,8 +12237,8 @@ function isMessageAuditReject(err) {
   return /not pass the audit/i.test(message);
 }
 function expandTilde(p3) {
-  if (p3 === "~") return homedir6();
-  if (p3.startsWith("~/")) return `${homedir6()}${p3.slice(1)}`;
+  if (p3 === "~") return homedir7();
+  if (p3.startsWith("~/")) return `${homedir7()}${p3.slice(1)}`;
   return p3;
 }
 function isAbsoluteOrTilde(p3) {
@@ -12630,7 +12715,7 @@ function runtimeAccessStatus(profileConfig) {
 async function larkCliStatus(ctx) {
   const appPaths2 = commandProfilePaths(ctx);
   try {
-    const raw = JSON.parse(await readFile11(appPaths2.larkCliTargetConfigFile, "utf8"));
+    const raw = JSON.parse(await readFile12(appPaths2.larkCliTargetConfigFile, "utf8"));
     const app = raw.apps?.find(
       (candidate) => candidate.appId === ctx.controls.profileConfig.accounts.app.id && candidate.brand === ctx.controls.profileConfig.accounts.app.tenant
     );
@@ -13005,6 +13090,31 @@ async function handleTimeout(args, ctx) {
   ctx.sessions.setIdleTimeoutMinutes(scope, n);
   log.info("command", "timeout-set", { scope, minutes: n, targeted: parsed.targeted });
   await reply(ctx, `\u2705 \u5F53\u524D session \u63A2\u6D3B\u5DF2\u8BBE\u4E3A ${n} \u5206\u949F\u3002`);
+}
+async function handleOutput(args, ctx) {
+  const value = args.trim().toLowerCase();
+  const current = ctx.sessions.getOutputMode(ctx.scope);
+  if (!value || value === "status") {
+    await reply(
+      ctx,
+      [
+        `\u5F53\u524D\u8F93\u51FA\u7B56\u7565\uFF1A\`${current}\``,
+        "",
+        "- `/output live`\uFF1A\u6301\u7EED\u663E\u793A\u8FDB\u5EA6\u3001\u4EA4\u4E92\u5361\u4E0E\u6700\u7EC8\u7B54\u590D",
+        "- `/output final`\uFF1A\u4E0D\u53D1\u9001\u8FC7\u7A0B\u8F93\u51FA\uFF0C\u53EA\u53D1\u9001\u6700\u7EC8\u7B54\u590D",
+        "- `/output off`\uFF1A\u4E0D\u53D1\u9001 agent \u8F93\u51FA\uFF1B\u4EFB\u52A1\u4ECD\u7EE7\u7EED\u8FD0\u884C\uFF0C`/status` \u4E0E `/tmux tail` \u4ECD\u53EF\u7528"
+      ].join("\n")
+    );
+    return;
+  }
+  if (value !== "live" && value !== "final" && value !== "off") {
+    await reply(ctx, "\u7528\u6CD5\uFF1A`/output [live|final|off|status]`");
+    return;
+  }
+  ctx.sessions.setOutputMode(ctx.scope, value);
+  const label = value === "live" ? "\u5B9E\u65F6\u8F93\u51FA" : value === "final" ? "\u4EC5\u6700\u7EC8\u7B54\u590D" : "\u5DF2\u9759\u9ED8 agent \u8F93\u51FA";
+  log.info("command", "output-mode", { scope: ctx.scope, mode: value });
+  await reply(ctx, `\u2705 \u8F93\u51FA\u7B56\u7565\u5DF2\u8BBE\u4E3A\uFF1A${label}\u3002`);
 }
 function parseTimeoutTarget(input, currentScope) {
   const parts = input.split(/\s+/).filter(Boolean);
@@ -13919,7 +14029,7 @@ function configFailureMessage(step, rollbackFailed, larkCliPolicyApplied) {
 }
 function commandProfilePaths(ctx) {
   return resolveAppPaths({
-    rootDir: dirname16(ctx.controls.configPath),
+    rootDir: dirname17(ctx.controls.configPath),
     profile: ctx.controls.profile
   });
 }
@@ -14672,7 +14782,7 @@ function signatureMatches(actual, expected) {
 }
 
 // src/card/callback-store.ts
-import { readFile as readFile12 } from "fs/promises";
+import { readFile as readFile13 } from "fs/promises";
 var CallbackNonceStore = class {
   path;
   nonces = /* @__PURE__ */ new Map();
@@ -14682,7 +14792,7 @@ var CallbackNonceStore = class {
   }
   async load() {
     try {
-      const raw = JSON.parse(await readFile12(this.path, "utf8"));
+      const raw = JSON.parse(await readFile13(this.path, "utf8"));
       if (!raw || typeof raw !== "object") return;
       this.nonces.clear();
       for (const [nonce, state] of Object.entries(raw)) {
@@ -14814,8 +14924,8 @@ function footerLine(status) {
 // src/media/cache.ts
 import { createHash as createHash5 } from "crypto";
 import { createReadStream as createReadStream2 } from "fs";
-import { mkdir as mkdir13, readdir as readdir5, rename as rename4, rm as rm11, stat as stat7 } from "fs/promises";
-import { join as join22 } from "path";
+import { mkdir as mkdir14, readdir as readdir5, rename as rename4, rm as rm11, stat as stat7 } from "fs/promises";
+import { join as join23 } from "path";
 
 // src/media/attachment.ts
 var DEFAULT_POLICY = {
@@ -14921,7 +15031,7 @@ var MediaCache = class {
   }
   async resolve(items, options = {}) {
     if (items.length === 0) return [];
-    await mkdir13(this.rootDir, { recursive: true });
+    await mkdir14(this.rootDir, { recursive: true });
     const candidates = [];
     for (const item of items) {
       try {
@@ -14951,7 +15061,7 @@ var MediaCache = class {
       return null;
     }
     const kind = r.type;
-    const tmpPath = join22(
+    const tmpPath = join23(
       this.rootDir,
       `.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`
     );
@@ -14965,7 +15075,7 @@ var MediaCache = class {
     const hash = await hashFile(tmpPath);
     const mime = contentType ?? defaultMime(kind);
     const ext = safeExtensionForMime(mime);
-    const absPath = join22(this.rootDir, `${hash}.${ext}`);
+    const absPath = join23(this.rootDir, `${hash}.${ext}`);
     try {
       await stat7(absPath);
       await rm11(tmpPath, { force: true });
@@ -15028,7 +15138,7 @@ async function listFiles(root) {
   const out = [];
   const entries = await readdir5(root, { withFileTypes: true }).catch(() => []);
   for (const entry of entries) {
-    const full = join22(root, entry.name);
+    const full = join23(root, entry.name);
     if (entry.isDirectory()) {
       out.push(...await listFiles(full));
     } else if (entry.isFile()) {
@@ -15213,7 +15323,7 @@ var ProcessPool = class {
     }
     log.info("pool", "wait", { active: this.active, cap: this.cap(), waiting: this.waiters.length + 1 });
     reportMetric("pool_waiting", this.waiters.length + 1);
-    await new Promise((resolve3) => this.waiters.push(resolve3));
+    await new Promise((resolve5) => this.waiters.push(resolve5));
     this.active++;
     log.info("pool", "acquired", { active: this.active, cap: this.cap() });
     reportMetric("pool_active", this.active);
@@ -15302,6 +15412,7 @@ var RunExecutor = class {
       model: input.model,
       reasoningEffort: input.reasoningEffort,
       images: input.images,
+      artifactDelivery: input.artifactDelivery,
       sandbox: input.policy.sandbox,
       permissionMode: input.policy.permissionMode,
       stopGraceMs: input.stopGraceMs
@@ -15498,11 +15609,11 @@ var EventFanout = class {
             }
             if (this.error) throw this.error;
             if (this.done) return { done: true, value: void 0 };
-            await new Promise((resolve3) => {
+            await new Promise((resolve5) => {
               waiter = () => {
                 if (waiter) this.waiters.delete(waiter);
                 waiter = void 0;
-                resolve3();
+                resolve5();
               };
               this.waiters.add(waiter);
             });
@@ -15600,8 +15711,8 @@ var ChatModeCache = class {
 
 // src/bot/comments.ts
 import { randomUUID as randomUUID3 } from "crypto";
-import { mkdir as mkdir14 } from "fs/promises";
-import { dirname as dirname17 } from "path";
+import { mkdir as mkdir15 } from "fs/promises";
+import { dirname as dirname18 } from "path";
 
 // src/bot/run-flow.ts
 async function startRunFlow(input) {
@@ -15680,6 +15791,7 @@ async function startRunFlow(input) {
       ),
       reasoningEffort: input.profileConfig.agentKind === "codex" ? resolveCodexReasoningEffort(input.profileConfig.preferences.reasoningEffort) : void 0,
       images: input.capability.agentId === "codex" ? policy.attachments.filter((attachment) => attachment.kind === "image" && attachment.decision === "accepted").map((attachment) => attachment.path).filter((path) => Boolean(path)) : void 0,
+      artifactDelivery: input.artifactDelivery,
       stopGraceMs: input.stopGraceMs,
       observability: input.observability
     });
@@ -16177,7 +16289,7 @@ async function resolveCommentWorkingDirectory(configuredCwd, defaultCwd, managed
 }
 async function resolveManagedCommentWorkingDirectory(managedFallbackCwd, fallbackFrom, fallbackReason, failures) {
   try {
-    await mkdir14(managedFallbackCwd, { recursive: true, mode: 448 });
+    await mkdir15(managedFallbackCwd, { recursive: true, mode: 448 });
   } catch (err) {
     return {
       ok: false,
@@ -16211,7 +16323,7 @@ async function resolveManagedCommentWorkingDirectory(managedFallbackCwd, fallbac
 }
 function managedDefaultWorkspaceForComments(controls) {
   return resolveAppPaths({
-    rootDir: dirname17(controls.configPath),
+    rootDir: dirname18(controls.configPath),
     profile: controls.profile
   }).defaultWorkspaceDir;
 }
@@ -16256,8 +16368,8 @@ async function nextCommentEvent(iterator, expiresAt) {
   try {
     return await Promise.race([
       iterator.next(),
-      new Promise((resolve3) => {
-        timer = setTimeout(() => resolve3("expired"), delayMs);
+      new Promise((resolve5) => {
+        timer = setTimeout(() => resolve5("expired"), delayMs);
       })
     ]);
   } finally {
@@ -16711,6 +16823,222 @@ async function removeReaction(channel, messageId, reactionId) {
   }
 }
 
+// src/bot/artifact-broker.ts
+import { randomBytes as randomBytes5 } from "crypto";
+import { lstat as lstat2, mkdir as mkdir16, readFile as readFile14, realpath as realpath5, rm as rm12 } from "fs/promises";
+import { createServer } from "net";
+import { basename as basename6, dirname as dirname19, isAbsolute as isAbsolute4, relative as relative2, resolve as resolve4, sep as sep2 } from "path";
+var ArtifactBroker = class {
+  constructor(socketPath, channel, allowLocalFileRoot, persistentStatePath) {
+    this.socketPath = socketPath;
+    this.channel = channel;
+    this.allowLocalFileRoot = allowLocalFileRoot;
+    this.persistentStatePath = persistentStatePath;
+  }
+  socketPath;
+  channel;
+  allowLocalFileRoot;
+  persistentStatePath;
+  grants = /* @__PURE__ */ new Map();
+  persistentTokensByScope = /* @__PURE__ */ new Map();
+  server;
+  saving = Promise.resolve();
+  async start() {
+    await this.loadPersistentGrants();
+    await mkdir16(dirname19(this.socketPath), { recursive: true });
+    await rm12(this.socketPath, { force: true }).catch(() => {
+    });
+    this.server = createServer((socket) => {
+      void this.handle(socket);
+    });
+    await new Promise((resolve5, reject4) => {
+      const server = this.server;
+      server.once("error", reject4);
+      server.listen(this.socketPath, () => {
+        server.off("error", reject4);
+        resolve5();
+      });
+    });
+  }
+  issue(input) {
+    if (input.persistent) {
+      const existingToken = this.persistentTokensByScope.get(input.scope);
+      const existing = existingToken ? this.grants.get(existingToken) : void 0;
+      if (existing) {
+        existing.chatId = input.chatId;
+        existing.replyTo = input.replyTo;
+        existing.replyInThread = input.replyInThread;
+        existing.maxFileBytes = input.maxFileBytes;
+        this.schedulePersist();
+        return { socketPath: this.socketPath, token: existing.token };
+      }
+      this.persistentTokensByScope.delete(input.scope);
+    }
+    const token = randomBytes5(32).toString("base64url");
+    this.grants.set(token, { ...input, token });
+    if (input.persistent) {
+      this.persistentTokensByScope.set(input.scope, token);
+      this.schedulePersist();
+    }
+    return { socketPath: this.socketPath, token };
+  }
+  revoke(token) {
+    if (!token) return;
+    const grant = this.grants.get(token);
+    this.grants.delete(token);
+    if (grant?.persistent) {
+      if (this.persistentTokensByScope.get(grant.scope) === token) {
+        this.persistentTokensByScope.delete(grant.scope);
+      }
+      this.schedulePersist();
+    }
+  }
+  activate(token, allowedRoots) {
+    const grant = this.grants.get(token);
+    if (!grant) return false;
+    grant.allowedRoots = [...new Set(allowedRoots)];
+    if (grant.persistent) this.schedulePersist();
+    return true;
+  }
+  async close() {
+    await this.flush();
+    const server = this.server;
+    this.server = void 0;
+    if (server) {
+      await new Promise((resolve5) => server.close(() => resolve5()));
+    }
+    await rm12(this.socketPath, { force: true }).catch(() => {
+    });
+  }
+  async flush() {
+    await this.saving;
+  }
+  async handle(socket) {
+    let input = "";
+    socket.setEncoding("utf8");
+    socket.setTimeout(15e3, () => socket.destroy());
+    socket.on("data", (chunk) => {
+      input += chunk;
+      if (input.length > 16384) socket.destroy();
+      if (input.includes("\n")) {
+        socket.pause();
+        void this.dispatch(socket, input.slice(0, input.indexOf("\n")));
+      }
+    });
+  }
+  async dispatch(socket, line) {
+    let response;
+    try {
+      const request = JSON.parse(line);
+      response = await this.deliver(request);
+    } catch (err) {
+      response = {
+        ok: false,
+        message: err instanceof Error ? err.message : "\u6587\u4EF6\u53D1\u9001\u8BF7\u6C42\u65E0\u6548"
+      };
+    }
+    socket.end(`${JSON.stringify(response)}
+`);
+  }
+  async deliver(request) {
+    if (typeof request.token !== "string") throw new Error("\u65E0\u6548\u7684 bridge \u6587\u4EF6\u80FD\u529B\u4EE4\u724C");
+    const grant = this.grants.get(request.token);
+    if (!grant) throw new Error("\u6587\u4EF6\u80FD\u529B\u4EE4\u724C\u5DF2\u5931\u6548\uFF1B\u8BF7\u5728\u5F53\u524D\u4EFB\u52A1\u5185\u91CD\u65B0\u8BF7\u6C42\u53D1\u9001");
+    if (typeof request.path !== "string" || !request.path.trim()) {
+      throw new Error("\u8BF7\u63D0\u4F9B\u8981\u53D1\u9001\u7684\u6587\u4EF6\u8DEF\u5F84");
+    }
+    if (isAbsolute4(request.path)) throw new Error("\u6587\u4EF6\u8DEF\u5F84\u5FC5\u987B\u76F8\u5BF9\u5F53\u524D\u5DE5\u4F5C\u76EE\u5F55");
+    if (request.path.split(/[\\/]+/u).some((part) => part === "..")) {
+      throw new Error("\u6587\u4EF6\u8DEF\u5F84\u4E0D\u80FD\u5305\u542B ..");
+    }
+    if (grant.allowedRoots.length === 0) {
+      throw new Error("\u5F53\u524D\u4EFB\u52A1\u5C1A\u672A\u6388\u6743\u6587\u4EF6\u76EE\u5F55\uFF1B\u8BF7\u5728\u5F53\u524D\u4EFB\u52A1\u4E2D\u91CD\u65B0\u8BF7\u6C42\u53D1\u9001");
+    }
+    const requested = resolve4(grant.allowedRoots[0], request.path);
+    const entry = await lstat2(requested).catch(() => void 0);
+    if (!entry) throw new Error("\u6587\u4EF6\u4E0D\u5B58\u5728\u6216\u4E0D\u53EF\u8BBF\u95EE");
+    if (entry.isSymbolicLink()) throw new Error("\u4E0D\u5141\u8BB8\u53D1\u9001\u7B26\u53F7\u94FE\u63A5");
+    if (!entry.isFile()) throw new Error("\u53EA\u80FD\u53D1\u9001\u666E\u901A\u6587\u4EF6");
+    if (entry.size > grant.maxFileBytes) throw new Error(`\u6587\u4EF6\u8D85\u8FC7\u53D1\u9001\u4E0A\u9650\uFF08${grant.maxFileBytes} B\uFF09`);
+    const resolved = await realpath5(requested);
+    const root = grant.allowedRoots.find((candidate) => isPathWithinRoot2(resolved, candidate));
+    if (!root) throw new Error("\u6587\u4EF6\u4E0D\u5728\u5F53\u524D\u4EFB\u52A1\u5141\u8BB8\u7684\u76EE\u5F55\u5185");
+    if (!await this.allowLocalFileRoot(root)) throw new Error("bridge \u672A\u5141\u8BB8\u8BE5\u6587\u4EF6\u76EE\u5F55");
+    const caption = normalizeCaption(request.caption);
+    await this.channel.send(
+      grant.chatId,
+      { file: { source: resolved, fileName: basename6(resolved) } },
+      { replyTo: grant.replyTo, ...grant.replyInThread ? { replyInThread: true } : {} }
+    );
+    if (caption) {
+      await this.channel.send(
+        grant.chatId,
+        { markdown: caption },
+        { replyTo: grant.replyTo, ...grant.replyInThread ? { replyInThread: true } : {} }
+      );
+    }
+    log.info("artifact", "delivered", {
+      scope: grant.scope,
+      name: basename6(resolved),
+      size: entry.size
+    });
+    return { ok: true, message: `\u5DF2\u53D1\u9001 ${basename6(resolved)}` };
+  }
+  async loadPersistentGrants() {
+    if (!this.persistentStatePath) return;
+    try {
+      const raw = JSON.parse(await readFile14(this.persistentStatePath, "utf8"));
+      if (raw.version !== 1 || !Array.isArray(raw.grants)) return;
+      for (const item of raw.grants) {
+        if (!isPersistentGrant(item)) continue;
+        this.grants.set(item.token, item);
+        this.persistentTokensByScope.set(item.scope, item.token);
+      }
+      log.info("artifact", "persistent-grants-restored", { count: this.persistentTokensByScope.size });
+    } catch (err) {
+      if (err.code !== "ENOENT") {
+        log.warn("artifact", "persistent-grants-load-failed", {
+          message: err instanceof Error ? err.message : String(err)
+        });
+      }
+    }
+  }
+  schedulePersist() {
+    if (!this.persistentStatePath) return;
+    this.saving = this.saving.then(async () => {
+      const content = {
+        version: 1,
+        grants: [...this.grants.values()].filter((grant) => grant.persistent)
+      };
+      await writeFileAtomic(this.persistentStatePath, `${JSON.stringify(content, null, 2)}
+`, {
+        mode: 384
+      });
+    }).catch((err) => {
+      log.warn("artifact", "persistent-grants-save-failed", {
+        message: err instanceof Error ? err.message : String(err)
+      });
+    });
+  }
+};
+function isPathWithinRoot2(path, root) {
+  const pathRelative = relative2(root, path);
+  return pathRelative === "" || pathRelative !== ".." && !pathRelative.startsWith(`..${sep2}`) && !isAbsolute4(pathRelative);
+}
+function isPersistentGrant(value) {
+  if (!value || typeof value !== "object") return false;
+  const grant = value;
+  return grant.persistent === true && typeof grant.token === "string" && /^[A-Za-z0-9_-]{16,200}$/u.test(grant.token) && typeof grant.scope === "string" && grant.scope.length > 0 && typeof grant.chatId === "string" && grant.chatId.length > 0 && typeof grant.replyTo === "string" && grant.replyTo.length > 0 && Array.isArray(grant.allowedRoots) && grant.allowedRoots.every((root) => typeof root === "string" && isAbsolute4(root)) && typeof grant.maxFileBytes === "number" && Number.isSafeInteger(grant.maxFileBytes) && grant.maxFileBytes > 0;
+}
+function normalizeCaption(value) {
+  if (value === void 0) return void 0;
+  if (typeof value !== "string") throw new Error("\u6587\u4EF6\u8BF4\u660E\u5FC5\u987B\u662F\u6587\u672C");
+  const caption = value.trim();
+  if (!caption) return void 0;
+  if (caption.length > 1e3) throw new Error("\u6587\u4EF6\u8BF4\u660E\u4E0D\u80FD\u8D85\u8FC7 1000 \u4E2A\u5B57\u7B26");
+  return caption;
+}
+
 // src/bot/cot.ts
 var ENDPOINTS2 = {
   feishu: "https://open.feishu.cn",
@@ -17129,8 +17457,8 @@ function stringifyArgs(args) {
   }).join(" ");
 }
 function expandHomeDirectory(path) {
-  if (path === "~") return homedir7();
-  return path.startsWith("~/") ? join23(homedir7(), path.slice(2)) : path;
+  if (path === "~") return homedir8();
+  return path.startsWith("~/") ? join24(homedir8(), path.slice(2)) : path;
 }
 async function startChannel(deps) {
   const { cfg, agent, sessions, sessionCatalog, workspaces, controls } = deps;
@@ -17140,7 +17468,7 @@ async function startChannel(deps) {
   const pool = new ProcessPool(() => getMaxConcurrentRuns(controls.cfg));
   const executor = new RunExecutor({ agent, pool, activeRuns });
   const appSecret = await resolveAppSecret(cfg, deps.appPaths);
-  const callbackNonceStore = deps.appPaths?.mediaDir ? new CallbackNonceStore(join23(dirname18(deps.appPaths.mediaDir), "callback-nonces.json")) : void 0;
+  const callbackNonceStore = deps.appPaths?.mediaDir ? new CallbackNonceStore(join24(dirname20(deps.appPaths.mediaDir), "callback-nonces.json")) : void 0;
   await callbackNonceStore?.load();
   const callbackAuth = callbackNonceStore ? new CallbackAuth({
     keys: [{ version: 1, secret: appSecret }],
@@ -17225,6 +17553,14 @@ async function startChannel(deps) {
   };
   const channel = createLarkChannel(opts);
   const media = new MediaCache(channel, deps.appPaths?.mediaDir);
+  const artifactStateDir = deps.appPaths?.mediaDir ? dirname20(deps.appPaths.mediaDir) : void 0;
+  const artifactBroker = new ArtifactBroker(
+    join24(artifactStateDir ?? join24(process.cwd(), ".arg-bridge-media"), "artifact-broker.sock"),
+    channel,
+    allowLocalFileRoot,
+    artifactStateDir ? join24(artifactStateDir, "artifact-grants.json") : void 0
+  );
+  await artifactBroker.start();
   const pending = new PendingQueue(DEBOUNCE_MS, (scope, batch) => {
     const firstMsg = batch[0];
     if (!firstMsg) return;
@@ -17275,6 +17611,7 @@ async function startChannel(deps) {
             activePolicyFingerprints,
             lastRunModelByScope,
             liveInteractionByScope,
+            artifactBroker,
             pending,
             scope,
             mode
@@ -17424,6 +17761,7 @@ async function startChannel(deps) {
         channel.disconnect(),
         activeRuns.stopAll(),
         agent.shutdown?.(),
+        artifactBroker.close(),
         sessions.flush(),
         sessionCatalog?.flush(),
         callbackNonceStore?.flush(),
@@ -17594,15 +17932,16 @@ async function intakeMessage(deps) {
     }
   }
   const nativeInputActive = pickerActive || getAgentSessionMode(controls.cfg) === "live";
-  const forceNative = route.forceNative || nativeModelCommand || Boolean(pickerFollowup);
+  const explicitLiveControl = nativeInputActive && isLiveControlInput(routedMsg.content);
+  const forceNative = route.forceNative || nativeModelCommand || Boolean(pickerFollowup) || explicitLiveControl;
   const agentMsg = forceNative ? markNativeAgentCommand(
     routedMsg,
-    pickerFollowup ? "control" : nativeModelCommand ? "command" : route.nativeMode ?? "command"
+    explicitLiveControl ? "control" : pickerFollowup ? "control" : nativeModelCommand ? "command" : route.nativeMode ?? "command"
   ) : nativeInputActive && isNativeAgentInputText(routedMsg.content, pickerActive) ? markNativeAgentCommand(
     routedMsg,
     routedMsg.content.trimStart().startsWith("/") ? "command" : pickerActive ? "control" : void 0
   ) : routedMsg;
-  const priorityLiveControl = pickerActive && liveInputModeForMessage(agentMsg) === "control";
+  const priorityLiveControl = liveInputModeForMessage(agentMsg) === "control" && (isLiveInterruptInput(agentMsg.content) || pickerActive);
   const size = priorityLiveControl ? pending.pushFront(scope, agentMsg) : pending.push(scope, agentMsg);
   log.info("intake", "queued", { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
   if (pending.shouldAckBusy(scope)) {
@@ -17617,7 +17956,7 @@ async function intakeMessage(deps) {
 }
 function commandPreservesPendingMessages(content) {
   const command = content.trim().toLowerCase();
-  return /^\/(?:status|help|ps)(?:\s|$)/u.test(command) || /^\/session(?:\s+\/?status)?\s*$/u.test(command) || /^\/tmux(?:\s+(?:list|status|tail))?(?:\s|$)/u.test(command) || /^\/timeout(?:\s|$)/u.test(command);
+  return /^\/(?:status|help|ps)(?:\s|$)/u.test(command) || /^\/session(?:\s+\/?status)?\s*$/u.test(command) || /^\/tmux(?:\s+(?:list|status|tail))?(?:\s|$)/u.test(command) || /^\/(?:timeout|output)(?:\s|$)/u.test(command);
 }
 function rewriteAgentCommandMessage(msg, agentKind) {
   const trimmed = msg.content.trimStart();
@@ -17641,7 +17980,7 @@ function normalizeAgentPrefixedNativeInput(input) {
   const trimmed = input.trim();
   const slashless = /^\/([A-Za-z0-9_-]+)$/u.exec(trimmed)?.[1];
   const controlText = slashless && isLivePickerInput(slashless) ? slashless : trimmed;
-  if (isLivePickerInput(controlText)) {
+  if (isLivePickerInput(controlText) || isLiveControlInput(controlText)) {
     return { text: controlText, forceNative: true, nativeMode: "control" };
   }
   return {
@@ -17703,6 +18042,7 @@ async function runAgentBatch(deps) {
     activePolicyFingerprints,
     lastRunModelByScope,
     liveInteractionByScope,
+    artifactBroker,
     pending,
     scope,
     mode
@@ -17776,13 +18116,7 @@ async function runAgentBatch(deps) {
   const nativeCommand = nativeAgentCommandForBatch(batch);
   const forceLiveSession = batch.some(isForceLiveAgentCommandMessage);
   const useLiveSession = forceLiveSession || getAgentSessionMode(controls.cfg) === "live";
-  const rawTerminalInput = buildTerminalInput(batch, attachments, quotes);
-  const bridgeRoute = useLiveSession ? await bridgeAgent.route({
-    userInput: nativeCommand ?? rawTerminalInput,
-    ...nativeCommand ? { inputMode: liveInputModeForBatch(batch, nativeCommand) } : {}
-  }) : void 0;
-  const liveInputMode = bridgeRoute?.inputMode;
-  const prompt = bridgeRoute?.stdin ?? buildPrompt(
+  const structuredPrompt = buildPrompt(
     batch,
     attachments,
     quotes,
@@ -17790,6 +18124,12 @@ async function runAgentBatch(deps) {
     channel.botIdentity,
     extraInstructions
   );
+  const bridgeRoute = useLiveSession ? await bridgeAgent.route({
+    userInput: nativeCommand ?? structuredPrompt,
+    ...nativeCommand ? { inputMode: liveInputModeForBatch(batch, nativeCommand) } : {}
+  }) : void 0;
+  const liveInputMode = bridgeRoute?.inputMode;
+  const prompt = bridgeRoute?.stdin ?? structuredPrompt;
   log.info("prompt", "built", {
     promptChars: prompt.length,
     nativeCommand: bridgeRoute?.kind === "native-command",
@@ -17818,6 +18158,15 @@ async function runAgentBatch(deps) {
     ...threadId ? { threadId } : {}
   };
   const capability = controls.profileConfig.agentKind === "codex" ? codexCapability(controls.profileConfig) : claudeCapability(controls.profileConfig);
+  const artifactGrant = artifactBroker.issue({
+    scope,
+    chatId,
+    replyTo: lastMsg.messageId,
+    ...mode === "topic" && threadId ? { replyInThread: true } : {},
+    allowedRoots: [],
+    maxFileBytes: controls.profileConfig.attachments.maxFileBytes,
+    persistent: useLiveSession
+  });
   const flow = await startRunFlow({
     scopeId: scope,
     scope: scopeContext,
@@ -17834,6 +18183,7 @@ async function runAgentBatch(deps) {
     executor,
     now: Date.now(),
     stopGraceMs: getAgentStopGraceMs(controls.cfg),
+    artifactDelivery: artifactGrant,
     observability: {
       profile: controls.profile,
       agent: capability.agentId,
@@ -17842,6 +18192,7 @@ async function runAgentBatch(deps) {
     }
   });
   if (!flow.ok) {
+    if (!useLiveSession) artifactBroker.revoke(artifactGrant.token);
     log.info("run-flow", "rejected", { scope, code: flow.rejectReason.code });
     log.warn("policy", "denied", {
       scope,
@@ -17852,6 +18203,10 @@ async function runAgentBatch(deps) {
     return;
   }
   const { execution, cwdRealpath: cwd } = flow;
+  artifactBroker.activate(artifactGrant.token, [cwd]);
+  const outputModeAtStart = sessions.getOutputMode(scope);
+  const currentOutputMode = () => sessions.getOutputMode(scope);
+  log.info("delivery", "run-policy", { scope, mode: outputModeAtStart });
   activePolicyFingerprints.set(scope, flow.policy.policyFingerprint);
   const handle = execution.handle;
   const eventStream = execution.subscribe();
@@ -17932,7 +18287,7 @@ ${delta}`.slice(-4e3);
       });
       if (!wasActive) log.info("agent-live", "picker-enter", { scope });
     }
-    if (opts.sendInteractionCard === false) return;
+    if (opts.sendInteractionCard === false || currentOutputMode() === "off" && bridgeRoute?.kind !== "native-command") return;
     if (isStartupInteraction && liveInputMode === "control") return;
     if (!interaction || !cardRenderOptions.signCallback) return;
     if (!useLiveSession && (sentInteractionSignatures.size > 0 || pendingInteractionSignatures.size > 0)) {
@@ -17982,13 +18337,13 @@ ${delta}`.slice(-4e3);
     log.info("flush", "progress-heartbeat", { progressHeartbeatMs });
   }
   const configuredReplyMode = getMessageReplyMode(controls.cfg);
-  const replyMode = useLiveSession && bridgeRoute?.presentation === "card" ? "card" : configuredReplyMode;
+  const replyMode = outputModeAtStart === "final" ? "text" : useLiveSession && bridgeRoute?.presentation === "card" ? "card" : configuredReplyMode;
   log.info("flush", "reply-mode", {
     mode: replyMode,
     ...replyMode !== configuredReplyMode ? { configuredMode: configuredReplyMode } : {}
   });
   const cotMessages = getCotMessages(controls.cfg);
-  const cotEnabled = cotMessages !== "off";
+  const cotEnabled = outputModeAtStart === "live" && cotMessages !== "off";
   const filterForPrefs = (state) => {
     if (getShowToolCalls(controls.cfg)) return state;
     return { ...state, blocks: state.blocks.filter((b) => b.kind !== "tool") };
@@ -18039,7 +18394,7 @@ ${delta}`.slice(-4e3);
       ttlMs: 24 * 60 * 60 * 1e3
     })
   } : {};
-  const promptBridge = callbackAuth ? consumeInteractivePrompts(execution.subscribe(), {
+  const promptBridge = outputModeAtStart !== "off" && callbackAuth ? consumeInteractivePrompts(execution.subscribe(), {
     channel,
     chatId,
     scope,
@@ -18054,7 +18409,7 @@ ${delta}`.slice(-4e3);
       ttlMs: 24 * 60 * 60 * 1e3
     })
   }) : Promise.resolve();
-  const reactionPromise = cotEnabled || replyMode === "card" ? void 0 : addWorkingReaction(channel, lastMsg.messageId);
+  const reactionPromise = outputModeAtStart !== "live" || cotEnabled || replyMode === "card" ? void 0 : addWorkingReaction(channel, lastMsg.messageId);
   try {
     if (useLiveSession && nativeCommand) {
       const finalState = await processAgentStream(
@@ -18082,6 +18437,50 @@ ${delta}`.slice(-4e3);
         ]),
         liveInteractionInputRoute: "live"
       });
+      return;
+    }
+    if (outputModeAtStart === "off") {
+      const finalState = await processAgentStream(
+        handle,
+        eventStream,
+        scope,
+        idleTimeoutMs,
+        progressHeartbeatMs,
+        recordSession,
+        async () => {
+        },
+        observeLiveEvent
+      );
+      if (currentOutputMode() !== "off") {
+        await sendFinalReply({
+          channel,
+          chatId,
+          scope,
+          state: finalAnswerOnlyState(prepareStateForReply(finalState)),
+          replyMode: "text",
+          sendOpts,
+          cardRenderOptions,
+          skipLiveInteractionSignatures: /* @__PURE__ */ new Set([
+            ...sentInteractionSignatures,
+            ...pendingInteractionSignatures
+          ]),
+          liveInteractionInputRoute: useLiveSession ? "live" : "agent"
+        });
+      }
+      return;
+    }
+    if (currentOutputMode() === "off") {
+      await processAgentStream(
+        handle,
+        eventStream,
+        scope,
+        idleTimeoutMs,
+        progressHeartbeatMs,
+        recordSession,
+        async () => {
+        },
+        observeLiveEvent
+      );
       return;
     }
     if (cotEnabled) {
@@ -18123,6 +18522,7 @@ ${delta}`.slice(-4e3);
             reason: cotPublisher.degradedReason
           });
         }
+        if (currentOutputMode() === "off") return;
         await sendFinalReply({
           channel,
           chatId,
@@ -18143,17 +18543,21 @@ ${delta}`.slice(-4e3);
     }
     if (replyMode === "card") {
       let latestState = initialState;
+      let segmentBaseText = "";
+      const stateForSegment = (state) => projectRunStateFromCursor(prepareStateForReply(state), segmentBaseText);
+      const stateForDelivery = (state) => currentOutputMode() === "final" ? finalAnswerOnlyState(prepareStateForReply(state)) : stateForSegment(state);
       let streamDegraded = false;
       let freshFinalPosted = false;
       let cardCtrl;
       const postFreshFinal = async (state) => {
         if (freshFinalPosted) return;
+        if (currentOutputMode() === "off") return;
         freshFinalPosted = true;
         await channel.send(
           chatId,
           {
             card: renderLiveAwareReplyCard(
-              prepareStateForReply(state),
+              currentOutputMode() === "final" ? finalAnswerOnlyState(prepareStateForReply(state)) : prepareStateForReply(state),
               cardRenderOptions,
               useLiveSession ? "live" : "agent"
             )
@@ -18171,9 +18575,13 @@ ${delta}`.slice(-4e3);
         recordSession,
         async (state) => {
           latestState = state;
+          const deliveryMode = currentOutputMode();
+          if (deliveryMode === "off" || deliveryMode === "final" && state.terminal === "running") {
+            return;
+          }
           if (cardCtrl) {
             const nextCard = renderLiveAwareReplyCard(
-              prepareStateForReply(state),
+              stateForDelivery(state),
               cardRenderOptions,
               useLiveSession ? "live" : "agent"
             );
@@ -18200,61 +18608,72 @@ ${delta}`.slice(-4e3);
       await runRollingReplyStream({
         mode: replyMode,
         renderDone,
-        startSegment: (segmentDone, markProducerStarted) => channel.stream(
-          chatId,
-          {
-            card: {
-              initial: renderLiveAwareReplyCard(
-                prepareStateForReply(latestState),
-                cardRenderOptions,
-                useLiveSession ? "live" : "agent"
-              ),
-              producer: async (ctrl) => {
-                markProducerStarted();
-                streamDegraded = false;
-                cardCtrl = ctrl;
-                try {
-                  await ctrl.update(
-                    renderLiveAwareReplyCard(
-                      prepareStateForReply(latestState),
-                      cardRenderOptions,
-                      useLiveSession ? "live" : "agent"
-                    )
-                  );
-                } catch (err) {
-                  streamDegraded = true;
-                  cardCtrl = void 0;
-                  log.warn("stream", "patch-degraded", {
-                    scope,
-                    mode: replyMode,
-                    step: "initial",
-                    err: err instanceof Error ? err.message : String(err)
-                  });
-                }
-                try {
-                  await segmentDone;
-                } finally {
-                  if (cardCtrl === ctrl) cardCtrl = void 0;
+        startSegment: (segmentDone, markProducerStarted, segment) => {
+          segmentBaseText = segment === 1 ? "" : runStateTextCursor(prepareStateForReply(latestState));
+          lastSentCardSerialized = void 0;
+          const currentSegmentState = stateForDelivery(latestState);
+          return channel.stream(
+            chatId,
+            {
+              card: {
+                initial: renderLiveAwareReplyCard(
+                  currentSegmentState,
+                  cardRenderOptions,
+                  useLiveSession ? "live" : "agent"
+                ),
+                producer: async (ctrl) => {
+                  markProducerStarted();
+                  streamDegraded = false;
+                  cardCtrl = ctrl;
+                  try {
+                    await ctrl.update(
+                      renderLiveAwareReplyCard(
+                        stateForDelivery(latestState),
+                        cardRenderOptions,
+                        useLiveSession ? "live" : "agent"
+                      )
+                    );
+                  } catch (err) {
+                    streamDegraded = true;
+                    cardCtrl = void 0;
+                    log.warn("stream", "patch-degraded", {
+                      scope,
+                      mode: replyMode,
+                      step: "initial",
+                      err: err instanceof Error ? err.message : String(err)
+                    });
+                  }
+                  try {
+                    await segmentDone;
+                  } finally {
+                    if (cardCtrl === ctrl) cardCtrl = void 0;
+                  }
                 }
               }
-            }
-          },
-          sendOpts
-        ),
+            },
+            sendOpts
+          );
+        },
         fallback: postFreshFinal
       });
-      if (streamDegraded) {
+      if (streamDegraded && currentOutputMode() !== "off") {
         await postFreshFinal(prepareStateForReply(latestState));
       }
     } else if (replyMode === "markdown") {
       let latestState = initialState;
+      let segmentBaseText = "";
+      const stateForSegment = (state) => projectRunStateFromCursor(prepareStateForReply(state), segmentBaseText);
+      const stateForDelivery = (state) => currentOutputMode() === "final" ? finalAnswerOnlyState(prepareStateForReply(state)) : stateForSegment(state);
       let streamDegraded = false;
       let freshFinalPosted = false;
       let markdownCtrl;
       const postFreshFinal = async (state) => {
         if (freshFinalPosted) return;
+        if (currentOutputMode() === "off") return;
         freshFinalPosted = true;
-        const body = renderText(prepareStateForReply(state));
+        const body = renderText(
+          currentOutputMode() === "final" ? finalAnswerOnlyState(prepareStateForReply(state)) : prepareStateForReply(state)
+        );
         if (body.trim()) {
           await channel.send(chatId, { markdown: body }, sendOpts);
         }
@@ -18269,8 +18688,12 @@ ${delta}`.slice(-4e3);
         recordSession,
         async (state) => {
           latestState = state;
+          const deliveryMode = currentOutputMode();
+          if (deliveryMode === "off" || deliveryMode === "final" && state.terminal === "running") {
+            return;
+          }
           if (markdownCtrl) {
-            const nextText = renderText(prepareStateForReply(state));
+            const nextText = renderText(stateForDelivery(state));
             if (nextText === lastSentMarkdownText) return;
             lastSentMarkdownText = nextText;
             try {
@@ -18291,37 +18714,42 @@ ${delta}`.slice(-4e3);
       await runRollingReplyStream({
         mode: replyMode,
         renderDone,
-        startSegment: (segmentDone, markProducerStarted) => channel.stream(
-          chatId,
-          {
-            markdown: async (ctrl) => {
-              markProducerStarted();
-              streamDegraded = false;
-              markdownCtrl = ctrl;
-              try {
-                await ctrl.setContent(renderText(prepareStateForReply(latestState)));
-              } catch (err) {
-                streamDegraded = true;
-                markdownCtrl = void 0;
-                log.warn("stream", "patch-degraded", {
-                  scope,
-                  mode: replyMode,
-                  step: "initial",
-                  err: err instanceof Error ? err.message : String(err)
-                });
+        startSegment: (segmentDone, markProducerStarted, segment) => {
+          segmentBaseText = segment === 1 ? "" : runStateTextCursor(prepareStateForReply(latestState));
+          lastSentMarkdownText = void 0;
+          const currentSegmentState = stateForDelivery(latestState);
+          return channel.stream(
+            chatId,
+            {
+              markdown: async (ctrl) => {
+                markProducerStarted();
+                streamDegraded = false;
+                markdownCtrl = ctrl;
+                try {
+                  await ctrl.setContent(renderText(currentSegmentState));
+                } catch (err) {
+                  streamDegraded = true;
+                  markdownCtrl = void 0;
+                  log.warn("stream", "patch-degraded", {
+                    scope,
+                    mode: replyMode,
+                    step: "initial",
+                    err: err instanceof Error ? err.message : String(err)
+                  });
+                }
+                try {
+                  await segmentDone;
+                } finally {
+                  if (markdownCtrl === ctrl) markdownCtrl = void 0;
+                }
               }
-              try {
-                await segmentDone;
-              } finally {
-                if (markdownCtrl === ctrl) markdownCtrl = void 0;
-              }
-            }
-          },
-          sendOpts
-        ),
+            },
+            sendOpts
+          );
+        },
         fallback: postFreshFinal
       });
-      if (streamDegraded) {
+      if (streamDegraded && currentOutputMode() !== "off") {
         await postFreshFinal(prepareStateForReply(latestState));
       }
     } else {
@@ -18336,11 +18764,12 @@ ${delta}`.slice(-4e3);
         },
         observeLiveEvent
       );
+      if (currentOutputMode() === "off") return;
       await sendFinalReply({
         channel,
         chatId,
         scope,
-        state: prepareStateForReply(finalState),
+        state: finalAnswerOnlyState(prepareStateForReply(finalState)),
         replyMode,
         sendOpts,
         cardRenderOptions,
@@ -18354,6 +18783,7 @@ ${delta}`.slice(-4e3);
   } catch (err) {
     log.fail("stream", err);
   } finally {
+    if (!useLiveSession) artifactBroker.revoke(artifactGrant.token);
     await promptBridge;
     await Promise.allSettled(interactionSends);
     if (useLiveSession && nativeCommand && controls.profileConfig.agentKind === "codex" && observedNativeModelSelection && !pickerObservedAfterInput) {
@@ -18604,6 +19034,30 @@ async function processAgentStream(handle, events, scope, idleTimeoutMs, progress
   }
   return state;
 }
+function runStateTextCursor(state) {
+  return state.blocks.filter((block) => block.kind === "text").map((block) => block.content).join("");
+}
+function projectRunStateFromCursor(state, deliveredText) {
+  if (!deliveredText) return state;
+  const currentText = runStateTextCursor(state);
+  const suffix = appendOnlyTextSuffix(deliveredText, currentText);
+  return {
+    ...state,
+    blocks: suffix ? [{ kind: "text", content: suffix, streaming: state.terminal === "running" }] : [],
+    reasoning: { content: "", active: false }
+  };
+}
+function appendOnlyTextSuffix(deliveredText, currentText) {
+  if (!currentText || currentText === deliveredText) return "";
+  if (currentText.startsWith(deliveredText)) return currentText.slice(deliveredText.length);
+  const max = Math.min(deliveredText.length, currentText.length);
+  for (let overlap = max; overlap > 0; overlap -= 1) {
+    if (deliveredText.endsWith(currentText.slice(0, overlap))) {
+      return currentText.slice(overlap);
+    }
+  }
+  return currentText;
+}
 async function runRollingReplyStream(input) {
   let renderSettled = false;
   const renderResult = input.renderDone.then(
@@ -18622,8 +19076,8 @@ async function runRollingReplyStream(input) {
     segment += 1;
     let producerStarted = false;
     let rolloverTimer;
-    const rollover = new Promise((resolve3) => {
-      rolloverTimer = setTimeout(resolve3, rolloverMs);
+    const rollover = new Promise((resolve5) => {
+      rolloverTimer = setTimeout(resolve5, rolloverMs);
     });
     const segmentDone = Promise.race([
       renderResult.then(() => void 0),
@@ -18631,7 +19085,7 @@ async function runRollingReplyStream(input) {
     ]);
     const streamResult = Promise.resolve().then(() => input.startSegment(segmentDone, () => {
       producerStarted = true;
-    })).then(
+    }, segment)).then(
       () => ({ kind: "stream", ok: true }),
       (err) => ({ kind: "stream", ok: false, err })
     );
@@ -18726,7 +19180,7 @@ function scheduleWorkingReactionCleanup(channel, messageId, reactionPromise) {
   })();
 }
 function delay2(ms) {
-  return new Promise((resolve3) => setTimeout(resolve3, ms));
+  return new Promise((resolve5) => setTimeout(resolve5, ms));
 }
 function buildPrompt(batch, attachments, quotes = [], topicContext = [], botIdentity, extraInstructions) {
   const first = batch[0];
@@ -18762,21 +19216,13 @@ function buildPrompt(batch, attachments, quotes = [], topicContext = [], botIden
     attachments: attachments.map(toPromptAttachment)
   });
 }
-function buildTerminalInput(batch, attachments, quotes) {
-  const fileKeys = batch.flatMap((message) => message.resources.map((resource) => resource.fileKey));
-  const texts = batch.map((message) => stripAttachmentRefs(message.content, fileKeys)).filter((text) => text.length > 0);
-  if (texts.length > 0) return texts.join("\n\n");
-  const quotedText = quotes.map((quote) => quote.content).filter((text) => text.length > 0);
-  if (quotedText.length > 0) return quotedText.join("\n\n");
-  return attachments.map((attachment) => attachment.path).join("\n");
-}
 function nativeAgentCommandForBatch(batch) {
   if (batch.length !== 1) return void 0;
   const msg = batch[0];
   if (!msg || !isNativeAgentCommandMessage(msg)) return void 0;
   const text = msg.content.trimStart();
   if (isForceLiveAgentCommandMessage(msg)) return text;
-  return isSlashCommandText(text) || isLivePickerInput(text) ? text : void 0;
+  return isSlashCommandText(text) || isLivePickerInput(text) || isLiveControlInput(text) ? text : void 0;
 }
 function liveInputModeForBatch(batch, nativeCommand) {
   const mode = batch.map(liveInputModeForMessage).find((item) => Boolean(item));
@@ -19132,7 +19578,7 @@ function isDefined(value) {
 }
 
 // src/session/store.ts
-import { readFile as readFile13 } from "fs/promises";
+import { readFile as readFile15 } from "fs/promises";
 var SessionStore = class {
   data = {};
   saving = Promise.resolve();
@@ -19142,7 +19588,7 @@ var SessionStore = class {
   }
   async load() {
     try {
-      const text = await readFile13(this.path, "utf8");
+      const text = await readFile15(this.path, "utf8");
       const raw = JSON.parse(text);
       this.data = {};
       for (const [chatId, entry] of Object.entries(raw)) {
@@ -19150,13 +19596,15 @@ var SessionStore = class {
         const sessionId = typeof entry.sessionId === "string" ? entry.sessionId : void 0;
         const cwd = typeof entry.cwd === "string" ? entry.cwd : void 0;
         const idleTimeoutMinutes = typeof entry.idleTimeoutMinutes === "number" ? entry.idleTimeoutMinutes : void 0;
+        const outputMode = isOutputMode(entry.outputMode) ? entry.outputMode : void 0;
         const hasSession = sessionId !== void 0 && cwd !== void 0;
-        if (!hasSession && idleTimeoutMinutes === void 0) continue;
+        if (!hasSession && idleTimeoutMinutes === void 0 && outputMode === void 0) continue;
         this.data[chatId] = {
           ...sessionId !== void 0 ? { sessionId } : {},
           ...cwd !== void 0 ? { cwd } : {},
           updatedAt: entry.updatedAt,
-          ...idleTimeoutMinutes !== void 0 ? { idleTimeoutMinutes } : {}
+          ...idleTimeoutMinutes !== void 0 ? { idleTimeoutMinutes } : {},
+          ...outputMode !== void 0 ? { outputMode } : {}
         };
       }
     } catch (err) {
@@ -19184,7 +19632,8 @@ var SessionStore = class {
       sessionId,
       cwd,
       updatedAt: Date.now(),
-      ...prev?.idleTimeoutMinutes !== void 0 ? { idleTimeoutMinutes: prev.idleTimeoutMinutes } : {}
+      ...prev?.idleTimeoutMinutes !== void 0 ? { idleTimeoutMinutes: prev.idleTimeoutMinutes } : {},
+      ...prev?.outputMode !== void 0 ? { outputMode: prev.outputMode } : {}
     };
     this.schedulePersist();
   }
@@ -19194,6 +19643,12 @@ var SessionStore = class {
     if (prev.idleTimeoutMinutes !== void 0) {
       this.data[chatId] = {
         idleTimeoutMinutes: prev.idleTimeoutMinutes,
+        updatedAt: Date.now(),
+        ...prev.outputMode !== void 0 ? { outputMode: prev.outputMode } : {}
+      };
+    } else if (prev.outputMode !== void 0) {
+      this.data[chatId] = {
+        outputMode: prev.outputMode,
         updatedAt: Date.now()
       };
     } else {
@@ -19225,6 +19680,18 @@ var SessionStore = class {
     this.schedulePersist();
     return true;
   }
+  getOutputMode(chatId) {
+    return this.data[chatId]?.outputMode ?? "live";
+  }
+  setOutputMode(chatId, outputMode) {
+    const prev = this.data[chatId];
+    this.data[chatId] = {
+      ...prev ?? { updatedAt: Date.now() },
+      outputMode,
+      updatedAt: Date.now()
+    };
+    this.schedulePersist();
+  }
   async flush() {
     await this.saving;
   }
@@ -19239,11 +19706,14 @@ var SessionStore = class {
     });
   }
 };
+function isOutputMode(value) {
+  return value === "live" || value === "final" || value === "off";
+}
 
 // src/session/catalog.ts
 import { randomUUID as randomUUID4 } from "crypto";
-import { open as open3, readFile as readFile14, rename as rename5, mkdir as mkdir15 } from "fs/promises";
-import { dirname as dirname19 } from "path";
+import { open as open3, readFile as readFile16, rename as rename5, mkdir as mkdir17 } from "fs/promises";
+import { dirname as dirname21 } from "path";
 var DEFAULT_MAX_ARCHIVED_AGE_MS = 90 * 24 * 60 * 60 * 1e3;
 var DEFAULT_MAX_ENTRIES_PER_SCOPE = 20;
 var DEFAULT_MAX_ENTRIES_PER_PROFILE = 1e3;
@@ -19265,7 +19735,7 @@ var SessionCatalog = class {
   }
   async load() {
     try {
-      const raw = JSON.parse(await readFile14(this.path, "utf8"));
+      const raw = JSON.parse(await readFile16(this.path, "utf8"));
       if (!Array.isArray(raw)) {
         this.data.clear();
         return;
@@ -19365,7 +19835,7 @@ var SessionCatalog = class {
     });
   }
   async persist() {
-    await mkdir15(dirname19(this.path), { recursive: true });
+    await mkdir17(dirname21(this.path), { recursive: true });
     const tmp = `${this.path}.${process.pid}.${Date.now()}.${randomUUID4()}.tmp`;
     const payload = `${JSON.stringify(this.entries(), null, 2)}
 `;
@@ -19378,7 +19848,7 @@ var SessionCatalog = class {
     }
     await rename5(tmp, this.path);
     try {
-      const dir = await open3(dirname19(this.path), "r");
+      const dir = await open3(dirname21(this.path), "r");
       try {
         await dir.sync();
       } finally {
@@ -19427,7 +19897,7 @@ function assertAgentIdentity(input) {
 }
 
 // src/workspace/store.ts
-import { readFile as readFile15 } from "fs/promises";
+import { readFile as readFile17 } from "fs/promises";
 var WorkspaceStore = class {
   data = { chats: {}, named: {} };
   saving = Promise.resolve();
@@ -19437,7 +19907,7 @@ var WorkspaceStore = class {
   }
   async load() {
     try {
-      const text = await readFile15(this.path, "utf8");
+      const text = await readFile17(this.path, "utf8");
       const parsed = JSON.parse(text);
       this.data = {
         chats: parsed.chats ?? {},
@@ -19842,7 +20312,7 @@ async function resolveConflict(conflicts) {
     return false;
   }
   const rl = createInterface7({ input: process.stdin, output: process.stdout });
-  const ask = (q) => new Promise((resolve3) => rl.question(q, resolve3));
+  const ask = (q) => new Promise((resolve5) => rl.question(q, resolve5));
   try {
     const verb = conflicts.length > 1 ? "\u5B83\u4EEC" : "\u90A3\u4E2A";
     const answer = (await ask(`\u7EE7\u7EED\u542F\u52A8\u4F1A\u5148\u5173\u6389${verb},\u662F\u5426\u7EE7\u7EED? [y/N]: `)).trim().toLowerCase();
@@ -19897,7 +20367,7 @@ async function confirmStopRuntimeLockProcess2(err) {
   const rl = createInterface7({ input: process.stdin, output: process.stdout });
   try {
     const answer = (await new Promise(
-      (resolve3) => rl.question("\u662F\u5426\u505C\u6B62\u65E7\u8FDB\u7A0B\u5E76\u91CD\u65B0\u542F\u52A8? [y/N]: ", resolve3)
+      (resolve5) => rl.question("\u662F\u5426\u505C\u6B62\u65E7\u8FDB\u7A0B\u5E76\u91CD\u65B0\u542F\u52A8? [y/N]: ", resolve5)
     )).trim().toLowerCase();
     return answer === "y" || answer === "yes";
   } finally {
@@ -19925,6 +20395,40 @@ function formatAgo3(ms) {
   if (ms < 36e5) return `${Math.floor(ms / 6e4)} \u5206\u949F\u524D`;
   if (ms < 864e5) return `${Math.floor(ms / 36e5)} \u5C0F\u65F6\u524D`;
   return `${Math.floor(ms / 864e5)} \u5929\u524D`;
+}
+
+// src/cli/commands/agent-sendfile.ts
+import { connect } from "net";
+async function runAgentSendFile(path, caption) {
+  const socketPath = process.env.ARG_BRIDGE_ARTIFACT_SOCKET;
+  const token = process.env.ARG_BRIDGE_ARTIFACT_TOKEN;
+  if (!socketPath || !token) {
+    throw new Error("\u5F53\u524D\u8FDB\u7A0B\u6CA1\u6709 bridge \u6587\u4EF6\u53D1\u9001\u80FD\u529B\uFF1B\u8BF7\u4ECE bridge agent \u4EFB\u52A1\u5185\u8C03\u7528");
+  }
+  const response = await new Promise((resolve5, reject4) => {
+    const socket = connect(socketPath);
+    let data = "";
+    socket.setEncoding("utf8");
+    socket.setTimeout(2e4, () => socket.destroy(new Error("\u7B49\u5F85 bridge \u6587\u4EF6\u53D1\u9001\u8D85\u65F6")));
+    socket.once("error", reject4);
+    socket.on("data", (chunk) => {
+      data += chunk;
+      if (!data.includes("\n")) return;
+      try {
+        resolve5(JSON.parse(data.slice(0, data.indexOf("\n"))));
+      } catch (err) {
+        reject4(err);
+      }
+      socket.end();
+    });
+    socket.on("connect", () => {
+      socket.write(`${JSON.stringify({ token, path, ...caption ? { caption } : {} })}
+`);
+    });
+  });
+  if (response.ok !== true) throw new Error(typeof response.message === "string" ? response.message : "bridge \u6587\u4EF6\u53D1\u9001\u5931\u8D25");
+  process.stdout.write(`${typeof response.message === "string" ? response.message : "\u6587\u4EF6\u5DF2\u53D1\u9001"}
+`);
 }
 
 // src/cli/index.ts
@@ -19962,6 +20466,9 @@ program.command("ps").description("List running bridge processes on this machine
 });
 program.command("kill <target>").description("Kill a running bridge process by short id or list index (SIGTERM, then SIGKILL after 2s). Was `stop <target>` in older versions.").action(async (target) => {
   await runKillCli(target);
+});
+program.command("sendfile <path>").description("Ask the active bridge run to send one workspace-relative file").option("--caption <text>", "optional delivery note").action(async (path, opts) => {
+  await runAgentSendFile(path, opts.caption);
 });
 program.command("start").description("Install (if needed) and start the bridge as an OS-managed daemon").option("--profile <name>", "profile name (defaults to active profile)").option("--agent <kind>", "agent kind for first-run profile bootstrap (claude or codex)").option("--workspace <path>", "initial working directory for first-run profile bootstrap").option("--app-id <id>", "use an existing Lark/Feishu app instead of QR app creation").option("--app-secret <secret>", "App Secret for --app-id; prefer interactive input on shared machines").option("--tenant <tenant>", "tenant for --app-id (feishu or lark; default feishu)").option("--skip-check-lark-cli", "skip lark-cli pre-flight check (auto-install + bind)").action(async (opts) => {
   await runServiceStart(opts);

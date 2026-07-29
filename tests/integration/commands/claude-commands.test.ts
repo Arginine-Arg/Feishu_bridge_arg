@@ -254,6 +254,21 @@ describe('Claude slash command visible behavior', () => {
     expect(lastMarkdown(h.channel)).toContain('用法:`/timeout <1-120>`');
   });
 
+  it('keeps output delivery policy independent from the idle watchdog', async () => {
+    const h = await createHarness();
+
+    await expect(h.run('/output off')).resolves.toBe(true);
+    expect(h.sessions.getOutputMode('chat-1')).toBe('off');
+    expect(h.sessions.getIdleTimeoutMinutes('chat-1')).toBeUndefined();
+    expect(lastMarkdown(h.channel)).toContain('已静默');
+
+    await expect(h.run('/output final')).resolves.toBe(true);
+    expect(h.sessions.getOutputMode('chat-1')).toBe('final');
+
+    await expect(h.run('/output')).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('`final`');
+  });
+
   it('handles /stop without sending a new reply', async () => {
     const h = await createHarness();
     const activeRun = h.agent.run({ runId: 'run-active', prompt: 'running' }) as FakeAgentRun;

@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
 import { chmodSync, lstatSync, mkdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
 import { log } from '../core/logger';
 import {
@@ -201,9 +201,10 @@ export class LiveTerminalSession {
       runId,
       events,
       stop: async () => {
-        // Escape is the native live-TUI interrupt key. It cancels the active
-        // turn while keeping the managed native conversation alive.
-        this.write('\x1b');
+        // Keep /stop on the same unconditional interrupt path as a user
+        // Ctrl-C. Unlike Escape, this does not depend on the current picker
+        // or editor surface and never turns into ordinary terminal text.
+        this.write('\x03');
       },
       waitForExit: async () => true,
     };
@@ -223,6 +224,17 @@ export class LiveTerminalSession {
         ['-S', terminal.socketPath, 'kill-session', '-t', terminal.sessionName],
         { stdio: 'ignore' },
       );
+      // Production managed terminals use the user's default server, which is
+      // shared with their own tmux sessions and must outlive this bridge.
+      // Anonymous/legacy live terminals use a dedicated socket instead; once
+      // their only managed session is explicitly closed, reclaim that private
+      // server as well. `detach()` deliberately does not do this so a bridge
+      // restart can reconnect to its existing agent.
+      if (!isDefaultTmuxSocket(terminal.socketPath)) {
+        spawnProcessSync('tmux', ['-S', terminal.socketPath, 'kill-server'], {
+          stdio: 'ignore',
+        });
+      }
     }
   }
 
@@ -397,7 +409,6 @@ export class LiveTerminalSession {
     let sawNormalSubmitProgress = false;
     let normalSubmitRetried = false;
     const inputGraceMs = this.inputGraceMs(commandMode);
-    const inputReadyAt = Date.now() + inputGraceMs;
 
     if (commandMode) {
       log.info('agent-live', 'command-start', {
@@ -535,7 +546,6 @@ export class LiveTerminalSession {
             textPreview: previewLiveText(event.text),
           });
         }
-        arm(startupTimeoutMs + Math.max(0, inputReadyAt - Date.now()));
         return;
       }
       // Only PTY/tmux screen snapshots carry terminal lifecycle state. Pipe
@@ -663,7 +673,6 @@ export class LiveTerminalSession {
     this.emitter.once('error', onError);
     for (const event of this.pendingTerminalOutput.splice(0)) onData(event);
     try {
-      arm(startupTimeoutMs + inputGraceMs);
       await this.waitForInputReady(inputGraceMs);
       if (!done) {
         if (startupInteractionText && inputMode !== 'control') {
@@ -712,7 +721,7 @@ export class LiveTerminalSession {
           else if (commandMode && isKnownSilentLiveCommand(prompt)) arm(idleMs);
           else if (commandMode && isSlowSilentLiveCommand(prompt)) {
             arm(noOutputIdleMs(prompt, idleMs));
-          }
+          } else arm(startupTimeoutMs);
         }
       }
 
@@ -921,6 +930,13 @@ function ensureDefaultTmuxSocketDirectory(socketPath: string): void {
   chmodSync(directory, 0o700);
 }
 
+function isDefaultTmuxSocket(socketPath: string): boolean {
+  return (
+    resolve(socketPath) ===
+    resolve(defaultTmuxSocketPath({ ...process.env, TMUX: undefined }))
+  );
+}
+
 /** Stable managed tmux identity for one cwd, conversation scope, and launch signature. */
 export function liveTmuxIdentity(
   cwd: string,
@@ -1074,6 +1090,15 @@ function setManagedMetadata() {
   tmux(['set-option', '-t', session, '@argbridge_scope', scope], { stdio: 'ignore' });
   tmux(['set-option', '-t', session, '@argbridge_agent', agentKind], { stdio: 'ignore' });
   tmux(['set-option', '-t', session, '@argbridge_cwd', cwd], { stdio: 'ignore' });
+  setManagedActiveTarget();
+}
+
+function setManagedActiveTarget() {
+  if (!managed || !target) return;
+  // This is deliberately tmux session metadata, not bridge-process memory.
+  // It survives a bridge restart and records the pane adopted after a user
+  // manually resumes a native Codex/Claude conversation.
+  tmux(['set-option', '-t', session, '@argbridge_active_target', target], { stdio: 'ignore' });
 }
 
 function createAgentWindow(initial) {
@@ -1150,6 +1175,7 @@ function createAgentWindow(initial) {
   lastSnapshot = '';
   lastHistoryPane = '';
   lastHistoryEnd = -1;
+  setManagedActiveTarget();
   return true;
 }
 
@@ -1206,6 +1232,7 @@ function adoptSelectedLivePane() {
   if (!selected || selected === target || !selectedPaneIsAgent(selected)) return false;
   target = selected;
   setPersistentPaneOptions();
+  setManagedActiveTarget();
   resetCaptureState();
   return true;
 }
@@ -1422,6 +1449,12 @@ export function parseLiveControlSequence(input: string): string[] | null {
 /** True when the whole message is a navigation/control key sequence. */
 export function isLiveControlInput(input: string): boolean {
   return parseLiveControlSequence(input) !== null;
+}
+
+/** Only native interrupt keys preempt the scope's FIFO message queue. */
+export function isLiveInterruptInput(input: string): boolean {
+  const sequence = parseLiveControlSequence(input);
+  return sequence !== null && sequence.length > 0 && sequence.every((key) => key === '\x03');
 }
 
 /**

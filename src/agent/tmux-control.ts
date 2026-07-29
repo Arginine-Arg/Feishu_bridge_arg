@@ -76,6 +76,15 @@ interface ManagedTmuxTerminalsFile {
   terminals: Record<string, ManagedTmuxTerminal>;
 }
 
+interface ManagedTmuxMetadata {
+  managed: string;
+  profile: string;
+  scope: string;
+  agent: string;
+  cwd: string;
+  activeTarget: string;
+}
+
 const BINDINGS_FILE = 'tmux-bindings.json';
 const MANAGED_TERMINALS_FILE = 'tmux-managed-terminals.json';
 const MAX_TMUX_TAIL_CHARS = 12_000;
@@ -566,7 +575,12 @@ function revalidateManagedTerminal(
   }
   return {
     socketPath: saved.socketPath,
-    target: saved.sessionName,
+    // A manual `codex resume`/`claude --resume` can run in a new pane of the
+    // same managed session. The helper persists that pane in tmux metadata so
+    // a bridge restart tails and controls the resumed conversation, rather
+    // than silently falling back to the session's original (possibly dead)
+    // pane.
+    target: revalidateManagedActiveTarget(saved.socketPath, saved.sessionName, metadata.activeTarget),
     attachCommand: saved.attachCommand,
     ownership: 'managed',
   };
@@ -575,7 +589,7 @@ function revalidateManagedTerminal(
 function readManagedMetadata(
   socketPath: string,
   sessionName: string,
-): { managed: string; profile: string; scope: string; agent: string; cwd: string } | undefined {
+): ManagedTmuxMetadata | undefined {
   const result = spawnProcessSync(
     'tmux',
     [
@@ -585,14 +599,31 @@ function readManagedMetadata(
       '-p',
       '-t',
       sessionName,
-      '#{@argbridge_managed}\t#{@argbridge_profile}\t#{@argbridge_scope}\t#{@argbridge_agent}\t#{@argbridge_cwd}',
+      '#{@argbridge_managed}\t#{@argbridge_profile}\t#{@argbridge_scope}\t#{@argbridge_agent}\t#{@argbridge_cwd}\t#{@argbridge_active_target}',
     ],
     { encoding: 'utf8' },
   );
   if (result.status !== 0 || typeof result.stdout !== 'string') return undefined;
-  const [managed = '', profile = '', scope = '', agent = '', cwd = ''] = result.stdout.trim().split('\t');
+  const [managed = '', profile = '', scope = '', agent = '', cwd = '', activeTarget = ''] = result.stdout.trim().split('\t');
   if (!managed || !profile || !scope) return undefined;
-  return { managed, profile, scope, agent, cwd };
+  return { managed, profile, scope, agent, cwd, activeTarget };
+}
+
+function revalidateManagedActiveTarget(
+  socketPath: string,
+  sessionName: string,
+  activeTarget: string,
+): string {
+  const candidate = activeTarget.trim();
+  if (!candidate) return sessionName;
+  const result = spawnProcessSync(
+    'tmux',
+    ['-S', socketPath, 'display-message', '-p', '-t', candidate, '#{session_name}'],
+    { encoding: 'utf8' },
+  );
+  return result.status === 0 && typeof result.stdout === 'string' && result.stdout.trim() === sessionName
+    ? candidate
+    : sessionName;
 }
 
 function recoverManagedTerminal(

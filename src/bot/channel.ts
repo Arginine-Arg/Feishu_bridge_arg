@@ -29,7 +29,7 @@ import {
   LIVE_INPUT_CALLBACK_ACTION,
 } from '../card/dispatcher';
 import { consumeInteractivePrompts, PROMPT_CALLBACK_ACTION } from '../card/interactive-prompt';
-import { isLiveControlInput } from '../agent/live-session';
+import { isLiveControlInput, isLiveInterruptInput } from '../agent/live-session';
 import {
   isBareAgentConfirmation,
   isStructuredLiveInteraction,
@@ -73,7 +73,7 @@ import type { ScopeContext } from '../policy/run-policy';
 import { createOwnerRefreshController } from '../policy/owner';
 import { RunExecutor } from '../runtime/run-executor';
 import type { SessionCatalog } from '../session/catalog';
-import type { SessionStore } from '../session/store';
+import type { OutputMode, SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
 import { ActiveRuns, type RunHandle } from './active-runs';
 import { ChatModeCache, type ChatMode } from './chat-mode-cache';
@@ -87,6 +87,7 @@ import { fetchQuotedContext, fetchTopicContext, type QuotedContext } from './quo
 import { lookupMessageThreadId } from './thread-id';
 import { addWorkingReaction, removeReaction } from './reaction';
 import { fetchKnownChats } from './lark-info';
+import { ArtifactBroker } from './artifact-broker';
 import {
   isForceLiveAgentCommandMessage,
   isNativeAgentCommandMessage,
@@ -335,6 +336,16 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
 
   const channel = createLarkChannel(opts);
   const media = new MediaCache(channel, deps.appPaths?.mediaDir);
+  const artifactStateDir = deps.appPaths?.mediaDir
+    ? dirname(deps.appPaths.mediaDir)
+    : undefined;
+  const artifactBroker = new ArtifactBroker(
+    join(artifactStateDir ?? join(process.cwd(), '.arg-bridge-media'), 'artifact-broker.sock'),
+    channel,
+    allowLocalFileRoot,
+    artifactStateDir ? join(artifactStateDir, 'artifact-grants.json') : undefined,
+  );
+  await artifactBroker.start();
 
   // Pending → run handoff: while a run is active on a chat, block its pending
   // queue so messages keep accumulating without flushing. When the run ends,
@@ -399,6 +410,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
             activePolicyFingerprints,
             lastRunModelByScope,
             liveInteractionByScope,
+            artifactBroker,
             pending,
             scope,
             mode,
@@ -564,6 +576,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         channel.disconnect(),
         activeRuns.stopAll(),
         agent.shutdown?.(),
+        artifactBroker.close(),
         sessions.flush(),
         sessionCatalog?.flush(),
         callbackNonceStore?.flush(),
@@ -818,11 +831,17 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   // typed into a TUI.
   const nativeInputActive =
     pickerActive || getAgentSessionMode(controls.cfg) === 'live';
-  const forceNative = route.forceNative || nativeModelCommand || Boolean(pickerFollowup);
+  // Native controls are a separate control plane.  They must never pass
+  // through prompt batching just because an earlier picker card expired or a
+  // bridge restart lost its in-memory picker flag.
+  const explicitLiveControl = nativeInputActive && isLiveControlInput(routedMsg.content);
+  const forceNative = route.forceNative || nativeModelCommand || Boolean(pickerFollowup) || explicitLiveControl;
   const agentMsg = forceNative
     ? markNativeAgentCommand(
         routedMsg,
-        pickerFollowup
+        explicitLiveControl
+          ? 'control'
+          : pickerFollowup
           ? 'control'
           : nativeModelCommand
             ? 'command'
@@ -839,8 +858,14 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
               : undefined,
         )
       : routedMsg;
+  // A selection/navigational key belongs behind the command that opened its
+  // picker. Once the scope has actually entered that picker it must, however,
+  // run before the task paused by the picker; otherwise an approval/model
+  // choice can never release deferred work. Ctrl-C is the only control that
+  // may preempt without an established picker state.
   const priorityLiveControl =
-    pickerActive && liveInputModeForMessage(agentMsg) === 'control';
+    liveInputModeForMessage(agentMsg) === 'control' &&
+    (isLiveInterruptInput(agentMsg.content) || pickerActive);
   const size = priorityLiveControl
     ? pending.pushFront(scope, agentMsg)
     : pending.push(scope, agentMsg);
@@ -875,7 +900,7 @@ export function commandPreservesPendingMessages(content: string): boolean {
     /^\/(?:status|help|ps)(?:\s|$)/u.test(command) ||
     /^\/session(?:\s+\/?status)?\s*$/u.test(command) ||
     /^\/tmux(?:\s+(?:list|status|tail))?(?:\s|$)/u.test(command) ||
-    /^\/timeout(?:\s|$)/u.test(command)
+    /^\/(?:timeout|output)(?:\s|$)/u.test(command)
   );
 }
 
@@ -912,7 +937,7 @@ function normalizeAgentPrefixedNativeInput(input: string): {
   const trimmed = input.trim();
   const slashless = /^\/([A-Za-z0-9_-]+)$/u.exec(trimmed)?.[1];
   const controlText = slashless && isLivePickerInput(slashless) ? slashless : trimmed;
-  if (isLivePickerInput(controlText)) {
+  if (isLivePickerInput(controlText) || isLiveControlInput(controlText)) {
     return { text: controlText, forceNative: true, nativeMode: 'control' };
   }
   return {
@@ -989,6 +1014,7 @@ interface RunBatchDeps {
   activePolicyFingerprints: Map<string, string>;
   lastRunModelByScope: Map<string, string>;
   liveInteractionByScope: Map<string, LiveInteractionState>;
+  artifactBroker: ArtifactBroker;
   pending: PendingQueue;
   scope: string;
   mode: ChatMode;
@@ -1010,6 +1036,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     activePolicyFingerprints,
     lastRunModelByScope,
     liveInteractionByScope,
+    artifactBroker,
     pending,
     scope,
     mode,
@@ -1110,24 +1137,27 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const nativeCommand = nativeAgentCommandForBatch(batch);
   const forceLiveSession = batch.some(isForceLiveAgentCommandMessage);
   const useLiveSession = forceLiveSession || getAgentSessionMode(controls.cfg) === 'live';
-  const rawTerminalInput = buildTerminalInput(batch, attachments, quotes);
+  // Turn and live runs consume the same typed envelope.  The old live path
+  // reduced this to plain text and returned early when a body existed, which
+  // silently dropped quoted cards and attachment paths from mixed messages.
+  // Native slash/control input remains raw because it targets the CLI TUI,
+  // not the agent's conversational prompt.
+  const structuredPrompt = buildPrompt(
+    batch,
+    attachments,
+    quotes,
+    topicContext,
+    channel.botIdentity,
+    extraInstructions,
+  );
   const bridgeRoute = useLiveSession
     ? await bridgeAgent.route({
-        userInput: nativeCommand ?? rawTerminalInput,
+        userInput: nativeCommand ?? structuredPrompt,
         ...(nativeCommand ? { inputMode: liveInputModeForBatch(batch, nativeCommand) } : {}),
       })
     : undefined;
   const liveInputMode = bridgeRoute?.inputMode;
-  const prompt =
-    bridgeRoute?.stdin ??
-    buildPrompt(
-      batch,
-      attachments,
-      quotes,
-      topicContext,
-      channel.botIdentity,
-      extraInstructions,
-    );
+  const prompt = bridgeRoute?.stdin ?? structuredPrompt;
   log.info('prompt', 'built', {
     promptChars: prompt.length,
     nativeCommand: bridgeRoute?.kind === 'native-command',
@@ -1167,6 +1197,18 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     controls.profileConfig.agentKind === 'codex'
       ? codexCapability(controls.profileConfig)
       : claudeCapability(controls.profileConfig);
+  // Allocate a token before spawning so it can be injected into the agent
+  // process. It is activated with the verified workspace root immediately
+  // after run-policy resolution succeeds.
+  const artifactGrant = artifactBroker.issue({
+    scope,
+    chatId,
+    replyTo: lastMsg.messageId,
+    ...(mode === 'topic' && threadId ? { replyInThread: true } : {}),
+    allowedRoots: [],
+    maxFileBytes: controls.profileConfig.attachments.maxFileBytes,
+    persistent: useLiveSession,
+  });
   const flow = await startRunFlow({
     scopeId: scope,
     scope: scopeContext,
@@ -1183,6 +1225,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     executor,
     now: Date.now(),
     stopGraceMs: getAgentStopGraceMs(controls.cfg),
+    artifactDelivery: artifactGrant,
     observability: {
       profile: controls.profile,
       agent: capability.agentId,
@@ -1191,6 +1234,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     },
   });
   if (!flow.ok) {
+    if (!useLiveSession) artifactBroker.revoke(artifactGrant.token);
     log.info('run-flow', 'rejected', { scope, code: flow.rejectReason.code });
     log.warn('policy', 'denied', {
       scope,
@@ -1202,6 +1246,14 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   }
 
   const { execution, cwdRealpath: cwd } = flow;
+  artifactBroker.activate(artifactGrant.token, [cwd]);
+  // Presentation is scope policy, not a property of this execution. Read it
+  // again at every delivery boundary so `/output off` can mute an already
+  // running task without cancelling the agent, and a later `/output final`
+  // can still recover its terminal answer.
+  const outputModeAtStart = sessions.getOutputMode(scope);
+  const currentOutputMode = (): OutputMode => sessions.getOutputMode(scope);
+  log.info('delivery', 'run-policy', { scope, mode: outputModeAtStart });
   activePolicyFingerprints.set(scope, flow.policy.policyFingerprint);
   const handle = execution.handle;
   const eventStream = execution.subscribe();
@@ -1285,7 +1337,13 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       });
       if (!wasActive) log.info('agent-live', 'picker-enter', { scope });
     }
-    if (opts.sendInteractionCard === false) return;
+    // Native pickers are control-plane state, not normal agent narration:
+    // users must still be able to drive `/model`, `/resume`, etc. while their
+    // ordinary output policy is muted.
+    if (
+      opts.sendInteractionCard === false ||
+      (currentOutputMode() === 'off' && bridgeRoute?.kind !== 'native-command')
+    ) return;
     if (isStartupInteraction && liveInputMode === 'control') return;
     if (!interaction || !cardRenderOptions.signCallback) return;
     if (!useLiveSession && (sentInteractionSignatures.size > 0 || pendingInteractionSignatures.size > 0)) {
@@ -1356,14 +1414,17 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   }
 
   const configuredReplyMode = getMessageReplyMode(controls.cfg);
-  const replyMode =
-    useLiveSession && bridgeRoute?.presentation === 'card' ? 'card' : configuredReplyMode;
+  const replyMode = outputModeAtStart === 'final'
+    ? 'text'
+    : useLiveSession && bridgeRoute?.presentation === 'card'
+      ? 'card'
+      : configuredReplyMode;
   log.info('flush', 'reply-mode', {
     mode: replyMode,
     ...(replyMode !== configuredReplyMode ? { configuredMode: configuredReplyMode } : {}),
   });
   const cotMessages = getCotMessages(controls.cfg);
-  const cotEnabled = cotMessages !== 'off';
+  const cotEnabled = outputModeAtStart === 'live' && cotMessages !== 'off';
 
   // Re-read prefs on every flush so toggling /config mid-stream takes
   // effect immediately. Cheap object lookups, no allocation when on.
@@ -1431,7 +1492,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   // click. The click resumes the session (via handleCardAction → pending
   // queue) as a follow-up turn carrying the choice. Runs as an independent
   // stream subscriber; awaited in finally so it drains before cleanup.
-  const promptBridge = callbackAuth
+  const promptBridge = outputModeAtStart !== 'off' && callbackAuth
     ? consumeInteractivePrompts(execution.subscribe(), {
         channel,
         chatId,
@@ -1455,9 +1516,14 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   // Add a "Typing" reaction to the triggering message as an instant ack, but
   // never let that outbound API call block agent event draining.
   const reactionPromise =
-    cotEnabled || replyMode === 'card' ? undefined : addWorkingReaction(channel, lastMsg.messageId);
+    outputModeAtStart !== 'live' || cotEnabled || replyMode === 'card'
+      ? undefined
+      : addWorkingReaction(channel, lastMsg.messageId);
 
   try {
+    // Native slash commands and pickers form the control plane. They remain
+    // observable even under `/output off`, otherwise a user could not select
+    // a model or resume a session while ordinary task narration is muted.
     if (useLiveSession && nativeCommand) {
       const finalState = await processAgentStream(
         handle,
@@ -1483,6 +1549,51 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         ]),
         liveInteractionInputRoute: 'live',
       });
+      return;
+    }
+    if (outputModeAtStart === 'off') {
+      const finalState = await processAgentStream(
+        handle,
+        eventStream,
+        scope,
+        idleTimeoutMs,
+        progressHeartbeatMs,
+        recordSession,
+        async () => {},
+        observeLiveEvent,
+      );
+      // Re-enabling output while a muted task is still running intentionally
+      // recovers only its final answer. A stream created after the fact would
+      // replay old terminal history and reintroduce duplicate delivery.
+      if (currentOutputMode() !== 'off') {
+        await sendFinalReply({
+          channel,
+          chatId,
+          scope,
+          state: finalAnswerOnlyState(prepareStateForReply(finalState)),
+          replyMode: 'text',
+          sendOpts,
+          cardRenderOptions,
+          skipLiveInteractionSignatures: new Set([
+            ...sentInteractionSignatures,
+            ...pendingInteractionSignatures,
+          ]),
+          liveInteractionInputRoute: useLiveSession ? 'live' : 'agent',
+        });
+      }
+      return;
+    }
+    if (currentOutputMode() === 'off') {
+      await processAgentStream(
+        handle,
+        eventStream,
+        scope,
+        idleTimeoutMs,
+        progressHeartbeatMs,
+        recordSession,
+        async () => {},
+        observeLiveEvent,
+      );
       return;
     }
 
@@ -1524,6 +1635,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
             reason: cotPublisher.degradedReason,
           });
         }
+        if (currentOutputMode() === 'off') return;
         await sendFinalReply({
           channel,
           chatId,
@@ -1545,6 +1657,16 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
 
     if (replyMode === 'card') {
       let latestState: RunState = initialState;
+      // A rolling Feishu stream is a new message, not a continuation of the
+      // prior card's mutable document.  Keep a per-segment output cursor so
+      // the new message contains only text produced after that cursor.
+      let segmentBaseText = '';
+      const stateForSegment = (state: RunState): RunState =>
+        projectRunStateFromCursor(prepareStateForReply(state), segmentBaseText);
+      const stateForDelivery = (state: RunState): RunState =>
+        currentOutputMode() === 'final'
+          ? finalAnswerOnlyState(prepareStateForReply(state))
+          : stateForSegment(state);
       // The streamed message can die mid-run (Feishu 230011 "message withdrawn",
       // content-length limits, or the platform's automatic 10-minute stream
       // close). Keep draining events, roll over before the platform deadline,
@@ -1556,12 +1678,15 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         | undefined;
       const postFreshFinal = async (state: RunState): Promise<void> => {
         if (freshFinalPosted) return;
+        if (currentOutputMode() === 'off') return;
         freshFinalPosted = true;
         await channel.send(
           chatId,
           {
             card: renderLiveAwareReplyCard(
-              prepareStateForReply(state),
+              currentOutputMode() === 'final'
+                ? finalAnswerOnlyState(prepareStateForReply(state))
+                : prepareStateForReply(state),
               cardRenderOptions,
               useLiveSession ? 'live' : 'agent',
             ),
@@ -1579,6 +1704,10 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         recordSession,
         async (state) => {
           latestState = state;
+          const deliveryMode = currentOutputMode();
+          if (deliveryMode === 'off' || (deliveryMode === 'final' && state.terminal === 'running')) {
+            return;
+          }
           if (cardCtrl) {
             // Dedup: skip PATCH if the rendered card is byte-identical to the
             // last one we sent. SDK throttle absorbs most redundant updates,
@@ -1586,7 +1715,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
             // emits `done` / `usage` events that re-render → identical card.
             // Without this guard we PATCH the same JSON many times in a row.
             const nextCard = renderLiveAwareReplyCard(
-              prepareStateForReply(state),
+              stateForDelivery(state),
               cardRenderOptions,
               useLiveSession ? 'live' : 'agent',
             );
@@ -1613,13 +1742,17 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       await runRollingReplyStream({
         mode: replyMode,
         renderDone,
-        startSegment: (segmentDone, markProducerStarted) =>
+        startSegment: (segmentDone, markProducerStarted, segment) => {
+          segmentBaseText = segment === 1 ? '' : runStateTextCursor(prepareStateForReply(latestState));
+          lastSentCardSerialized = undefined;
+          const currentSegmentState = stateForDelivery(latestState);
+          return (
           channel.stream(
             chatId,
             {
               card: {
                 initial: renderLiveAwareReplyCard(
-                  prepareStateForReply(latestState),
+                  currentSegmentState,
                   cardRenderOptions,
                   useLiveSession ? 'live' : 'agent',
                 ),
@@ -1630,7 +1763,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
                   try {
                     await ctrl.update(
                       renderLiveAwareReplyCard(
-                        prepareStateForReply(latestState),
+                        stateForDelivery(latestState),
                         cardRenderOptions,
                         useLiveSession ? 'live' : 'agent',
                       ),
@@ -1654,14 +1787,23 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
               },
             },
             sendOpts,
-          ),
+          )
+          );
+        },
         fallback: postFreshFinal,
       });
-      if (streamDegraded) {
+      if (streamDegraded && currentOutputMode() !== 'off') {
         await postFreshFinal(prepareStateForReply(latestState));
       }
     } else if (replyMode === 'markdown') {
       let latestState: RunState = initialState;
+      let segmentBaseText = '';
+      const stateForSegment = (state: RunState): RunState =>
+        projectRunStateFromCursor(prepareStateForReply(state), segmentBaseText);
+      const stateForDelivery = (state: RunState): RunState =>
+        currentOutputMode() === 'final'
+          ? finalAnswerOnlyState(prepareStateForReply(state))
+          : stateForSegment(state);
       // See card branch: a withdrawn/failed patch must degrade to a fresh final
       // message instead of aborting the run and losing the answer.
       let streamDegraded = false;
@@ -1669,8 +1811,13 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       let markdownCtrl: { setContent(markdown: string): Promise<void> } | undefined;
       const postFreshFinal = async (state: RunState): Promise<void> => {
         if (freshFinalPosted) return;
+        if (currentOutputMode() === 'off') return;
         freshFinalPosted = true;
-        const body = renderText(prepareStateForReply(state));
+        const body = renderText(
+          currentOutputMode() === 'final'
+            ? finalAnswerOnlyState(prepareStateForReply(state))
+            : prepareStateForReply(state),
+        );
         if (body.trim()) {
           await channel.send(chatId, { markdown: body }, sendOpts);
         }
@@ -1685,13 +1832,17 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         recordSession,
         async (state) => {
           latestState = state;
+          const deliveryMode = currentOutputMode();
+          if (deliveryMode === 'off' || (deliveryMode === 'final' && state.terminal === 'running')) {
+            return;
+          }
           if (markdownCtrl) {
             // Dedup: skip PATCH if rendered markdown is identical to the
             // last one we sent. SDK throttle absorbs most redundant updates,
             // but on text-heavy streams (v0.6.32 motivation: bridge echoed
             // a 6KB+ reply 30+ times), this kills the perceived "duplicate"
             // symptom in Feishu.
-            const nextText = renderText(prepareStateForReply(state));
+            const nextText = renderText(stateForDelivery(state));
             if (nextText === lastSentMarkdownText) return;
             lastSentMarkdownText = nextText;
             try {
@@ -1712,7 +1863,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       await runRollingReplyStream({
         mode: replyMode,
         renderDone,
-        startSegment: (segmentDone, markProducerStarted) =>
+        startSegment: (segmentDone, markProducerStarted, segment) => {
+          segmentBaseText = segment === 1 ? '' : runStateTextCursor(prepareStateForReply(latestState));
+          lastSentMarkdownText = undefined;
+          const currentSegmentState = stateForDelivery(latestState);
+          return (
           channel.stream(
             chatId,
             {
@@ -1721,7 +1876,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
                 streamDegraded = false;
                 markdownCtrl = ctrl;
                 try {
-                  await ctrl.setContent(renderText(prepareStateForReply(latestState)));
+                  await ctrl.setContent(renderText(currentSegmentState));
                 } catch (err) {
                   streamDegraded = true;
                   markdownCtrl = undefined;
@@ -1740,10 +1895,12 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
               },
             },
             sendOpts,
-          ),
+          )
+          );
+        },
         fallback: postFreshFinal,
       });
-      if (streamDegraded) {
+      if (streamDegraded && currentOutputMode() !== 'off') {
         await postFreshFinal(prepareStateForReply(latestState));
       }
     } else {
@@ -1760,11 +1917,12 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         async () => {},
         observeLiveEvent,
       );
+      if (currentOutputMode() === 'off') return;
       await sendFinalReply({
         channel,
         chatId,
         scope,
-        state: prepareStateForReply(finalState),
+        state: finalAnswerOnlyState(prepareStateForReply(finalState)),
         replyMode,
         sendOpts,
         cardRenderOptions,
@@ -1778,6 +1936,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   } catch (err) {
     log.fail('stream', err);
   } finally {
+    if (!useLiveSession) artifactBroker.revoke(artifactGrant.token);
     // Let the interactive-prompt subscriber drain (it resolves when the event
     // stream ends); it never rejects, so this can't mask a run error.
     await promptBridge;
@@ -2128,12 +2287,55 @@ async function processAgentStream(
   return state;
 }
 
+/**
+ * Stable, append-oriented text projection used as the outbound stream cursor.
+ * `RunState` itself is intentionally rich and mutable (tool status, footer,
+ * folded content); it is therefore unsuitable as a Feishu segment identity.
+ * Agent text blocks only grow during a run, which gives us a deterministic
+ * cursor without treating a terminal redraw as fresh chat output.
+ */
+function runStateTextCursor(state: RunState): string {
+  return state.blocks
+    .filter((block): block is Extract<RunState['blocks'][number], { kind: 'text' }> => block.kind === 'text')
+    .map((block) => block.content)
+    .join('');
+}
+
+function projectRunStateFromCursor(state: RunState, deliveredText: string): RunState {
+  if (!deliveredText) return state;
+  const currentText = runStateTextCursor(state);
+  const suffix = appendOnlyTextSuffix(deliveredText, currentText);
+  return {
+    ...state,
+    blocks: suffix
+      ? [{ kind: 'text', content: suffix, streaming: state.terminal === 'running' }]
+      : [],
+    reasoning: { content: '', active: false },
+  };
+}
+
+function appendOnlyTextSuffix(deliveredText: string, currentText: string): string {
+  if (!currentText || currentText === deliveredText) return '';
+  if (currentText.startsWith(deliveredText)) return currentText.slice(deliveredText.length);
+  // Defensive recovery for a provider that rewrites old blocks.  We retain
+  // the maximal overlap only; replaying the whole accumulated state is what
+  // produced the duplicate Feishu messages this cursor replaces.
+  const max = Math.min(deliveredText.length, currentText.length);
+  for (let overlap = max; overlap > 0; overlap -= 1) {
+    if (deliveredText.endsWith(currentText.slice(0, overlap))) {
+      return currentText.slice(overlap);
+    }
+  }
+  return currentText;
+}
+
 export async function runRollingReplyStream(input: {
   mode: 'card' | 'markdown';
   renderDone: Promise<RunState>;
   startSegment: (
     segmentDone: Promise<void>,
     markProducerStarted: () => void,
+    segment: number,
   ) => Promise<unknown>;
   fallback: (state: RunState) => Promise<void>;
   rolloverMs?: number;
@@ -2166,7 +2368,7 @@ export async function runRollingReplyStream(input: {
     const streamResult = Promise.resolve()
       .then(() => input.startSegment(segmentDone, () => {
         producerStarted = true;
-      }))
+      }, segment))
       .then(
         () => ({ kind: 'stream' as const, ok: true as const }),
         (err) => ({ kind: 'stream' as const, ok: false as const, err }),
@@ -2344,30 +2546,15 @@ function buildPrompt(
   });
 }
 
-function buildTerminalInput(
-  batch: NormalizedMessage[],
-  attachments: LocalAttachment[],
-  quotes: QuotedContext[],
-): string {
-  const fileKeys = batch.flatMap((message) => message.resources.map((resource) => resource.fileKey));
-  const texts = batch
-    .map((message) => stripAttachmentRefs(message.content, fileKeys))
-    .filter((text) => text.length > 0);
-  if (texts.length > 0) return texts.join('\n\n');
-
-  const quotedText = quotes.map((quote) => quote.content).filter((text) => text.length > 0);
-  if (quotedText.length > 0) return quotedText.join('\n\n');
-
-  return attachments.map((attachment) => attachment.path).join('\n');
-}
-
 function nativeAgentCommandForBatch(batch: NormalizedMessage[]): string | undefined {
   if (batch.length !== 1) return undefined;
   const msg = batch[0];
   if (!msg || !isNativeAgentCommandMessage(msg)) return undefined;
   const text = msg.content.trimStart();
   if (isForceLiveAgentCommandMessage(msg)) return text;
-  return isSlashCommandText(text) || isLivePickerInput(text) ? text : undefined;
+  return isSlashCommandText(text) || isLivePickerInput(text) || isLiveControlInput(text)
+    ? text
+    : undefined;
 }
 
 function liveInputModeForBatch(

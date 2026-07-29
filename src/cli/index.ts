@@ -24,6 +24,7 @@ import {
   runServiceUnregister,
 } from './commands/service';
 import { runStart } from './commands/start';
+import { runAgentSendFile } from './commands/agent-sendfile';
 
 const program = new Command();
 
@@ -146,6 +147,16 @@ program
   .description('Kill a running bridge process by short id or list index (SIGTERM, then SIGKILL after 2s). Was `stop <target>` in older versions.')
   .action(async (target: string) => {
     await runKillCli(target);
+  });
+
+// Agent-only capability. The active bridge injects the broker socket and
+// one-time token; invoking this outside a run deliberately fails.
+program
+  .command('sendfile <path>')
+  .description('Ask the active bridge run to send one workspace-relative file')
+  .option('--caption <text>', 'optional delivery note')
+  .action(async (path: string, opts: { caption?: string }) => {
+    await runAgentSendFile(path, opts.caption);
   });
 
 // === service-level commands (OS-managed daemon: launchd/systemd/schtasks) ===
