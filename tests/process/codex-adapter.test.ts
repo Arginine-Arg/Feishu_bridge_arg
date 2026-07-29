@@ -35,7 +35,7 @@ describe('CodexAdapter process contract', () => {
     );
   });
 
-  it('spawns a fresh JSON run with prompt on stdin and inherits the user Codex home by default', async () => {
+  it('spawns a fresh JSON run with only the user prompt on stdin and inherits the user Codex home by default', async () => {
     process.env.CODEX_HOME = '/outer/codex-home';
     process.env.APP_SECRET = 'inherited-secret';
     const fake = await createFakeCodex({
@@ -71,14 +71,10 @@ describe('CodexAdapter process contract', () => {
     expect(record.argv).not.toContain('--ignore-user-config');
     expect(record.argv).toContain('--skip-git-repo-check');
     expect(record.argv).not.toContain('hello from lark');
-    expect(record.stdin).toContain('arg-bridge 运行约定');
-    expect(record.stdin).toContain('__bridge_cb');
-    expect(record.stdin).toContain('lark-cli auth login');
-    expect(record.stdin).toContain('LARK_CHANNEL_PROFILE');
-    expect(record.stdin).toContain('LARKSUITE_CLI_CONFIG_DIR');
-    expect(record.stdin).not.toContain('lark-cli config bind --source lark-channel');
-    expect(record.stdin).toContain('hello from lark');
-    expect(record.stdin).not.toBe('hello from lark');
+    expect(record.stdin).toBe('hello from lark');
+    expect(record.stdin).not.toContain('arg-bridge 运行约定');
+    expect(record.stdin).not.toContain('__bridge_cb');
+    expect(record.stdin).not.toContain('LARK_CHANNEL_PROFILE');
     expect(record.env).toMatchObject({
       LARK_CHANNEL: '1',
       CODEX_HOME: '/outer/codex-home',

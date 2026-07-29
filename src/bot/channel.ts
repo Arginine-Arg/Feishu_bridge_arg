@@ -10,14 +10,11 @@ import { claudeCapability, codexCapability } from '../agent/capability';
 import { BridgeAgent, createBridgeAgentFromEnvironment } from '../bridge-agent';
 import {
   isCodexModelId,
-  modelLabel,
-  normalizeModelSelection,
   resolveModelArg,
 } from '../agent/models';
 import {
   buildAgentPrompt,
   type BridgePromptInteractiveCard,
-  type BridgePromptMention,
   type BridgePromptQuotedMessage,
   type BridgePromptTopicMessage,
 } from '../agent/prompt';
@@ -107,13 +104,6 @@ const DEBOUNCE_MS = 600;
 const STREAM_TERMINAL_GRACE_MS = 3000;
 const STREAM_ROLLOVER_MS = 8 * 60_000;
 const REACTION_CLEANUP_GRACE_MS = 1000;
-
-const BRIDGE_AGENT_INSTRUCTIONS = [
-  '你在 bridge 进程中运行，普通 lark-cli 会继承 LARK_CHANNEL=1 并进入 bridge-bound 模式。',
-  '不要 unset LARK_CHANNEL / LARK_CHANNEL_HOME / LARK_CHANNEL_PROFILE / LARKSUITE_CLI_CONFIG_DIR，也不要用 env -u LARK_CHANNEL 绕回本机普通配置。',
-  'Codex bridge 默认使用 danger-full-access 对齐 Claude bridge 的 bypassPermissions 行为，因此 lark-cli 应能像用户本机终端一样访问 keychain。',
-  '如果提示 lark-channel context detected but not bound，停止当前操作并请用户重启 bridge 或运行 bridge doctor/preflight；不要改用普通 profile，不要自行 bind，也不要直接读取 config.json 里的账号或密钥。',
-];
 
 // Lark SDK logs API errors at error level even when the caller catches them.
 // These specific codes are EXPECTED in our flow (wiki-node lookup that
@@ -244,10 +234,6 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       })
     : undefined;
   const activePolicyFingerprints = new Map<string, string>();
-  // Per-scope record of the model used on the last run, so a `/config` model
-  // switch can inject a one-time "model changed" note into the next (resumed)
-  // prompt. In-memory only: on restart the first run re-seeds silently.
-  const lastRunModelByScope = new Map<string, string>();
   // Hybrid live mode keeps normal chat on turn-mode runs. This map records
   // scopes currently showing an agent picker so later up/down/enter messages
   // are routed as terminal controls instead of plain chat.
@@ -408,7 +394,6 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
             cotClient,
             callbackAuth,
             activePolicyFingerprints,
-            lastRunModelByScope,
             liveInteractionByScope,
             artifactBroker,
             pending,
@@ -1012,7 +997,6 @@ interface RunBatchDeps {
   cotClient: CotClient;
   callbackAuth?: CallbackAuth;
   activePolicyFingerprints: Map<string, string>;
-  lastRunModelByScope: Map<string, string>;
   liveInteractionByScope: Map<string, LiveInteractionState>;
   artifactBroker: ArtifactBroker;
   pending: PendingQueue;
@@ -1034,7 +1018,6 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     cotClient,
     callbackAuth,
     activePolicyFingerprints,
-    lastRunModelByScope,
     liveInteractionByScope,
     artifactBroker,
     pending,
@@ -1113,42 +1096,29 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     }
   }
 
-  // Detect a model switch since this scope's last run. When resuming an
-  // existing conversation the transcript still claims the old model, so tell
-  // the (now-switched) agent its model changed — otherwise it keeps echoing
-  // the previously-announced model. Only fires when a prior model was seen
-  // for this scope (never on the first run) and the selection actually
-  // changed. `requestedModel` (the `--model` value, or undefined for default)
-  // is reused below to log requested-vs-actual against the init event.
-  const agentKind = controls.profileConfig.agentKind;
-  const modelPref = controls.profileConfig.preferences.model;
-  const modelSelection = normalizeModelSelection(agentKind, modelPref);
-  const requestedModel = resolveModelArg(agentKind, modelPref);
-  const prevModel = lastRunModelByScope.get(scope);
-  const modelSwitched = prevModel !== undefined && prevModel !== modelSelection;
-  lastRunModelByScope.set(scope, modelSelection);
-  const extraInstructions = modelSwitched
-    ? [
-        `用户刚把本会话使用的模型切换为「${modelLabel(agentKind, modelPref)}」。` +
-          '之前的对话里可能提到别的模型,请以当前模型为准;若被问到你用的是什么模型,据此回答。',
-      ]
-    : undefined;
+  const requestedModel = resolveModelArg(
+    controls.profileConfig.agentKind,
+    controls.profileConfig.preferences.model,
+  );
 
   const nativeCommand = nativeAgentCommandForBatch(batch);
   const forceLiveSession = batch.some(isForceLiveAgentCommandMessage);
   const useLiveSession = forceLiveSession || getAgentSessionMode(controls.cfg) === 'live';
-  // Turn and live runs consume the same typed envelope.  The old live path
-  // reduced this to plain text and returned early when a body existed, which
-  // silently dropped quoted cards and attachment paths from mixed messages.
-  // Native slash/control input remains raw because it targets the CLI TUI,
-  // not the agent's conversational prompt.
+  if (useLiveSession && !nativeCommand && liveInteractionByScope.delete(scope)) {
+    // A normal user task supersedes an abandoned native picker. The live
+    // terminal will press Escape before typing this task; clear the bridge's
+    // matching control-plane state so later words are never misrouted as
+    // picker keys.
+    log.info('agent-live', 'picker-dismissed-for-task', { scope });
+  }
+  // Normal turns remain user text. Quotes, cards and attachment paths are
+  // appended only when present; native slash/control input stays raw because
+  // it targets the CLI TUI rather than a conversational prompt.
   const structuredPrompt = buildPrompt(
     batch,
     attachments,
     quotes,
     topicContext,
-    channel.botIdentity,
-    extraInstructions,
   );
   const bridgeRoute = useLiveSession
     ? await bridgeAgent.route({
@@ -1164,7 +1134,6 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     sessionMode: useLiveSession ? 'live' : 'turn',
     quotes: quotes.length,
     topicContext: topicContext.length,
-    ...(modelSwitched ? { modelSwitchedTo: modelSelection } : {}),
   });
 
   // For topic groups: thread the reply so it lands in the same topic as the
@@ -2491,8 +2460,6 @@ function buildPrompt(
   attachments: LocalAttachment[],
   quotes: QuotedContext[] = [],
   topicContext: QuotedContext[] = [],
-  botIdentity?: { openId: string; name?: string },
-  extraInstructions?: string[],
 ): string {
   const first = batch[0];
   if (!first) return '';
@@ -2518,26 +2485,7 @@ function buildPrompt(
           ? '（对方仅引用了上述消息。请围绕引用内容回答；若其中没有明确问题或任务，再简短询问其意图。）'
           : '（对方发来一条没有正文的消息——通常是只 @ 了你的唤醒（ping）。请简短回应。）';
 
-  const senderType = senderTypeOf(first);
-  const mentions = mergeMentions(batch);
-
   return buildAgentPrompt({
-    context: {
-      chatId: first.chatId,
-      chatType: first.chatType,
-      senderId: first.senderId,
-      ...(first.senderName ? { senderName: first.senderName } : {}),
-      ...(senderType ? { senderType } : {}),
-      ...(botIdentity?.openId ? { botOpenId: botIdentity.openId } : {}),
-      ...(mentions.length > 0 ? { mentions } : {}),
-      ...(first.threadId ? { threadId: first.threadId } : {}),
-      messageIds: batch.map((m) => m.messageId),
-      source: 'im',
-    },
-    instructions:
-      extraInstructions && extraInstructions.length > 0
-        ? [...BRIDGE_AGENT_INSTRUCTIONS, ...extraInstructions]
-        : BRIDGE_AGENT_INSTRUCTIONS,
     userInput: userPart,
     ...(topicContext.length > 0 ? { topicContext: topicContext.map(toPromptTopicMessage) } : {}),
     quotedMessages: quotes.map(toPromptQuote),
@@ -2992,24 +2940,6 @@ function senderAnnotation(msg: NormalizedMessage): string {
   const name = msg.senderName ?? msg.senderId;
   const type = senderTypeOf(msg);
   return type ? `[${name} (${type})]:` : `[${name}]:`;
-}
-
-function mergeMentions(batch: NormalizedMessage[]): BridgePromptMention[] {
-  const seen = new Set<string>();
-  const out: BridgePromptMention[] = [];
-  for (const msg of batch) {
-    for (const mention of msg.mentions ?? []) {
-      const dedupeKey = mention.openId ?? `${mention.name ?? ''}:${mention.key}`;
-      if (seen.has(dedupeKey)) continue;
-      seen.add(dedupeKey);
-      out.push({
-        ...(mention.openId ? { openId: mention.openId } : {}),
-        ...(mention.name ? { name: mention.name } : {}),
-        ...(mention.isBot !== undefined ? { isBot: mention.isBot } : {}),
-      });
-    }
-  }
-  return out;
 }
 
 function replyQuoteTargetForMessage(

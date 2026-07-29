@@ -242,10 +242,9 @@ async function safeFetchRaw(channel: LarkChannel, messageId: string): Promise<Ap
 }
 
 /**
- * Render one or more quoted contexts as an XML block intended to sit at the
- * top of the prompt body (after `<bridge_context>`, before the user's actual
- * question). Returns empty string when there are no quotes — keeps callers
- * concatenating without conditional checks.
+ * Legacy XML renderer retained for external callers. Normal bridge turns use
+ * the compact human-readable quote supplement built in `agent/prompt.ts` and
+ * never add a bridge envelope to the user's conversation.
  */
 export function renderQuotedBlock(quotes: QuotedContext[]): string {
   if (quotes.length === 0) return '';

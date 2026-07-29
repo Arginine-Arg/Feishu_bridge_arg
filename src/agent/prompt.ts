@@ -73,7 +73,12 @@ export interface BridgePromptAttachment {
 }
 
 export interface BuildAgentPromptInput {
-  context: BridgePromptContext;
+  /**
+   * Kept for source compatibility with older integrations. Conversation
+   * routing metadata belongs to the bridge, not the agent's user turn.
+   */
+  context?: BridgePromptContext;
+  /** @deprecated Bridge runtime instructions are no longer injected into user turns. */
   instructions?: string[];
   userInput: string;
   topicContext?: BridgePromptTopicMessage[];
@@ -84,30 +89,66 @@ export interface BuildAgentPromptInput {
 }
 
 export function buildAgentPrompt(input: BuildAgentPromptInput): string {
-  const sections = [
-    promptSection('bridge_context', input.context),
-    input.instructions && input.instructions.length > 0
-      ? promptSection('bridge_instructions', input.instructions)
-      : undefined,
-    input.topicContext && input.topicContext.length > 0
-      ? promptSection('topic_context', input.topicContext)
-      : undefined,
-    input.quotedMessages && input.quotedMessages.length > 0
-      ? promptSection('quoted_messages', input.quotedMessages)
-      : undefined,
-    input.interactiveCards && input.interactiveCards.length > 0
-      ? promptSection('interactive_cards', input.interactiveCards)
-      : undefined,
-    input.comment ? promptSection('comment_context', input.comment) : undefined,
-    promptSection('user_input', {
-      text: input.userInput,
-      ...(input.attachments && input.attachments.length > 0
-        ? { attachments: input.attachments }
-        : {}),
-    }),
-  ];
+  // A bridged turn is a user turn, not a system-message transport. In
+  // particular, do not make normal chat pay to re-send routing ids, bridge
+  // operational rules, or a JSON/XML envelope that Codex will echo in tmux.
+  // Supplemental material is included only when the user actually supplied
+  // it, in a compact human-readable form that preserves the needed paths and
+  // source content.
+  const sections = [input.userInput];
+
+  if (input.topicContext && input.topicContext.length > 0) {
+    sections.push(
+      [
+        '此前话题内容：',
+        ...input.topicContext.map((message, index) =>
+          `--- ${index + 1} ---\n${message.content}`),
+      ].join('\n'),
+    );
+  }
+  if (input.quotedMessages && input.quotedMessages.length > 0) {
+    sections.push(
+      [
+        '引用内容：',
+        ...input.quotedMessages.map((message, index) =>
+          `--- ${index + 1} ---\n${message.content}`),
+      ].join('\n'),
+    );
+  }
+  if (input.interactiveCards && input.interactiveCards.length > 0) {
+    sections.push(
+      [
+        '交互卡片内容：',
+        ...input.interactiveCards.map((card) => safeJsonStringify(card.content)),
+      ].join('\n'),
+    );
+  }
+  if (input.comment) {
+    sections.push(
+      [
+        '文档评论：',
+        input.comment.question,
+        ...(input.comment.quote ? [`选中文本：${input.comment.quote}`] : []),
+      ].join('\n'),
+    );
+  }
+  if (input.attachments && input.attachments.length > 0) {
+    sections.push(
+      [
+        '本地附件：',
+        ...input.attachments.map((attachment) => formatAttachment(attachment)),
+      ].join('\n'),
+    );
+  }
 
   return sections.filter(Boolean).join('\n\n');
+}
+
+function formatAttachment(attachment: BridgePromptAttachment): string {
+  if (attachment.decision && attachment.decision !== 'accepted') {
+    return `- ${attachment.kind}: 无法读取（${attachment.rejectionReason ?? attachment.decision}）`;
+  }
+  return `- ${attachment.kind}: ${attachment.path}${attachment.mime ? ` (${attachment.mime})` : ''}`;
 }
 
 export function promptSection(tag: string, value: unknown): string {

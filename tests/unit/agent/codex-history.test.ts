@@ -6,7 +6,6 @@ import {
   CodexHistoryError,
   listCodexThreadHistory,
 } from '../../../src/session/codex-history.js';
-import { buildAgentPrompt } from '../../../src/agent/prompt.js';
 
 interface FakeCodex {
   dir: string;
@@ -131,16 +130,15 @@ describe('Codex thread history provider', () => {
 
   it('summarizes bridge-prefixed Codex previews using the real user input section', async () => {
     const fake = await createFakeCodex({
-      firstPreview: `# arg-bridge 运行约定\n\n## user_message\n\n${buildAgentPrompt({
-        context: {
-          chatId: 'oc_secret',
-          chatType: 'p2p',
-          senderId: 'ou_secret',
-          source: 'im',
-        },
-        instructions: ['internal bridge instruction'],
-        userInput: 'Codex 真实用户问题\n\n第二行',
-      })}`,
+      firstPreview: [
+        '# arg-bridge 运行约定',
+        '',
+        '## user_message',
+        '',
+        '<user_input>',
+        '{"text":"Codex 真实用户问题\\n\\n第二行"}',
+        '</user_input>',
+      ].join('\n'),
     });
     cleanup.push(fake.dir);
 

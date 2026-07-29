@@ -1,7 +1,5 @@
 import { createHash } from 'node:crypto';
 import { isStructuredLiveInteraction } from '../agent/live-interaction-detection';
-import { log } from '../core/logger';
-import { BRIDGE_AGENT_SYSTEM_PROMPT } from './prompt';
 
 export type BridgeInputKind = 'task' | 'native-command' | 'terminal-control';
 export type BridgePresentation = 'markdown' | 'card';
@@ -24,12 +22,6 @@ export interface BridgeAgentDecision {
   input_sha256?: unknown;
   kind?: unknown;
   presentation?: unknown;
-}
-
-interface ValidatedBridgeAgentDecision {
-  input_sha256: string;
-  kind: BridgeInputKind;
-  presentation: BridgePresentation;
 }
 
 export interface BridgeAgentClassifier {
@@ -118,27 +110,12 @@ export class BridgeAgent {
   }
 
   async route(input: BridgeRouteInput): Promise<BridgeRoute> {
-    const route = deterministicRoute(input);
-    if (!this.classifier) return route;
-
-    try {
-      const decision = await this.classifier.classify({
-        systemPrompt: BRIDGE_AGENT_SYSTEM_PROMPT,
-        userInput: input.userInput,
-        inputSha256: route.inputSha256,
-      });
-      if (!isValidDecision(decision, route.inputSha256)) return route;
-      return {
-        ...route,
-        kind: decision.kind,
-        presentation: decision.presentation,
-      };
-    } catch (err) {
-      log.warn('bridge-agent', 'classifier-failed', {
-        err: err instanceof Error ? err.message : String(err),
-      });
-      return route;
-    }
+    // Routing is a control-plane operation. It must be immediate, token-free,
+    // and incapable of changing a task into a picker based on an auxiliary
+    // model's interpretation. Keep the optional classifier API for backward
+    // compatibility, but never put user turns on that network path.
+    void this.classifier;
+    return deterministicRoute(input);
   }
 
   classifyOutput(text: string): BridgeOutputKind {
@@ -175,20 +152,6 @@ function deterministicRoute(input: BridgeRouteInput): BridgeRoute {
     inputSha256,
     ...(input.inputMode ? { inputMode: input.inputMode } : {}),
   };
-}
-
-function isValidDecision(
-  decision: BridgeAgentDecision | undefined,
-  inputSha256: string,
-): decision is ValidatedBridgeAgentDecision {
-  return Boolean(
-    decision &&
-      decision.input_sha256 === inputSha256 &&
-      (decision.kind === 'task' ||
-        decision.kind === 'native-command' ||
-        decision.kind === 'terminal-control') &&
-      (decision.presentation === 'markdown' || decision.presentation === 'card'),
-  );
 }
 
 function looksLikeTerminalPicker(text: string): boolean {

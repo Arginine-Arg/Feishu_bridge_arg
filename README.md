@@ -13,6 +13,7 @@ For a product walkthrough, see the [Feishu document](https://larkcommunity.feish
 - **COT process messages**: optionally send a process message with agent progress text and tool calls, then send the final answer separately.
 - **Session continuity**: each chat, topic, or document comment thread keeps its own session.
 - **Persistent tmux execution**: each chat or topic runs one native Claude/Codex CLI inside tmux. Normal messages and native slash commands share that same terminal context.
+- **Clean transport boundary**: ordinary chat is forwarded as the user's text, without bridge XML, routing IDs, or operational instructions. Only an actual reply quote, card, topic context, or downloaded attachment is added when present.
 - **Queueing and batching**: messages sent in quick succession are handled together; messages sent during a run are queued for the next turn, while commands like `/new`, `/cd`, `/ws use`, and `/stop` can interrupt the current task.
 - **Multiple workspaces**: use `/cd` to switch the current project, and `/ws` to save and reuse common project directories.
 - **Images and files**: send them to the bot directly, and the bridge downloads them locally for the agent.
@@ -41,7 +42,7 @@ Install a pinned release or use a writable custom npm prefix when required:
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 0.6.49
+sh /tmp/install-arg-bridge.sh --version 0.6.50
 # Example for a machine without permission to write npm's configured global prefix:
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -85,10 +86,10 @@ Release tarballs are preferred. If a Git install is required, keep both compatib
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.49"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.50"
 ```
 
-`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.49`.
+`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.50`.
 
 ### 4. Node or npm global-prefix errors
 
@@ -261,17 +262,11 @@ DMs do not require an @ mention. Groups and topic groups require `@bot` by defau
 
 ## Execution and routing
 
-Normal user turns are delivered as one typed, escaped envelope: text, reply quotes, CardKit JSON, topic context, and downloaded attachment paths stay together with their provenance. Native CLI slash commands and picker controls are intentionally sent raw to the terminal because they target the Codex/Claude TUI rather than the conversational prompt. The optional Bridge Agent can only classify route and presentation metadata; its response is validated against a SHA-256 of the original input and cannot rewrite terminal stdin.
+An ordinary message is forwarded as the exact user text. Bridge-owned metadata such as chat IDs, account identity, runtime restrictions, and tmux state stays in the bridge process rather than being injected into the Claude/Codex conversation. This avoids token waste, prevents prompt echoes from entering terminal history, and keeps a regular task independent of bridge internals.
 
-Set all three variables to enable that optional classifier:
+Only user-provided context is appended when needed: a reply quote, card content, prior topic content, a document comment, or a verified local attachment path. Native CLI slash commands and picker controls are intentionally sent raw to the terminal because they control the Codex/Claude TUI rather than a conversational turn. Routing is deterministic and local; normal message delivery never waits for an auxiliary model-classification request.
 
-```bash
-export ARG_BRIDGE_AGENT_ENDPOINT=https://example.invalid/v1
-export ARG_BRIDGE_AGENT_MODEL=your-lightweight-model
-export ARG_BRIDGE_AGENT_API_KEY=your-api-key
-```
-
-Without them, the deterministic router provides the same safe pass-through behavior.
+If a native picker was left open by an earlier command, a new ordinary task or a new native slash command first dismisses that stale picker and then submits the requested input. Only an explicit picker control (`1`, `down`, `enter`, `esc`, `ctrl+c`, and so on) continues an active picker.
 
 **Interactive prompts become cards**: when the agent calls `AskUserQuestion` (pick one) or `ExitPlanMode` (approve a plan), the bridge renders it as a Lark card with buttons; click to answer and your choice resumes the session on the next turn — no hand-rolled card needed.
 
@@ -281,6 +276,7 @@ Long conversations / tasks are not cut off by a fixed time limit, but two behavi
 
 - **Queued messages (looks unresponsive)**: while a run is active on the same chat/topic, a new ordinary message does **not** interrupt it — it queues for after the current run. Busy notices are limited to one per 30 seconds, so later progress checks still receive a liveness reply without spamming rapid bursts. Read-only `/status` and `/session status` checks do not discard queued work. **Send `/stop` to interrupt now.**
 - **Streaming-card rollover and degradation**: Feishu/Lark automatically closes streaming cards after about 10 minutes. The bridge starts a continuation card every 8 minutes while the run is still active. Each continuation begins at a text cursor, so it contains only newly produced output rather than replaying the accumulated transcript. If a card is withdrawn or invalidated mid-run (Feishu `230011`), the bridge keeps draining the agent and **posts the full answer as a fresh message**.
+- **Terminal-history isolation**: live tmux capture is scoped to the current prompt and uses an append-only delivery cursor. Redraws, prior terminal output, and legacy bridge envelopes are discarded rather than sent again; newly produced final lines remain eligible for delivery after a long task.
 - **Delivery policy (control without interruption)**: `/output live` streams progress and the final answer, `/output final` posts only the terminal answer, and `/output off` keeps the agent running while suppressing agent-originated chat output. This is independent of `/timeout`.
 - **Persistent tmux identity**: a scope records its managed tmux session and currently adopted agent pane. Closing a local terminal, detaching tmux, or restarting arg-bridge does not create a new native conversation. If you manually run `codex resume` or `claude --resume` in a new selected pane of that managed session, the bridge adopts and persists that pane; later Feishu input and `/tmux tail` target the resumed conversation. A real reboot of the host that runs tmux necessarily ends its processes; move the bridge and tmux to the durable server host for work that must survive client shutdowns.
 

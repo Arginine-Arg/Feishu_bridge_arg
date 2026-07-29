@@ -531,11 +531,19 @@ export class LiveTerminalSession {
         const terminalText = event.terminalText ?? event.text;
         if (terminalText && isLiveTerminalInteraction(terminalText)) {
           startupInteractionText = terminalText;
-          if (!startupInteractionEventQueued) {
+          // A picker that was already on screen belongs to an earlier native
+          // command. Only an explicit control input may continue it. A normal
+          // task or a new slash command dismisses it below instead of turning
+          // that task into an unsolicited Feishu selection card.
+          if (inputMode === 'control' && !startupInteractionEventQueued) {
             startupInteractionEventQueued = true;
             push({ type: 'interactive', text: terminalText, phase: 'startup' });
             log.info('agent-live', 'startup-interaction', {
               textPreview: previewLiveText(terminalText),
+            });
+          } else if (inputMode !== 'control') {
+            log.info('agent-live', 'startup-interaction-dismiss-pending', {
+              inputMode: inputMode ?? 'task',
             });
           }
         }
@@ -676,53 +684,52 @@ export class LiveTerminalSession {
       await this.waitForInputReady(inputGraceMs);
       if (!done) {
         if (startupInteractionText && inputMode !== 'control') {
-          // Leave the TUI untouched while Feishu renders the confirmation
-          // card. The channel defers this prompt, and the callback is
-          // prioritized so its key reaches the persistent session first.
-          done = true;
-          if (timer) clearTimeout(timer);
-          push({ type: 'done', terminationReason: 'normal' });
-        } else {
-          this.cleaner.resetTurn();
-          output.setSnapshotBaseline(this.lastTerminalSnapshot);
-          output.setHistoryBaseline(this.lastTerminalHistory);
-          if (commandMode && !startupInteractionText) {
-            log.info('agent-live', 'command-clear', { sequence: 'esc ctrl-a ctrl-k' });
-            await this.clearPendingInput();
-            this.cleaner.resetTurn();
-          }
-          acceptingOutput = true;
-          const controlKeys = inputMode === 'control' ? parseLiveControlSequence(prompt) : null;
-          if (controlKeys) {
-            // Send each key as its own write so the tmux backend (which matches a
-            // single key per stdin chunk) sees them individually; a small gap keeps
-            // the writes from coalescing into one unrecognized chunk.
-            for (let i = 0; i < controlKeys.length; i++) {
-              if (i > 0) await delay(CONTROL_KEY_GAP_MS);
-              this.write(controlKeys[i]!);
-            }
-          } else {
-            if (commandMode) log.info('agent-live', 'command-submit', { commandText: prompt });
-            if (inputMode === 'control' && shouldDeferControlLiteralSubmit(prompt)) {
-              log.info('agent-live', 'control-literal-type', { input: prompt });
-              this.write(prompt);
-              controlLiteralConfirmTimer = setTimeout(() => {
-                controlLiteralConfirmTimer = undefined;
-                if (done || sawAcceptedOutput) return;
-                log.info('agent-live', 'control-literal-confirm', { input: prompt });
-                this.write('\r');
-              }, CONTROL_LITERAL_CONFIRM_DELAY_MS);
-            } else {
-              this.write(`${prompt}\r`);
-              scheduleNormalSubmitRetry();
-            }
-          }
-          if (commandMode && isStatusLiveCommand(prompt)) arm(idleMs);
-          else if (commandMode && isKnownSilentLiveCommand(prompt)) arm(idleMs);
-          else if (commandMode && isSlowSilentLiveCommand(prompt)) {
-            arm(noOutputIdleMs(prompt, idleMs));
-          } else arm(startupTimeoutMs);
+          log.info('agent-live', 'startup-interaction-dismiss', {
+            inputMode: inputMode ?? 'task',
+          });
+          this.write('\x1B');
+          await delay(COMMAND_ESCAPE_SETTLE_MS);
+          startupInteractionText = undefined;
         }
+        this.cleaner.resetTurn();
+        output.setSnapshotBaseline(this.lastTerminalSnapshot);
+        output.setHistoryBaseline(this.lastTerminalHistory);
+        if (commandMode) {
+          log.info('agent-live', 'command-clear', { sequence: 'esc ctrl-a ctrl-k' });
+          await this.clearPendingInput();
+          this.cleaner.resetTurn();
+        }
+        acceptingOutput = true;
+        const controlKeys = inputMode === 'control' ? parseLiveControlSequence(prompt) : null;
+        if (controlKeys) {
+          // Send each key as its own write so the tmux backend (which matches a
+          // single key per stdin chunk) sees them individually; a small gap keeps
+          // the writes from coalescing into one unrecognized chunk.
+          for (let i = 0; i < controlKeys.length; i++) {
+            if (i > 0) await delay(CONTROL_KEY_GAP_MS);
+            this.write(controlKeys[i]!);
+          }
+        } else {
+          if (commandMode) log.info('agent-live', 'command-submit', { commandText: prompt });
+          if (inputMode === 'control' && shouldDeferControlLiteralSubmit(prompt)) {
+            log.info('agent-live', 'control-literal-type', { input: prompt });
+            this.write(prompt);
+            controlLiteralConfirmTimer = setTimeout(() => {
+              controlLiteralConfirmTimer = undefined;
+              if (done || sawAcceptedOutput) return;
+              log.info('agent-live', 'control-literal-confirm', { input: prompt });
+              this.write('\r');
+            }, CONTROL_LITERAL_CONFIRM_DELAY_MS);
+          } else {
+            this.write(`${prompt}\r`);
+            scheduleNormalSubmitRetry();
+          }
+        }
+        if (commandMode && isStatusLiveCommand(prompt)) arm(idleMs);
+        else if (commandMode && isKnownSilentLiveCommand(prompt)) arm(idleMs);
+        else if (commandMode && isSlowSilentLiveCommand(prompt)) {
+          arm(noOutputIdleMs(prompt, idleMs));
+        } else arm(startupTimeoutMs);
       }
 
       while (!done || queue.length > 0) {
@@ -2146,7 +2153,7 @@ function normalizeScatteredCursorLines(input: string): string {
 }
 
 function stripKnownLiveNoise(input: string, prompt = ''): string {
-  return stripPromptMismatchedLiveContent(stripTerminalChrome(stripCompactNoise(input, [
+  return stripLegacyBridgePromptEcho(stripPromptMismatchedLiveContent(stripTerminalChrome(stripCompactNoise(input, [
     '⚠Ignoringmalformedagentroledefinition:duplicateagentrolenameweb-researcherdeclaredinthesameconfiglayer',
     'Ignoringmalformedagentroledefinition:duplicateagentrolenameweb-researcherdeclaredinthesameconfiglayer',
     'nfiglayer⚠Ignoringmalforntrole',
@@ -2164,14 +2171,50 @@ function stripKnownLiveNoise(input: string, prompt = ''): string {
     'Tip:NewBuildfasterwithCodex',
     '•Nopreviousmessagetoedit.',
     'Nopreviousmessagetoedit.',
-  ]), prompt), prompt)
+  ]), prompt), prompt))
     .replace(/(^|\n)\s*`\s*(?=\n|$)/g, '$1')
     .replace(/\n{3,}/g, '\n\n')
     .replace(/\n{2,}$/g, '\n')
     .trimStart();
 }
 
-function sanitizeLiveTurnOutput(input: string, prompt = ''): string {
+/**
+ * Older bridge versions could leave a structured bridge envelope in tmux
+ * history. It is prompt echo, not agent output, and must never reach a later
+ * Feishu stream after a wrapped terminal redraw.
+ */
+function stripLegacyBridgePromptEcho(input: string): string {
+  const out: string[] = [];
+  let inEnvelope = false;
+  const closingTag = /<\/(?:bridge_context|bridge_instructions|user_input)>/iu;
+  for (const line of input.split('\n')) {
+    const startsEnvelope =
+      /<(?:bridge_context|bridge_instructions|user_input)\b/iu.test(line) ||
+      /^\s*\["你在 bridge 进程中运行/u.test(line);
+    const looksLikeContextJson =
+      line.includes('"chatId"') && line.includes('"senderId"') && line.includes('"source"');
+    if (startsEnvelope || looksLikeContextJson) {
+      inEnvelope = !closingTag.test(line);
+      continue;
+    }
+    if (inEnvelope) {
+      if (closingTag.test(line)) inEnvelope = false;
+      // Terminal history can crop the closing tag while retaining the next
+      // Codex event. Do not let a stale prompt swallow the actual answer.
+      else if (/^\s*•\s+/u.test(line)) {
+        inEnvelope = false;
+        out.push(line);
+      }
+      continue;
+    }
+    // A cropped screen can retain a closing tag while dropping its opening.
+    if (closingTag.test(line)) continue;
+    out.push(line);
+  }
+  return out.join('\n');
+}
+
+export function sanitizeLiveTurnOutput(input: string, prompt = ''): string {
   const stripped = stripKnownLiveNoise(input, prompt);
   if (!stripped.trim()) return '';
   return isLikelyCodexRoleWarningFragment(stripped) ? '' : stripped;

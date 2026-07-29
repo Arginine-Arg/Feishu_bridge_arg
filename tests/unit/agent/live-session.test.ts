@@ -16,6 +16,7 @@ import {
   encodeTmuxInputFrame,
   liveTmuxIdentity,
   managedTmuxIdentity,
+  sanitizeLiveTurnOutput,
   scopeLiveSnapshotToPrompt,
   undeliveredSnapshotSuffix,
 } from '../../../src/agent/live-session';
@@ -267,6 +268,23 @@ describe('tmux input framing and snapshots', () => {
         '[y/n]',
       ].join('\n'),
     );
+  });
+
+  it('removes legacy bridge prompt echoes without dropping the following answer', () => {
+    const echoed = [
+      '<bridge_context>',
+      '{"chatId":"oc_secret","senderId":"ou_secret","source":"im"}',
+      '</bridge_context>',
+      '<bridge_instructions>',
+      '["你在 bridge 进程中运行"]',
+      '</bridge_instructions>',
+      '<user_input>',
+      '{"text":"inspect this image"}',
+      '</user_input>',
+      '• 最终答复完整可见。',
+    ].join('\n');
+
+    expect(sanitizeLiveTurnOutput(echoed, 'inspect this image')).toBe('• 最终答复完整可见。');
   });
 
   it('keeps native picker redraws for every command that opens one', () => {
@@ -748,7 +766,7 @@ setInterval(() => {}, 1000);
     expect(textOf(events)).toBe('clean answer\n');
   });
 
-  it('surfaces a startup confirmation without submitting the pending prompt', async () => {
+  it('dismisses a stale startup picker before submitting a normal task', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-startup-interaction-test-'));
     const bin = join(dir, 'fake-startup-interaction-agent.mjs');
     const inputTrace = join(dir, 'input-trace.txt');
@@ -759,9 +777,16 @@ import { appendFileSync, writeFileSync } from 'node:fs';
 writeFileSync(${JSON.stringify(inputTrace)}, '');
 process.stdin.setEncoding('utf8');
 if (process.stdin.isTTY) process.stdin.setRawMode(true);
+let pickerOpen = true;
 process.stdin.on('data', (chunk) => {
   appendFileSync(${JSON.stringify(inputTrace)}, chunk);
-  if (chunk.includes('\\r')) process.stdout.write('startup-choice-accepted\\n');
+  if (chunk.includes('\\x1b')) {
+    pickerOpen = false;
+    process.stdout.write('picker-dismissed\\n');
+  }
+  if (!pickerOpen && chunk.includes('pending task') && chunk.includes('\\r')) {
+    process.stdout.write('task-submitted\\n');
+  }
 });
 setTimeout(() => process.stdout.write([
   'WARNING: Claude Code running in Bypass Permissions mode',
@@ -790,23 +815,12 @@ setInterval(() => {}, 1000);
       startupTimeoutMs: 5_000,
     });
 
-    const startupRun = session.run('startup-interaction-run', 'pending task', dir);
-    // Reproduce a busy bridge/runtime that does not subscribe immediately.
-    // Startup prompts emitted in this window must still block task submission.
-    await testDelay(200);
-    const blocked = await collect(startupRun.events);
-    expect(interactionsOf(blocked)).toEqual([
-      expect.objectContaining({ type: 'interactive', phase: 'startup' }),
-    ]);
-    expect(await readFile(inputTrace, 'utf8')).toBe('');
-
-    const accepted = await collect(
-      session.run('startup-interaction-choice', 'down enter', dir, 'control').events,
-    );
+    const events = await collect(session.run('startup-interaction-run', 'pending task', dir).events);
     await pool.closeAll();
 
-    expect(await readFile(inputTrace, 'utf8')).toBe('\x1B[B\r');
-    expect(textOf(accepted)).toBe('startup-choice-accepted\n');
+    expect(interactionsOf(events)).toEqual([]);
+    expect(await readFile(inputTrace, 'utf8')).toContain('\x1Bpending task\r');
+    expect(textOf(events)).toContain('task-submitted\n');
   }, 15_000);
 
   it('submits a pending task when startup history only contains interaction words', async () => {

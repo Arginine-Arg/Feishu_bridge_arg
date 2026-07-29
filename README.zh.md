@@ -13,6 +13,7 @@
 - **COT 过程消息**：可选先发一条过程消息展示 agent 的阶段性文本和工具调用，再单独发送最终答案。
 - **会话延续**：每个聊天、话题或文档评论有自己的会话，不会互相串。
 - **常驻 tmux 执行**：每个 chat/topic 在 tmux 中运行一个原生 Claude/Codex CLI；普通消息和原生斜杠命令共享同一终端上下文。
+- **干净传输边界**：普通消息按用户原文转发，不携带 bridge XML、路由 ID 或运行指令；仅在真实存在时附加引用、卡片、话题上下文或已下载附件。
 - **排队与消息合并**：短时间连续发送的消息会合并处理；任务运行中收到的普通消息会排队到下一轮，`/new`、`/cd`、`/ws use`、`/stop` 这类命令可以中断当前任务。
 - **多工作空间**：用 `/cd` 切换当前项目，用 `/ws` 保存和复用常用项目目录。
 - **图片 / 文件**：直接发给 bot，bridge 下载到本地后交给本机 agent 处理。
@@ -41,7 +42,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 0.6.49
+sh /tmp/install-arg-bridge.sh --version 0.6.50
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -85,10 +86,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.49"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.50"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.49`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.50`。
 
 ### 4. Node 或 npm 全局目录错误
 
@@ -261,17 +262,11 @@ arg-bridge profile export <name> --include-secrets --yes
 
 ## 执行与路由
 
-普通用户任务会以一份带类型且转义的上下文信封送入 agent：正文、引用消息、CardKit JSON、话题上下文和已下载附件路径会连同来源一起保留。原生 CLI 斜杠命令和选择器按键则有意原样发送到终端，因为它们控制的是 Codex/Claude TUI，而不是对话提示词。Bridge Agent 可选调用 OpenAI 兼容的轻量模型，只生成路由和展示元数据；其输出会校验原始输入的 SHA-256，且没有改写 stdin 的字段。
+普通消息按用户原文进入 agent。聊天 ID、账户身份、运行限制和 tmux 状态等 bridge 自身元数据留在 bridge 进程内，不再注入 Claude/Codex 对话。这样不会浪费 token，也不会把提示词回显写入终端历史；普通任务完全不依赖 bridge 的内部描述。
 
-同时设置以下三个变量可启用该可选分类器：
+仅当用户实际提供时，才附加必要上下文：引用内容、卡片内容、此前话题、文档评论或已验证的本地附件路径。原生 CLI 斜杠命令和选择器按键仍原样送入终端，因为它们控制的是 Codex/Claude TUI，而不是一次对话输入。路由由本地确定性逻辑完成，普通消息不会等待额外模型分类请求。
 
-```bash
-export ARG_BRIDGE_AGENT_ENDPOINT=https://example.invalid/v1
-export ARG_BRIDGE_AGENT_MODEL=your-lightweight-model
-export ARG_BRIDGE_AGENT_API_KEY=your-api-key
-```
-
-未设置时使用确定性的安全直通路由。
+若此前的原生选择器仍停在屏幕上，新的普通任务或新的原生斜杠命令会先退出这个遗留选择器，再提交当前输入。只有明确的选择器控制输入（如 `1`、`down`、`enter`、`esc`、`ctrl+c`）会继续一个活动选择器。
 
 **交互式提问自动变卡片**：agent 调用 `AskUserQuestion`（多选一）或 `ExitPlanMode`（计划确认）时，bridge 会把它渲染成带按钮的飞书卡片；点按钮即可回答，你的选择会作为下一轮跟进消息续上会话。无需 agent 自己拼卡片。
 
@@ -281,6 +276,7 @@ export ARG_BRIDGE_AGENT_API_KEY=your-api-key
 
 - **消息排队(看起来没反应)**:同一个 chat / 话题已经有任务在跑时,你新发的普通消息**不会打断它,会排队**到当前任务结束后处理。忙时提示按 30 秒限频,所以稍后再次询问仍会收到存活回执,短时间连发又不会刷屏。只读的 `/status` 和 `/session status` 不会再清空已排队消息。**要立刻打断,发 `/stop`。**
 - **流式卡片续接与失效降级**:飞书/Lark 会在约 10 分钟后自动关闭流式卡片。任务仍在运行时,bridge 每 8 分钟新建一张续接卡片；每一段从文本游标继续，只包含之后新产生的输出，不会重放已发送的完整历史。如果卡片被撤回或失效(飞书 `230011 withdrawn`),bridge 仍会继续消费 agent 输出,并**把完整答案作为一条全新消息补发**。
+- **终端历史隔离**：live tmux 只捕获当前提示词对应的输出，并以仅追加的投递游标去重。终端重绘、早先任务内容和旧版 bridge 信封都会被丢弃，长任务最后新增的答复行仍会发送。
 - **投递策略（不中断控制）**：`/output live` 持续显示过程和最终答复，`/output final` 只发送最终答复，`/output off` 静默 agent 发出的消息但让任务继续运行；它和 `/timeout` 完全独立。
 - **持久 tmux 身份**：每个 scope 会保存 bridge 托管 tmux session 及已接管的 agent pane。关闭本地终端、detach tmux 或重启 arg-bridge 不会创建新的原生对话。若你在同一托管 session 的新选中 pane 中手动运行 `codex resume` 或 `claude --resume`，bridge 会接管并持久记录该 pane；后续飞书输入和 `/tmux tail` 都会指向已恢复的对话。tmux 所在主机真的重启时，进程必然结束；需要跨客户端关机持续执行时，应把 bridge 和 tmux 部署在稳定的服务器主机上。
 

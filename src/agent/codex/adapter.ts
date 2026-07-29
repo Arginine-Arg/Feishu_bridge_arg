@@ -6,7 +6,6 @@ import { log } from '../../core/logger';
 import { AsyncEventQueue } from '../event-queue';
 import { mergeProcessEnv, spawnProcess, type SpawnedProcessByStdio } from '../../platform/spawn';
 import { SpawnFailed } from '../../runtime/errors';
-import { prefixBridgeSystemPrompt } from '../bridge-system-prompt';
 import { ensureBundledCodexSkill } from '../bundled-skill';
 import {
   buildLarkChannelEnv,
@@ -71,7 +70,6 @@ export class CodexAdapter implements AgentAdapter {
   private readonly liveIdleMs: number | undefined;
   private readonly liveSessions = new LiveSessionPool();
   private readonly tmuxBindings: TmuxBindingController;
-  private botIdentity: AgentBotIdentity | undefined;
 
   constructor(opts: CodexAdapterOptions) {
     this.binary = opts.binary;
@@ -112,8 +110,9 @@ export class CodexAdapter implements AgentAdapter {
     };
   }
 
-  setBotIdentity(identity: AgentBotIdentity): void {
-    this.botIdentity = identity;
+  setBotIdentity(_identity: AgentBotIdentity): void {
+    // Identity remains bridge-owned metadata; it is intentionally not added
+    // to a user's Codex prompt.
   }
 
   private async tmuxStatus(scopeId: string, cwd?: string): Promise<TmuxBindingStatus> {
@@ -237,10 +236,9 @@ export class CodexAdapter implements AgentAdapter {
       log.warn('agent', 'stdin-error', { message: err.message });
     });
     const events = createEventStream(child, stderrChunks, () => runtimeError, () => stopReason);
-    child.stdin.end(
-      opts.threadId ? opts.prompt : prefixBridgeSystemPrompt(opts.prompt, this.botIdentity),
-      'utf8',
-    );
+    // The bridge control plane is carried by process capabilities, not by
+    // prepending a second system prompt to every new Codex conversation.
+    child.stdin.end(opts.prompt, 'utf8');
 
     const stopGraceMs = opts.stopGraceMs ?? this.defaultStopGraceMs;
 
