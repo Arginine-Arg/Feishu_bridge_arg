@@ -41,7 +41,7 @@ Install a pinned release or use a writable custom npm prefix when required:
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 0.6.36
+sh /tmp/install-arg-bridge.sh --version 0.6.49
 # Example for a machine without permission to write npm's configured global prefix:
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -85,10 +85,10 @@ Release tarballs are preferred. If a Git install is required, keep both compatib
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.36"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.49"
 ```
 
-`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.36`.
+`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.49`.
 
 ### 4. Node or npm global-prefix errors
 
@@ -247,7 +247,7 @@ If a profile was created with the wrong agent kind, stop or unregister any match
 | `/invite group` | Allow the current group to use the bot |
 | `/invite all group` | Allow all groups the bot has joined |
 | `/remove user @name`, `/remove admin @name`, `/remove group` | Remove access entries |
-| `/stop` | Stop the current run, including the card stop button |
+| `/stop` | Interrupt the current run with native Ctrl-C while preserving the tmux session; also available from the card stop button |
 | `/timeout [N\|off\|default]` | Set or clear the current session idle watchdog |
 | `/ps` | List local bridge processes |
 | `/exit <id\|#>` | Stop a bridge process |
@@ -280,9 +280,9 @@ Without them, the deterministic router provides the same safe pass-through behav
 Long conversations / tasks are not cut off by a fixed time limit, but two behaviors are worth knowing (optimized in this fork):
 
 - **Queued messages (looks unresponsive)**: while a run is active on the same chat/topic, a new ordinary message does **not** interrupt it — it queues for after the current run. Busy notices are limited to one per 30 seconds, so later progress checks still receive a liveness reply without spamming rapid bursts. Read-only `/status` and `/session status` checks do not discard queued work. **Send `/stop` to interrupt now.**
-- **Streaming-card rollover and degradation**: Feishu/Lark automatically closes streaming cards after about 10 minutes. The bridge starts a continuation card every 8 minutes while the run is still active. If a card is withdrawn or invalidated mid-run (Feishu `230011`), the bridge keeps draining the agent and **posts the full answer as a fresh message**.
+- **Streaming-card rollover and degradation**: Feishu/Lark automatically closes streaming cards after about 10 minutes. The bridge starts a continuation card every 8 minutes while the run is still active. Each continuation begins at a text cursor, so it contains only newly produced output rather than replaying the accumulated transcript. If a card is withdrawn or invalidated mid-run (Feishu `230011`), the bridge keeps draining the agent and **posts the full answer as a fresh message**.
 - **Delivery policy (control without interruption)**: `/output live` streams progress and the final answer, `/output final` posts only the terminal answer, and `/output off` keeps the agent running while suppressing agent-originated chat output. This is independent of `/timeout`.
-- **Persistent tmux identity**: a scope records its managed tmux session and currently adopted agent pane. Closing a local terminal, detaching tmux, or restarting arg-bridge does not create a new native conversation. A real reboot of the host that runs tmux necessarily ends its processes; move the bridge and tmux to the durable server host for work that must survive client shutdowns.
+- **Persistent tmux identity**: a scope records its managed tmux session and currently adopted agent pane. Closing a local terminal, detaching tmux, or restarting arg-bridge does not create a new native conversation. If you manually run `codex resume` or `claude --resume` in a new selected pane of that managed session, the bridge adopts and persists that pane; later Feishu input and `/tmux tail` target the resumed conversation. A real reboot of the host that runs tmux necessarily ends its processes; move the bridge and tmux to the durable server host for work that must survive client shutdowns.
 
 **Best practices for long tasks**: have the agent write full logs/reports to project files (`report.md`, `task.log`) and only post short progress + a final summary to Lark (cards have length limits); use `/status` for a non-destructive liveness check; use `/stop` to interrupt.
 
@@ -333,6 +333,12 @@ The bridge checks that a selected directory exists, is a directory, and is not a
 Every directory is resolved through the same broad-root policy as a workspace. Files remain subject to regular-file, symlink, realpath containment, and `attachments.maxFileBytes` checks in both the bridge and channel SDK. Do not add `/`, the home root, or an entire shared volume.
 
 When an agent produces a file during a task, it uses the bridge capability rather than a direct Lark upload: `arg-bridge sendfile <cwd-relative-path> [--caption "..."]`. The bridge binds that request to the current scope, reply target, workspace root, and file-size policy. Live terminals retain a profile-local opaque capability across turns and bridge restarts; the bridge refreshes its permitted root and reply target for each accepted run.
+
+### Bundled Codex skill
+
+The package contains the `arg-bridge-sendfile` Codex skill, but npm installation itself does not rely on a lifecycle hook to write into a user's Codex home. On the first Codex run prepared by arg-bridge, it automatically synchronizes `SKILL.md` to `CODEX_HOME/skills/arg-bridge-sendfile/` (or Codex's normal default home when `CODEX_HOME` is not set). Later runs refresh it when the bundled skill changes, so users do not need to install or copy it manually after upgrading the bridge.
+
+The skill tells Codex to use the scoped command above only when the user needs the actual artifact in Feishu/Lark. The file authorization remains enforced by the bridge; if skill synchronization cannot write to the selected Codex home, the run continues and `arg-bridge sendfile` remains available inside an active bridge task.
 
 ## Permission modes
 

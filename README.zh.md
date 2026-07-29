@@ -41,7 +41,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 0.6.36
+sh /tmp/install-arg-bridge.sh --version 0.6.49
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -85,10 +85,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.36"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.49"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.36`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.49`。
 
 ### 4. Node 或 npm 全局目录错误
 
@@ -247,7 +247,7 @@ arg-bridge profile export <name> --include-secrets --yes
 | `/invite group` | 允许当前群使用 bot |
 | `/invite all group` | 允许 bot 所在的所有群使用 |
 | `/remove user @某人`, `/remove admin @某人`, `/remove group` | 移除访问控制条目 |
-| `/stop` | 停止当前 run，也可点卡片停止按钮 |
+| `/stop` | 以原生 Ctrl-C 中断当前 run，同时保留 tmux 会话；也可点卡片停止按钮 |
 | `/timeout [N\|off\|default]` | 设置或清除当前会话的 idle watchdog |
 | `/ps` | 列出本机 bridge 进程 |
 | `/exit <id\|#>` | 停止指定 bridge 进程 |
@@ -280,9 +280,9 @@ export ARG_BRIDGE_AGENT_API_KEY=your-api-key
 长对话 / 长任务不会因为"跑太久"被固定时限掐断,但有两种表现要知道(本 fork 已针对性优化):
 
 - **消息排队(看起来没反应)**:同一个 chat / 话题已经有任务在跑时,你新发的普通消息**不会打断它,会排队**到当前任务结束后处理。忙时提示按 30 秒限频,所以稍后再次询问仍会收到存活回执,短时间连发又不会刷屏。只读的 `/status` 和 `/session status` 不会再清空已排队消息。**要立刻打断,发 `/stop`。**
-- **流式卡片续接与失效降级**:飞书/Lark 会在约 10 分钟后自动关闭流式卡片。任务仍在运行时,bridge 每 8 分钟新建一张续接卡片；如果卡片被撤回或失效(飞书 `230011 withdrawn`),bridge 仍会继续消费 agent 输出,并**把完整答案作为一条全新消息补发**。
+- **流式卡片续接与失效降级**:飞书/Lark 会在约 10 分钟后自动关闭流式卡片。任务仍在运行时,bridge 每 8 分钟新建一张续接卡片；每一段从文本游标继续，只包含之后新产生的输出，不会重放已发送的完整历史。如果卡片被撤回或失效(飞书 `230011 withdrawn`),bridge 仍会继续消费 agent 输出,并**把完整答案作为一条全新消息补发**。
 - **投递策略（不中断控制）**：`/output live` 持续显示过程和最终答复，`/output final` 只发送最终答复，`/output off` 静默 agent 发出的消息但让任务继续运行；它和 `/timeout` 完全独立。
-- **持久 tmux 身份**：每个 scope 会保存 bridge 托管 tmux session 及已接管的 agent pane。关闭本地终端、detach tmux 或重启 arg-bridge 不会创建新的原生对话。tmux 所在主机真的重启时，进程必然结束；需要跨客户端关机持续执行时，应把 bridge 和 tmux 部署在稳定的服务器主机上。
+- **持久 tmux 身份**：每个 scope 会保存 bridge 托管 tmux session 及已接管的 agent pane。关闭本地终端、detach tmux 或重启 arg-bridge 不会创建新的原生对话。若你在同一托管 session 的新选中 pane 中手动运行 `codex resume` 或 `claude --resume`，bridge 会接管并持久记录该 pane；后续飞书输入和 `/tmux tail` 都会指向已恢复的对话。tmux 所在主机真的重启时，进程必然结束；需要跨客户端关机持续执行时，应把 bridge 和 tmux 部署在稳定的服务器主机上。
 
 **长任务最佳实践**:
 
@@ -337,6 +337,12 @@ bridge 会检查所选目录存在、是目录，并且不是 `/`、Home 根、�
 每个目录都会经过与工作目录相同的宽泛根目录检查。bridge 和 channel SDK 仍会执行普通文件、符号链接、realpath 目录归属及 `attachments.maxFileBytes` 双重校验。不要加入 `/`、Home 根或整个共享磁盘。
 
 agent 在任务中产出文件时，应调用 bridge 能力而不是直接上传：`arg-bridge sendfile <相对当前 cwd 的路径> [--caption "..."]`。bridge 会把请求固定到当前 scope、回复目标、工作目录根和文件大小策略。live 终端可跨轮次和 bridge 重启保留 profile 本地的不透明能力令牌，而 bridge 会在每个获准运行开始时刷新允许目录和回复目标。
+
+### 内置 Codex skill
+
+安装包包含 `arg-bridge-sendfile` Codex skill，但 npm 安装阶段不会依赖 lifecycle hook 向用户的 Codex 目录写文件。arg-bridge 首次为 Codex 准备运行时，会自动把 `SKILL.md` 同步到 `CODEX_HOME/skills/arg-bridge-sendfile/`；未设置 `CODEX_HOME` 时则使用 Codex 的默认 home。之后每次运行都会检查内置版本，发生变化时自动刷新，因此用户升级 bridge 后不需要手动安装或复制该 skill。
+
+该 skill 只是在用户确实需要在飞书/Lark 收到实际产物时，引导 Codex 调用上面的 scoped 命令。文件授权始终由 bridge 校验；若选定 Codex home 不可写导致同步失败，当前任务仍可继续，活动 bridge 任务内的 `arg-bridge sendfile` 命令仍然可用。
 
 ## 权限模式
 
