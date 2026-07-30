@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.55",
+  version: "0.6.56",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -6090,6 +6090,34 @@ var TmuxBindingController = class {
     };
     await this.flushManaged();
   }
+  /**
+   * Rehydrate a live artifact grant after the bridge restarts. The target is
+   * restricted to the saved managed session for this scope; external bindings
+   * are deliberately excluded because their tmux session may carry multiple
+   * independent bridge scopes.
+   */
+  async restoreManagedArtifactDelivery(scopeId, artifact) {
+    const saved = this.managedTerminals[scopeId];
+    if (!saved) return false;
+    let terminal;
+    try {
+      terminal = revalidateManagedTerminal(saved, scopeId, this.profile, this.agentKind);
+    } catch {
+      return false;
+    }
+    for (const [key, value] of [
+      ["ARG_BRIDGE_ARTIFACT_SOCKET", artifact.socketPath],
+      ["ARG_BRIDGE_ARTIFACT_TOKEN", artifact.token]
+    ]) {
+      const result = spawnProcessSync(
+        "tmux",
+        ["-S", terminal.socketPath, "set-environment", "-t", saved.sessionName, key, value],
+        { stdio: "ignore" }
+      );
+      if (result.status !== 0) return false;
+    }
+    return true;
+  }
   bindingFor(scopeId, cwd) {
     const saved = this.bindings[scopeId];
     if (!saved) return void 0;
@@ -7384,6 +7412,25 @@ function setManagedMetadata() {
   setManagedActiveTarget();
 }
 
+function setManagedArtifactDeliveryEnvironment() {
+  if (!managed) return;
+  const socket = process.env.ARG_BRIDGE_ARTIFACT_SOCKET;
+  const token = process.env.ARG_BRIDGE_ARTIFACT_TOKEN;
+  if (!socket || !token) return;
+
+  // A managed session belongs to exactly one bridge scope. Keep this scoped
+  // capability in its tmux environment so a user-created pane can run
+  // codex --resume without losing artifact delivery. Never do this for an
+  // externally bound pane: one user tmux session can contain several scopes.
+  for (const [key, value] of [
+    ['ARG_BRIDGE_ARTIFACT_SOCKET', socket],
+    ['ARG_BRIDGE_ARTIFACT_TOKEN', token],
+  ]) {
+    const result = tmux(['set-environment', '-t', session, key, value]);
+    if (result.status !== 0) writeError('failed to restore managed artifact capability', result);
+  }
+}
+
 function setManagedActiveTarget() {
   if (!managed || !target) return;
   // This is deliberately tmux session metadata, not bridge-process memory.
@@ -7483,6 +7530,7 @@ if (managed) {
     process.exit(1);
   }
   setManagedMetadata();
+  setManagedArtifactDeliveryEnvironment();
 } else {
   const exists = tmux(['display-message', '-p', '-t', target, '#{pane_id}'], { stdio: 'ignore' });
   if (exists.status !== 0) {
@@ -8910,7 +8958,8 @@ var ClaudeAdapter = class {
       tail: async (scopeId, lineCount, cwd) => {
         const terminal = tmuxTerminalForStatus(await this.tmuxStatus(scopeId, cwd));
         return captureTmuxPaneTail(terminal, lineCount);
-      }
+      },
+      restoreArtifactDelivery: (scopeId, artifact) => this.tmuxBindings.restoreManagedArtifactDelivery(scopeId, artifact)
     };
   }
   setBotIdentity(_identity) {
@@ -9523,7 +9572,8 @@ var CodexAdapter = class {
       tail: async (scopeId, lineCount, cwd) => {
         const terminal = tmuxTerminalForStatus2(await this.tmuxStatus(scopeId, cwd));
         return captureTmuxPaneTail(terminal, lineCount);
-      }
+      },
+      restoreArtifactDelivery: (scopeId, artifact) => this.tmuxBindings.restoreManagedArtifactDelivery(scopeId, artifact)
     };
   }
   setBotIdentity(_identity) {
@@ -16975,6 +17025,13 @@ var ArtifactBroker = class {
     if (grant.persistent) this.schedulePersist();
     return true;
   }
+  /** Persistent grants are restored only into their matching managed tmux scope. */
+  persistentDeliveries() {
+    return [...this.persistentTokensByScope.entries()].flatMap(([scope, token]) => {
+      const grant = this.grants.get(token);
+      return grant?.persistent ? [{ scope, socketPath: this.socketPath, token }] : [];
+    });
+  }
   async close() {
     await this.flush();
     const server = this.server;
@@ -17765,6 +17822,16 @@ async function startChannel(deps) {
     artifactStateDir ? join24(artifactStateDir, "artifact-grants.json") : void 0
   );
   await artifactBroker.start();
+  if (agent.tmux?.restoreArtifactDelivery) {
+    const restored = await Promise.all(
+      artifactBroker.persistentDeliveries().map(async (grant) => ({
+        scope: grant.scope,
+        restored: await agent.tmux.restoreArtifactDelivery(grant.scope, grant).catch(() => false)
+      }))
+    );
+    const count = restored.filter((item) => item.restored).length;
+    if (count > 0) log.info("artifact", "managed-tmux-capabilities-restored", { count });
+  }
   const pending = new PendingQueue(DEBOUNCE_MS, (scope, batch) => {
     const firstMsg = batch[0];
     if (!firstMsg) return;
@@ -20575,15 +20642,23 @@ function formatAgo3(ms) {
 }
 
 // src/cli/commands/agent-sendfile.ts
+import { spawnSync as spawnSync4 } from "child_process";
 import { connect } from "net";
+function resolveAgentArtifactDelivery(env = process.env, readTmuxEnvironment = readTmuxSessionEnvironment) {
+  const socketPath = env.ARG_BRIDGE_ARTIFACT_SOCKET;
+  const token = env.ARG_BRIDGE_ARTIFACT_TOKEN;
+  if (socketPath && token) return { socketPath, token };
+  const resumedSocketPath = readTmuxEnvironment("ARG_BRIDGE_ARTIFACT_SOCKET", env);
+  const resumedToken = readTmuxEnvironment("ARG_BRIDGE_ARTIFACT_TOKEN", env);
+  return resumedSocketPath && resumedToken ? { socketPath: resumedSocketPath, token: resumedToken } : void 0;
+}
 async function runAgentSendFile(path, caption) {
-  const socketPath = process.env.ARG_BRIDGE_ARTIFACT_SOCKET;
-  const token = process.env.ARG_BRIDGE_ARTIFACT_TOKEN;
-  if (!socketPath || !token) {
-    throw new Error("\u5F53\u524D\u8FDB\u7A0B\u6CA1\u6709 bridge \u6587\u4EF6\u53D1\u9001\u80FD\u529B\uFF1B\u8BF7\u4ECE bridge agent \u4EFB\u52A1\u5185\u8C03\u7528");
+  const artifact = resolveAgentArtifactDelivery();
+  if (!artifact) {
+    throw new Error("\u5F53\u524D\u8FDB\u7A0B\u6CA1\u6709 bridge \u6587\u4EF6\u53D1\u9001\u80FD\u529B\uFF1B\u8BF7\u4ECE bridge agent \u4EFB\u52A1\u5185\u8C03\u7528\uFF0C\u6216\u5728\u6258\u7BA1 tmux session \u4E2D\u91CD\u542F bridge \u540E\u91CD\u8BD5");
   }
   const response = await new Promise((resolve5, reject4) => {
-    const socket = connect(socketPath);
+    const socket = connect(artifact.socketPath);
     let data = "";
     socket.setEncoding("utf8");
     socket.setTimeout(2e4, () => socket.destroy(new Error("\u7B49\u5F85 bridge \u6587\u4EF6\u53D1\u9001\u8D85\u65F6")));
@@ -20599,13 +20674,26 @@ async function runAgentSendFile(path, caption) {
       socket.end();
     });
     socket.on("connect", () => {
-      socket.write(`${JSON.stringify({ token, path, ...caption ? { caption } : {} })}
+      socket.write(`${JSON.stringify({ token: artifact.token, path, ...caption ? { caption } : {} })}
 `);
     });
   });
   if (response.ok !== true) throw new Error(typeof response.message === "string" ? response.message : "bridge \u6587\u4EF6\u53D1\u9001\u5931\u8D25");
   process.stdout.write(`${typeof response.message === "string" ? response.message : "\u6587\u4EF6\u5DF2\u53D1\u9001"}
 `);
+}
+function readTmuxSessionEnvironment(name, env) {
+  const pane = env.TMUX_PANE;
+  if (!pane || !/^%\d+$/u.test(pane) || !env.TMUX) return void 0;
+  const result = spawnSync4("tmux", ["show-environment", "-t", pane, name], {
+    env,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"]
+  });
+  if (result.status !== 0 || typeof result.stdout !== "string") return void 0;
+  const prefix = `${name}=`;
+  const line = result.stdout.trim();
+  return line.startsWith(prefix) ? line.slice(prefix.length) || void 0 : void 0;
 }
 
 // src/cli/index.ts

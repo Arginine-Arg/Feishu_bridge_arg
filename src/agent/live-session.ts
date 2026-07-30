@@ -1104,6 +1104,25 @@ function setManagedMetadata() {
   setManagedActiveTarget();
 }
 
+function setManagedArtifactDeliveryEnvironment() {
+  if (!managed) return;
+  const socket = process.env.ARG_BRIDGE_ARTIFACT_SOCKET;
+  const token = process.env.ARG_BRIDGE_ARTIFACT_TOKEN;
+  if (!socket || !token) return;
+
+  // A managed session belongs to exactly one bridge scope. Keep this scoped
+  // capability in its tmux environment so a user-created pane can run
+  // codex --resume without losing artifact delivery. Never do this for an
+  // externally bound pane: one user tmux session can contain several scopes.
+  for (const [key, value] of [
+    ['ARG_BRIDGE_ARTIFACT_SOCKET', socket],
+    ['ARG_BRIDGE_ARTIFACT_TOKEN', token],
+  ]) {
+    const result = tmux(['set-environment', '-t', session, key, value]);
+    if (result.status !== 0) writeError('failed to restore managed artifact capability', result);
+  }
+}
+
 function setManagedActiveTarget() {
   if (!managed || !target) return;
   // This is deliberately tmux session metadata, not bridge-process memory.
@@ -1203,6 +1222,7 @@ if (managed) {
     process.exit(1);
   }
   setManagedMetadata();
+  setManagedArtifactDeliveryEnvironment();
 } else {
   const exists = tmux(['display-message', '-p', '-t', target, '#{pane_id}'], { stdio: 'ignore' });
   if (exists.status !== 0) {

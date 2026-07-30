@@ -133,6 +133,14 @@ export class ArtifactBroker {
     return true;
   }
 
+  /** Persistent grants are restored only into their matching managed tmux scope. */
+  persistentDeliveries(): Array<{ scope: string; socketPath: string; token: string }> {
+    return [...this.persistentTokensByScope.entries()].flatMap(([scope, token]) => {
+      const grant = this.grants.get(token);
+      return grant?.persistent ? [{ scope, socketPath: this.socketPath, token }] : [];
+    });
+  }
+
   async close(): Promise<void> {
     await this.flush();
     const server = this.server;

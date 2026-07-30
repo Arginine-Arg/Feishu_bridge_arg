@@ -1255,7 +1255,7 @@ setInterval(() => {}, 1000);
       expect((await interruptedIterator.next()).value).toMatchObject({ type: 'system' });
       expect((await interruptedIterator.next()).value).toMatchObject({ type: 'text' });
       await interruptedTurn.stop();
-      await testDelay(250);
+      await waitForFileText(inputTrace, 'interrupt', 3_000);
       await interruptedIterator.return?.();
       expect(await readFile(inputTrace, 'utf8')).toContain('interrupt');
       expect(session.isAlive()).toBe(true);
@@ -1734,6 +1734,7 @@ setInterval(() => {}, 1000);
     const bin = join(dir, 'fake-tmux-ctrl-c-agent.mjs');
     const agentBin = join(dir, 'codex');
     const countFile = join(dir, 'starts.txt');
+    const capabilityFile = join(dir, 'capabilities.txt');
     const scopeKey = 'ctrl-c-scope';
     const signature = 'ctrl-c-signature';
     const { socketPath, sessionName } = liveTmuxIdentity(dir, scopeKey, signature);
@@ -1742,6 +1743,10 @@ setInterval(() => {}, 1000);
       `#!/usr/bin/env node
 import { appendFileSync } from 'node:fs';
 appendFileSync(${JSON.stringify(countFile)}, 'start\\n');
+appendFileSync(${JSON.stringify(capabilityFile)}, [
+  process.env.ARG_BRIDGE_ARTIFACT_SOCKET || '',
+  process.env.ARG_BRIDGE_ARTIFACT_TOKEN || '',
+].join('\\t') + '\\n');
 process.stdin.setEncoding('utf8');
 let buffer = '';
 process.on('SIGINT', () => process.exit(0));
@@ -1771,6 +1776,10 @@ setInterval(() => {}, 1000);
         command: agentBin,
         args: [bin],
         cwd: dir,
+        env: {
+          ARG_BRIDGE_ARTIFACT_SOCKET: join(dir, 'artifact-broker.sock'),
+          ARG_BRIDGE_ARTIFACT_TOKEN: 'resume-capability-token',
+        },
         signature,
         tmuxScopeId: scopeKey,
         tmuxAgentKind: 'codex',
@@ -1822,6 +1831,10 @@ setInterval(() => {}, 1000);
         '• second agent reply\n',
       );
       expect((await readFile(countFile, 'utf8')).trim().split('\n')).toEqual(['start', 'start']);
+      expect((await readFile(capabilityFile, 'utf8')).trim().split('\n')).toEqual([
+        `${join(dir, 'artifact-broker.sock')}\tresume-capability-token`,
+        `${join(dir, 'artifact-broker.sock')}\tresume-capability-token`,
+      ]);
 
       const paneStates = spawnSync(
         'tmux',
@@ -1844,6 +1857,80 @@ setInterval(() => {}, 1000);
       );
       expect(resumedPane.status).toBe(0);
       expect(resumedPane.stdout).toContain('second agent reply');
+    } finally {
+      await pool.closeAll();
+      spawnSync('tmux', ['-S', socketPath, 'kill-server'], { stdio: 'ignore' });
+    }
+  }, 20_000);
+
+  tmuxIt('restores artifact delivery in a split resume pane after the original pane closes', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-artifact-resume-test-'));
+    const bin = join(dir, 'fake-tmux-artifact-resume-agent.mjs');
+    const agentBin = join(dir, 'codex');
+    const capabilityFile = join(dir, 'capabilities.txt');
+    const scopeKey = 'artifact-resume-scope';
+    const signature = 'artifact-resume-signature';
+    const { socketPath, sessionName } = liveTmuxIdentity(dir, scopeKey, signature);
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs';
+appendFileSync(${JSON.stringify(capabilityFile)}, [
+  process.env.ARG_BRIDGE_ARTIFACT_SOCKET || '',
+  process.env.ARG_BRIDGE_ARTIFACT_TOKEN || '',
+].join('\\t') + '\\n');
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', () => process.stdout.write('• initial reply\\n›\\n'));
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+    await symlink(process.execPath, agentBin);
+
+    const pool = new LiveSessionPool();
+    try {
+      const session = pool.getOrCreate(scopeKey, {
+        command: agentBin,
+        args: [bin],
+        cwd: dir,
+        env: {
+          ARG_BRIDGE_ARTIFACT_SOCKET: join(dir, 'artifact-broker.sock'),
+          ARG_BRIDGE_ARTIFACT_TOKEN: 'split-resume-capability-token',
+        },
+        signature,
+        tmuxScopeId: scopeKey,
+        tmuxAgentKind: 'codex',
+        usePty: true,
+        backend: 'tmux',
+        idleMs: 200,
+        outputFlushMs: 30,
+        startupTimeoutMs: 1_500,
+      });
+      expect(textOf(await collect(session.run('artifact-resume-first', 'first task', dir).events))).toContain(
+        'initial reply',
+      );
+
+      const resumed = spawnSync(
+        'tmux',
+        [
+          '-S', socketPath,
+          'split-window', '-d', '-P', '-F', '#{session_name}:#{window_index}.#{pane_index}',
+          '-t', `${sessionName}:0.0`, '-c', dir,
+          agentBin, bin,
+        ],
+        { encoding: 'utf8' },
+      );
+      expect(resumed.status).toBe(0);
+      const resumedTarget = resumed.stdout.trim();
+      expect(spawnSync('tmux', ['-S', socketPath, 'select-pane', '-t', resumedTarget]).status).toBe(0);
+      expect(spawnSync('tmux', ['-S', socketPath, 'kill-pane', '-t', `${sessionName}:0.0`]).status).toBe(0);
+      await testDelay(400);
+
+      expect((await readFile(capabilityFile, 'utf8')).trim().split('\n')).toEqual([
+        `${join(dir, 'artifact-broker.sock')}\tsplit-resume-capability-token`,
+        `${join(dir, 'artifact-broker.sock')}\tsplit-resume-capability-token`,
+      ]);
     } finally {
       await pool.closeAll();
       spawnSync('tmux', ['-S', socketPath, 'kill-server'], { stdio: 'ignore' });
@@ -1916,7 +2003,7 @@ setInterval(() => {}, 1000);
     ).not.toBe(0);
 
     expect(textOf(events)).toContain('tmux:hello\n48 120\n48x120\n');
-  });
+  }, 15_000);
 
   tmuxIt('reports a managed terminal when the live helper starts', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-terminal-hook-test-'));
@@ -2956,6 +3043,16 @@ async function waitForEventText(
   const deadline = Date.now() + timeoutMs;
   while (!textOf(events).includes(expected)) {
     if (Date.now() >= deadline) throw new Error(`timed out waiting for live text: ${expected}`);
+    await testDelay(25);
+  }
+}
+
+async function waitForFileText(path: string, expected: string, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const content = await readFile(path, 'utf8').catch(() => '');
+    if (content.includes(expected)) return;
+    if (Date.now() >= deadline) throw new Error(`timed out waiting for file text: ${expected}`);
     await testDelay(25);
   }
 }

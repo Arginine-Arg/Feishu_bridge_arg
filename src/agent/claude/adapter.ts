@@ -86,6 +86,8 @@ export class ClaudeAdapter implements AgentAdapter {
         const terminal = tmuxTerminalForStatus(await this.tmuxStatus(scopeId, cwd));
         return captureTmuxPaneTail(terminal, lineCount);
       },
+      restoreArtifactDelivery: (scopeId, artifact) =>
+        this.tmuxBindings.restoreManagedArtifactDelivery(scopeId, artifact),
     };
   }
 

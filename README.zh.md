@@ -43,7 +43,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 0.6.55
+sh /tmp/install-arg-bridge.sh --version 0.6.56
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -87,10 +87,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.55"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.56"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.55`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.56`。
 
 ### 4. Node 或 npm 全局目录错误
 
@@ -334,7 +334,7 @@ bridge 会检查所选目录存在、是目录，并且不是 `/`、Home 根、�
 
 每个目录都会经过与工作目录相同的宽泛根目录检查。bridge 和 channel SDK 仍会执行普通文件、符号链接、realpath 目录归属及 `attachments.maxFileBytes` 双重校验。不要加入 `/`、Home 根或整个共享磁盘。
 
-agent 在任务中产出文件时，应调用 bridge 能力而不是直接上传：`arg-bridge sendfile <相对当前 cwd 的路径> [--caption "..."]`。bridge 会把请求固定到当前 scope、回复目标、工作目录根和文件大小策略。live 终端可跨轮次和 bridge 重启保留 profile 本地的不透明能力令牌，而 bridge 会在每个获准运行开始时刷新允许目录和回复目标。
+agent 在任务中产出文件时，应调用 bridge 能力而不是直接上传：`arg-bridge sendfile <相对当前 cwd 的路径> [--caption "..."]`。bridge 会把请求固定到当前 scope、回复目标、工作目录根和文件大小策略。live 终端可跨轮次和 bridge 重启保留 profile 本地的不透明能力令牌，而 bridge 会在每个获准运行开始时刷新允许目录和回复目标。对于 bridge 托管的 tmux session，后续在同一 session 新建的 pane 也会继承这个受限能力；因此关闭原 pane 后在分屏 pane 中运行 `codex --resume` 不会丢失文件发送能力。外部绑定的 tmux session 和无关 shell 不会获得该能力。
 
 ### 内置 Codex skill
 

@@ -340,6 +340,16 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     artifactStateDir ? join(artifactStateDir, 'artifact-grants.json') : undefined,
   );
   await artifactBroker.start();
+  if (agent.tmux?.restoreArtifactDelivery) {
+    const restored = await Promise.all(
+      artifactBroker.persistentDeliveries().map(async (grant) => ({
+        scope: grant.scope,
+        restored: await agent.tmux!.restoreArtifactDelivery!(grant.scope, grant).catch(() => false),
+      })),
+    );
+    const count = restored.filter((item) => item.restored).length;
+    if (count > 0) log.info('artifact', 'managed-tmux-capabilities-restored', { count });
+  }
 
   // Pending → run handoff: while a run is active on a chat, block its pending
   // queue so messages keep accumulating without flushing. When the run ends,

@@ -9,6 +9,7 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { writeFileAtomic } from '../platform/atomic-write';
 import { spawnProcessSync } from '../platform/spawn';
 import { resolveWorkingDirectory } from '../policy/workspace';
+import type { ArtifactDeliveryEnv } from './lark-channel-env';
 
 export type TmuxAgentKind = 'codex' | 'claude';
 export type TmuxOwnership = 'managed' | 'external';
@@ -54,6 +55,8 @@ export interface AgentTmuxControl {
   status(scopeId: string, cwd?: string): Promise<TmuxBindingStatus>;
   /** Captures only the current scope's active or bound pane. */
   tail?(scopeId: string, lineCount: number, cwd?: string): Promise<TmuxPaneTail>;
+  /** Restores a persistent artifact grant to one bridge-managed tmux session. */
+  restoreArtifactDelivery?(scopeId: string, artifact: ArtifactDeliveryEnv): Promise<boolean>;
 }
 
 interface TmuxBindingsFile {
@@ -251,6 +254,35 @@ export class TmuxBindingController {
       updatedAt: Date.now(),
     };
     await this.flushManaged();
+  }
+
+  /**
+   * Rehydrate a live artifact grant after the bridge restarts. The target is
+   * restricted to the saved managed session for this scope; external bindings
+   * are deliberately excluded because their tmux session may carry multiple
+   * independent bridge scopes.
+   */
+  async restoreManagedArtifactDelivery(scopeId: string, artifact: ArtifactDeliveryEnv): Promise<boolean> {
+    const saved = this.managedTerminals[scopeId];
+    if (!saved) return false;
+    let terminal: TmuxTerminalTarget;
+    try {
+      terminal = revalidateManagedTerminal(saved, scopeId, this.profile, this.agentKind);
+    } catch {
+      return false;
+    }
+    for (const [key, value] of [
+      ['ARG_BRIDGE_ARTIFACT_SOCKET', artifact.socketPath],
+      ['ARG_BRIDGE_ARTIFACT_TOKEN', artifact.token],
+    ] as const) {
+      const result = spawnProcessSync(
+        'tmux',
+        ['-S', terminal.socketPath, 'set-environment', '-t', saved.sessionName, key, value],
+        { stdio: 'ignore' },
+      );
+      if (result.status !== 0) return false;
+    }
+    return true;
   }
 
   bindingFor(scopeId: string, cwd: string): TmuxPaneTarget | undefined {

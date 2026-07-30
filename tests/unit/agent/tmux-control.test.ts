@@ -208,6 +208,24 @@ describe.skipIf(!live)('tmux control', () => {
       sessionName,
       cwdRealpath: root,
     });
+    expect(await restarted.restoreManagedArtifactDelivery(scope, {
+      socketPath: join(root, 'artifact-broker.sock'),
+      token: 'restarted-artifact-token',
+    })).toBe(true);
+    expect(
+      spawnSync(
+        'tmux',
+        ['-S', socketPath, 'show-environment', '-t', sessionName, 'ARG_BRIDGE_ARTIFACT_SOCKET'],
+        { encoding: 'utf8' },
+      ).stdout.trim(),
+    ).toBe(`ARG_BRIDGE_ARTIFACT_SOCKET=${join(root, 'artifact-broker.sock')}`);
+    expect(
+      spawnSync(
+        'tmux',
+        ['-S', socketPath, 'show-environment', '-t', sessionName, 'ARG_BRIDGE_ARTIFACT_TOKEN'],
+        { encoding: 'utf8' },
+      ).stdout.trim(),
+    ).toBe('ARG_BRIDGE_ARTIFACT_TOKEN=restarted-artifact-token');
     expect(captureTmuxPaneTail(status.terminal!, 2).text).toBe('resumed-session-tail');
 
     // v0.6.41 and earlier did not have a managed-terminals file. A first

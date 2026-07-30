@@ -73,6 +73,9 @@ describe('ArtifactBroker', () => {
     });
 
     expect(second).toEqual(first);
+    expect(broker.persistentDeliveries()).toEqual([
+      { scope: 'chat-live', socketPath: join(root, 'broker.sock'), token: first.token },
+    ]);
     expect(broker.activate(second.token, [workspace])).toBe(true);
     await expect(request(second.socketPath, { token: first.token, path: 'report.txt' })).resolves.toMatchObject({ ok: true });
     expect(send).toHaveBeenCalledWith(

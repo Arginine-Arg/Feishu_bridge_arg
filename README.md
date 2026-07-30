@@ -43,7 +43,7 @@ Install a pinned release or use a writable custom npm prefix when required:
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 0.6.55
+sh /tmp/install-arg-bridge.sh --version 0.6.56
 # Example for a machine without permission to write npm's configured global prefix:
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -87,10 +87,10 @@ Release tarballs are preferred. If a Git install is required, keep both compatib
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.55"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.56"
 ```
 
-`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.55`.
+`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.56`.
 
 ### 4. Node or npm global-prefix errors
 
@@ -330,7 +330,7 @@ The bridge checks that a selected directory exists, is a directory, and is not a
 
 Every directory is resolved through the same broad-root policy as a workspace. Files remain subject to regular-file, symlink, realpath containment, and `attachments.maxFileBytes` checks in both the bridge and channel SDK. Do not add `/`, the home root, or an entire shared volume.
 
-When an agent produces a file during a task, it uses the bridge capability rather than a direct Lark upload: `arg-bridge sendfile <cwd-relative-path> [--caption "..."]`. The bridge binds that request to the current scope, reply target, workspace root, and file-size policy. Live terminals retain a profile-local opaque capability across turns and bridge restarts; the bridge refreshes its permitted root and reply target for each accepted run.
+When an agent produces a file during a task, it uses the bridge capability rather than a direct Lark upload: `arg-bridge sendfile <cwd-relative-path> [--caption "..."]`. The bridge binds that request to the current scope, reply target, workspace root, and file-size policy. Live terminals retain a profile-local opaque capability across turns and bridge restarts; the bridge refreshes its permitted root and reply target for each accepted run. A bridge-managed tmux session also passes that scoped capability to panes created later in the same session, so closing a pane and running `codex --resume` in a split pane does not lose file delivery. This does not apply to an externally bound tmux session or an unrelated shell.
 
 ### Bundled Codex skill
 
