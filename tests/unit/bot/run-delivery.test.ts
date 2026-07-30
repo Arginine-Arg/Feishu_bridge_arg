@@ -62,6 +62,13 @@ describe('novelLiveSuffix', () => {
     expect(novelLiveSuffix(delivered, 'beta\ngamma\n')).toBe('gamma\n');
   });
 
+  it('keeps only the new tail when tmux changes terminal line wrapping', () => {
+    const delivered = '• inspect the stream\n• verify the queue\n';
+    const reflowed = '• inspect\n  the stream\n• verify the queue\n• retain the final tail\n';
+
+    expect(novelLiveSuffix(delivered, reflowed)).toBe('• retain the final tail\n');
+  });
+
   it('keeps intervening output when a full prior transcript appears twice', () => {
     const delivered = 'alpha\nbeta\n';
     const redraw = `${delivered}intervening update\n${delivered}final update\n`;

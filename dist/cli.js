@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.52",
+  version: "0.6.53",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -5781,6 +5781,76 @@ import { createHash as createHash2 } from "crypto";
 import { chmodSync, lstatSync as lstatSync2, mkdirSync as mkdirSync3 } from "fs";
 import { dirname as dirname15, join as join17, resolve as resolve3 } from "path";
 
+// src/agent/terminal-text.ts
+function novelTerminalTextSuffix(delivered, candidate) {
+  if (!candidate || !delivered) return candidate;
+  const exactReplay = candidate.indexOf(delivered);
+  if (exactReplay >= 0) return candidate.slice(exactReplay + delivered.length);
+  if (delivered.endsWith(candidate)) return "";
+  const semantic = whitespaceNormalizedSuffix(delivered, candidate);
+  if (semantic !== void 0) return semantic;
+  const overlap = longestSuffixPrefix(delivered, candidate);
+  return overlap > 0 ? candidate.slice(overlap) : candidate;
+}
+function whitespaceNormalizedSuffix(delivered, candidate) {
+  const left = normalizeWhitespace(delivered);
+  const right = normalizeWhitespace(candidate);
+  if (!left.text || !right.text) return void 0;
+  const replay = right.text.indexOf(left.text);
+  if (replay >= 0) {
+    return right.sliceAfter(
+      replay + left.text.length,
+      /\s$/u.test(delivered)
+    );
+  }
+  if (left.text.endsWith(right.text)) return "";
+  const overlap = longestSuffixPrefix(left.text, right.text);
+  if (overlap < 24) return void 0;
+  return right.sliceAfter(overlap, /\s$/u.test(delivered));
+}
+function longestSuffixPrefix(left, right) {
+  const values = `${right}\0${left}`;
+  const prefix = new Uint32Array(values.length);
+  for (let index = 1; index < values.length; index += 1) {
+    let matched = prefix[index - 1];
+    while (matched > 0 && values[index] !== values[matched]) matched = prefix[matched - 1];
+    if (values[index] === values[matched]) matched += 1;
+    prefix[index] = matched;
+  }
+  return Math.min(prefix.at(-1) ?? 0, right.length);
+}
+function normalizeWhitespace(input) {
+  let text = "";
+  const ends = [];
+  let pendingWhitespace = false;
+  for (let index = 0; index < input.length; index += 1) {
+    const char = input[index];
+    if (/\s/u.test(char)) {
+      pendingWhitespace ||= text.length > 0;
+      continue;
+    }
+    if (pendingWhitespace) {
+      text += " ";
+      ends.push(index);
+      pendingWhitespace = false;
+    }
+    text += char;
+    ends.push(index + 1);
+  }
+  return {
+    text,
+    sliceAfter(normalizedLength, skipFollowingWhitespace = false) {
+      if (normalizedLength <= 0) return input;
+      if (normalizedLength >= ends.length) return "";
+      let rawIndex = ends[normalizedLength - 1];
+      if (skipFollowingWhitespace) {
+        while (rawIndex < input.length && /\s/u.test(input[rawIndex])) rawIndex += 1;
+      }
+      return input.slice(rawIndex);
+    }
+  };
+}
+
 // src/agent/live-interaction-detection.ts
 var MAX_INTERACTION_LINES = 40;
 var FALLBACK_INTERACTION_LINES = 12;
@@ -8151,15 +8221,7 @@ function trimTail(value, maxChars) {
   return value.length <= maxChars ? value : value.slice(-maxChars);
 }
 function undeliveredSnapshotSuffix(deliveredTail, snapshot) {
-  if (!deliveredTail) return snapshot;
-  const containedAt = snapshot.lastIndexOf(deliveredTail);
-  if (containedAt >= 0) return snapshot.slice(containedAt + deliveredTail.length);
-  if (deliveredTail.endsWith(snapshot)) return "";
-  const max = Math.min(deliveredTail.length, snapshot.length);
-  for (let overlap = max; overlap > 0; overlap -= 1) {
-    if (deliveredTail.endsWith(snapshot.slice(0, overlap))) return snapshot.slice(overlap);
-  }
-  return snapshot;
+  return novelTerminalTextSuffix(deliveredTail, snapshot);
 }
 function collapseCarriageReturns(input) {
   let out = "";
@@ -17147,15 +17209,7 @@ var RunEventGate = class {
   }
 };
 function novelLiveSuffix(delivered, candidate) {
-  if (!candidate || !delivered) return candidate;
-  if (delivered.endsWith(candidate)) return "";
-  const fullReplay = candidate.indexOf(delivered);
-  if (fullReplay >= 0) return candidate.slice(fullReplay + delivered.length);
-  const max = Math.min(delivered.length, candidate.length);
-  for (let overlap = max; overlap > 0; overlap -= 1) {
-    if (delivered.endsWith(candidate.slice(0, overlap))) return candidate.slice(overlap);
-  }
-  return candidate;
+  return novelTerminalTextSuffix(delivered, candidate);
 }
 function trimTail2(value, maxChars) {
   return value.length <= maxChars ? value : value.slice(-maxChars);

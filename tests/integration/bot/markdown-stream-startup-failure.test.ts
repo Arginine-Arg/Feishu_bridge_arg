@@ -84,6 +84,84 @@ afterEach(async () => {
 });
 
 describe('markdown stream startup failures', () => {
+  it.each(['markdown', 'card'] as const)(
+    'delivers terminal reflow history once and retains the final tail in %s streams',
+    async (messageReply) => {
+      const markdownUpdates: string[] = [];
+      const cardUpdates: object[] = [];
+      const h = await createHarness({
+        stream: async (_chatId, input) => {
+          if (messageReply === 'markdown') {
+            const producer = (input as {
+              markdown?: (ctrl: { setContent(markdown: string): Promise<void> }) => Promise<void>;
+            }).markdown;
+            if (!producer) throw new Error('expected markdown stream producer');
+            await producer({
+              setContent: async (markdown) => {
+                markdownUpdates.push(markdown);
+              },
+            });
+            return;
+          }
+
+          const producer = (input as {
+            card?: {
+              producer?: (ctrl: {
+                update(next: object | ((current: object) => object)): Promise<void>;
+              }) => Promise<void>;
+            };
+          }).card?.producer;
+          if (!producer) throw new Error('expected card stream producer');
+          await producer({
+            update: async (next) => {
+              if (typeof next === 'function') throw new Error('unexpected card updater function');
+              cardUpdates.push(next);
+            },
+          });
+        },
+      });
+      h.profileConfig.preferences = {
+        ...(h.profileConfig.preferences ?? {}),
+        messageReply,
+      };
+      h.controls.profileConfig.preferences = h.profileConfig.preferences;
+      h.controls.cfg.preferences = h.profileConfig.preferences;
+      h.agent.setEvents([
+        [
+          {
+            type: 'text',
+            source: 'live-terminal',
+            sequence: 1,
+            delta: '• inspect the stream\n• verify the queue\n',
+          },
+          {
+            type: 'text',
+            source: 'live-terminal',
+            sequence: 2,
+            delta: '• inspect\n  the stream\n• verify the queue\n• retain the final tail\n',
+          },
+          { type: 'done', terminationReason: 'normal' },
+        ],
+      ]);
+      await startTestBridge(h);
+
+      await h.channel.handlers.message?.(message(`om_reflow_${messageReply}`, 'inspect progress'));
+      await waitFor(() =>
+        (messageReply === 'markdown' ? markdownUpdates : cardUpdates.map((update) => JSON.stringify(update))).some((update) =>
+          update.includes('retain the final tail'),
+        ),
+      );
+
+      const delivered = messageReply === 'markdown'
+        ? markdownUpdates.at(-1) ?? ''
+        : JSON.stringify(cardUpdates.at(-1) ?? {});
+      expect(delivered.match(/inspect the stream/g)).toHaveLength(1);
+      expect(delivered.match(/verify the queue/g)).toHaveLength(1);
+      expect(delivered.match(/retain the final tail/g)).toHaveLength(1);
+      expect(delivered).not.toContain('inspect\\n  the stream');
+    },
+  );
+
   it('suppresses a replayed Feishu message before it can start a second agent turn', async () => {
     const h = await createHarness();
     h.profileConfig.preferences = {

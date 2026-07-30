@@ -144,6 +144,24 @@ describe('tmux input framing and snapshots', () => {
     ).toBe('final completion\n');
   });
 
+  it('keeps the final tail across a tmux history reflow', () => {
+    expect(
+      undeliveredSnapshotSuffix(
+        '• inspect the stream\n• verify the queue\n',
+        '• inspect\n  the stream\n• verify the queue\n• retain the final tail\n',
+      ),
+    ).toBe('• retain the final tail\n');
+  });
+
+  it('anchors at the first replayed history copy so intervening output survives', () => {
+    const delivered = 'first result\nsecond result\n';
+    const redraw = `${delivered}intervening result\n${delivered}final result\n`;
+
+    expect(undeliveredSnapshotSuffix(delivered, redraw)).toBe(
+      'intervening result\nfirst result\nsecond result\nfinal result\n',
+    );
+  });
+
   it('keeps only the current prompt and its output from a pane snapshot', () => {
     const snapshot = [
       '› earlier question',

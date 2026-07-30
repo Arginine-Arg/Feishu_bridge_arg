@@ -1,4 +1,5 @@
 import type { AgentEvent } from '../agent/types';
+import { novelTerminalTextSuffix } from '../agent/terminal-text';
 
 const LIVE_TRANSCRIPT_WINDOW = 256_000;
 
@@ -65,22 +66,7 @@ export class RunEventGate {
 }
 
 export function novelLiveSuffix(delivered: string, candidate: string): string {
-  if (!candidate || !delivered) return candidate;
-  if (delivered.endsWith(candidate)) return '';
-
-  // A full-screen redraw often contains the entire delivered transcript plus
-  // one new suffix. Keep only that suffix, rather than appending the redraw.
-  // The first complete occurrence is the prior transcript's position in the
-  // redraw. Using the last one could drop valid intervening output when a
-  // model naturally repeats an earlier sentence later in its response.
-  const fullReplay = candidate.indexOf(delivered);
-  if (fullReplay >= 0) return candidate.slice(fullReplay + delivered.length);
-
-  const max = Math.min(delivered.length, candidate.length);
-  for (let overlap = max; overlap > 0; overlap -= 1) {
-    if (delivered.endsWith(candidate.slice(0, overlap))) return candidate.slice(overlap);
-  }
-  return candidate;
+  return novelTerminalTextSuffix(delivered, candidate);
 }
 
 function trimTail(value: string, maxChars: number): string {

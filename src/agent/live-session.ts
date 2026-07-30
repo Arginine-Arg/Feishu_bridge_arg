@@ -11,6 +11,7 @@ import {
   type SpawnedProcessByStdio,
 } from '../platform/spawn';
 import type { AgentEvent, AgentRun } from './types';
+import { novelTerminalTextSuffix } from './terminal-text';
 import {
   isLiveInteractionPromptStart,
   isStructuredLiveInteraction,
@@ -2083,15 +2084,7 @@ function trimTail(value: string, maxChars: number): string {
 }
 
 export function undeliveredSnapshotSuffix(deliveredTail: string, snapshot: string): string {
-  if (!deliveredTail) return snapshot;
-  const containedAt = snapshot.lastIndexOf(deliveredTail);
-  if (containedAt >= 0) return snapshot.slice(containedAt + deliveredTail.length);
-  if (deliveredTail.endsWith(snapshot)) return '';
-  const max = Math.min(deliveredTail.length, snapshot.length);
-  for (let overlap = max; overlap > 0; overlap -= 1) {
-    if (deliveredTail.endsWith(snapshot.slice(0, overlap))) return snapshot.slice(overlap);
-  }
-  return snapshot;
+  return novelTerminalTextSuffix(deliveredTail, snapshot);
 }
 
 function collapseCarriageReturns(input: string): string {
