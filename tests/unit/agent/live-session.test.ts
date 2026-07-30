@@ -1033,7 +1033,11 @@ setInterval(() => {}, 1000);
     await pool.closeAll();
 
     const text = textOf(events);
-    expect(text).toContain('Select Model and Effort');
+    // A PTY may expose only the lower visible rows of a redraw. The contract
+    // is that the second Enter reveals the model choices, not that its heading
+    // remains visible in every terminal geometry.
+    expect(text).toContain('gpt-5.6-sol (default)');
+    expect(text).toContain('Press enter to confirm or esc to go back');
     expect(text).not.toContain('Select Reasoning Level');
     expect((await readFile(traceFile, 'utf8')).trim().split('\n')).toEqual(['enter', 'enter']);
   }, 20_000);
