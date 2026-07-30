@@ -2069,6 +2069,68 @@ setInterval(() => {}, 1000);
     expect(output.match(/FINAL_COMPLETION_AFTER_HISTORY_ROLL/g)).toHaveLength(1);
   }, 20_000);
 
+  tmuxIt('does not replay tmux history when a long output line reflows after resize', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-resize-reflow-test-'));
+    const bin = join(dir, 'fake-tmux-resize-reflow-agent.mjs');
+    const prompt = 'inspect resize reflow';
+    const first = `• FIRST_RESIZE_REFLOW_${'x'.repeat(360)}`;
+    const final = '• FINAL_AFTER_TMUX_RESIZE';
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+let draft = '';
+process.stdout.write('› \\n');
+process.stdin.on('data', (chunk) => {
+  for (const char of chunk) {
+    if (char !== '\\r' && char !== '\\n') {
+      draft += char;
+      continue;
+    }
+    if (draft !== ${JSON.stringify(prompt)}) continue;
+    draft = '';
+    process.stdout.write('› ${prompt}\\n${first}\\n');
+    setTimeout(() => process.stdout.write(${JSON.stringify(`${final}\n› \n`)}), 1400);
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    let resizeStatus: number | null | undefined;
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-resize-reflow-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-resize-reflow',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 2_500,
+      outputFlushMs: 40,
+      startupTimeoutMs: 6_000,
+      onTerminal: async (terminal) => {
+        setTimeout(() => {
+          resizeStatus = spawnSync(
+            'tmux',
+            ['-S', terminal.socketPath!, 'resize-window', '-t', terminal.sessionName!, '-x', '52', '-y', '48'],
+            { stdio: 'ignore' },
+          ).status;
+        }, 900);
+      },
+    });
+
+    const events = await collect(session.run('tmux-resize-reflow-run', prompt, dir).events);
+    await pool.closeAll();
+
+    const output = textOf(events);
+    expect(resizeStatus).toBe(0);
+    expect(output.match(/FIRST_RESIZE_REFLOW/g)).toHaveLength(1);
+    expect(output.match(/FINAL_AFTER_TMUX_RESIZE/g)).toHaveLength(1);
+  }, 20_000);
+
   tmuxIt('submits a first Chinese prompt and streams every delayed task update', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-first-prompt-test-'));
     const bin = join(dir, 'fake-tmux-first-prompt-agent.mjs');

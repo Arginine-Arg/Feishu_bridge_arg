@@ -75,6 +75,49 @@ describe('novelLiveSuffix', () => {
 
     expect(novelLiveSuffix(delivered, redraw)).toBe('intervening update\nalpha\nbeta\nfinal update\n');
   });
+
+  it('drops a historical viewport fragment that is no longer the delivered tail', () => {
+    const delivered = [
+      '• 开始进行只读项目巡检。',
+      '• Exploring',
+      '  └ List src',
+      '• Ran git log --oneline',
+      '  └ latest commit',
+      '• 项目规模已确认。',
+    ].join('\n');
+    const fragment = ['• 开始进行只读项目巡检。', '• Exploring', '  └ List src'].join('\n');
+
+    expect(novelLiveSuffix(delivered, fragment)).toBe('');
+  });
+
+  it('removes a historical viewport prefix but keeps the new tail', () => {
+    const old = [
+      '• 开始进行只读项目巡检，检查消息入口、tmux 和投递队列。',
+      '• Exploring',
+      '  └ List src',
+    ].join('\n');
+    const delivered = `${old}\n• 已完成配置层检查。`;
+    const candidate = `${old}\n• 新增：已完成测试层检查。`;
+
+    expect(novelLiveSuffix(delivered, candidate)).toBe('• 新增：已完成测试层检查。');
+  });
+
+  it('drops a reflowed historical fragment even when its line breaks changed', () => {
+    const delivered = [
+      '• 开始进行只读项目巡检，检查消息入口、tmux 和投递队列。',
+      '• Exploring',
+      '  └ List src',
+      '• 已完成配置层检查。',
+    ].join('\n');
+    const reflowed = [
+      '• 开始进行只读项目巡检，检查消息入口、tmux',
+      '  和投递队列。',
+      '• Exploring',
+      '  └ List src',
+    ].join('\n');
+
+    expect(novelLiveSuffix(delivered, reflowed)).toBe('');
+  });
 });
 
 describe('SerializedDelivery', () => {

@@ -12,6 +12,11 @@ export function novelTerminalTextSuffix(delivered: string, candidate: string): s
   // Keep the earliest copy: a later copy may be legitimate new output.
   const exactReplay = candidate.indexOf(delivered);
   if (exactReplay >= 0) return candidate.slice(exactReplay + delivered.length);
+  // A scrolled/repainted terminal frame can contain only a *middle* fragment
+  // of already-delivered history. `endsWith()` alone misses that case and
+  // repeatedly forwards the fragment whenever tmux changes the viewport or
+  // Codex redraws its progress region.
+  if (delivered.includes(candidate)) return '';
   if (delivered.endsWith(candidate)) return '';
 
   const semantic = whitespaceNormalizedSuffix(delivered, candidate);
@@ -33,13 +38,69 @@ function whitespaceNormalizedSuffix(delivered: string, candidate: string): strin
       /\s$/u.test(delivered),
     );
   }
+  // The candidate may be a historical viewport fragment rather than the
+  // whole redraw. Treat a non-trivial normalized fragment already present in
+  // the delivered ledger as replay. The size floor keeps a coincidental word
+  // or short status line from suppressing genuine output.
+  if (right.text.length >= HISTORY_FRAGMENT_MIN_CHARS && left.text.includes(right.text)) {
+    return '';
+  }
   if (left.text.endsWith(right.text)) return '';
+
+  // A malformed positioned-history delta can begin with an older region and
+  // then include a real new tail. Remove the longest proven historical prefix
+  // instead of appending that region a second time. This is deliberately only
+  // applied to a sufficiently long match: ordinary agent prose may repeat a
+  // short phrase, while a terminal history replay is a substantial block.
+  const historicalPrefix = longestContainedPrefix(left.text, right.text);
+  const safeHistoricalPrefix = prefixBeforeNewToken(right.text, historicalPrefix);
+  if (safeHistoricalPrefix >= HISTORY_FRAGMENT_MIN_CHARS && safeHistoricalPrefix < right.text.length) {
+    return right.sliceAfter(safeHistoricalPrefix, /\s$/u.test(delivered));
+  }
 
   // Ignore a tiny common word or punctuation match. It is not a trustworthy
   // reflow anchor; the exact overlap fallback below remains available.
   const overlap = longestSuffixPrefix(left.text, right.text);
   if (overlap < 24) return undefined;
   return right.sliceAfter(overlap, /\s$/u.test(delivered));
+}
+
+const HISTORY_FRAGMENT_MIN_CHARS = 48;
+
+/**
+ * Length of the longest prefix of `needle` occurring anywhere in `haystack`.
+ * The predicate is monotonic, so binary search avoids repeatedly scanning
+ * increasingly large terminal captures during a long task.
+ */
+function longestContainedPrefix(haystack: string, needle: string): number {
+  let low = 0;
+  let high = Math.min(haystack.length, needle.length);
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (haystack.includes(needle.slice(0, middle))) low = middle;
+    else high = middle - 1;
+  }
+  return low;
+}
+
+/**
+ * Do not consume the first token of a genuinely new line just because its
+ * marker (for example `•`) happens to match the historical text. The last
+ * normalized whitespace boundary is the safe place to begin the new suffix.
+ */
+function prefixBeforeNewToken(text: string, matchedLength: number): number {
+  if (matchedLength <= 0) return matchedLength;
+  // Codex's output blocks commonly start with one of these markers. A match
+  // can extend through `• ` because that prefix is also present on an older
+  // line, but the marker itself belongs to the new block.
+  const marker = Math.max(
+    text.lastIndexOf('•', matchedLength - 1),
+    text.lastIndexOf('›', matchedLength - 1),
+    text.lastIndexOf('❯', matchedLength - 1),
+  );
+  if (marker >= HISTORY_FRAGMENT_MIN_CHARS && marker < matchedLength) return marker;
+  const boundary = text.lastIndexOf(' ', matchedLength - 1);
+  return boundary >= HISTORY_FRAGMENT_MIN_CHARS ? boundary : matchedLength;
 }
 
 function longestSuffixPrefix(left: string, right: string): number {

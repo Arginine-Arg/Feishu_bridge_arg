@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.53",
+  version: "0.6.54",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -5786,6 +5786,7 @@ function novelTerminalTextSuffix(delivered, candidate) {
   if (!candidate || !delivered) return candidate;
   const exactReplay = candidate.indexOf(delivered);
   if (exactReplay >= 0) return candidate.slice(exactReplay + delivered.length);
+  if (delivered.includes(candidate)) return "";
   if (delivered.endsWith(candidate)) return "";
   const semantic = whitespaceNormalizedSuffix(delivered, candidate);
   if (semantic !== void 0) return semantic;
@@ -5803,10 +5804,40 @@ function whitespaceNormalizedSuffix(delivered, candidate) {
       /\s$/u.test(delivered)
     );
   }
+  if (right.text.length >= HISTORY_FRAGMENT_MIN_CHARS && left.text.includes(right.text)) {
+    return "";
+  }
   if (left.text.endsWith(right.text)) return "";
+  const historicalPrefix = longestContainedPrefix(left.text, right.text);
+  const safeHistoricalPrefix = prefixBeforeNewToken(right.text, historicalPrefix);
+  if (safeHistoricalPrefix >= HISTORY_FRAGMENT_MIN_CHARS && safeHistoricalPrefix < right.text.length) {
+    return right.sliceAfter(safeHistoricalPrefix, /\s$/u.test(delivered));
+  }
   const overlap = longestSuffixPrefix(left.text, right.text);
   if (overlap < 24) return void 0;
   return right.sliceAfter(overlap, /\s$/u.test(delivered));
+}
+var HISTORY_FRAGMENT_MIN_CHARS = 48;
+function longestContainedPrefix(haystack, needle) {
+  let low = 0;
+  let high = Math.min(haystack.length, needle.length);
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (haystack.includes(needle.slice(0, middle))) low = middle;
+    else high = middle - 1;
+  }
+  return low;
+}
+function prefixBeforeNewToken(text, matchedLength) {
+  if (matchedLength <= 0) return matchedLength;
+  const marker = Math.max(
+    text.lastIndexOf("\u2022", matchedLength - 1),
+    text.lastIndexOf("\u203A", matchedLength - 1),
+    text.lastIndexOf("\u276F", matchedLength - 1)
+  );
+  if (marker >= HISTORY_FRAGMENT_MIN_CHARS && marker < matchedLength) return marker;
+  const boundary = text.lastIndexOf(" ", matchedLength - 1);
+  return boundary >= HISTORY_FRAGMENT_MIN_CHARS ? boundary : matchedLength;
 }
 function longestSuffixPrefix(left, right) {
   const values = `${right}\0${left}`;
