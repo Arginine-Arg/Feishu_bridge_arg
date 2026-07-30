@@ -1687,7 +1687,9 @@ setInterval(() => {}, 1000);
         tmuxScopeId: scopeKey,
         usePty: true,
         backend: 'tmux',
-        idleMs: 250,
+        // Let the helper observe the post-detach tmux redraw before the
+        // synthetic idle watchdog closes this deliberately tiny fixture.
+        idleMs: 600,
         outputFlushMs: 30,
         startupTimeoutMs: 1_500,
       });
