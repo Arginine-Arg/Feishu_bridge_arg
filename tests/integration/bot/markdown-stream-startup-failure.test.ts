@@ -84,6 +84,32 @@ afterEach(async () => {
 });
 
 describe('markdown stream startup failures', () => {
+  it('suppresses a replayed Feishu message before it can start a second agent turn', async () => {
+    const h = await createHarness();
+    h.profileConfig.preferences = {
+      ...(h.profileConfig.preferences ?? {}),
+      messageReply: 'text',
+      messageReplyMigrated: true,
+    };
+    h.controls.profileConfig.preferences = h.profileConfig.preferences;
+    h.controls.cfg.preferences = h.profileConfig.preferences;
+    h.agent.setEvents([
+      [{ type: 'text', delta: 'one response\n' }, { type: 'done', terminationReason: 'normal' }],
+    ]);
+    await startTestBridge(h);
+
+    const replay = message('om_same_delivery', 'continue once');
+    await Promise.all([
+      h.channel.handlers.message?.(replay),
+      h.channel.handlers.message?.(replay),
+    ]);
+    await waitFor(() => h.agent.runOptions.length === 1);
+    await new Promise((resolve) => setTimeout(resolve, 800));
+
+    expect(h.agent.runOptions).toHaveLength(1);
+    expect(userTextOrNative(h.agent.runOptions[0]?.prompt ?? '')).toBe('continue once');
+  }, 10_000);
+
   it('waits for startup interaction input before replaying the original task', async () => {
     const h = await createHarness();
     h.profileConfig.preferences = {

@@ -85,6 +85,8 @@ import { lookupMessageThreadId } from './thread-id';
 import { addWorkingReaction, removeReaction } from './reaction';
 import { fetchKnownChats } from './lark-info';
 import { ArtifactBroker } from './artifact-broker';
+import { InboundMessageLedger } from './inbound-message-ledger';
+import { RunEventGate, SerializedDelivery } from './run-delivery';
 import {
   isForceLiveAgentCommandMessage,
   isNativeAgentCommandMessage,
@@ -227,6 +229,12 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     ? new CallbackNonceStore(join(dirname(deps.appPaths.mediaDir), 'callback-nonces.json'))
     : undefined;
   await callbackNonceStore?.load();
+  const inboundMessages = new InboundMessageLedger(
+    deps.appPaths?.mediaDir
+      ? join(dirname(deps.appPaths.mediaDir), 'inbound-message-ledger.json')
+      : undefined,
+  );
+  await inboundMessages.load();
   const callbackAuth = callbackNonceStore
     ? new CallbackAuth({
         keys: [{ version: 1, secret: appSecret }],
@@ -432,6 +440,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           pool,
           liveInteractionByScope,
           allowLocalFileRoot,
+          inboundMessages,
         }),
       ).catch((err) => log.fail('intake', err));
     },
@@ -565,6 +574,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         sessions.flush(),
         sessionCatalog?.flush(),
         callbackNonceStore?.flush(),
+        inboundMessages.flush(),
         workspaces.flush(),
       ]);
       if (stopAllResult.status === 'rejected') {
@@ -633,6 +643,7 @@ interface IntakeDeps {
   pool: ProcessPool;
   liveInteractionByScope: Map<string, LiveInteractionState>;
   allowLocalFileRoot: (root: string) => Promise<boolean>;
+  inboundMessages: InboundMessageLedger;
 }
 
 type LogThreadModeOverride = (input: {
@@ -658,7 +669,12 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     pool,
     liveInteractionByScope,
     allowLocalFileRoot,
+    inboundMessages,
   } = deps;
+  if (!(await inboundMessages.claim(msg.messageId))) {
+    log.info('intake', 'duplicate-message-suppressed', { msgId: msg.messageId, chatId: msg.chatId });
+    return;
+  }
   const preview = msg.content.length > 80 ? `${msg.content.slice(0, 80)}…` : msg.content;
   // Resolve scope (and underlying chat mode) once at intake — every
   // downstream consumer keys off these.
@@ -2113,6 +2129,9 @@ async function processAgentStream(
 ): Promise<RunState> {
   const runStart = Date.now();
   let state: RunState = initialState;
+  const eventGate = new RunEventGate();
+  const delivery = new SerializedDelivery();
+  const queueFlush = (snapshot: RunState): Promise<void> => delivery.enqueue(() => flush(snapshot));
 
   // Idle watchdog: claude going silent for `idleTimeoutMs` is treated as
   // "presumed hung", we stop() and surface a timeout marker on the card.
@@ -2173,14 +2192,16 @@ async function processAgentStream(
       lastHeartbeatFlushMs = now;
       state = { ...state, currentToolElapsedMs: elapsed, lastEventAt: now };
       log.info('card', 'heartbeat-flush', { scope, elapsedMs: elapsed });
-      void flush(state);
+      void queueFlush(state).catch((err) => log.fail('stream', err, { scope, step: 'heartbeat-flush' }));
     }, progressHeartbeatMs);
   };
   startHeartbeat();
 
   try {
-    for await (const evt of events) {
+    for await (const rawEvent of events) {
       if (handle.interrupted) break;
+      const evt = eventGate.accept(rawEvent);
+      if (!evt) continue;
 
       // Track tool flight before re-arming the idle timer so the arm step
       // sees the correct set size. tool_use opens a window; tool_result
@@ -2223,7 +2244,7 @@ async function processAgentStream(
       if (state.footer !== prevFooter || state.terminal !== prevTerminal) {
         log.info('card', 'transition', { footer: state.footer, terminal: state.terminal });
       }
-      await flush(state);
+      await queueFlush(state);
       // Stop iterating as soon as we have a terminal state. Some claude
       // versions don't close stdout immediately after the result event, which
       // would leave the for-await waiting forever otherwise.
@@ -2249,7 +2270,8 @@ async function processAgentStream(
   }
   log.info('card', 'final', { scope, terminal: state.terminal, interrupted: handle.interrupted });
   reportMetric('run_e2e_ms', Date.now() - runStart, { terminal: state.terminal });
-  await flush(state);
+  await queueFlush(state);
+  await delivery.drain();
   if (handle.interrupted) {
     await handle.run.stop();
   }

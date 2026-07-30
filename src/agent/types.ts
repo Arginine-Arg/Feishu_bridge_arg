@@ -7,7 +7,14 @@ export type { ClaudePermissionMode } from '../config/permissions';
 
 export type AgentEvent =
   | { type: 'system'; sessionId?: string; threadId?: string; cwd?: string; model?: string }
-  | { type: 'text'; delta: string }
+  | {
+      type: 'text';
+      delta: string;
+      /** Present only for screen-derived native terminal output. */
+      source?: 'live-terminal';
+      /** Monotonic within one live terminal turn. */
+      sequence?: number;
+    }
   | { type: 'interactive'; text: string; phase: 'startup' | 'turn' }
   | { type: 'thinking'; delta: string }
   | { type: 'tool_use'; id: string; name: string; input: unknown }

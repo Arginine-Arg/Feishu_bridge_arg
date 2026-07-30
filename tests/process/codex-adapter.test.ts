@@ -316,7 +316,7 @@ describe('CodexAdapter process contract', () => {
 
     expect(events).toEqual([
       { type: 'system', cwd },
-      { type: 'text', delta: 'model menu\n' },
+      { type: 'text', delta: 'model menu\n', source: 'live-terminal', sequence: 1 },
       { type: 'done', terminationReason: 'normal' },
     ]);
     expect(record.argv).toEqual([

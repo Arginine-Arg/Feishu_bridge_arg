@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.51",
+  version: "0.6.52",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -6697,6 +6697,7 @@ var LiveTerminalSession = class {
     let sawAcceptedOutput = false;
     let sawCommandResultOutput = false;
     let deliveredText = false;
+    let liveTextSequence = 0;
     let slashConfirmRetried = false;
     let latestCommandTerminalText = "";
     let terminalWasBusy = false;
@@ -6728,7 +6729,7 @@ var LiveTerminalSession = class {
       }
       if (delta) {
         deliveredText = true;
-        push({ type: "text", delta });
+        push({ type: "text", delta, source: "live-terminal", sequence: ++liveTextSequence });
       }
     };
     const scheduleOutputFlush = () => {
@@ -6762,7 +6763,9 @@ var LiveTerminalSession = class {
       if (commandMode && isStatusLiveCommand(prompt)) {
         push({
           type: "text",
-          delta: deliveredText ? buildLiveTerminalFooter(this.terminalInfo) : buildLiveStatusFallback(this.opts, cwd, this.terminalInfo)
+          delta: deliveredText ? buildLiveTerminalFooter(this.terminalInfo) : buildLiveStatusFallback(this.opts, cwd, this.terminalInfo),
+          source: "live-terminal",
+          sequence: ++liveTextSequence
         });
       }
       push({ type: "done", terminationReason: "normal" });
@@ -17018,6 +17021,146 @@ function normalizeCaption(value) {
   return caption;
 }
 
+// src/bot/inbound-message-ledger.ts
+import { readFile as readFile15 } from "fs/promises";
+var FILE_VERSION2 = 1;
+var DEFAULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1e3;
+var DEFAULT_MAX_ENTRIES = 5e4;
+var InboundMessageLedger = class {
+  constructor(path, options = {}) {
+    this.path = path;
+    this.options = options;
+  }
+  path;
+  options;
+  entries = /* @__PURE__ */ new Map();
+  saving = Promise.resolve();
+  async load() {
+    if (!this.path) return;
+    try {
+      const raw = JSON.parse(await readFile15(this.path, "utf8"));
+      if (raw.version !== FILE_VERSION2 || !raw.entries || typeof raw.entries !== "object") return;
+      for (const [messageId, acceptedAt] of Object.entries(raw.entries)) {
+        if (typeof acceptedAt === "number" && Number.isFinite(acceptedAt) && messageId) {
+          this.entries.set(messageId, acceptedAt);
+        }
+      }
+      this.prune(this.now());
+      await this.flush();
+    } catch (err) {
+      if (err.code !== "ENOENT") throw err;
+    }
+  }
+  /** Returns true exactly once for a message id within the retention window. */
+  async claim(messageId) {
+    if (!messageId) return true;
+    const now = this.now();
+    this.prune(now);
+    if (this.entries.has(messageId)) return false;
+    this.entries.set(messageId, now);
+    this.prune(now);
+    this.schedulePersist();
+    await this.flush();
+    return true;
+  }
+  async flush() {
+    await this.saving;
+  }
+  size() {
+    return this.entries.size;
+  }
+  now() {
+    return this.options.now?.() ?? Date.now();
+  }
+  retentionMs() {
+    return this.options.retentionMs ?? DEFAULT_RETENTION_MS;
+  }
+  maxEntries() {
+    return this.options.maxEntries ?? DEFAULT_MAX_ENTRIES;
+  }
+  prune(now) {
+    const oldest = now - this.retentionMs();
+    for (const [messageId, acceptedAt] of this.entries) {
+      if (acceptedAt < oldest) this.entries.delete(messageId);
+    }
+    if (this.entries.size <= this.maxEntries()) return;
+    const oldestFirst = [...this.entries.entries()].sort((a, b) => a[1] - b[1]);
+    const excess = this.entries.size - this.maxEntries();
+    for (const [messageId] of oldestFirst.slice(0, excess)) this.entries.delete(messageId);
+  }
+  schedulePersist() {
+    if (!this.path) return;
+    this.saving = this.saving.then(async () => {
+      const entries = Object.fromEntries(this.entries);
+      await writeFileAtomic(this.path, `${JSON.stringify({ version: FILE_VERSION2, entries }, null, 2)}
+`, {
+        mode: 384
+      });
+    });
+  }
+};
+
+// src/bot/run-delivery.ts
+var LIVE_TRANSCRIPT_WINDOW = 256e3;
+var SerializedDelivery = class {
+  tail = Promise.resolve();
+  enqueue(deliver) {
+    const task = this.tail.then(deliver);
+    this.tail = task.catch(() => void 0);
+    return task;
+  }
+  async drain() {
+    await this.tail;
+  }
+};
+var RunEventGate = class {
+  toolUses = /* @__PURE__ */ new Set();
+  toolResults = /* @__PURE__ */ new Set();
+  lastLiveSequence = 0;
+  liveTranscript = "";
+  terminalSeen = false;
+  accept(event) {
+    if (this.terminalSeen) return void 0;
+    if (event.type === "tool_use") {
+      if (this.toolUses.has(event.id)) return void 0;
+      this.toolUses.add(event.id);
+      return event;
+    }
+    if (event.type === "tool_result") {
+      const fingerprint = `${event.id}\0${event.isError ? "1" : "0"}\0${event.output}`;
+      if (this.toolResults.has(fingerprint)) return void 0;
+      this.toolResults.add(fingerprint);
+      return event;
+    }
+    if (event.type === "text" && event.source === "live-terminal") {
+      if (event.sequence !== void 0) {
+        if (event.sequence <= this.lastLiveSequence) return void 0;
+        this.lastLiveSequence = event.sequence;
+      }
+      const delta = novelLiveSuffix(this.liveTranscript, event.delta);
+      if (!delta) return void 0;
+      this.liveTranscript = trimTail2(this.liveTranscript + delta, LIVE_TRANSCRIPT_WINDOW);
+      return { ...event, delta };
+    }
+    if (event.type === "done" || event.type === "error") this.terminalSeen = true;
+    return event;
+  }
+};
+function novelLiveSuffix(delivered, candidate) {
+  if (!candidate || !delivered) return candidate;
+  if (delivered.endsWith(candidate)) return "";
+  const fullReplay = candidate.indexOf(delivered);
+  if (fullReplay >= 0) return candidate.slice(fullReplay + delivered.length);
+  const max = Math.min(delivered.length, candidate.length);
+  for (let overlap = max; overlap > 0; overlap -= 1) {
+    if (delivered.endsWith(candidate.slice(0, overlap))) return candidate.slice(overlap);
+  }
+  return candidate;
+}
+function trimTail2(value, maxChars) {
+  return value.length <= maxChars ? value : value.slice(-maxChars);
+}
+
 // src/bot/cot.ts
 var ENDPOINTS2 = {
   feishu: "https://open.feishu.cn",
@@ -17443,6 +17586,10 @@ async function startChannel(deps) {
   const appSecret = await resolveAppSecret(cfg, deps.appPaths);
   const callbackNonceStore = deps.appPaths?.mediaDir ? new CallbackNonceStore(join24(dirname20(deps.appPaths.mediaDir), "callback-nonces.json")) : void 0;
   await callbackNonceStore?.load();
+  const inboundMessages = new InboundMessageLedger(
+    deps.appPaths?.mediaDir ? join24(dirname20(deps.appPaths.mediaDir), "inbound-message-ledger.json") : void 0
+  );
+  await inboundMessages.load();
   const callbackAuth = callbackNonceStore ? new CallbackAuth({
     keys: [{ version: 1, secret: appSecret }],
     nonceStore: callbackNonceStore
@@ -17616,7 +17763,8 @@ async function startChannel(deps) {
           executor,
           pool,
           liveInteractionByScope,
-          allowLocalFileRoot
+          allowLocalFileRoot,
+          inboundMessages
         })
       ).catch((err) => log.fail("intake", err));
     },
@@ -17736,6 +17884,7 @@ async function startChannel(deps) {
         sessions.flush(),
         sessionCatalog?.flush(),
         callbackNonceStore?.flush(),
+        inboundMessages.flush(),
         workspaces.flush()
       ]);
       if (stopAllResult.status === "rejected") {
@@ -17792,8 +17941,13 @@ async function intakeMessage(deps) {
     executor,
     pool,
     liveInteractionByScope,
-    allowLocalFileRoot
+    allowLocalFileRoot,
+    inboundMessages
   } = deps;
+  if (!await inboundMessages.claim(msg.messageId)) {
+    log.info("intake", "duplicate-message-suppressed", { msgId: msg.messageId, chatId: msg.chatId });
+    return;
+  }
   const preview2 = msg.content.length > 80 ? `${msg.content.slice(0, 80)}\u2026` : msg.content;
   const resolvedMode = await chatModeCache.resolve(channel, msg.chatId);
   let threadId = msg.threadId;
@@ -18899,6 +19053,9 @@ async function processAgentStream(handle, events, scope, idleTimeoutMs, progress
 }) {
   const runStart2 = Date.now();
   let state = initialState;
+  const eventGate = new RunEventGate();
+  const delivery = new SerializedDelivery();
+  const queueFlush = (snapshot) => delivery.enqueue(() => flush(snapshot));
   let idleFired = false;
   let timer;
   const inFlightTools = /* @__PURE__ */ new Set();
@@ -18931,13 +19088,15 @@ async function processAgentStream(handle, events, scope, idleTimeoutMs, progress
       lastHeartbeatFlushMs = now;
       state = { ...state, currentToolElapsedMs: elapsed, lastEventAt: now };
       log.info("card", "heartbeat-flush", { scope, elapsedMs: elapsed });
-      void flush(state);
+      void queueFlush(state).catch((err) => log.fail("stream", err, { scope, step: "heartbeat-flush" }));
     }, progressHeartbeatMs);
   };
   startHeartbeat();
   try {
-    for await (const evt of events) {
+    for await (const rawEvent of events) {
       if (handle.interrupted) break;
+      const evt = eventGate.accept(rawEvent);
+      if (!evt) continue;
       if (evt.type === "tool_use") {
         inFlightTools.add(evt.id);
         log.info("agent", "tool-in-flight", {
@@ -18974,7 +19133,7 @@ async function processAgentStream(handle, events, scope, idleTimeoutMs, progress
       if (state.footer !== prevFooter || state.terminal !== prevTerminal) {
         log.info("card", "transition", { footer: state.footer, terminal: state.terminal });
       }
-      await flush(state);
+      await queueFlush(state);
       if (state.terminal !== "running") break;
     }
   } finally {
@@ -18992,7 +19151,8 @@ async function processAgentStream(handle, events, scope, idleTimeoutMs, progress
   }
   log.info("card", "final", { scope, terminal: state.terminal, interrupted: handle.interrupted });
   reportMetric("run_e2e_ms", Date.now() - runStart2, { terminal: state.terminal });
-  await flush(state);
+  await queueFlush(state);
+  await delivery.drain();
   if (handle.interrupted) {
     await handle.run.stop();
   }
@@ -19510,7 +19670,7 @@ function isDefined(value) {
 }
 
 // src/session/store.ts
-import { readFile as readFile15 } from "fs/promises";
+import { readFile as readFile16 } from "fs/promises";
 var SessionStore = class {
   data = {};
   saving = Promise.resolve();
@@ -19520,7 +19680,7 @@ var SessionStore = class {
   }
   async load() {
     try {
-      const text = await readFile15(this.path, "utf8");
+      const text = await readFile16(this.path, "utf8");
       const raw = JSON.parse(text);
       this.data = {};
       for (const [chatId, entry] of Object.entries(raw)) {
@@ -19644,7 +19804,7 @@ function isOutputMode(value) {
 
 // src/session/catalog.ts
 import { randomUUID as randomUUID4 } from "crypto";
-import { open as open3, readFile as readFile16, rename as rename5, mkdir as mkdir17 } from "fs/promises";
+import { open as open3, readFile as readFile17, rename as rename5, mkdir as mkdir17 } from "fs/promises";
 import { dirname as dirname21 } from "path";
 var DEFAULT_MAX_ARCHIVED_AGE_MS = 90 * 24 * 60 * 60 * 1e3;
 var DEFAULT_MAX_ENTRIES_PER_SCOPE = 20;
@@ -19667,7 +19827,7 @@ var SessionCatalog = class {
   }
   async load() {
     try {
-      const raw = JSON.parse(await readFile16(this.path, "utf8"));
+      const raw = JSON.parse(await readFile17(this.path, "utf8"));
       if (!Array.isArray(raw)) {
         this.data.clear();
         return;
@@ -19829,7 +19989,7 @@ function assertAgentIdentity(input) {
 }
 
 // src/workspace/store.ts
-import { readFile as readFile17 } from "fs/promises";
+import { readFile as readFile18 } from "fs/promises";
 var WorkspaceStore = class {
   data = { chats: {}, named: {} };
   saving = Promise.resolve();
@@ -19839,7 +19999,7 @@ var WorkspaceStore = class {
   }
   async load() {
     try {
-      const text = await readFile17(this.path, "utf8");
+      const text = await readFile18(this.path, "utf8");
       const parsed = JSON.parse(text);
       this.data = {
         chats: parsed.chats ?? {},

@@ -7,6 +7,10 @@ type AgentEvent = {
 } | {
     type: 'text';
     delta: string;
+    /** Present only for screen-derived native terminal output. */
+    source?: 'live-terminal';
+    /** Monotonic within one live terminal turn. */
+    sequence?: number;
 } | {
     type: 'interactive';
     text: string;

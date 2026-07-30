@@ -403,6 +403,7 @@ export class LiveTerminalSession {
     let sawAcceptedOutput = false;
     let sawCommandResultOutput = false;
     let deliveredText = false;
+    let liveTextSequence = 0;
     let slashConfirmRetried = false;
     let latestCommandTerminalText = '';
     let terminalWasBusy = false;
@@ -436,7 +437,7 @@ export class LiveTerminalSession {
       }
       if (delta) {
         deliveredText = true;
-        push({ type: 'text', delta });
+        push({ type: 'text', delta, source: 'live-terminal', sequence: ++liveTextSequence });
       }
     };
     const scheduleOutputFlush = (): void => {
@@ -473,6 +474,8 @@ export class LiveTerminalSession {
           delta: deliveredText
             ? buildLiveTerminalFooter(this.terminalInfo)
             : buildLiveStatusFallback(this.opts, cwd, this.terminalInfo),
+          source: 'live-terminal',
+          sequence: ++liveTextSequence,
         });
       }
       push({ type: 'done', terminationReason: 'normal' });
