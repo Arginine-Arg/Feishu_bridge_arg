@@ -1332,6 +1332,80 @@ setInterval(() => {}, 1000);
     }
   }, 20_000);
 
+  tmuxIt('detaches an active bridge relay without sending Ctrl-C to the managed agent', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-detach-active-test-'));
+    const bin = join(dir, 'fake-tmux-detach-agent.mjs');
+    const inputTrace = join(dir, 'input-trace.txt');
+    const scopeKey = 'detach-active-scope';
+    const signature = 'detach-active-signature';
+    const { socketPath, sessionName } = liveTmuxIdentity(dir, scopeKey, signature);
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs';
+process.stdin.setEncoding('utf8');
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+let draft = '';
+function screen(lines) {
+  process.stdout.write('\\x1b[2J\\x1b[H' + lines.join('\\n') + '\\n');
+}
+process.stdin.on('data', (chunk) => {
+  for (const char of chunk) {
+    if (char === '\\x03') {
+      appendFileSync(${JSON.stringify(inputTrace)}, 'ctrl-c\\n');
+      continue;
+    }
+    if (char !== '\\r' && char !== '\\n') {
+      draft += char;
+      continue;
+    }
+    if (draft.trim() === 'long task') {
+      draft = '';
+      screen(['relay stays detached', '• Working (0s • esc to interrupt)']);
+    } else {
+      draft = '';
+    }
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate(scopeKey, {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature,
+      tmuxScopeId: scopeKey,
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 250,
+      outputFlushMs: 30,
+      startupTimeoutMs: 2_000,
+    });
+    const turn = session.run('detach-active-run', 'long task', dir);
+    const iterator = turn.events[Symbol.asyncIterator]();
+    try {
+      expect((await iterator.next()).value).toMatchObject({ type: 'system' });
+      expect((await iterator.next()).value).toMatchObject({ type: 'text' });
+
+      await pool.detachAll();
+      await new Promise<void>((resolve) => setTimeout(resolve, 150));
+
+      await expect(readFile(inputTrace, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(
+        spawnSync('tmux', ['-S', socketPath, 'has-session', '-t', sessionName], { stdio: 'ignore' }).status,
+      ).toBe(0);
+    } finally {
+      await iterator.return?.();
+      await pool.closeAll();
+      spawnSync('tmux', ['-S', socketPath, 'kill-server'], { stdio: 'ignore' });
+    }
+  }, 20_000);
+
   it('ignores stale status panels for other commands and strips stale goal usage from status', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-stale-status-panel-test-'));
     const bin = join(dir, 'fake-stale-status-panel-agent.mjs');

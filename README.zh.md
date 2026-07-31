@@ -43,7 +43,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 0.6.58
+sh /tmp/install-arg-bridge.sh --version 0.6.59
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -87,10 +87,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.58"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.59"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.58`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.59`。
 
 ### 4. Node 或 npm 全局目录错误
 
@@ -181,6 +181,8 @@ arg-bridge unregister [--profile <name>]
 
 daemon 日志在 `~/.lark-channel/profiles/<profile>/logs/daemon/`。
 
+`restart` 只重启 bridge 转发进程。Linux 上它会先刷新 systemd unit，再重连；bridge 托管的 tmux/Codex/Claude 不会被 systemd 连带结束。任务正在运行时会继续在 tmux 内执行，重启前已断开的过程输出不会重放；下一条飞书消息会附着回同一 profile、chat/topic scope 的原生会话。
+
 ### 多 profile：分别运行 Claude 和 Codex
 
 默认情况下，bridge 使用当前激活的 profile；可以通过 `profile use <name>` 切换。每个 profile 会维护独立的应用凭据、会话、工作目录和日志。只有在需要同时连接多个 PersonalAgent 应用，或分别运行 Claude 和 Codex 时，才需要创建多个 profile：
@@ -253,7 +255,7 @@ arg-bridge profile export <name> --include-secrets --yes
 | `/timeout [N\|off\|default]` | 设置或清除当前会话的 idle watchdog |
 | `/ps` | 列出本机 bridge 进程 |
 | `/exit <id\|#>` | 停止指定 bridge 进程 |
-| `/reconnect` | 强制 WebSocket 重连 |
+| `/reconnect` | 重连 WebSocket；默认保留 tmux 中正在运行的任务，`--wait` 会等待其结束 |
 | `/doctor [描述]` | 执行低敏诊断 |
 | `/help` | 帮助卡片 |
 
@@ -280,7 +282,7 @@ arg-bridge profile export <name> --include-secrets --yes
 - **终端历史隔离**：live tmux 只捕获当前提示词对应的输出，并在每次更新前与本轮投递账本归并。终端重绘、早先任务内容、旧版 bridge 信封和足够长的内嵌历史回放都会被移除；回放前后真正新增的文本及长任务最后答复行仍会发送。
 - **幂等事件投递**：每条飞书 message ID 会在排队前持久化认领，因此 websocket 重放或 bridge 重启都不会再启动第二个 turn。tmux 屏幕输出携带单调序号并归并为新后缀；心跳和 agent 更新共用一个有序投递队列。
 - **投递策略（不中断控制）**：`/output live` 持续显示过程和最终答复，`/output final` 只发送最终答复，`/output off` 静默 agent 发出的消息但让任务继续运行；它和 `/timeout` 完全独立。
-- **持久 tmux 身份**：每个 scope 会保存 bridge 托管 tmux session 及已接管的 agent pane。关闭本地终端、detach tmux 或重启 arg-bridge 不会创建新的原生对话。若你在同一托管 session 的新选中 pane 中手动运行 `codex resume` 或 `claude --resume`，bridge 会接管并持久记录该 pane；后续飞书输入和 `/tmux tail` 都会指向已恢复的对话。tmux 所在主机真的重启时，进程必然结束；需要跨客户端关机持续执行时，应把 bridge 和 tmux 部署在稳定的服务器主机上。
+- **持久 tmux 身份**：每个 scope 会保存 bridge 托管 tmux session 及已接管的 agent pane。关闭本地终端、detach tmux、`arg-bridge restart`、服务自动重启或 `/reconnect` 都只会断开 bridge 转发，不会向 tmux agent 写入 Ctrl-C，也不会创建新的原生对话。重连时会严格校验 profile、agent kind、Feishu chat/topic scope 和 workspace，不能接管其他会话的 pane；下一个飞书 turn 会重新附着到原 session。若重启发生在任务运行中，任务会继续在 tmux 执行，但已断开的 bridge 不会回放或补发这轮中间输出。若你在同一托管 session 的新选中 pane 中手动运行 `codex resume` 或 `claude --resume`，bridge 会接管并持久记录该 pane；后续飞书输入和 `/tmux tail` 都会指向已恢复的对话。tmux 所在主机真的重启时，进程必然结束；需要跨客户端关机持续执行时，应把 bridge 和 tmux 部署在稳定的服务器主机上。
 
 **长任务最佳实践**:
 

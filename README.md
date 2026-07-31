@@ -43,7 +43,7 @@ Install a pinned release or use a writable custom npm prefix when required:
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 0.6.58
+sh /tmp/install-arg-bridge.sh --version 0.6.59
 # Example for a machine without permission to write npm's configured global prefix:
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -87,10 +87,10 @@ Release tarballs are preferred. If a Git install is required, keep both compatib
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.58"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.59"
 ```
 
-`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.58`.
+`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.59`.
 
 ### 4. Node or npm global-prefix errors
 
@@ -181,6 +181,8 @@ Platform mapping:
 
 Daemon logs are under `~/.lark-channel/profiles/<profile>/logs/daemon/`.
 
+`restart` restarts only the bridge relay. On Linux it first refreshes the systemd unit and then reconnects; bridge-managed tmux/Codex/Claude processes are not terminated with the service. A running task continues in tmux, its already-detached intermediate output is not replayed, and the next Feishu message attaches to the same native session for that profile and chat/topic scope.
+
 ### Multiple profiles: Claude and Codex
 
 By default, the bridge starts with the currently selected profile. Use `profile use <name>` to change it. Each profile keeps its own app credentials, sessions, working directories, and logs. Create multiple profiles only when you need to connect multiple PersonalAgent apps, or run Claude and Codex as separate bots:
@@ -253,7 +255,7 @@ If a profile was created with the wrong agent kind, stop or unregister any match
 | `/timeout [N\|off\|default]` | Set or clear the current session idle watchdog |
 | `/ps` | List local bridge processes |
 | `/exit <id\|#>` | Stop a bridge process |
-| `/reconnect` | Force a WebSocket reconnect |
+| `/reconnect` | Reconnect WebSocket; preserve a running tmux task by default, or wait for it with `--wait` |
 | `/doctor [description]` | Run low-sensitive diagnostics |
 | `/help` | Help card |
 
@@ -280,7 +282,7 @@ Long conversations / tasks are not cut off by a fixed time limit, but two behavi
 - **Terminal-history isolation**: live tmux capture is scoped to the current prompt and reconciled against the current turn's delivery ledger before every update. Redraws, prior terminal output, legacy bridge envelopes, and substantial embedded history replays are removed rather than sent again; newly produced text on either side of a replay and final lines remain eligible for delivery after a long task.
 - **Idempotent event delivery**: every inbound Feishu message ID is durably claimed before it is queued, so websocket replay or a bridge restart cannot launch a second turn. Screen-derived tmux updates carry a monotonic sequence and are reduced to their novel suffix; heartbeat and agent patches share one ordered delivery queue.
 - **Delivery policy (control without interruption)**: `/output live` streams progress and the final answer, `/output final` posts only the terminal answer, and `/output off` keeps the agent running while suppressing agent-originated chat output. This is independent of `/timeout`.
-- **Persistent tmux identity**: a scope records its managed tmux session and currently adopted agent pane. Closing a local terminal, detaching tmux, or restarting arg-bridge does not create a new native conversation. If you manually run `codex resume` or `claude --resume` in a new selected pane of that managed session, the bridge adopts and persists that pane; later Feishu input and `/tmux tail` target the resumed conversation. A real reboot of the host that runs tmux necessarily ends its processes; move the bridge and tmux to the durable server host for work that must survive client shutdowns.
+- **Persistent tmux identity**: a scope records its managed tmux session and currently adopted agent pane. Closing a local terminal, detaching tmux, `arg-bridge restart`, service auto-restart, or `/reconnect` only detaches the bridge relay: it never writes Ctrl-C to the tmux agent and never creates a new native conversation. Reconnection strictly validates profile, agent kind, Feishu chat/topic scope, and workspace, so it cannot adopt another conversation's pane; the next Feishu turn reattaches to the original session. If a restart occurs while a task is running, the task continues in tmux, while the disconnected bridge deliberately does not replay or post that turn's intermediate output. If you manually run `codex resume` or `claude --resume` in a new selected pane of that managed session, the bridge adopts and persists that pane; later Feishu input and `/tmux tail` target the resumed conversation. A real reboot of the host that runs tmux necessarily ends its processes; move the bridge and tmux to the durable server host for work that must survive client shutdowns.
 
 **Best practices for long tasks**: have the agent write full logs/reports to project files (`report.md`, `task.log`) and only post short progress + a final summary to Lark (cards have length limits); use `/status` for a non-destructive liveness check; use `/stop` to interrupt.
 

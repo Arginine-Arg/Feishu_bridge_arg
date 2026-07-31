@@ -34,6 +34,12 @@ export interface UnitInputs {
  * the moment ExecStart fires (bridge's WS handshake happens later, just
  * as on macOS). Our CLI polls the registry for the connection separately.
  *
+ * Managed tmux servers and their agents deliberately outlive a bridge
+ * restart. The systemd default (`KillMode=control-group`) would terminate
+ * every tmux/Codex child in the bridge cgroup before the bridge can reconnect;
+ * restrict stop signals to the bridge main process instead. Its SIGTERM
+ * handler still detaches its short-lived relay helpers cleanly.
+ *
  * `WantedBy=default.target` makes `systemctl --user enable` auto-start
  * the service when the user logs in. Note: systemd user services only
  * survive logout if `loginctl enable-linger <user>` is set — we mention
@@ -51,6 +57,7 @@ Type=simple
 ExecStart="${escape(inputs.nodePath)}" "${escape(inputs.bridgeEntryPath)}" run --profile "${escape(inputs.profile)}"
 Restart=always
 RestartSec=5
+KillMode=process
 StandardOutput=append:${daemonStdoutPath(inputs.profile)}
 StandardError=append:${daemonStderrPath(inputs.profile)}
 Environment="PATH=${escape(inputs.envPath)}"

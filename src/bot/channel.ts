@@ -576,9 +576,9 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       knownChatsRefresh.stop();
       keepalive.stop();
       pending.cancelAll();
-      const [disconnectResult, stopAllResult, ...flushResults] = await Promise.allSettled([
+      const [disconnectResult, detachResult, ...flushResults] = await Promise.allSettled([
         channel.disconnect(),
-        activeRuns.stopAll(),
+        activeRuns.detachAll(),
         agent.shutdown?.(),
         artifactBroker.close(),
         sessions.flush(),
@@ -587,8 +587,8 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         inboundMessages.flush(),
         workspaces.flush(),
       ]);
-      if (stopAllResult.status === 'rejected') {
-        log.fail('disconnect', stopAllResult.reason, { step: 'stopAll' });
+      if (detachResult.status === 'rejected') {
+        log.fail('disconnect', detachResult.reason, { step: 'detachAll' });
       }
       for (const [idx, result] of flushResults.entries()) {
         if (result.status === 'rejected') {
@@ -1538,6 +1538,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         async () => {},
         observeLiveEvent,
       );
+      if (handle.detached) return;
       await sendFinalReply({
         channel,
         chatId,
@@ -1568,7 +1569,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       // Re-enabling output while a muted task is still running intentionally
       // recovers only its final answer. A stream created after the fact would
       // replay old terminal history and reintroduce duplicate delivery.
-      if (currentOutputMode() !== 'off') {
+      if (!handle.detached && currentOutputMode() !== 'off') {
         await sendFinalReply({
           channel,
           chatId,
@@ -1629,6 +1630,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           observeLiveEvent,
         );
         await cotDone;
+        if (handle.detached) return;
         if (cotPublisher.degradedReason) {
           await sendCotDegradedNotice({
             channel,
@@ -1680,6 +1682,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         | { update(next: object | ((current: object) => object)): Promise<void> }
         | undefined;
       const postFreshFinal = async (state: RunState): Promise<void> => {
+        if (handle.detached) return;
         if (freshFinalPosted) return;
         if (currentOutputMode() === 'off') return;
         freshFinalPosted = true;
@@ -1795,7 +1798,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         },
         fallback: postFreshFinal,
       });
-      if (streamDegraded && currentOutputMode() !== 'off') {
+      if (!handle.detached && streamDegraded && currentOutputMode() !== 'off') {
         await postFreshFinal(prepareStateForReply(latestState));
       }
     } else if (replyMode === 'markdown') {
@@ -1813,6 +1816,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       let freshFinalPosted = false;
       let markdownCtrl: { setContent(markdown: string): Promise<void> } | undefined;
       const postFreshFinal = async (state: RunState): Promise<void> => {
+        if (handle.detached) return;
         if (freshFinalPosted) return;
         if (currentOutputMode() === 'off') return;
         freshFinalPosted = true;
@@ -1903,7 +1907,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         },
         fallback: postFreshFinal,
       });
-      if (streamDegraded && currentOutputMode() !== 'off') {
+      if (!handle.detached && streamDegraded && currentOutputMode() !== 'off') {
         await postFreshFinal(prepareStateForReply(latestState));
       }
     } else {
@@ -1920,7 +1924,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         async () => {},
         observeLiveEvent,
       );
-      if (currentOutputMode() === 'off') return;
+      if (handle.detached || currentOutputMode() === 'off') return;
       await sendFinalReply({
         channel,
         chatId,
@@ -2149,7 +2153,15 @@ async function processAgentStream(
   let state: RunState = initialState;
   const eventGate = new RunEventGate();
   const delivery = new SerializedDelivery();
-  const queueFlush = (snapshot: RunState): Promise<void> => delivery.enqueue(() => flush(snapshot));
+  const queueFlush = (snapshot: RunState): Promise<void> => {
+    if (handle.detached) return Promise.resolve();
+    return delivery.enqueue(async () => {
+      // A disconnect can happen while an earlier update is waiting in the
+      // serialized delivery queue. Do not let a stale bridge process update a
+      // card after its replacement has attached to this conversation.
+      if (!handle.detached) await flush(snapshot);
+    });
+  };
   let streamFailure: unknown;
   let sawTerminalEvent = false;
 
@@ -2199,6 +2211,7 @@ async function processAgentStream(
     if (!progressHeartbeatMs || progressHeartbeatMs <= 0) return;
     if (heartbeatTimer) return;
     heartbeatTimer = setInterval(() => {
+      if (handle.detached) return;
       if (state.terminal !== 'running') return;
       if (state.footer !== 'tool_running') return;
       if (state.lastToolStartedAt === undefined) return;
@@ -2281,6 +2294,14 @@ async function processAgentStream(
     if (heartbeatTimer) clearInterval(heartbeatTimer);
   }
 
+  // The process is being replaced, not the agent task. The new bridge will
+  // reconnect to the persisted profile/scope tmux session on its next turn;
+  // never emit a misleading terminal card or write Ctrl-C while detaching.
+  if (handle.detached) {
+    log.info('card', 'detached', { scope });
+    return state;
+  }
+
   // If state already reached a terminal event (done/error/etc.) before the
   // watchdog or interrupt could land, don't clobber it — that real terminal
   // wins. This avoids "claude finished but flush was slow → timer fired
@@ -2311,7 +2332,7 @@ async function processAgentStream(
   reportMetric('run_e2e_ms', Date.now() - runStart, { terminal: state.terminal });
   await queueFlush(state);
   await delivery.drain();
-  if (handle.interrupted) {
+  if (handle.interrupted && !handle.detached) {
     await handle.run.stop();
   }
   return state;

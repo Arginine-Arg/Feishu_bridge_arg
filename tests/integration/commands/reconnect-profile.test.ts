@@ -20,14 +20,15 @@ afterEach(async () => {
 });
 
 describe('/reconnect profile lifecycle', () => {
-  it('stops current profile runs before reconnect by default', async () => {
+  it('detaches current profile runs before reconnect without stopping their agent', async () => {
     const h = await createHarness();
     const run = new ManualRun('run-1');
     h.activeRuns.register('chat-1', run);
 
     await expect(h.command('/reconnect')).resolves.toBe(true);
 
-    expect(run.stopCalls).toBe(1);
+    expect(run.stopCalls).toBe(0);
+    expect(h.activeRuns.get('chat-1')).toBeUndefined();
     expect(run.waitForExitCalls).toBe(0);
     expect(h.restart).toHaveBeenCalledWith({ wait: false });
   });
@@ -63,7 +64,7 @@ describe('/reconnect profile lifecycle', () => {
     expect(disconnectBlock).not.toContain('resumeNewRuns');
     expect(disconnectBlock).toContain('await Promise.allSettled([');
     expect(disconnectBlock).toContain('channel.disconnect()');
-    expect(disconnectBlock).toContain('activeRuns.stopAll()');
+    expect(disconnectBlock).toContain('activeRuns.detachAll()');
     expect(source).toContain('sessionCatalogIdentity: await commandSessionCatalogIdentity({');
   });
 });

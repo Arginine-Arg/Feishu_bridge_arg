@@ -98,7 +98,15 @@ function makeSystemdAdapter(profile: string): ServiceAdapter {
     start: () => systemd.enableAndStart(profile),
     stop: () => systemd.stop(profile),
     stopAndDisableAutostart: () => systemd.disableAndStop(profile),
-    restart: () => systemd.restart(profile),
+    restart: async () => {
+      // Refresh the unit before every restart so an installed bridge picks up
+      // lifecycle fixes such as KillMode=process without a separate
+      // unregister/start cycle.
+      await systemd.writeUnit(profile);
+      const reload = systemd.daemonReload();
+      if (!reload.ok) return reload;
+      return systemd.restart(profile);
+    },
     waitUntilStopped: (timeoutMs) => systemd.waitUntilInactive(profile, timeoutMs),
     deleteFile: async () => {
       await systemd.deleteUnit(profile);

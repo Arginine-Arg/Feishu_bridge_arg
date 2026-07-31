@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.58",
+  version: "0.6.59",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -4577,6 +4577,7 @@ Type=simple
 ExecStart="${escape(inputs.nodePath)}" "${escape(inputs.bridgeEntryPath)}" run --profile "${escape(inputs.profile)}"
 Restart=always
 RestartSec=5
+KillMode=process
 StandardOutput=append:${daemonStdoutPath(inputs.profile)}
 StandardError=append:${daemonStderrPath(inputs.profile)}
 Environment="PATH=${escape(inputs.envPath)}"
@@ -4687,7 +4688,12 @@ function makeSystemdAdapter(profile2) {
     start: () => enableAndStart(profile2),
     stop: () => stop(profile2),
     stopAndDisableAutostart: () => disableAndStop(profile2),
-    restart: () => restart(profile2),
+    restart: async () => {
+      await writeUnit(profile2);
+      const reload = daemonReload();
+      if (!reload.ok) return reload;
+      return restart(profile2);
+    },
     waitUntilStopped: (timeoutMs) => waitUntilInactive(profile2, timeoutMs),
     deleteFile: async () => {
       await deleteUnit(profile2);
@@ -13459,14 +13465,14 @@ function formatAgo2(ms) {
 async function handleReconnect(args, ctx) {
   const wait = args.trim().split(/\s+/).filter(Boolean).includes("--wait");
   log.info("command", "reconnect", { wait });
-  await reply(ctx, wait ? "\u23F3 \u5C06\u5728\u5F53\u524D\u8FD0\u884C\u7ED3\u675F\u540E\u91CD\u8FDE\u2026" : "\u23F3 \u6B63\u5728\u505C\u6B62\u5F53\u524D\u8FD0\u884C\u5E76\u91CD\u8FDE\u2026");
+  await reply(ctx, wait ? "\u23F3 \u5C06\u5728\u5F53\u524D\u8FD0\u884C\u7ED3\u675F\u540E\u91CD\u8FDE\u2026" : "\u23F3 \u6B63\u5728\u91CD\u8FDE\uFF1B\u5F53\u524D tmux \u4EFB\u52A1\u4F1A\u7EE7\u7EED\u8FD0\u884C\uFF0C\u8FC7\u7A0B\u8F93\u51FA\u4E0D\u4F1A\u91CD\u653E\u3002");
   let resumeNewRuns;
   try {
     resumeNewRuns = ctx.activeRuns.pauseNewRuns("reconnect-in-progress");
     if (wait) {
       await ctx.activeRuns.waitForAll();
     } else {
-      await ctx.activeRuns.stopAll();
+      await ctx.activeRuns.detachAll();
     }
     await ctx.controls.restart({ wait });
     log.info("command", "reconnect-ok");
@@ -15492,7 +15498,7 @@ var ActiveRuns = class {
       throw new Error(`run already active for scope: ${chatId}`);
     }
     this.reservations.delete(chatId);
-    const handle = { run, interrupted: false };
+    const handle = { run, interrupted: false, detached: false };
     this.handles.set(chatId, handle);
     return handle;
   }
@@ -15547,6 +15553,21 @@ var ActiveRuns = class {
     this.reservations.clear();
     for (const h of all) h.interrupted = true;
     await Promise.allSettled(all.map((h) => h.run.stop()));
+  }
+  /**
+   * Drop bridge-side run ownership during a relay restart without signaling
+   * the agent. Managed tmux sessions are durable runtimes: sending Ctrl-C
+   * here would destroy an unrelated long-running task merely because the
+   * Feishu websocket or bridge binary was restarted.
+   */
+  async detachAll() {
+    const all = [...this.handles.values()];
+    this.handles.clear();
+    this.reservations.clear();
+    for (const h of all) {
+      h.interrupted = true;
+      h.detached = true;
+    }
   }
   async waitForAll(timeoutMs = 3e5) {
     const all = [...this.handles.values()];
@@ -18155,9 +18176,9 @@ async function startChannel(deps) {
       knownChatsRefresh.stop();
       keepalive.stop();
       pending.cancelAll();
-      const [disconnectResult, stopAllResult, ...flushResults] = await Promise.allSettled([
+      const [disconnectResult, detachResult, ...flushResults] = await Promise.allSettled([
         channel.disconnect(),
-        activeRuns.stopAll(),
+        activeRuns.detachAll(),
         agent.shutdown?.(),
         artifactBroker.close(),
         sessions.flush(),
@@ -18166,8 +18187,8 @@ async function startChannel(deps) {
         inboundMessages.flush(),
         workspaces.flush()
       ]);
-      if (stopAllResult.status === "rejected") {
-        log.fail("disconnect", stopAllResult.reason, { step: "stopAll" });
+      if (detachResult.status === "rejected") {
+        log.fail("disconnect", detachResult.reason, { step: "detachAll" });
       }
       for (const [idx, result] of flushResults.entries()) {
         if (result.status === "rejected") {
@@ -18823,6 +18844,7 @@ ${delta}`.slice(-16e3);
         },
         observeLiveEvent
       );
+      if (handle.detached) return;
       await sendFinalReply({
         channel,
         chatId,
@@ -18851,7 +18873,7 @@ ${delta}`.slice(-16e3);
         },
         observeLiveEvent
       );
-      if (currentOutputMode() !== "off") {
+      if (!handle.detached && currentOutputMode() !== "off") {
         await sendFinalReply({
           channel,
           chatId,
@@ -18913,6 +18935,7 @@ ${delta}`.slice(-16e3);
           observeLiveEvent
         );
         await cotDone;
+        if (handle.detached) return;
         if (cotPublisher.degradedReason) {
           await sendCotDegradedNotice({
             channel,
@@ -18950,6 +18973,7 @@ ${delta}`.slice(-16e3);
       let freshFinalPosted = false;
       let cardCtrl;
       const postFreshFinal = async (state) => {
+        if (handle.detached) return;
         if (freshFinalPosted) return;
         if (currentOutputMode() === "off") return;
         freshFinalPosted = true;
@@ -19056,7 +19080,7 @@ ${delta}`.slice(-16e3);
         },
         fallback: postFreshFinal
       });
-      if (streamDegraded && currentOutputMode() !== "off") {
+      if (!handle.detached && streamDegraded && currentOutputMode() !== "off") {
         await postFreshFinal(prepareStateForReply(latestState));
       }
     } else if (replyMode === "markdown") {
@@ -19068,6 +19092,7 @@ ${delta}`.slice(-16e3);
       let freshFinalPosted = false;
       let markdownCtrl;
       const postFreshFinal = async (state) => {
+        if (handle.detached) return;
         if (freshFinalPosted) return;
         if (currentOutputMode() === "off") return;
         freshFinalPosted = true;
@@ -19149,7 +19174,7 @@ ${delta}`.slice(-16e3);
         },
         fallback: postFreshFinal
       });
-      if (streamDegraded && currentOutputMode() !== "off") {
+      if (!handle.detached && streamDegraded && currentOutputMode() !== "off") {
         await postFreshFinal(prepareStateForReply(latestState));
       }
     } else {
@@ -19164,7 +19189,7 @@ ${delta}`.slice(-16e3);
         },
         observeLiveEvent
       );
-      if (currentOutputMode() === "off") return;
+      if (handle.detached || currentOutputMode() === "off") return;
       await sendFinalReply({
         channel,
         chatId,
@@ -19337,7 +19362,12 @@ async function processAgentStream(handle, events, scope, idleTimeoutMs, progress
   let state = initialState;
   const eventGate = new RunEventGate();
   const delivery = new SerializedDelivery();
-  const queueFlush = (snapshot) => delivery.enqueue(() => flush(snapshot));
+  const queueFlush = (snapshot) => {
+    if (handle.detached) return Promise.resolve();
+    return delivery.enqueue(async () => {
+      if (!handle.detached) await flush(snapshot);
+    });
+  };
   let streamFailure;
   let sawTerminalEvent = false;
   let idleFired = false;
@@ -19363,6 +19393,7 @@ async function processAgentStream(handle, events, scope, idleTimeoutMs, progress
     if (!progressHeartbeatMs || progressHeartbeatMs <= 0) return;
     if (heartbeatTimer) return;
     heartbeatTimer = setInterval(() => {
+      if (handle.detached) return;
       if (state.terminal !== "running") return;
       if (state.footer !== "tool_running") return;
       if (state.lastToolStartedAt === void 0) return;
@@ -19430,6 +19461,10 @@ async function processAgentStream(handle, events, scope, idleTimeoutMs, progress
     if (timer) clearTimeout(timer);
     if (heartbeatTimer) clearInterval(heartbeatTimer);
   }
+  if (handle.detached) {
+    log.info("card", "detached", { scope });
+    return state;
+  }
   if (state.terminal === "running") {
     if (idleFired) {
       state = markIdleTimeout(state, Math.round(idleTimeoutMs / 6e4));
@@ -19453,7 +19488,7 @@ async function processAgentStream(handle, events, scope, idleTimeoutMs, progress
   reportMetric("run_e2e_ms", Date.now() - runStart2, { terminal: state.terminal });
   await queueFlush(state);
   await delivery.drain();
-  if (handle.interrupted) {
+  if (handle.interrupted && !handle.detached) {
     await handle.run.stop();
   }
   return state;

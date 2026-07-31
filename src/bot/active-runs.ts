@@ -3,6 +3,8 @@ import type { AgentRun } from '../agent/types';
 export interface RunHandle {
   run: AgentRun;
   interrupted: boolean;
+  /** The bridge relay ended, but the underlying agent must keep running. */
+  detached: boolean;
 }
 
 export class ActiveRuns {
@@ -27,7 +29,7 @@ export class ActiveRuns {
       throw new Error(`run already active for scope: ${chatId}`);
     }
     this.reservations.delete(chatId);
-    const handle: RunHandle = { run, interrupted: false };
+    const handle: RunHandle = { run, interrupted: false, detached: false };
     this.handles.set(chatId, handle);
     return handle;
   }
@@ -92,6 +94,25 @@ export class ActiveRuns {
     this.reservations.clear();
     for (const h of all) h.interrupted = true;
     await Promise.allSettled(all.map((h) => h.run.stop()));
+  }
+
+  /**
+   * Drop bridge-side run ownership during a relay restart without signaling
+   * the agent. Managed tmux sessions are durable runtimes: sending Ctrl-C
+   * here would destroy an unrelated long-running task merely because the
+   * Feishu websocket or bridge binary was restarted.
+   */
+  async detachAll(): Promise<void> {
+    const all = [...this.handles.values()];
+    this.handles.clear();
+    this.reservations.clear();
+    for (const h of all) {
+      // Existing renderers already use `interrupted` to suppress stale output.
+      // `detached` preserves the crucial distinction: this is not a request to
+      // interrupt the agent, so no later cleanup path may call run.stop().
+      h.interrupted = true;
+      h.detached = true;
+    }
   }
 
   async waitForAll(timeoutMs = 300_000): Promise<void> {
