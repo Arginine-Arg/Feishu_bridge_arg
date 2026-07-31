@@ -26,6 +26,105 @@ export function novelTerminalTextSuffix(delivered: string, candidate: string): s
   return overlap > 0 ? candidate.slice(overlap) : candidate;
 }
 
+const REPLAY_SEGMENT_MIN_LINES = 3;
+const REPLAY_SEGMENT_MIN_CHARS = 72;
+
+/**
+ * Terminal captures are state snapshots rather than an append-only event log.
+ * When tmux/Codex redraws a scrolled viewport, the previously-delivered
+ * transcript can occur *inside* an otherwise-new candidate. A suffix-only
+ * comparison cannot remove that internal replay, so it leaks back into the
+ * outbound card and eventually pushes the actual final answer out of view.
+ *
+ * This deliberately only removes a proven, substantial contiguous replay of
+ * the current run's terminal transcript. Short repeated prose remains valid
+ * agent output; a terminal-history replay is normally several adjacent lines
+ * or a long block.
+ */
+export function stripReplayedTerminalSegments(history: string, candidate: string): string {
+  if (!history || !candidate) return candidate;
+
+  let remaining = stripWholeHistoryReplays(history, candidate);
+  if (!remaining) return '';
+
+  const historyLines = history.split('\n');
+  const candidateLines = remaining.split('\n');
+  const positions = new Map<string, number[]>();
+  for (let index = 0; index < historyLines.length; index += 1) {
+    const normalized = normalizeReplayLine(historyLines[index]!);
+    if (!normalized) continue;
+    const matches = positions.get(normalized);
+    if (matches) matches.push(index);
+    else positions.set(normalized, [index]);
+  }
+
+  const out: string[] = [];
+  for (let index = 0; index < candidateLines.length;) {
+    const normalized = normalizeReplayLine(candidateLines[index]!);
+    const matches = normalized ? positions.get(normalized) : undefined;
+    const replayLength = matches
+      ? longestReplayLineRun(historyLines, candidateLines, matches, index)
+      : 0;
+    if (replayLength > 0 && isSubstantialReplay(candidateLines, index, replayLength)) {
+      index += replayLength;
+      continue;
+    }
+    out.push(candidateLines[index]!);
+    index += 1;
+  }
+  remaining = out.join('\n');
+  return remaining;
+}
+
+function stripWholeHistoryReplays(history: string, candidate: string): string {
+  // An exact current-run ledger embedded in a new frame is unambiguously a
+  // redraw. Keep the floor so a brief intentional repeated sentence is never
+  // erased simply because it happens to equal all earlier text.
+  if (history.length < REPLAY_SEGMENT_MIN_CHARS) return candidate;
+  let out = candidate;
+  let replayAt = out.indexOf(history);
+  while (replayAt >= 0) {
+    out = out.slice(0, replayAt) + out.slice(replayAt + history.length);
+    replayAt = out.indexOf(history);
+  }
+  return out;
+}
+
+function longestReplayLineRun(
+  historyLines: string[],
+  candidateLines: string[],
+  historyPositions: number[],
+  candidateStart: number,
+): number {
+  let longest = 0;
+  for (const historyStart of historyPositions) {
+    let length = 0;
+    while (
+      historyStart + length < historyLines.length &&
+      candidateStart + length < candidateLines.length &&
+      normalizeReplayLine(historyLines[historyStart + length]!) ===
+        normalizeReplayLine(candidateLines[candidateStart + length]!)
+    ) {
+      length += 1;
+    }
+    longest = Math.max(longest, length);
+  }
+  return longest;
+}
+
+function isSubstantialReplay(lines: string[], start: number, length: number): boolean {
+  if (length >= REPLAY_SEGMENT_MIN_LINES) return true;
+  const chars = lines
+    .slice(start, start + length)
+    .map(normalizeReplayLine)
+    .join('\n').length;
+  return chars >= REPLAY_SEGMENT_MIN_CHARS;
+}
+
+function normalizeReplayLine(line: string): string {
+  return line.replace(/\s+/gu, ' ').trim();
+}
+
 function whitespaceNormalizedSuffix(delivered: string, candidate: string): string | undefined {
   const left = normalizeWhitespace(delivered);
   const right = normalizeWhitespace(candidate);

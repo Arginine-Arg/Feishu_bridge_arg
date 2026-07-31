@@ -11,7 +11,10 @@ import {
   type SpawnedProcessByStdio,
 } from '../platform/spawn';
 import type { AgentEvent, AgentRun } from './types';
-import { novelTerminalTextSuffix } from './terminal-text';
+import {
+  novelTerminalTextSuffix,
+  stripReplayedTerminalSegments,
+} from './terminal-text';
 import {
   isLiveInteractionPromptStart,
   isStructuredLiveInteraction,
@@ -2104,7 +2107,14 @@ function trimTail(value: string, maxChars: number): string {
 }
 
 export function undeliveredSnapshotSuffix(deliveredTail: string, snapshot: string): string {
-  return novelTerminalTextSuffix(deliveredTail, snapshot);
+  // A positioned tmux snapshot can contain new output on both sides of a
+  // reflowed history block. Reconcile the embedded replay before taking the
+  // append suffix, otherwise the first matching history copy would discard
+  // the genuine leading delta.
+  return novelTerminalTextSuffix(
+    deliveredTail,
+    stripReplayedTerminalSegments(deliveredTail, snapshot),
+  );
 }
 
 function collapseCarriageReturns(input: string): string {

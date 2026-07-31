@@ -803,7 +803,7 @@ function sanitizeTelemetryError(err) {
 import { createHash } from "crypto";
 
 // src/agent/live-interaction-detection.ts
-var MAX_INTERACTION_LINES = 40;
+var MAX_INTERACTION_LINES = 120;
 var FALLBACK_INTERACTION_LINES = 12;
 var NUMBERED_CHOICE_RE = /^(?:[›❯>▸*+-]\s*)?\d{1,2}[.)、:\s-]+\S/u;
 var BINARY_CONTROL_RE = /\b(?:y\/n|yes\/no|no\/yes)\b|\[(?:y|yes)\/(?:n|no)\]|\((?:y|yes)\/(?:n|no)\)/iu;

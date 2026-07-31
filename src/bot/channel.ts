@@ -946,6 +946,11 @@ function normalizeAgentPrefixedNativeInput(input: string): {
   nativeMode?: LiveInputMode;
 } {
   const trimmed = input.trim();
+  // `/codex model` is the natural shorthand users type for `/codex /model`.
+  // Treat it as the native picker command rather than ordinary conversation.
+  if (/^model$/iu.test(trimmed)) {
+    return { text: '/model', forceNative: true, nativeMode: 'command' };
+  }
   const slashless = /^\/([A-Za-z0-9_-]+)$/u.exec(trimmed)?.[1];
   const controlText = slashless && isLivePickerInput(slashless) ? slashless : trimmed;
   if (isLivePickerInput(controlText) || isLiveControlInput(controlText)) {
@@ -1314,7 +1319,10 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       const selection = parseNativeCodexModelSelection(delta);
       if (selection) observedNativeModelSelection = selection;
     }
-    interactionTextBuffer = `${interactionTextBuffer}\n${delta}`.slice(-4000);
+    // Keep enough terminal history to reconstruct a full native model menu.
+    // A 4 KB tail can drop the picker title and early choices when Codex
+    // redraws a longer model list over several frames.
+    interactionTextBuffer = `${interactionTextBuffer}\n${delta}`.slice(-16_000);
     const outputKind = bridgeAgent.classifyOutput(interactionTextBuffer);
     const pickerLike = isStartupInteraction || outputKind === 'picker';
     const interaction = pickerLike ? detectLiveInteraction(interactionTextBuffer) : undefined;
@@ -2596,7 +2604,12 @@ function detectLiveInteraction(
     isClaudeModelPicker(prompt) ||
     isCodexUpdatePrompt(prompt);
   const selectedChoice = numberedChoices.findIndex((choice) => choice.selected);
-  for (const [index, choice] of numberedChoices.slice(0, 8).entries()) {
+  // A native model picker is a bounded control surface, but it can contain
+  // more than eight models. Preserve the complete practical list in the card;
+  // Feishu supports far more than this many button elements and the prompt
+  // itself remains the authoritative visual record of every choice.
+  const maxButtons = isCodexModelPickerPrompt(prompt) ? 24 : 8;
+  for (const [index, choice] of numberedChoices.slice(0, maxButtons).entries()) {
     if (!arrowNumberedPrompt) {
       add(choice.input, choice.input);
       continue;
@@ -2653,7 +2666,7 @@ function detectLiveInteraction(
   if (buttons.length === 0) return undefined;
   return {
     signature: `${prompt}\n${buttons.map((button) => button.input).join('|')}`.slice(0, 500),
-    prompt: displayPrompt.slice(0, 1200),
+    prompt: displayPrompt.slice(0, isCodexModelPickerPrompt(prompt) ? 4_000 : 1_200),
     buttons,
   };
 }

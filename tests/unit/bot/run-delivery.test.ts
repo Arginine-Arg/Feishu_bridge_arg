@@ -118,6 +118,28 @@ describe('novelLiveSuffix', () => {
 
     expect(novelLiveSuffix(delivered, reflowed)).toBe('');
   });
+
+  it('removes an internal terminal-history replay while retaining both new tails', () => {
+    const gate = new RunEventGate();
+    const history = [
+      '• inspect the stream and delivery state',
+      '• verify terminal history anchoring',
+      '• retain the final answer after rollover',
+    ].join('\n') + '\n';
+    expect(gate.accept({ type: 'text', delta: history, source: 'live-terminal', sequence: 1 }))
+      .toMatchObject({ delta: history });
+
+    const repaired = gate.accept({
+      type: 'text',
+      delta: `• inspect the remaining renderer path\n${history}• final completion is intact\n`,
+      source: 'live-terminal',
+      sequence: 2,
+    });
+
+    expect(repaired).toMatchObject({
+      delta: '• inspect the remaining renderer path\n• final completion is intact\n',
+    });
+  });
 });
 
 describe('SerializedDelivery', () => {

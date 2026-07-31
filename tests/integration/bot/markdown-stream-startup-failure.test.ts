@@ -162,6 +162,75 @@ describe('markdown stream startup failures', () => {
     },
   );
 
+  it.each(['markdown', 'card'] as const)(
+    'repairs an internal terminal-history replay and retains the final tail in %s streams',
+    async (messageReply) => {
+      const markdownUpdates: string[] = [];
+      const cardUpdates: object[] = [];
+      const h = await createHarness({
+        stream: async (_chatId, input) => {
+          if (messageReply === 'markdown') {
+            const producer = (input as {
+              markdown?: (ctrl: { setContent(markdown: string): Promise<void> }) => Promise<void>;
+            }).markdown;
+            if (!producer) throw new Error('expected markdown stream producer');
+            await producer({
+              setContent: async (markdown) => {
+                markdownUpdates.push(markdown);
+              },
+            });
+            return;
+          }
+          const producer = (input as {
+            card?: { producer?: (ctrl: { update(next: object): Promise<void> }) => Promise<void> };
+          }).card?.producer;
+          if (!producer) throw new Error('expected card stream producer');
+          await producer({
+            update: async (next) => {
+              cardUpdates.push(next);
+            },
+          });
+        },
+      });
+      h.profileConfig.preferences = { ...(h.profileConfig.preferences ?? {}), messageReply };
+      h.controls.profileConfig.preferences = h.profileConfig.preferences;
+      h.controls.cfg.preferences = h.profileConfig.preferences;
+      const history = [
+        '• inspect the stream and delivery state',
+        '• verify terminal history anchoring',
+        '• retain the final answer after rollover',
+      ].join('\n') + '\n';
+      h.agent.setEvents([
+        [
+          { type: 'text', source: 'live-terminal', sequence: 1, delta: history },
+          {
+            type: 'text',
+            source: 'live-terminal',
+            sequence: 2,
+            delta: `• inspect the remaining renderer path\n${history}• FINAL_COMPLETION_MESSAGE\n`,
+          },
+          { type: 'done', terminationReason: 'normal' },
+        ],
+      ]);
+      await startTestBridge(h);
+
+      await h.channel.handlers.message?.(message(`om_internal_replay_${messageReply}`, 'inspect progress'));
+      await waitFor(() => {
+        const delivered = messageReply === 'markdown'
+          ? markdownUpdates.at(-1) ?? ''
+          : JSON.stringify(cardUpdates.at(-1) ?? {});
+        return delivered.includes('FINAL_COMPLETION_MESSAGE');
+      });
+
+      const delivered = messageReply === 'markdown'
+        ? markdownUpdates.at(-1) ?? ''
+        : JSON.stringify(cardUpdates.at(-1) ?? {});
+      expect(delivered.match(/inspect the stream and delivery state/g)).toHaveLength(1);
+      expect(delivered.match(/verify terminal history anchoring/g)).toHaveLength(1);
+      expect(delivered).toContain('FINAL_COMPLETION_MESSAGE');
+    },
+  );
+
   it('suppresses a replayed Feishu message before it can start a second agent turn', async () => {
     const h = await createHarness();
     h.profileConfig.preferences = {
@@ -396,6 +465,38 @@ describe('markdown stream startup failures', () => {
       model: 'gpt-5.6-sol',
       reasoningEffort: 'ultra',
     });
+  });
+
+  it('keeps all practical Codex model-picker choices and accepts /codex model shorthand', async () => {
+    const h = await createHarness({
+      stream: async () => {
+        throw new Error('native model picker output should not use stream');
+      },
+    });
+    const choices = Array.from(
+      { length: 12 },
+      (_, index) => `${index === 0 ? '› ' : ''}${index + 1}. gpt-5.${index + 1}${index === 0 ? ' (current)' : ''}`,
+    );
+    h.agent.setEvents([
+      [
+        {
+          type: 'text',
+          delta: ['Select Model and Effort', ...choices, 'Press enter to confirm or esc to go back'].join('\n'),
+        },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+    ]);
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_prefixed_model', '/codex model'));
+    await waitFor(() => h.agent.runOptions.length === 1 && h.channel.sent.length === 1);
+
+    expect(h.agent.runOptions[0]).toMatchObject({ prompt: '/model', liveInputMode: 'command' });
+    const card = (h.channel.sent[0]?.content as { card?: unknown }).card;
+    expect(buttonLabels(card)).toEqual([
+      '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', 'enter', 'esc',
+    ]);
+    expect(JSON.stringify(card)).toContain('12. gpt-5.12');
   });
 
   it('keeps plain Codex /model restricted to profile admins', async () => {

@@ -162,6 +162,19 @@ describe('tmux input framing and snapshots', () => {
     );
   });
 
+  it('keeps new output on both sides of a substantial embedded history replay', () => {
+    const delivered = [
+      '• inspect the stream and delivery state',
+      '• verify terminal history anchoring',
+      '• retain the final answer after rollover',
+    ].join('\n') + '\n';
+    const snapshot = `• newly rendered leading delta\n${delivered}• FINAL_COMPLETION_MESSAGE\n`;
+
+    expect(undeliveredSnapshotSuffix(delivered, snapshot)).toBe(
+      '• newly rendered leading delta\n• FINAL_COMPLETION_MESSAGE\n',
+    );
+  });
+
   it('keeps only the current prompt and its output from a pane snapshot', () => {
     const snapshot = [
       '› earlier question',

@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.56",
+  version: "0.6.57",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -5793,6 +5793,66 @@ function novelTerminalTextSuffix(delivered, candidate) {
   const overlap = longestSuffixPrefix(delivered, candidate);
   return overlap > 0 ? candidate.slice(overlap) : candidate;
 }
+var REPLAY_SEGMENT_MIN_LINES = 3;
+var REPLAY_SEGMENT_MIN_CHARS = 72;
+function stripReplayedTerminalSegments(history, candidate) {
+  if (!history || !candidate) return candidate;
+  let remaining = stripWholeHistoryReplays(history, candidate);
+  if (!remaining) return "";
+  const historyLines = history.split("\n");
+  const candidateLines = remaining.split("\n");
+  const positions = /* @__PURE__ */ new Map();
+  for (let index = 0; index < historyLines.length; index += 1) {
+    const normalized = normalizeReplayLine(historyLines[index]);
+    if (!normalized) continue;
+    const matches = positions.get(normalized);
+    if (matches) matches.push(index);
+    else positions.set(normalized, [index]);
+  }
+  const out = [];
+  for (let index = 0; index < candidateLines.length; ) {
+    const normalized = normalizeReplayLine(candidateLines[index]);
+    const matches = normalized ? positions.get(normalized) : void 0;
+    const replayLength = matches ? longestReplayLineRun(historyLines, candidateLines, matches, index) : 0;
+    if (replayLength > 0 && isSubstantialReplay(candidateLines, index, replayLength)) {
+      index += replayLength;
+      continue;
+    }
+    out.push(candidateLines[index]);
+    index += 1;
+  }
+  remaining = out.join("\n");
+  return remaining;
+}
+function stripWholeHistoryReplays(history, candidate) {
+  if (history.length < REPLAY_SEGMENT_MIN_CHARS) return candidate;
+  let out = candidate;
+  let replayAt = out.indexOf(history);
+  while (replayAt >= 0) {
+    out = out.slice(0, replayAt) + out.slice(replayAt + history.length);
+    replayAt = out.indexOf(history);
+  }
+  return out;
+}
+function longestReplayLineRun(historyLines, candidateLines, historyPositions, candidateStart) {
+  let longest = 0;
+  for (const historyStart of historyPositions) {
+    let length = 0;
+    while (historyStart + length < historyLines.length && candidateStart + length < candidateLines.length && normalizeReplayLine(historyLines[historyStart + length]) === normalizeReplayLine(candidateLines[candidateStart + length])) {
+      length += 1;
+    }
+    longest = Math.max(longest, length);
+  }
+  return longest;
+}
+function isSubstantialReplay(lines, start, length) {
+  if (length >= REPLAY_SEGMENT_MIN_LINES) return true;
+  const chars = lines.slice(start, start + length).map(normalizeReplayLine).join("\n").length;
+  return chars >= REPLAY_SEGMENT_MIN_CHARS;
+}
+function normalizeReplayLine(line) {
+  return line.replace(/\s+/gu, " ").trim();
+}
 function whitespaceNormalizedSuffix(delivered, candidate) {
   const left = normalizeWhitespace(delivered);
   const right = normalizeWhitespace(candidate);
@@ -5883,7 +5943,7 @@ function normalizeWhitespace(input) {
 }
 
 // src/agent/live-interaction-detection.ts
-var MAX_INTERACTION_LINES = 40;
+var MAX_INTERACTION_LINES = 120;
 var FALLBACK_INTERACTION_LINES = 12;
 var NUMBERED_CHOICE_RE = /^(?:[›❯>▸*+-]\s*)?\d{1,2}[.)、:\s-]+\S/u;
 var BINARY_CONTROL_RE = /\b(?:y\/n|yes\/no|no\/yes)\b|\[(?:y|yes)\/(?:n|no)\]|\((?:y|yes)\/(?:n|no)\)/iu;
@@ -8300,7 +8360,10 @@ function trimTail(value, maxChars) {
   return value.length <= maxChars ? value : value.slice(-maxChars);
 }
 function undeliveredSnapshotSuffix(deliveredTail, snapshot) {
-  return novelTerminalTextSuffix(deliveredTail, snapshot);
+  return novelTerminalTextSuffix(
+    deliveredTail,
+    stripReplayedTerminalSegments(deliveredTail, snapshot)
+  );
 }
 function collapseCarriageReturns(input) {
   let out = "";
@@ -17287,7 +17350,10 @@ var RunEventGate = class {
         if (event.sequence <= this.lastLiveSequence) return void 0;
         this.lastLiveSequence = event.sequence;
       }
-      const delta = novelLiveSuffix(this.liveTranscript, event.delta);
+      const delta = novelLiveSuffix(
+        this.liveTranscript,
+        stripReplayedTerminalSegments(this.liveTranscript, event.delta)
+      );
       if (!delta) return void 0;
       this.liveTranscript = trimTail2(this.liveTranscript + delta, LIVE_TRANSCRIPT_WINDOW);
       return { ...event, delta };
@@ -18255,6 +18321,9 @@ function rewriteAgentCommandMessage(msg, agentKind) {
 }
 function normalizeAgentPrefixedNativeInput(input) {
   const trimmed = input.trim();
+  if (/^model$/iu.test(trimmed)) {
+    return { text: "/model", forceNative: true, nativeMode: "command" };
+  }
   const slashless = /^\/([A-Za-z0-9_-]+)$/u.exec(trimmed)?.[1];
   const controlText = slashless && isLivePickerInput(slashless) ? slashless : trimmed;
   if (isLivePickerInput(controlText) || isLiveControlInput(controlText)) {
@@ -18539,7 +18608,7 @@ async function runAgentBatch(deps) {
       if (selection) observedNativeModelSelection = selection;
     }
     interactionTextBuffer = `${interactionTextBuffer}
-${delta}`.slice(-4e3);
+${delta}`.slice(-16e3);
     const outputKind = bridgeAgent.classifyOutput(interactionTextBuffer);
     const pickerLike = isStartupInteraction || outputKind === "picker";
     const interaction = pickerLike ? detectLiveInteraction(interactionTextBuffer) : void 0;
@@ -19508,7 +19577,8 @@ function detectLiveInteraction(text, allowBareConfirmation = false) {
   };
   const arrowNumberedPrompt = isClaudeBypassPermissionsPrompt(prompt) || isClaudeModelPicker(prompt) || isCodexUpdatePrompt(prompt);
   const selectedChoice = numberedChoices.findIndex((choice) => choice.selected);
-  for (const [index, choice] of numberedChoices.slice(0, 8).entries()) {
+  const maxButtons = isCodexModelPickerPrompt(prompt) ? 24 : 8;
+  for (const [index, choice] of numberedChoices.slice(0, maxButtons).entries()) {
     if (!arrowNumberedPrompt) {
       add(choice.input, choice.input);
       continue;
@@ -19559,7 +19629,7 @@ function detectLiveInteraction(text, allowBareConfirmation = false) {
   return {
     signature: `${prompt}
 ${buttons.map((button2) => button2.input).join("|")}`.slice(0, 500),
-    prompt: displayPrompt.slice(0, 1200),
+    prompt: displayPrompt.slice(0, isCodexModelPickerPrompt(prompt) ? 4e3 : 1200),
     buttons
   };
 }

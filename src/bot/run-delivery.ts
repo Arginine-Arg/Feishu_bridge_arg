@@ -1,6 +1,12 @@
 import type { AgentEvent } from '../agent/types';
-import { novelTerminalTextSuffix } from '../agent/terminal-text';
+import {
+  novelTerminalTextSuffix,
+  stripReplayedTerminalSegments,
+} from '../agent/terminal-text';
 
+// Keep a bounded terminal ledger for reconciliation. This covers more than
+// the live session's own 120K delivery tail without letting a noisy terminal
+// consume unbounded memory during a long task.
 const LIVE_TRANSCRIPT_WINDOW = 256_000;
 
 /**
@@ -55,7 +61,13 @@ export class RunEventGate {
         if (event.sequence <= this.lastLiveSequence) return undefined;
         this.lastLiveSequence = event.sequence;
       }
-      const delta = novelLiveSuffix(this.liveTranscript, event.delta);
+      // Reconcile internal redraw copies before calculating the append suffix.
+      // Doing this in the opposite order can discard genuine new text that
+      // happens to appear immediately before a replayed history block.
+      const delta = novelLiveSuffix(
+        this.liveTranscript,
+        stripReplayedTerminalSegments(this.liveTranscript, event.delta),
+      );
       if (!delta) return undefined;
       this.liveTranscript = trimTail(this.liveTranscript + delta, LIVE_TRANSCRIPT_WINDOW);
       return { ...event, delta };

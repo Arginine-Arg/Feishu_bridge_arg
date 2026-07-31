@@ -1,4 +1,7 @@
-const MAX_INTERACTION_LINES = 40;
+// Native model pickers can list more than a single terminal viewport. Keep
+// enough history to reconstruct the complete choice set instead of making the
+// card depend on whatever rows happened to be visible during a redraw.
+const MAX_INTERACTION_LINES = 120;
 const FALLBACK_INTERACTION_LINES = 12;
 
 const NUMBERED_CHOICE_RE = /^(?:[›❯>▸*+-]\s*)?\d{1,2}[.)、:\s-]+\S/u;
