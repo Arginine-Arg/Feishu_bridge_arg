@@ -140,6 +140,33 @@ describe('novelLiveSuffix', () => {
       delta: '• inspect the remaining renderer path\n• final completion is intact\n',
     });
   });
+
+  it('removes short repeated terminal rows while retaining the new activity and final tail', () => {
+    const gate = new RunEventGate();
+    const intro = '• 当前可以把多版本实验归纳为一句话：条件表征需要先校准。';
+    const tableRow = 'correct    0.068903    0.003373';
+
+    expect(gate.accept({ type: 'text', delta: `${intro}\n`, source: 'live-terminal', sequence: 1 }))
+      .toMatchObject({ delta: `${intro}\n` });
+    expect(gate.accept({
+      type: 'text',
+      delta: `${intro}\n• Explored\n└ Read stablefate_v126_cgate_interpretation.md\n`,
+      source: 'live-terminal',
+      sequence: 2,
+    })).toMatchObject({ delta: '• Explored\n└ Read stablefate_v126_cgate_interpretation.md\n' });
+    expect(gate.accept({
+      type: 'text',
+      delta: `${intro}\n${tableRow}\n• FINAL_CONCLUSION_REMAINS_COMPLETE\n`,
+      source: 'live-terminal',
+      sequence: 3,
+    })).toMatchObject({ delta: `${tableRow}\n• FINAL_CONCLUSION_REMAINS_COMPLETE\n` });
+    expect(gate.accept({
+      type: 'text',
+      delta: `${tableRow}\n• FINAL_AFTER_TABLE_ROW_REPLAY\n`,
+      source: 'live-terminal',
+      sequence: 4,
+    })).toMatchObject({ delta: '• FINAL_AFTER_TABLE_ROW_REPLAY\n' });
+  });
 });
 
 describe('SerializedDelivery', () => {

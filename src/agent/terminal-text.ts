@@ -8,10 +8,17 @@
 export function novelTerminalTextSuffix(delivered: string, candidate: string): string {
   if (!candidate || !delivered) return candidate;
 
+  // Preserve full snapshot structure while determining its novel suffix.
+  // In particular, a reflowed line can need a later historical line as its
+  // whitespace-normalized anchor. Only then remove isolated replay rows from
+  // the already-scoped suffix.
+  const withoutShortReplays = (suffix: string): string =>
+    stripReplayedTerminalLines(delivered, suffix);
+
   // A complete redraw normally includes the delivered transcript verbatim.
   // Keep the earliest copy: a later copy may be legitimate new output.
   const exactReplay = candidate.indexOf(delivered);
-  if (exactReplay >= 0) return candidate.slice(exactReplay + delivered.length);
+  if (exactReplay >= 0) return withoutShortReplays(candidate.slice(exactReplay + delivered.length));
   // A scrolled/repainted terminal frame can contain only a *middle* fragment
   // of already-delivered history. `endsWith()` alone misses that case and
   // repeatedly forwards the fragment whenever tmux changes the viewport or
@@ -20,10 +27,10 @@ export function novelTerminalTextSuffix(delivered: string, candidate: string): s
   if (delivered.endsWith(candidate)) return '';
 
   const semantic = whitespaceNormalizedSuffix(delivered, candidate);
-  if (semantic !== undefined) return semantic;
+  if (semantic !== undefined) return withoutShortReplays(semantic);
 
   const overlap = longestSuffixPrefix(delivered, candidate);
-  return overlap > 0 ? candidate.slice(overlap) : candidate;
+  return withoutShortReplays(overlap > 0 ? candidate.slice(overlap) : candidate);
 }
 
 const REPLAY_SEGMENT_MIN_LINES = 3;
@@ -74,6 +81,51 @@ export function stripReplayedTerminalSegments(history: string, candidate: string
   }
   remaining = out.join('\n');
   return remaining;
+}
+
+/**
+ * A terminal viewport can redraw only one already-delivered progress line
+ * before showing a new tool row. It is too small for the conservative
+ * multi-line replay detector above, yet forwarding it makes every live card
+ * repeat its opening status and can duplicate individual table rows. Apply
+ * this only to terminal-shaped lines and only against the current run's
+ * delivered transcript; structured agent text is never passed here.
+ */
+function stripReplayedTerminalLines(history: string, candidate: string): string {
+  if (!history || !candidate) return candidate;
+
+  const delivered = new Set(
+    history
+      .split('\n')
+      .filter((line) => isReplayableTerminalLine(line))
+      .map(normalizeReplayLine)
+      .filter(Boolean),
+  );
+  if (delivered.size === 0) return candidate;
+
+  return candidate
+    .split('\n')
+    .filter((line) => {
+      const normalized = normalizeReplayLine(line);
+      return !normalized || !isReplayableTerminalLine(line) || !delivered.has(normalized);
+    })
+    .join('\n');
+}
+
+function isReplayableTerminalLine(line: string): boolean {
+  const normalized = normalizeReplayLine(line);
+  if (!normalized) return false;
+  // Codex/Claude prose bullets, command frames, and terminal table rows are
+  // stable screen content. A repeat of one of these rows in a later snapshot
+  // is a redraw, not a second assistant event.
+  if (/^[•◦⏺●]\s*(?:ran|running|explored|exploring|viewed|read|search|listed|list|edited|wrote|applied|patched|checked|inspected|worked|planning|analyzing|investigating)\b/iu.test(normalized)) {
+    return true;
+  }
+  if (/^[•◦⏺●]\s+\S/u.test(normalized) && normalized.length >= 12) return true;
+  if (/^[└│╰⎿]\s*\S/u.test(normalized)) return true;
+  if (/^[━─═╌╍┄┅\s]+$/u.test(normalized)) return true;
+  if (/\S(?: {2,}|\t+)\S/u.test(line)) return true;
+  return normalized.length >= REPLAY_SEGMENT_MIN_CHARS;
 }
 
 function stripWholeHistoryReplays(history: string, candidate: string): string {

@@ -107,6 +107,13 @@ function splitTerminalActivity(input: string): TextSegment[] {
       continue;
     }
     if (activity.length > 0) {
+      const tablePreludeStart = terminalTablePreludeStart(activity, line);
+      if (tablePreludeStart !== undefined) {
+        const tablePrelude = activity.splice(tablePreludeStart);
+        flushActivity();
+        prose.push(...tablePrelude, line);
+        continue;
+      }
       // Codex puts tool stdout below `Ran` in an unstructured terminal
       // frame. Keep it with that activity until a new normal bullet/prose
       // message begins, so the command and its output stay together.
@@ -192,6 +199,17 @@ export function preserveTerminalAlignedTables(input: string): string {
     while (start > 0 && !fenced[start - 1] && isTerminalTableLine(lines[start - 1] ?? '')) {
       start -= 1;
     }
+    // A terminal renders a compact two-column header with a single space in
+    // some locales. The rule row proves the surrounding structure is a table,
+    // so include the immediately preceding cell header even without a wide
+    // gap rather than leaving it to Feishu's proportional Markdown renderer.
+    if (
+      start > 0 &&
+      !fenced[start - 1] &&
+      isTerminalTableHeader(lines[start - 1] ?? '', lines[index] ?? '')
+    ) {
+      start -= 1;
+    }
     let end = index;
     while (end + 1 < lines.length && !fenced[end + 1] && isTerminalTableLine(lines[end + 1] ?? '')) {
       end += 1;
@@ -207,7 +225,8 @@ export function preserveTerminalAlignedTables(input: string): string {
   const out: string[] = [];
   let cursor = 0;
   for (const range of ranges) {
-    out.push(...lines.slice(cursor, range.start));
+    const redundantMarkdownStart = redundantMarkdownHeaderStart(lines, range.start);
+    out.push(...lines.slice(cursor, redundantMarkdownStart));
     const body = lines.slice(range.start, range.end + 1).join('\n');
     const fence = '`'.repeat(Math.max(3, longestBacktickRun(body) + 1));
     out.push(`${fence}PLAIN_TEXT`, body, fence);
@@ -223,12 +242,75 @@ function isTerminalTableRule(line: string): boolean {
   return (trimmed.match(/[━─═╌╍┄┅]{3,}/gu) ?? []).length >= 2;
 }
 
+/**
+ * Tool output is usually terminal chrome, but an agent can emit a table right
+ * after an `Explored`/`Ran` frame. Move the table header out of that activity
+ * block so it reaches the table-preserving Markdown renderer as normal prose.
+ */
+function terminalTablePreludeStart(activity: string[], rule: string): number | undefined {
+  if (!isTerminalTableRule(rule) || activity.length === 0) return undefined;
+  const headerStart = activity.length - 1;
+  const header = activity[headerStart] ?? '';
+  if (!isTerminalTableHeader(header, rule)) return undefined;
+  const possibleMarkdownHeader = headerStart - 1;
+  if (isEquivalentPipeHeader(activity[possibleMarkdownHeader] ?? '', header)) {
+    return possibleMarkdownHeader;
+  }
+  const possibleDelimiter = headerStart - 1;
+  const markdownHeader = headerStart - 2;
+  if (
+    isPipeTableDelimiter(activity[possibleDelimiter] ?? '') &&
+    isEquivalentPipeHeader(activity[markdownHeader] ?? '', header)
+  ) {
+    return markdownHeader;
+  }
+  return headerStart;
+}
+
 function isTerminalTableLine(line: string): boolean {
   if (isTerminalTableRule(line)) return true;
   // The rule row is the proof that this is a table. A two-column terminal
   // table has only one wide column gap, so requiring two gaps would fence the
   // rule alone and leave its header/data vulnerable to Markdown reflow.
   return /\S(?: {2,}|\t+)\S/u.test(line);
+}
+
+function isTerminalTableHeader(line: string, rule: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.includes('|')) return false;
+  if (/^(?:[•◦⏺●]|[-*+]\s|#{1,6}\s|>\s)/u.test(trimmed)) return false;
+  const columns = (rule.match(/[━─═╌╍┄┅]{3,}/gu) ?? []).length;
+  return columns >= 2 && trimmed.split(/\s+/u).filter(Boolean).length >= columns;
+}
+
+function redundantMarkdownHeaderStart(lines: string[], terminalHeaderStart: number): number {
+  const terminalHeader = lines[terminalHeaderStart] ?? '';
+  const direct = terminalHeaderStart - 1;
+  if (isEquivalentPipeHeader(lines[direct] ?? '', terminalHeader)) return direct;
+
+  const delimiter = terminalHeaderStart - 1;
+  const header = terminalHeaderStart - 2;
+  if (isPipeTableDelimiter(lines[delimiter] ?? '') && isEquivalentPipeHeader(lines[header] ?? '', terminalHeader)) {
+    return header;
+  }
+  return terminalHeaderStart;
+}
+
+function isEquivalentPipeHeader(pipeLine: string, terminalHeader: string): boolean {
+  const cells = pipeLine
+    .trim()
+    .replace(/^\|/u, '')
+    .replace(/\|$/u, '')
+    .split('|')
+    .map((cell) => cell.trim())
+    .filter(Boolean);
+  if (cells.length < 2) return false;
+  return cells.join(' ') === terminalHeader.trim().replace(/\s+/gu, ' ');
+}
+
+function isPipeTableDelimiter(line: string): boolean {
+  const trimmed = line.trim();
+  return /^\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?$/u.test(trimmed);
 }
 
 function existingFenceLines(lines: string[]): boolean[] {

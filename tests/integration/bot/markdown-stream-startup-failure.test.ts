@@ -119,25 +119,33 @@ describe('markdown stream startup failures', () => {
       h.controls.profileConfig.preferences = h.profileConfig.preferences;
       h.controls.cfg.preferences = h.profileConfig.preferences;
 
-      const prefix = [
-        '• 最新结论：当前瓶颈已从训练不足转为条件表示与生成先验不兼容。',
-        '',
-        '固定 512 scaffold validation    Validity       FCD    Similarity    Fraggle    Morgan',
-        '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━  ━━━━━━━━  ━━━━━━━━━━━━  ━━━━━━━━━  ━━━━━━━━',
-      ].join('\n') + '\n';
-      const suffix = [
-        '当前主基线 ensemble                1.000    23.667        0.8785     0.3054    0.1078',
-        'CURE 原文 unseen-drugs                 -         -         0.948      0.561     0.512',
-        '',
-        '瓶颈：',
-        '- Fraggle 和 Morgan 仍是主要缺口。',
-        '',
-        '对 TBDD 建模的启示：使用 scaffold-disjoint 多指标 gate。',
-      ].join('\n') + '\n';
+      const intro = '• 当前可以把多版本实验归纳为一句话：条件表征需要先校准。';
+      const terminalHeader = '问题 结果 结论';
+      const terminalRule = '━━━━ ━━━━ ━━━━';
+      const firstRow = 'MMELON    correct > shuffled    条件进入生成器';
+      const secondRow = 'Bio    尚未通过分子级 gate    暂不作生物学结论';
+      const finalTail = '对 TBDD 建模的启示：使用 scaffold-disjoint 多指标 gate。';
       h.agent.setEvents([
         [
-          { type: 'text', source: 'live-terminal', sequence: 1, delta: prefix },
-          { type: 'text', source: 'live-terminal', sequence: 2, delta: `${prefix}${suffix}` },
+          { type: 'text', source: 'live-terminal', sequence: 1, delta: `${intro}\n` },
+          {
+            type: 'text',
+            source: 'live-terminal',
+            sequence: 2,
+            delta: `${intro}\n• Explored\n└ Read stablefate_v126_cgate_interpretation.md\n`,
+          },
+          {
+            type: 'text',
+            source: 'live-terminal',
+            sequence: 3,
+            delta: `${intro}\n| 问题 | 结果 | 结论 |\n| --- | --- | --- |\n${terminalHeader}\n${terminalRule}\n${firstRow}\n`,
+          },
+          {
+            type: 'text',
+            source: 'live-terminal',
+            sequence: 4,
+            delta: `${intro}\n${firstRow}\n${secondRow}\n\n${finalTail}\n`,
+          },
           { type: 'done', terminationReason: 'normal' },
         ],
       ]);
@@ -148,18 +156,21 @@ describe('markdown stream startup failures', () => {
         const delivered = messageReply === 'markdown'
           ? markdownUpdates.at(-1) ?? ''
           : JSON.stringify(cardUpdates.at(-1) ?? {});
-        return delivered.includes('对 TBDD 建模的启示');
+        return delivered.includes(finalTail);
       });
 
       const delivered = messageReply === 'markdown'
         ? markdownUpdates.at(-1) ?? ''
         : JSON.stringify(cardUpdates.at(-1) ?? {});
       expect(delivered).toContain('PLAIN_TEXT');
-      expect(delivered).toContain('当前主基线 ensemble                1.000');
-      expect(delivered.match(/最新结论/g)).toHaveLength(1);
-      expect(delivered.match(/固定 512 scaffold validation/g)).toHaveLength(1);
-      expect(delivered.match(/当前主基线 ensemble/g)).toHaveLength(1);
+      expect(delivered.match(/当前可以把多版本实验归纳/g)).toHaveLength(1);
+      expect(delivered.match(/Read stablefate_v126_cgate_interpretation/g)).toHaveLength(1);
+      expect(delivered.match(/问题 结果 结论/g)).toHaveLength(1);
+      expect(delivered.match(/MMELON/g)).toHaveLength(1);
+      expect(delivered.match(/Bio/g)).toHaveLength(1);
       expect(delivered.match(/对 TBDD 建模的启示/g)).toHaveLength(1);
+      expect(delivered).not.toContain('| 问题 | 结果 | 结论 |');
+      expect(delivered).not.toContain('| --- | --- | --- |');
     },
   );
 

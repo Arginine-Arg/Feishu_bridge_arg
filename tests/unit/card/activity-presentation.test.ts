@@ -80,6 +80,19 @@ describe('terminal activity presentation', () => {
     expect(preserveTerminalAlignedTables(table)).toBe(`\`\`\`\`PLAIN_TEXT\n${table}\n\`\`\`\``);
   });
 
+  it('keeps a compact terminal header with its table and removes a duplicate Markdown header', () => {
+    const terminalTable = [
+      '问题 结果 结论',
+      '━━━━ ━━━━ ━━━━',
+      'MMELON    correct > shuffled    条件进入生成器',
+    ].join('\n');
+    const input = `| 问题 | 结果 | 结论 |\n${terminalTable}\n后续结论保持为普通正文。`;
+
+    expect(preserveTerminalAlignedTables(input)).toBe(
+      `\`\`\`PLAIN_TEXT\n${terminalTable}\n\`\`\`\n后续结论保持为普通正文。`,
+    );
+  });
+
   it('stops the terminal table fence before unaligned prose without requiring a blank line', () => {
     const table = [
       'Name    Validity    FCD',

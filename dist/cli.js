@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.63",
+  version: "0.6.64",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -5790,14 +5790,15 @@ import { dirname as dirname15, join as join17, resolve as resolve3 } from "path"
 // src/agent/terminal-text.ts
 function novelTerminalTextSuffix(delivered, candidate) {
   if (!candidate || !delivered) return candidate;
+  const withoutShortReplays = (suffix) => stripReplayedTerminalLines(delivered, suffix);
   const exactReplay = candidate.indexOf(delivered);
-  if (exactReplay >= 0) return candidate.slice(exactReplay + delivered.length);
+  if (exactReplay >= 0) return withoutShortReplays(candidate.slice(exactReplay + delivered.length));
   if (delivered.includes(candidate)) return "";
   if (delivered.endsWith(candidate)) return "";
   const semantic = whitespaceNormalizedSuffix(delivered, candidate);
-  if (semantic !== void 0) return semantic;
+  if (semantic !== void 0) return withoutShortReplays(semantic);
   const overlap = longestSuffixPrefix(delivered, candidate);
-  return overlap > 0 ? candidate.slice(overlap) : candidate;
+  return withoutShortReplays(overlap > 0 ? candidate.slice(overlap) : candidate);
 }
 var REPLAY_SEGMENT_MIN_LINES = 3;
 var REPLAY_SEGMENT_MIN_CHARS = 72;
@@ -5829,6 +5830,29 @@ function stripReplayedTerminalSegments(history, candidate) {
   }
   remaining = out.join("\n");
   return remaining;
+}
+function stripReplayedTerminalLines(history, candidate) {
+  if (!history || !candidate) return candidate;
+  const delivered = new Set(
+    history.split("\n").filter((line) => isReplayableTerminalLine(line)).map(normalizeReplayLine).filter(Boolean)
+  );
+  if (delivered.size === 0) return candidate;
+  return candidate.split("\n").filter((line) => {
+    const normalized = normalizeReplayLine(line);
+    return !normalized || !isReplayableTerminalLine(line) || !delivered.has(normalized);
+  }).join("\n");
+}
+function isReplayableTerminalLine(line) {
+  const normalized = normalizeReplayLine(line);
+  if (!normalized) return false;
+  if (/^[•◦⏺●]\s*(?:ran|running|explored|exploring|viewed|read|search|listed|list|edited|wrote|applied|patched|checked|inspected|worked|planning|analyzing|investigating)\b/iu.test(normalized)) {
+    return true;
+  }
+  if (/^[•◦⏺●]\s+\S/u.test(normalized) && normalized.length >= 12) return true;
+  if (/^[└│╰⎿]\s*\S/u.test(normalized)) return true;
+  if (/^[━─═╌╍┄┅\s]+$/u.test(normalized)) return true;
+  if (/\S(?: {2,}|\t+)\S/u.test(line)) return true;
+  return normalized.length >= REPLAY_SEGMENT_MIN_CHARS;
 }
 function stripWholeHistoryReplays(history, candidate) {
   if (history.length < REPLAY_SEGMENT_MIN_CHARS) return candidate;
@@ -11598,6 +11622,13 @@ function splitTerminalActivity(input) {
       continue;
     }
     if (activity.length > 0) {
+      const tablePreludeStart = terminalTablePreludeStart(activity, line);
+      if (tablePreludeStart !== void 0) {
+        const tablePrelude = activity.splice(tablePreludeStart);
+        flushActivity();
+        prose.push(...tablePrelude, line);
+        continue;
+      }
       if (startsNormalAgentMessage(line)) {
         flushActivity();
         prose.push(line);
@@ -11651,6 +11682,9 @@ function preserveTerminalAlignedTables(input) {
     while (start > 0 && !fenced[start - 1] && isTerminalTableLine(lines[start - 1] ?? "")) {
       start -= 1;
     }
+    if (start > 0 && !fenced[start - 1] && isTerminalTableHeader(lines[start - 1] ?? "", lines[index] ?? "")) {
+      start -= 1;
+    }
     let end = index;
     while (end + 1 < lines.length && !fenced[end + 1] && isTerminalTableLine(lines[end + 1] ?? "")) {
       end += 1;
@@ -11664,7 +11698,8 @@ function preserveTerminalAlignedTables(input) {
   const out = [];
   let cursor = 0;
   for (const range of ranges) {
-    out.push(...lines.slice(cursor, range.start));
+    const redundantMarkdownStart = redundantMarkdownHeaderStart(lines, range.start);
+    out.push(...lines.slice(cursor, redundantMarkdownStart));
     const body = lines.slice(range.start, range.end + 1).join("\n");
     const fence = "`".repeat(Math.max(3, longestBacktickRun(body) + 1));
     out.push(`${fence}PLAIN_TEXT`, body, fence);
@@ -11678,9 +11713,52 @@ function isTerminalTableRule(line) {
   if (!trimmed || !/^[━─═╌╍┄┅\s]+$/u.test(trimmed)) return false;
   return (trimmed.match(/[━─═╌╍┄┅]{3,}/gu) ?? []).length >= 2;
 }
+function terminalTablePreludeStart(activity, rule) {
+  if (!isTerminalTableRule(rule) || activity.length === 0) return void 0;
+  const headerStart = activity.length - 1;
+  const header = activity[headerStart] ?? "";
+  if (!isTerminalTableHeader(header, rule)) return void 0;
+  const possibleMarkdownHeader = headerStart - 1;
+  if (isEquivalentPipeHeader(activity[possibleMarkdownHeader] ?? "", header)) {
+    return possibleMarkdownHeader;
+  }
+  const possibleDelimiter = headerStart - 1;
+  const markdownHeader = headerStart - 2;
+  if (isPipeTableDelimiter(activity[possibleDelimiter] ?? "") && isEquivalentPipeHeader(activity[markdownHeader] ?? "", header)) {
+    return markdownHeader;
+  }
+  return headerStart;
+}
 function isTerminalTableLine(line) {
   if (isTerminalTableRule(line)) return true;
   return /\S(?: {2,}|\t+)\S/u.test(line);
+}
+function isTerminalTableHeader(line, rule) {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.includes("|")) return false;
+  if (/^(?:[•◦⏺●]|[-*+]\s|#{1,6}\s|>\s)/u.test(trimmed)) return false;
+  const columns = (rule.match(/[━─═╌╍┄┅]{3,}/gu) ?? []).length;
+  return columns >= 2 && trimmed.split(/\s+/u).filter(Boolean).length >= columns;
+}
+function redundantMarkdownHeaderStart(lines, terminalHeaderStart) {
+  const terminalHeader = lines[terminalHeaderStart] ?? "";
+  const direct = terminalHeaderStart - 1;
+  if (isEquivalentPipeHeader(lines[direct] ?? "", terminalHeader)) return direct;
+  const delimiter2 = terminalHeaderStart - 1;
+  const header = terminalHeaderStart - 2;
+  if (isPipeTableDelimiter(lines[delimiter2] ?? "") && isEquivalentPipeHeader(lines[header] ?? "", terminalHeader)) {
+    return header;
+  }
+  return terminalHeaderStart;
+}
+function isEquivalentPipeHeader(pipeLine, terminalHeader) {
+  const cells = pipeLine.trim().replace(/^\|/u, "").replace(/\|$/u, "").split("|").map((cell) => cell.trim()).filter(Boolean);
+  if (cells.length < 2) return false;
+  return cells.join(" ") === terminalHeader.trim().replace(/\s+/gu, " ");
+}
+function isPipeTableDelimiter(line) {
+  const trimmed = line.trim();
+  return /^\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?$/u.test(trimmed);
 }
 function existingFenceLines(lines) {
   const fenced = Array.from({ length: lines.length }, () => false);

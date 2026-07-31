@@ -237,6 +237,13 @@ function splitTerminalActivity(input) {
       continue;
     }
     if (activity.length > 0) {
+      const tablePreludeStart = terminalTablePreludeStart(activity, line);
+      if (tablePreludeStart !== void 0) {
+        const tablePrelude = activity.splice(tablePreludeStart);
+        flushActivity();
+        prose.push(...tablePrelude, line);
+        continue;
+      }
       if (startsNormalAgentMessage(line)) {
         flushActivity();
         prose.push(line);
@@ -290,6 +297,9 @@ function preserveTerminalAlignedTables(input) {
     while (start > 0 && !fenced[start - 1] && isTerminalTableLine(lines[start - 1] ?? "")) {
       start -= 1;
     }
+    if (start > 0 && !fenced[start - 1] && isTerminalTableHeader(lines[start - 1] ?? "", lines[index] ?? "")) {
+      start -= 1;
+    }
     let end = index;
     while (end + 1 < lines.length && !fenced[end + 1] && isTerminalTableLine(lines[end + 1] ?? "")) {
       end += 1;
@@ -303,7 +313,8 @@ function preserveTerminalAlignedTables(input) {
   const out = [];
   let cursor = 0;
   for (const range of ranges) {
-    out.push(...lines.slice(cursor, range.start));
+    const redundantMarkdownStart = redundantMarkdownHeaderStart(lines, range.start);
+    out.push(...lines.slice(cursor, redundantMarkdownStart));
     const body = lines.slice(range.start, range.end + 1).join("\n");
     const fence = "`".repeat(Math.max(3, longestBacktickRun(body) + 1));
     out.push(`${fence}PLAIN_TEXT`, body, fence);
@@ -317,9 +328,52 @@ function isTerminalTableRule(line) {
   if (!trimmed || !/^[━─═╌╍┄┅\s]+$/u.test(trimmed)) return false;
   return (trimmed.match(/[━─═╌╍┄┅]{3,}/gu) ?? []).length >= 2;
 }
+function terminalTablePreludeStart(activity, rule) {
+  if (!isTerminalTableRule(rule) || activity.length === 0) return void 0;
+  const headerStart = activity.length - 1;
+  const header = activity[headerStart] ?? "";
+  if (!isTerminalTableHeader(header, rule)) return void 0;
+  const possibleMarkdownHeader = headerStart - 1;
+  if (isEquivalentPipeHeader(activity[possibleMarkdownHeader] ?? "", header)) {
+    return possibleMarkdownHeader;
+  }
+  const possibleDelimiter = headerStart - 1;
+  const markdownHeader = headerStart - 2;
+  if (isPipeTableDelimiter(activity[possibleDelimiter] ?? "") && isEquivalentPipeHeader(activity[markdownHeader] ?? "", header)) {
+    return markdownHeader;
+  }
+  return headerStart;
+}
 function isTerminalTableLine(line) {
   if (isTerminalTableRule(line)) return true;
   return /\S(?: {2,}|\t+)\S/u.test(line);
+}
+function isTerminalTableHeader(line, rule) {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.includes("|")) return false;
+  if (/^(?:[•◦⏺●]|[-*+]\s|#{1,6}\s|>\s)/u.test(trimmed)) return false;
+  const columns = (rule.match(/[━─═╌╍┄┅]{3,}/gu) ?? []).length;
+  return columns >= 2 && trimmed.split(/\s+/u).filter(Boolean).length >= columns;
+}
+function redundantMarkdownHeaderStart(lines, terminalHeaderStart) {
+  const terminalHeader = lines[terminalHeaderStart] ?? "";
+  const direct = terminalHeaderStart - 1;
+  if (isEquivalentPipeHeader(lines[direct] ?? "", terminalHeader)) return direct;
+  const delimiter = terminalHeaderStart - 1;
+  const header = terminalHeaderStart - 2;
+  if (isPipeTableDelimiter(lines[delimiter] ?? "") && isEquivalentPipeHeader(lines[header] ?? "", terminalHeader)) {
+    return header;
+  }
+  return terminalHeaderStart;
+}
+function isEquivalentPipeHeader(pipeLine, terminalHeader) {
+  const cells = pipeLine.trim().replace(/^\|/u, "").replace(/\|$/u, "").split("|").map((cell) => cell.trim()).filter(Boolean);
+  if (cells.length < 2) return false;
+  return cells.join(" ") === terminalHeader.trim().replace(/\s+/gu, " ");
+}
+function isPipeTableDelimiter(line) {
+  const trimmed = line.trim();
+  return /^\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?$/u.test(trimmed);
 }
 function existingFenceLines(lines) {
   const fenced = Array.from({ length: lines.length }, () => false);
