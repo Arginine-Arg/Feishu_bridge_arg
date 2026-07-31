@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.62",
+  version: "0.6.63",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -11680,7 +11680,7 @@ function isTerminalTableRule(line) {
 }
 function isTerminalTableLine(line) {
   if (isTerminalTableRule(line)) return true;
-  return (line.match(/\s{2,}/gu) ?? []).length >= 2;
+  return /\S(?: {2,}|\t+)\S/u.test(line);
 }
 function existingFenceLines(lines) {
   const fenced = Array.from({ length: lines.length }, () => false);

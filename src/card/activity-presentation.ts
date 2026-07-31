@@ -225,7 +225,10 @@ function isTerminalTableRule(line: string): boolean {
 
 function isTerminalTableLine(line: string): boolean {
   if (isTerminalTableRule(line)) return true;
-  return (line.match(/\s{2,}/gu) ?? []).length >= 2;
+  // The rule row is the proof that this is a table. A two-column terminal
+  // table has only one wide column gap, so requiring two gaps would fence the
+  // rule alone and leave its header/data vulnerable to Markdown reflow.
+  return /\S(?: {2,}|\t+)\S/u.test(line);
 }
 
 function existingFenceLines(lines: string[]): boolean[] {

@@ -319,7 +319,7 @@ function isTerminalTableRule(line) {
 }
 function isTerminalTableLine(line) {
   if (isTerminalTableRule(line)) return true;
-  return (line.match(/\s{2,}/gu) ?? []).length >= 2;
+  return /\S(?: {2,}|\t+)\S/u.test(line);
 }
 function existingFenceLines(lines) {
   const fenced = Array.from({ length: lines.length }, () => false);
