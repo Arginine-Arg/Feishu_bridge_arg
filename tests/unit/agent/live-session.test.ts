@@ -6,6 +6,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import type { AgentEvent } from '../../../src/agent/types';
 import {
   cleanTerminalOutput,
+  detectLiveTerminalFailure,
   isLiveControlInput,
   LiveSessionPool,
   LiveTerminalSession,
@@ -479,6 +480,27 @@ describe('tmux input framing and snapshots', () => {
     expect(isLiveTerminalBusy('tab to queue message 99% context left')).toBe(true);
     expect(isLiveTerminalBusy('› ready for the next task')).toBe(false);
   });
+
+  it('recognizes terminal-owned API failures without mistaking assistant prose for one', () => {
+    expect(
+      detectLiveTerminalFailure(
+        '└ Invalid prompt: the provider rejected this request\n› ',
+      ),
+    ).toBe('Codex API 拒绝了当前请求（Invalid prompt）。');
+    expect(
+      detectLiveTerminalFailure('⚠ API Error: service unavailable\n› '),
+    ).toBe('Codex API 请求失败。');
+    expect(
+      detectLiveTerminalFailure('Error: Invalid prompt: request blocked'),
+    ).toBe('Codex API 拒绝了当前请求（Invalid prompt）。');
+    expect(
+      detectLiveTerminalFailure('◦ Reconnecting... 5/5 (connection timed out)'),
+    ).toBe('Codex API 连接重试已耗尽。');
+    expect(detectLiveTerminalFailure('◦ Reconnecting... 1/5')).toBeUndefined();
+    expect(
+      detectLiveTerminalFailure('• 文档里的 "Invalid prompt:" 是一个需要解释的错误字符串。'),
+    ).toBeUndefined();
+  });
 });
 
 const linuxIt = process.platform === 'linux' ? it : it.skip;
@@ -633,6 +655,9 @@ process.stdin.on('data', (chunk) => {
       process.stdout.write('› Explain this codebase\\n');
       setTimeout(() => process.stdout.write('• Usage: /goal [<objective>|clear|edit|pause|resume] No goal is currently set.\\n'), 600);
     }
+    else if (line === '/api-failure') {
+      process.stdout.write('└ Invalid prompt: the provider rejected this request\\n');
+    }
     else process.stdout.write('echo:' + line + '\\n');
   }
 });
@@ -689,6 +714,7 @@ setInterval(() => {}, 1000);
     const thirteenth = await collect(secondSession.run('run-15', '/slow-compact', dir, 'command').events);
     const fourteenth = await collect(secondSession.run('run-16', '/goal', dir, 'command').events);
     const fifteenth = await collect(secondSession.run('run-17', '/skills', dir).events);
+    const apiFailure = await collect(secondSession.run('run-18', '/api-failure', dir).events);
     await pool.closeAll();
 
     expect(textOf(first)).toContain('echo:hello');
@@ -716,6 +742,11 @@ setInterval(() => {}, 1000);
     expect(textOf(fifteenth)).toBe(
       'Choose an action\n› 1. Enable research\n2. Disable imagegen\nPress enter to confirm or esc to go back\n',
     );
+    expect(apiFailure.at(-1)).toEqual({
+      type: 'error',
+      message: 'Codex API 拒绝了当前请求（Invalid prompt）。',
+      terminationReason: 'failed',
+    });
     expect(await readFile(countFile, 'utf8')).toBe('start\n');
   }, 70_000);
 

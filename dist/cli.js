@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.57",
+  version: "0.6.58",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -6940,10 +6940,14 @@ var LiveTerminalSession = class {
       sawNormalSubmitProgress = true;
       cancelNormalSubmitRetry();
     };
-    const finish = () => {
+    const finish = (failureMessage) => {
       if (done) return;
       done = true;
-      if (commandMode) log.info("agent-live", "command-finish", { reason: "idle-or-startup" });
+      if (commandMode) {
+        log.info("agent-live", "command-finish", {
+          reason: failureMessage ? "terminal-failure" : "idle-or-startup"
+        });
+      }
       if (timer) clearTimeout(timer);
       cancelSlashCommandConfirm();
       if (controlLiteralConfirmTimer) clearTimeout(controlLiteralConfirmTimer);
@@ -6957,7 +6961,11 @@ var LiveTerminalSession = class {
           sequence: ++liveTextSequence
         });
       }
-      push({ type: "done", terminationReason: "normal" });
+      if (failureMessage) {
+        push({ type: "error", message: failureMessage, terminationReason: "failed" });
+      } else {
+        push({ type: "done", terminationReason: "normal" });
+      }
     };
     const arm = (ms) => {
       if (timer) clearTimeout(timer);
@@ -7086,6 +7094,11 @@ var LiveTerminalSession = class {
         if (!terminalWasBusy) {
           arm(sawAcceptedOutput ? idleMs : noOutputIdleMs(prompt, idleMs));
         }
+      }
+      const terminalFailure = detectLiveTerminalFailure(text);
+      if (terminalFailure) {
+        log.warn("agent-live", "terminal-failure", { reason: terminalFailure });
+        finish(terminalFailure);
       }
     };
     const onExit = (evt) => {
@@ -8834,6 +8847,39 @@ function isLiveTerminalBusy(input) {
   return /(?:tab\s+to\s+queue\s+message|working\s*\([^)]*(?:esc|escape)\s+to\s+interrupt|esc(?:ape)?\s+to\s+interrupt|compacting(?:\s+context)?)/iu.test(
     recent
   );
+}
+function detectLiveTerminalFailure(input) {
+  const lines = cleanTerminalOutput(input).split("\n").map((line) => line.trim()).filter(Boolean).slice(-24);
+  for (const line of lines) {
+    const terminalLine = line.replace(/^[└│╰⚠✖]\s*/u, "").trim();
+    const isTerminalRow = /^[└│╰⚠✖]/u.test(line) || /^(?:error|api error|request failed|authentication failed|connection failed)\b[:\s]/iu.test(
+      terminalLine
+    );
+    if (!isTerminalRow) continue;
+    const detail = terminalLine.replace(/^(?:error|api error)\s*:\s*/iu, "");
+    if (/^invalid\s+prompt\s*:/iu.test(detail)) {
+      return "Codex API \u62D2\u7EDD\u4E86\u5F53\u524D\u8BF7\u6C42\uFF08Invalid prompt\uFF09\u3002";
+    }
+    if (/(?:rate\s*limit|usage\s*limit|quota)/iu.test(terminalLine)) {
+      return "Codex API \u8BF7\u6C42\u53D7\u9650\uFF08rate limit / quota\uFF09\u3002";
+    }
+    if (/(?:authentication|unauthori[sz]ed|invalid api key|login required)/iu.test(terminalLine)) {
+      return "Codex API \u8BA4\u8BC1\u5931\u8D25\u3002";
+    }
+    if (/(?:api error|request failed|connection failed|network error|service unavailable)/iu.test(terminalLine)) {
+      return "Codex API \u8BF7\u6C42\u5931\u8D25\u3002";
+    }
+  }
+  for (const line of lines) {
+    const retry = line.match(/reconnecting\D*(\d+)\s*\/\s*(\d+)/iu);
+    if (!retry) continue;
+    const attempt = Number.parseInt(retry[1], 10);
+    const limit = Number.parseInt(retry[2], 10);
+    if (Number.isSafeInteger(attempt) && Number.isSafeInteger(limit) && limit > 0 && attempt >= limit) {
+      return "Codex API \u8FDE\u63A5\u91CD\u8BD5\u5DF2\u8017\u5C3D\u3002";
+    }
+  }
+  return void 0;
 }
 function isLiveTerminalReady(input) {
   const recent = cleanTerminalOutput(input).split("\n").slice(-6);
@@ -11836,6 +11882,21 @@ function markIdleTimeout(state, minutes) {
       terminal: "idle_timeout",
       footer: null,
       idleTimeoutMinutes: minutes
+    },
+    Date.now(),
+    { clearTool: true }
+  );
+}
+function markRunFailed(state, message) {
+  if (state.terminal !== "running") return state;
+  return withLiveness(
+    {
+      ...state,
+      blocks: closeStreamingText(state.blocks),
+      reasoning: { ...state.reasoning, active: false },
+      terminal: "error",
+      errorMsg: message,
+      footer: null
     },
     Date.now(),
     { clearTool: true }
@@ -19277,6 +19338,8 @@ async function processAgentStream(handle, events, scope, idleTimeoutMs, progress
   const eventGate = new RunEventGate();
   const delivery = new SerializedDelivery();
   const queueFlush = (snapshot) => delivery.enqueue(() => flush(snapshot));
+  let streamFailure;
+  let sawTerminalEvent = false;
   let idleFired = false;
   let timer;
   const inFlightTools = /* @__PURE__ */ new Set();
@@ -19355,8 +19418,14 @@ async function processAgentStream(handle, events, scope, idleTimeoutMs, progress
         log.info("card", "transition", { footer: state.footer, terminal: state.terminal });
       }
       await queueFlush(state);
-      if (state.terminal !== "running") break;
+      if (state.terminal !== "running") {
+        sawTerminalEvent = true;
+        break;
+      }
     }
+  } catch (err) {
+    streamFailure = err;
+    log.fail("agent", err, { scope, step: "event-stream" });
   } finally {
     if (timer) clearTimeout(timer);
     if (heartbeatTimer) clearInterval(heartbeatTimer);
@@ -19366,8 +19435,18 @@ async function processAgentStream(handle, events, scope, idleTimeoutMs, progress
       state = markIdleTimeout(state, Math.round(idleTimeoutMs / 6e4));
     } else if (handle.interrupted) {
       state = markInterrupted(state);
+    } else if (streamFailure) {
+      state = markRunFailed(
+        state,
+        "bridge \u63A5\u6536 agent \u4E8B\u4EF6\u65F6\u4E2D\u65AD\uFF0C\u672A\u6536\u5230\u4EFB\u52A1\u5B8C\u6210\u72B6\u6001\u3002\u8BF7\u68C0\u67E5 tmux \u6216\u91CD\u8BD5\u3002"
+      );
+    } else if (!sawTerminalEvent) {
+      state = markRunFailed(
+        state,
+        "agent \u4E8B\u4EF6\u6D41\u5728\u672A\u62A5\u544A\u5B8C\u6210\u72B6\u6001\u65F6\u7ED3\u675F\u3002\u8BF7\u68C0\u67E5 tmux \u6216\u91CD\u8BD5\u3002"
+      );
     } else {
-      state = finalizeIfRunning(state);
+      state = markRunFailed(state, "agent \u672A\u63D0\u4F9B\u53EF\u8BC6\u522B\u7684\u5B8C\u6210\u72B6\u6001\u3002\u8BF7\u68C0\u67E5 tmux \u6216\u91CD\u8BD5\u3002");
     }
   }
   log.info("card", "final", { scope, terminal: state.terminal, interrupted: handle.interrupted });

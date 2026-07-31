@@ -909,6 +909,17 @@ describe('markdown stream startup failures', () => {
     expect(lastMarkdown(h.channel)).toContain('codex exited with code 1');
   });
 
+  it('surfaces an error when an agent event stream ends without a terminal event', async () => {
+    const h = await createHarness();
+    h.agent.setEvents([[]]);
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_silent_end', 'first'));
+    await waitFor(() => JSON.stringify(h.channel.sent).includes('agent 失败'));
+
+    expect(JSON.stringify(h.channel.sent)).toContain('agent 事件流在未报告完成状态时结束');
+  });
+
   it('does not wait for the working reaction before draining a failed agent run', async () => {
     const reaction = deferred<{ data: { reaction_id: string } }>();
     const h = await createHarness({

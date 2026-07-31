@@ -463,10 +463,14 @@ export class LiveTerminalSession {
       sawNormalSubmitProgress = true;
       cancelNormalSubmitRetry();
     };
-    const finish = (): void => {
+    const finish = (failureMessage?: string): void => {
       if (done) return;
       done = true;
-      if (commandMode) log.info('agent-live', 'command-finish', { reason: 'idle-or-startup' });
+      if (commandMode) {
+        log.info('agent-live', 'command-finish', {
+          reason: failureMessage ? 'terminal-failure' : 'idle-or-startup',
+        });
+      }
       if (timer) clearTimeout(timer);
       cancelSlashCommandConfirm();
       if (controlLiteralConfirmTimer) clearTimeout(controlLiteralConfirmTimer);
@@ -482,7 +486,11 @@ export class LiveTerminalSession {
           sequence: ++liveTextSequence,
         });
       }
-      push({ type: 'done', terminationReason: 'normal' });
+      if (failureMessage) {
+        push({ type: 'error', message: failureMessage, terminationReason: 'failed' });
+      } else {
+        push({ type: 'done', terminationReason: 'normal' });
+      }
     };
     const arm = (ms: number): void => {
       if (timer) clearTimeout(timer);
@@ -641,6 +649,16 @@ export class LiveTerminalSession {
         if (!terminalWasBusy) {
           arm(sawAcceptedOutput ? idleMs : noOutputIdleMs(prompt, idleMs));
         }
+      }
+      // Native live sessions keep the Codex process alive after an API
+      // failure, then return to the normal editor. Without a structured
+      // stream terminal event this used to be indistinguishable from a
+      // successful idle completion. Only inspect text scoped to this turn so
+      // an older error still visible in tmux history cannot poison a new run.
+      const terminalFailure = detectLiveTerminalFailure(text);
+      if (terminalFailure) {
+        log.warn('agent-live', 'terminal-failure', { reason: terminalFailure });
+        finish(terminalFailure);
       }
     };
     const onExit = (evt: { code: number | null; signal: NodeJS.Signals | null }): void => {
@@ -2777,6 +2795,65 @@ export function isLiveTerminalBusy(input: string): boolean {
   return /(?:tab\s+to\s+queue\s+message|working\s*\([^)]*(?:esc|escape)\s+to\s+interrupt|esc(?:ape)?\s+to\s+interrupt|compacting(?:\s+context)?)/iu.test(
     recent,
   );
+}
+
+/**
+ * Classify terminal-owned failures that do not make the persistent Codex or
+ * Claude process exit. The result intentionally names only a safe category:
+ * raw provider diagnostics can contain request details and are already
+ * available in the terminal transcript when needed.
+ *
+ * Restrict matching to terminal error rows rather than arbitrary assistant
+ * prose. An agent can legitimately discuss phrases such as "rate limit" or
+ * "invalid prompt" while answering a task; those normal bullet lines must
+ * not turn a successful run into a failed one.
+ */
+export function detectLiveTerminalFailure(input: string): string | undefined {
+  const lines = cleanTerminalOutput(input)
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(-24);
+
+  for (const line of lines) {
+    // Codex renders a terminal-owned failure under the tree connector (for
+    // example: "└ Invalid prompt: ..."). Do not match assistant bullets.
+    const terminalLine = line.replace(/^[└│╰⚠✖]\s*/u, '').trim();
+    const isTerminalRow =
+      /^[└│╰⚠✖]/u.test(line) ||
+      /^(?:error|api error|request failed|authentication failed|connection failed)\b[:\s]/iu.test(
+        terminalLine,
+      );
+    if (!isTerminalRow) continue;
+    const detail = terminalLine.replace(/^(?:error|api error)\s*:\s*/iu, '');
+
+    if (/^invalid\s+prompt\s*:/iu.test(detail)) {
+      return 'Codex API 拒绝了当前请求（Invalid prompt）。';
+    }
+    if (/(?:rate\s*limit|usage\s*limit|quota)/iu.test(terminalLine)) {
+      return 'Codex API 请求受限（rate limit / quota）。';
+    }
+    if (/(?:authentication|unauthori[sz]ed|invalid api key|login required)/iu.test(terminalLine)) {
+      return 'Codex API 认证失败。';
+    }
+    if (/(?:api error|request failed|connection failed|network error|service unavailable)/iu.test(terminalLine)) {
+      return 'Codex API 请求失败。';
+    }
+  }
+
+  // A transient reconnect notice is normal. Exhausting the advertised retry
+  // budget is terminal and should surface immediately instead of waiting for
+  // the regular idle watchdog (which may be configured for many minutes).
+  for (const line of lines) {
+    const retry = line.match(/reconnecting\D*(\d+)\s*\/\s*(\d+)/iu);
+    if (!retry) continue;
+    const attempt = Number.parseInt(retry[1]!, 10);
+    const limit = Number.parseInt(retry[2]!, 10);
+    if (Number.isSafeInteger(attempt) && Number.isSafeInteger(limit) && limit > 0 && attempt >= limit) {
+      return 'Codex API 连接重试已耗尽。';
+    }
+  }
+  return undefined;
 }
 
 function isLiveTerminalReady(input: string): boolean {

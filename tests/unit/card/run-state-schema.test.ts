@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { initialState, reduce } from '../../../src/card/run-state';
+import { initialState, markRunFailed, reduce } from '../../../src/card/run-state';
 
 describe('run state terminal event schema', () => {
   it('maps done termination reasons onto visible terminal states', () => {
@@ -36,5 +36,15 @@ describe('run state terminal event schema', () => {
         terminationReason: 'timeout',
       }).terminal,
     ).toBe('idle_timeout');
+  });
+
+  it('does not present an unterminated agent event stream as successful', () => {
+    const state = markRunFailed(
+      reduce(initialState, { type: 'text', delta: 'partial result' }),
+      'agent 事件流在未报告完成状态时结束。请检查 tmux 或重试。',
+    );
+
+    expect(state.terminal).toBe('error');
+    expect(state.errorMsg).toContain('未报告完成状态');
   });
 });

@@ -240,6 +240,28 @@ export function markIdleTimeout(state: RunState, minutes: number): RunState {
   );
 }
 
+/**
+ * Terminal events are an agent/bridge contract. If the event iterator ends
+ * or throws before either `done` or `error`, do not present the partial
+ * transcript as a successful completion: the task owner needs an explicit
+ * failure marker and can inspect the attached tmux pane or retry it.
+ */
+export function markRunFailed(state: RunState, message: string): RunState {
+  if (state.terminal !== 'running') return state;
+  return withLiveness(
+    {
+      ...state,
+      blocks: closeStreamingText(state.blocks),
+      reasoning: { ...state.reasoning, active: false },
+      terminal: 'error',
+      errorMsg: message,
+      footer: null,
+    },
+    Date.now(),
+    { clearTool: true },
+  );
+}
+
 export function finalizeIfRunning(state: RunState): RunState {
   if (state.terminal !== 'running') return state;
   return withLiveness(

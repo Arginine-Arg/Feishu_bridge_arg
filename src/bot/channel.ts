@@ -36,10 +36,10 @@ import { CallbackAuth } from '../card/callback-auth';
 import { CallbackNonceStore } from '../card/callback-store';
 import { renderCard } from '../card/run-renderer';
 import {
-  finalizeIfRunning,
   initialState,
   markIdleTimeout,
   markInterrupted,
+  markRunFailed,
   reduce,
   type RunState,
 } from '../card/run-state';
@@ -2150,6 +2150,8 @@ async function processAgentStream(
   const eventGate = new RunEventGate();
   const delivery = new SerializedDelivery();
   const queueFlush = (snapshot: RunState): Promise<void> => delivery.enqueue(() => flush(snapshot));
+  let streamFailure: unknown;
+  let sawTerminalEvent = false;
 
   // Idle watchdog: claude going silent for `idleTimeoutMs` is treated as
   // "presumed hung", we stop() and surface a timeout marker on the card.
@@ -2266,8 +2268,14 @@ async function processAgentStream(
       // Stop iterating as soon as we have a terminal state. Some claude
       // versions don't close stdout immediately after the result event, which
       // would leave the for-await waiting forever otherwise.
-      if (state.terminal !== 'running') break;
+      if (state.terminal !== 'running') {
+        sawTerminalEvent = true;
+        break;
+      }
     }
+  } catch (err) {
+    streamFailure = err;
+    log.fail('agent', err, { scope, step: 'event-stream' });
   } finally {
     if (timer) clearTimeout(timer);
     if (heartbeatTimer) clearInterval(heartbeatTimer);
@@ -2282,8 +2290,21 @@ async function processAgentStream(
       state = markIdleTimeout(state, Math.round(idleTimeoutMs! / 60_000));
     } else if (handle.interrupted) {
       state = markInterrupted(state);
+    } else if (streamFailure) {
+      state = markRunFailed(
+        state,
+        'bridge 接收 agent 事件时中断，未收到任务完成状态。请检查 tmux 或重试。',
+      );
+    } else if (!sawTerminalEvent) {
+      state = markRunFailed(
+        state,
+        'agent 事件流在未报告完成状态时结束。请检查 tmux 或重试。',
+      );
     } else {
-      state = finalizeIfRunning(state);
+      // `sawTerminalEvent` and `state.terminal === 'running'` cannot both
+      // occur with the current reducer, but keep an explicit failure instead
+      // of ever presenting an unknown terminal state as successful.
+      state = markRunFailed(state, 'agent 未提供可识别的完成状态。请检查 tmux 或重试。');
     }
   }
   log.info('card', 'final', { scope, terminal: state.terminal, interrupted: handle.interrupted });
