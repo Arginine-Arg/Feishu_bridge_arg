@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { presentBlocks } from '../../../src/card/activity-presentation';
+import {
+  presentBlocks,
+  preserveTerminalAlignedTables,
+} from '../../../src/card/activity-presentation';
 import { renderCard } from '../../../src/card/run-renderer';
 import { initialState, reduce, type RunState } from '../../../src/card/run-state';
 import { renderText } from '../../../src/card/text-renderer';
@@ -24,6 +27,72 @@ function activityPanel(state: RunState): CardPanel | undefined {
 }
 
 describe('terminal activity presentation', () => {
+  it('preserves a terminal-aligned scientific table without swallowing the final prose', () => {
+    const table = [
+      '固定 512 scaffold validation    Validity       FCD    Similarity    Fraggle    Morgan',
+      '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━  ━━━━━━━━  ━━━━━━━━━━━━  ━━━━━━━━━  ━━━━━━━━',
+      '当前主基线 ensemble                1.000    23.667        0.8785     0.3054    0.1078',
+      'CURE 原文 unseen-drugs                 -         -         0.948      0.561     0.512',
+    ].join('\n');
+    const finalTail = [
+      '瓶颈：',
+      '- Fraggle 和 Morgan 仍是主要缺口。',
+      '- 条件表示与生成先验仍不兼容。',
+      '',
+      '对 TBDD 建模的启示：必须在 scaffold-disjoint 验证上执行多指标选模。',
+    ].join('\n');
+    const state = stateFromText(`• 最新结论：验证 gate 尚未同时通过。\n\n${table}\n\n${finalTail}`);
+
+    const text = renderText(state);
+    const card = JSON.stringify(renderCard(state));
+    const fencedTable = `\`\`\`PLAIN_TEXT\n${table}\n\`\`\``;
+
+    expect(text).toContain(fencedTable);
+    expect(card).toContain('PLAIN_TEXT');
+    expect(card).toContain('当前主基线 ensemble                1.000');
+    expect(text.match(/固定 512 scaffold validation/g)).toHaveLength(1);
+    expect(card.match(/固定 512 scaffold validation/g)).toHaveLength(1);
+    expect(text.indexOf('```', text.indexOf('```') + 3)).toBeLessThan(text.indexOf('瓶颈：'));
+    expect(text.endsWith('对 TBDD 建模的启示：必须在 scaffold-disjoint 验证上执行多指标选模。')).toBe(true);
+  });
+
+  it('leaves an existing fenced terminal table untouched', () => {
+    const alreadyFenced = [
+      '前文',
+      '~~~~PLAIN_TEXT',
+      'Name    Value',
+      '━━━━    ━━━━━',
+      'A       1',
+      '~~~~',
+      '后文',
+    ].join('\n');
+
+    expect(preserveTerminalAlignedTables(alreadyFenced)).toBe(alreadyFenced);
+  });
+
+  it('uses a longer fence when a terminal table contains backtick runs', () => {
+    const table = [
+      'Name    Note',
+      '━━━━    ━━━━━',
+      'A       value with ``` literal ticks',
+    ].join('\n');
+
+    expect(preserveTerminalAlignedTables(table)).toBe(`\`\`\`\`PLAIN_TEXT\n${table}\n\`\`\`\``);
+  });
+
+  it('stops the terminal table fence before unaligned prose without requiring a blank line', () => {
+    const table = [
+      'Name    Validity    FCD',
+      '━━━━    ━━━━━━━━    ━━━',
+      'baseline    1.000    23.667',
+    ].join('\n');
+    const conclusion = '结论：后续正文必须保持正常 Markdown。';
+
+    expect(preserveTerminalAlignedTables(`${table}\n${conclusion}`)).toBe(
+      `\`\`\`PLAIN_TEXT\n${table}\n\`\`\`\n${conclusion}`,
+    );
+  });
+
   it('wraps Codex Ran and Explored frames while keeping normal progress prominent', () => {
     const state = stateFromText([
       '• Ran git status --short',

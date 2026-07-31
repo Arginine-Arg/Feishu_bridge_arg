@@ -4,6 +4,7 @@ import type {
   NormalizedMessage,
 } from '@larksuite/channel';
 import { createLarkChannel } from '@larksuite/channel';
+import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { claudeCapability, codexCapability } from '../agent/capability';
@@ -2328,7 +2329,19 @@ async function processAgentStream(
       state = markRunFailed(state, 'agent 未提供可识别的完成状态。请检查 tmux 或重试。');
     }
   }
-  log.info('card', 'final', { scope, terminal: state.terminal, interrupted: handle.interrupted });
+  const finalSourceText = runStateTextCursor(state);
+  const finalMarkdown = renderText(state);
+  const finalCard = JSON.stringify(renderCard(state));
+  log.info('card', 'final', {
+    scope,
+    terminal: state.terminal,
+    interrupted: handle.interrupted,
+    sourceChars: finalSourceText.length,
+    sourceBytes: Buffer.byteLength(finalSourceText, 'utf8'),
+    sourceSha256: createHash('sha256').update(finalSourceText).digest('hex'),
+    renderedMarkdownBytes: Buffer.byteLength(finalMarkdown, 'utf8'),
+    renderedCardBytes: Buffer.byteLength(finalCard, 'utf8'),
+  });
   reportMetric('run_e2e_ms', Date.now() - runStart, { terminal: state.terminal });
   await queueFlush(state);
   await delivery.drain();

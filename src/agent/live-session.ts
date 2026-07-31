@@ -651,11 +651,13 @@ export class LiveTerminalSession {
         }
       }
       // Native live sessions keep the Codex process alive after an API
-      // failure, then return to the normal editor. Without a structured
-      // stream terminal event this used to be indistinguishable from a
-      // successful idle completion. Only inspect text scoped to this turn so
-      // an older error still visible in tmux history cannot poison a new run.
-      const terminalFailure = detectLiveTerminalFailure(text);
+      // failure, then return to the normal editor. Only inspect text newly
+      // accepted for this turn: positioned tmux history intentionally retains
+      // older diagnostics, and scanning that whole capture would falsely fail
+      // a later /model or ordinary task before its own input has run.
+      const terminalFailure = accepted
+        ? detectLiveTerminalFailure(output.lastAcceptedText())
+        : undefined;
       if (terminalFailure) {
         log.warn('agent-live', 'terminal-failure', { reason: terminalFailure });
         finish(terminalFailure);
@@ -720,9 +722,13 @@ export class LiveTerminalSession {
         output.setSnapshotBaseline(this.lastTerminalSnapshot);
         output.setHistoryBaseline(this.lastTerminalHistory);
         if (commandMode) {
-          log.info('agent-live', 'command-clear', { sequence: 'esc ctrl-a ctrl-k' });
-          await this.clearPendingInput();
-          this.cleaner.resetTurn();
+          if (isLiveTerminalReady(this.lastTerminalSnapshot)) {
+            log.info('agent-live', 'command-fast-submit', { reason: 'ready-prompt' });
+          } else {
+            log.info('agent-live', 'command-clear', { sequence: 'esc ctrl-a ctrl-k' });
+            await this.clearPendingInput();
+            this.cleaner.resetTurn();
+          }
         }
         acceptingOutput = true;
         const controlKeys = inputMode === 'control' ? parseLiveControlSequence(prompt) : null;
@@ -1374,6 +1380,19 @@ function sendInput(input) {
   if (shouldSubmit) sendKeys(['Enter']);
 }
 
+function terminalReadyForFullReconcile(snapshot) {
+  const recent = snapshot.split('\n').slice(-6);
+  return recent.some((line) => {
+    const trimmed = line.trim();
+    return /^[›❯]\s*$/u.test(trimmed) ||
+      /^›\s*(?:Use\s+\/[a-z][\w-]*(?:\s+.*)?|Implement \{feature\}|Summarize recent commits|Find and fix a bug in @filename|Improve documentation in @filename|Explain this codebase|Write tests for @filename|Run \/review on my current changes)\s*$/iu.test(trimmed);
+  });
+}
+
+function capturePaneFrom(start) {
+  return tmux(['capture-pane', '-p', '-S', String(start), '-t', target]);
+}
+
 function capture() {
   if (closed) return;
   if (managed) adoptSelectedLivePane();
@@ -1395,20 +1414,43 @@ function capture() {
   // stale line coordinates cannot skip output after attach/detach.
   const historyIdentity = paneId + '@' + paneWidth + 'x' + paneHeight;
   const canContinue = historyIdentity === lastHistoryPane && lastHistoryEnd >= 0;
-  const requestedStart = canContinue
+  let requestedStart = canContinue
     ? Math.min(0, lastHistoryEnd - historySize - 1)
     : -${TMUX_CAPTURE_HISTORY_LINES};
-  const actualStart = Math.max(requestedStart, -historySize);
-  const result = tmux(['capture-pane', '-p', '-S', String(requestedStart), '-t', target]);
+  let actualStart = Math.max(requestedStart, -historySize);
+  let result = capturePaneFrom(requestedStart);
   if (result.status !== 0) {
     writeError('failed to capture tmux live session', result);
     closed = true;
     process.exit(1);
   }
-  const captured = result.stdout.replace(/\n$/u, '');
-  const capturedLines = captured.split('\n');
+  let captured = result.stdout.replace(/\n$/u, '');
+  let capturedLines = captured.split('\n');
   const visibleRows = Number.parseInt(rows, 10) || 48;
-  const snapshot = capturedLines.slice(-visibleRows).join('\n').replace(/\s+$/u, '');
+  let snapshot = capturedLines.slice(-visibleRows).join('\n').replace(/\s+$/u, '');
+
+  // Incremental positioned captures are efficient while a task is running,
+  // but a transient reflow can make one delta look empty. When the native CLI
+  // returns to its prompt, capture a wider immutable window once so the turn
+  // buffer can reconcile any missed tail before emitting done.
+  if (
+    snapshot &&
+    snapshot !== lastSnapshot &&
+    terminalReadyForFullReconcile(snapshot) &&
+    requestedStart > -${TMUX_CAPTURE_HISTORY_LINES}
+  ) {
+    requestedStart = -${TMUX_CAPTURE_HISTORY_LINES};
+    actualStart = Math.max(requestedStart, -historySize);
+    result = capturePaneFrom(requestedStart);
+    if (result.status !== 0) {
+      writeError('failed to capture final tmux reconciliation frame', result);
+      closed = true;
+      process.exit(1);
+    }
+    captured = result.stdout.replace(/\n$/u, '');
+    capturedLines = captured.split('\n');
+    snapshot = capturedLines.slice(-visibleRows).join('\n').replace(/\s+$/u, '');
+  }
   const history = captured.replace(/\s+$/u, '');
   if (snapshot && snapshot !== lastSnapshot) {
     lastSnapshot = snapshot;
@@ -1969,6 +2011,7 @@ class TurnOutputBuffer {
   private snapshotBaseline = '';
   private historyBaseline = '';
   private historyPositionBaseline: LiveHistorySnapshot | undefined;
+  private lastAccepted = '';
 
   constructor(
     private readonly maxChars: number,
@@ -1986,6 +2029,7 @@ class TurnOutputBuffer {
   }
 
   append(raw: string): boolean {
+    this.lastAccepted = '';
     const compacted = stripPromptMismatchedLiveContent(this.compact(raw), this.promptEcho);
     if (!compacted.trim()) return false;
     if (isStalePickerSnapshotForPrompt(compacted, this.promptEcho)) return false;
@@ -1996,6 +2040,7 @@ class TurnOutputBuffer {
     if (existing.endsWith(compacted)) return false;
 
     this.pending += compacted;
+    this.lastAccepted = compacted;
     this.enforceLimit();
     return true;
   }
@@ -2005,6 +2050,7 @@ class TurnOutputBuffer {
     preferPromptAnchor = false,
     historyPosition?: LiveHistorySnapshot,
   ): boolean {
+    this.lastAccepted = '';
     const hasPromptAnchor = preferPromptAnchor && snapshotHasPromptAnchor(raw, this.promptEcho);
     const previousBaseline = preferPromptAnchor ? this.historyBaseline : this.snapshotBaseline;
     const positionedDelta =
@@ -2041,11 +2087,13 @@ class TurnOutputBuffer {
         if (this.pending === nextPending) return false;
         if (shouldKeepRicherSnapshot(this.pending, nextPending)) return false;
         this.pending = nextPending;
+        this.lastAccepted = nextPending;
       } else {
         const existing = this.deliveredTail + this.pending;
         const suffix = undeliveredSnapshotSuffix(existing, normalized);
         if (!suffix) return false;
         this.pending += suffix;
+        this.lastAccepted = suffix;
       }
       this.enforceLimit();
       return Boolean(this.pending);
@@ -2053,8 +2101,13 @@ class TurnOutputBuffer {
     if (this.pending === compacted || this.deliveredTail.endsWith(compacted)) return false;
     if (shouldKeepRicherSnapshot(this.pending, compacted)) return false;
     this.pending = compacted.endsWith('\n') ? compacted : `${compacted}\n`;
+    this.lastAccepted = this.pending;
     this.enforceLimit();
     return true;
+  }
+
+  lastAcceptedText(): string {
+    return this.lastAccepted;
   }
 
   take(): string {

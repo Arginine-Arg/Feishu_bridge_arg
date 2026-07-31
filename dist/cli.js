@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.61",
+  version: "0.6.62",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -7101,7 +7101,7 @@ var LiveTerminalSession = class {
           arm(sawAcceptedOutput ? idleMs : noOutputIdleMs(prompt, idleMs));
         }
       }
-      const terminalFailure = detectLiveTerminalFailure(text);
+      const terminalFailure = accepted ? detectLiveTerminalFailure(output.lastAcceptedText()) : void 0;
       if (terminalFailure) {
         log.warn("agent-live", "terminal-failure", { reason: terminalFailure });
         finish(terminalFailure);
@@ -7162,9 +7162,13 @@ var LiveTerminalSession = class {
         output.setSnapshotBaseline(this.lastTerminalSnapshot);
         output.setHistoryBaseline(this.lastTerminalHistory);
         if (commandMode) {
-          log.info("agent-live", "command-clear", { sequence: "esc ctrl-a ctrl-k" });
-          await this.clearPendingInput();
-          this.cleaner.resetTurn();
+          if (isLiveTerminalReady(this.lastTerminalSnapshot)) {
+            log.info("agent-live", "command-fast-submit", { reason: "ready-prompt" });
+          } else {
+            log.info("agent-live", "command-clear", { sequence: "esc ctrl-a ctrl-k" });
+            await this.clearPendingInput();
+            this.cleaner.resetTurn();
+          }
         }
         acceptingOutput = true;
         const controlKeys = inputMode === "control" ? parseLiveControlSequence(prompt) : null;
@@ -7740,6 +7744,19 @@ function sendInput(input) {
   if (shouldSubmit) sendKeys(['Enter']);
 }
 
+function terminalReadyForFullReconcile(snapshot) {
+  const recent = snapshot.split('\n').slice(-6);
+  return recent.some((line) => {
+    const trimmed = line.trim();
+    return /^[›❯]\s*$/u.test(trimmed) ||
+      /^›\s*(?:Use\s+\/[a-z][\w-]*(?:\s+.*)?|Implement \{feature\}|Summarize recent commits|Find and fix a bug in @filename|Improve documentation in @filename|Explain this codebase|Write tests for @filename|Run \/review on my current changes)\s*$/iu.test(trimmed);
+  });
+}
+
+function capturePaneFrom(start) {
+  return tmux(['capture-pane', '-p', '-S', String(start), '-t', target]);
+}
+
 function capture() {
   if (closed) return;
   if (managed) adoptSelectedLivePane();
@@ -7761,20 +7778,43 @@ function capture() {
   // stale line coordinates cannot skip output after attach/detach.
   const historyIdentity = paneId + '@' + paneWidth + 'x' + paneHeight;
   const canContinue = historyIdentity === lastHistoryPane && lastHistoryEnd >= 0;
-  const requestedStart = canContinue
+  let requestedStart = canContinue
     ? Math.min(0, lastHistoryEnd - historySize - 1)
     : -${TMUX_CAPTURE_HISTORY_LINES};
-  const actualStart = Math.max(requestedStart, -historySize);
-  const result = tmux(['capture-pane', '-p', '-S', String(requestedStart), '-t', target]);
+  let actualStart = Math.max(requestedStart, -historySize);
+  let result = capturePaneFrom(requestedStart);
   if (result.status !== 0) {
     writeError('failed to capture tmux live session', result);
     closed = true;
     process.exit(1);
   }
-  const captured = result.stdout.replace(/\n$/u, '');
-  const capturedLines = captured.split('\n');
+  let captured = result.stdout.replace(/\n$/u, '');
+  let capturedLines = captured.split('\n');
   const visibleRows = Number.parseInt(rows, 10) || 48;
-  const snapshot = capturedLines.slice(-visibleRows).join('\n').replace(/\s+$/u, '');
+  let snapshot = capturedLines.slice(-visibleRows).join('\n').replace(/\s+$/u, '');
+
+  // Incremental positioned captures are efficient while a task is running,
+  // but a transient reflow can make one delta look empty. When the native CLI
+  // returns to its prompt, capture a wider immutable window once so the turn
+  // buffer can reconcile any missed tail before emitting done.
+  if (
+    snapshot &&
+    snapshot !== lastSnapshot &&
+    terminalReadyForFullReconcile(snapshot) &&
+    requestedStart > -${TMUX_CAPTURE_HISTORY_LINES}
+  ) {
+    requestedStart = -${TMUX_CAPTURE_HISTORY_LINES};
+    actualStart = Math.max(requestedStart, -historySize);
+    result = capturePaneFrom(requestedStart);
+    if (result.status !== 0) {
+      writeError('failed to capture final tmux reconciliation frame', result);
+      closed = true;
+      process.exit(1);
+    }
+    captured = result.stdout.replace(/\n$/u, '');
+    capturedLines = captured.split('\n');
+    snapshot = capturedLines.slice(-visibleRows).join('\n').replace(/\s+$/u, '');
+  }
   const history = captured.replace(/\s+$/u, '');
   if (snapshot && snapshot !== lastSnapshot) {
     lastSnapshot = snapshot;
@@ -8252,6 +8292,7 @@ var TurnOutputBuffer = class {
   snapshotBaseline = "";
   historyBaseline = "";
   historyPositionBaseline;
+  lastAccepted = "";
   setSnapshotBaseline(snapshot) {
     this.snapshotBaseline = snapshot;
   }
@@ -8260,6 +8301,7 @@ var TurnOutputBuffer = class {
     this.historyPositionBaseline = snapshot;
   }
   append(raw) {
+    this.lastAccepted = "";
     const compacted = stripPromptMismatchedLiveContent(this.compact(raw), this.promptEcho);
     if (!compacted.trim()) return false;
     if (isStalePickerSnapshotForPrompt(compacted, this.promptEcho)) return false;
@@ -8269,10 +8311,12 @@ var TurnOutputBuffer = class {
     const existing = this.deliveredTail + this.pending;
     if (existing.endsWith(compacted)) return false;
     this.pending += compacted;
+    this.lastAccepted = compacted;
     this.enforceLimit();
     return true;
   }
   replace(raw, preferPromptAnchor = false, historyPosition) {
+    this.lastAccepted = "";
     const hasPromptAnchor = preferPromptAnchor && snapshotHasPromptAnchor(raw, this.promptEcho);
     const previousBaseline = preferPromptAnchor ? this.historyBaseline : this.snapshotBaseline;
     const positionedDelta = preferPromptAnchor && !hasPromptAnchor && historyPosition && this.historyPositionBaseline ? positionedHistoryDelta(this.historyPositionBaseline, historyPosition) : void 0;
@@ -8307,11 +8351,13 @@ var TurnOutputBuffer = class {
         if (this.pending === nextPending) return false;
         if (shouldKeepRicherSnapshot(this.pending, nextPending)) return false;
         this.pending = nextPending;
+        this.lastAccepted = nextPending;
       } else {
         const existing = this.deliveredTail + this.pending;
         const suffix = undeliveredSnapshotSuffix(existing, normalized);
         if (!suffix) return false;
         this.pending += suffix;
+        this.lastAccepted = suffix;
       }
       this.enforceLimit();
       return Boolean(this.pending);
@@ -8320,8 +8366,12 @@ var TurnOutputBuffer = class {
     if (shouldKeepRicherSnapshot(this.pending, compacted)) return false;
     this.pending = compacted.endsWith("\n") ? compacted : `${compacted}
 `;
+    this.lastAccepted = this.pending;
     this.enforceLimit();
     return true;
+  }
+  lastAcceptedText() {
+    return this.lastAccepted;
   }
   take() {
     const out = stripKnownLiveNoise(this.pending, this.promptEcho);
@@ -10004,6 +10054,7 @@ function isWindowsCommandNotFoundLine2(line) {
 
 // src/bot/channel.ts
 import { createLarkChannel } from "@larksuite/channel";
+import { createHash as createHash7 } from "crypto";
 import { homedir as homedir8 } from "os";
 import { dirname as dirname20, join as join24 } from "path";
 
@@ -11492,7 +11543,11 @@ function presentBlocks(blocks) {
         activity.push(segment.content);
         entries += segment.entries;
       } else {
-        appendTextBlock(presented, segment.content, block.streaming);
+        appendTextBlock(
+          presented,
+          preserveTerminalAlignedTables(segment.content),
+          block.streaming
+        );
       }
     }
   }
@@ -11584,6 +11639,72 @@ function isClaudeToolActivity(line) {
 }
 function isTerminalChromeActivity(line) {
   return /^(?:◦\s*)?(?:exploring|working|thinking|planning)\b/iu.test(line) || /^(?:✻|⏵⏵)\s*(?:thinking|working|running|planning)\b/iu.test(line);
+}
+function preserveTerminalAlignedTables(input) {
+  if (!input || !/[━─═╌╍┄┅]/u.test(input)) return input;
+  const lines = input.split("\n");
+  const fenced = existingFenceLines(lines);
+  const ranges = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (fenced[index] || !isTerminalTableRule(lines[index] ?? "")) continue;
+    let start = index;
+    while (start > 0 && !fenced[start - 1] && isTerminalTableLine(lines[start - 1] ?? "")) {
+      start -= 1;
+    }
+    let end = index;
+    while (end + 1 < lines.length && !fenced[end + 1] && isTerminalTableLine(lines[end + 1] ?? "")) {
+      end += 1;
+    }
+    const previous = ranges.at(-1);
+    if (previous && start <= previous.end + 1) previous.end = Math.max(previous.end, end);
+    else ranges.push({ start, end });
+    index = end;
+  }
+  if (ranges.length === 0) return input;
+  const out = [];
+  let cursor = 0;
+  for (const range of ranges) {
+    out.push(...lines.slice(cursor, range.start));
+    const body = lines.slice(range.start, range.end + 1).join("\n");
+    const fence = "`".repeat(Math.max(3, longestBacktickRun(body) + 1));
+    out.push(`${fence}PLAIN_TEXT`, body, fence);
+    cursor = range.end + 1;
+  }
+  out.push(...lines.slice(cursor));
+  return out.join("\n");
+}
+function isTerminalTableRule(line) {
+  const trimmed = line.trim();
+  if (!trimmed || !/^[━─═╌╍┄┅\s]+$/u.test(trimmed)) return false;
+  return (trimmed.match(/[━─═╌╍┄┅]{3,}/gu) ?? []).length >= 2;
+}
+function isTerminalTableLine(line) {
+  if (isTerminalTableRule(line)) return true;
+  return (line.match(/\s{2,}/gu) ?? []).length >= 2;
+}
+function existingFenceLines(lines) {
+  const fenced = Array.from({ length: lines.length }, () => false);
+  let marker;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    if (!marker) {
+      const opening = line.match(/^\s{0,3}(`{3,}|~{3,})/u)?.[1];
+      if (!opening) continue;
+      marker = { char: opening[0], length: opening.length };
+      fenced[index] = true;
+      continue;
+    }
+    fenced[index] = true;
+    const closing = new RegExp(`^\\s{0,3}${escapeRegExp2(marker.char)}{${marker.length},}\\s*$`, "u");
+    if (closing.test(line)) marker = void 0;
+  }
+  return fenced;
+}
+function longestBacktickRun(input) {
+  return Math.max(0, ...(input.match(/`+/gu) ?? []).map((run) => run.length));
+}
+function escapeRegExp2(input) {
+  return input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 function foldActivityContent(content, maxBytes) {
   if (Buffer.byteLength(content, "utf8") <= maxBytes) return content;
@@ -13351,8 +13472,8 @@ function parseTmuxTailLineCount(parts) {
   return parsed >= 1 && parsed <= MAX_TMUX_TAIL_LINES ? parsed : void 0;
 }
 function fencedCodeBlock(content) {
-  const longestBacktickRun = Math.max(0, ...[...content.matchAll(/`+/gu)].map((match) => match[0].length));
-  const fence = "`".repeat(Math.max(3, longestBacktickRun + 1));
+  const longestBacktickRun2 = Math.max(0, ...[...content.matchAll(/`+/gu)].map((match) => match[0].length));
+  const fence = "`".repeat(Math.max(3, longestBacktickRun2 + 1));
   return `${fence}text
 ${content}
 ${fence}`;
@@ -19670,7 +19791,19 @@ async function processAgentStream(handle, events, scope, idleTimeoutMs, progress
       state = markRunFailed(state, "agent \u672A\u63D0\u4F9B\u53EF\u8BC6\u522B\u7684\u5B8C\u6210\u72B6\u6001\u3002\u8BF7\u68C0\u67E5 tmux \u6216\u91CD\u8BD5\u3002");
     }
   }
-  log.info("card", "final", { scope, terminal: state.terminal, interrupted: handle.interrupted });
+  const finalSourceText = runStateTextCursor(state);
+  const finalMarkdown = renderText(state);
+  const finalCard = JSON.stringify(renderCard(state));
+  log.info("card", "final", {
+    scope,
+    terminal: state.terminal,
+    interrupted: handle.interrupted,
+    sourceChars: finalSourceText.length,
+    sourceBytes: Buffer.byteLength(finalSourceText, "utf8"),
+    sourceSha256: createHash7("sha256").update(finalSourceText).digest("hex"),
+    renderedMarkdownBytes: Buffer.byteLength(finalMarkdown, "utf8"),
+    renderedCardBytes: Buffer.byteLength(finalCard, "utf8")
+  });
   reportMetric("run_e2e_ms", Date.now() - runStart2, { terminal: state.terminal });
   await queueFlush(state);
   await delivery.drain();

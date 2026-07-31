@@ -2123,6 +2123,110 @@ setInterval(() => {}, 1000);
     expect(textOf(events)).toContain('tmux:hello\n48 120\n48x120\n');
   }, 15_000);
 
+  tmuxIt('does not fail a new turn because retained tmux history contains an older API error', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-stale-failure-test-'));
+    const bin = join(dir, 'fake-tmux-stale-failure-agent.mjs');
+    const prompt = 'continue after an older failure';
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+let draft = '';
+const oldHistory = Array.from({ length: 64 }, (_, index) => 'old terminal history ' + index);
+process.stdout.write(oldHistory.join('\\n') + '\\n└ Error: rate limit reached for a previous request\\n› \\n');
+process.stdin.on('data', (chunk) => {
+  for (const char of chunk) {
+    if (char !== '\\r' && char !== '\\n') {
+      draft += char;
+      continue;
+    }
+    if (draft !== ${JSON.stringify(prompt)}) continue;
+    draft = '';
+    process.stdout.write('› ${prompt}\\n• FRESH_TURN_COMPLETED_NORMALLY\\n› \\n');
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-stale-failure-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-stale-failure',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 350,
+      outputFlushMs: 25,
+      startupTimeoutMs: 6_000,
+    });
+
+    const events = await collect(session.run('tmux-stale-failure-run', prompt, dir).events);
+    await pool.closeAll();
+
+    expect(events.some((event) => event.type === 'error')).toBe(false);
+    expect(textOf(events)).toBe('• FRESH_TURN_COMPLETED_NORMALLY\n');
+  }, 15_000);
+
+  it('submits a native command immediately when the existing terminal is at a blank prompt', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-fast-command-test-'));
+    const bin = join(dir, 'fake-fast-command-agent.mjs');
+    const traceFile = join(dir, 'input-trace.txt');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+import { appendFileSync, writeFileSync } from 'node:fs';
+writeFileSync(${JSON.stringify(traceFile)}, '');
+process.stdin.setEncoding('utf8');
+let draft = '';
+process.stdin.on('data', (chunk) => {
+  for (const char of chunk) {
+    if (char === '\\x1b') appendFileSync(${JSON.stringify(traceFile)}, 'esc\\n');
+    if (char === '\\x01') appendFileSync(${JSON.stringify(traceFile)}, 'home\\n');
+    if (char === '\\x0b') appendFileSync(${JSON.stringify(traceFile)}, 'kill\\n');
+    if (char !== '\\r' && char !== '\\n') {
+      draft += char;
+      continue;
+    }
+    if (draft === '/model') {
+      draft = '';
+      appendFileSync(${JSON.stringify(traceFile)}, 'model\\n');
+      process.stdout.write('Select Model and Effort\\n› 1. gpt-5.6-sol\\n2. gpt-5.6-terra\\nPress enter to confirm or esc to go back\\n');
+    }
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('fast-command-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'fast-command',
+      usePty: false,
+      idleMs: 100,
+      outputFlushMs: 10,
+      startupTimeoutMs: 800,
+    });
+    // The fast path is driven by the most recently captured terminal screen.
+    // A pipe fixture has no screen-capture backend, so seed the same ready
+    // prompt state a persistent tmux session provides after a completed turn.
+    (session as unknown as { lastTerminalSnapshot: string }).lastTerminalSnapshot = '› \n';
+
+    const events = await collect(session.run('fast-command-model', '/model', dir, 'command').events);
+    await pool.closeAll();
+
+    expect(textOf(events)).toContain('Select Model and Effort');
+    expect(await readFile(traceFile, 'utf8')).toBe('model\n');
+  }, 10_000);
+
   tmuxIt('reports a managed terminal when the live helper starts', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-terminal-hook-test-'));
     const bin = join(dir, 'fake-tmux-terminal-hook-agent.mjs');
@@ -2336,6 +2440,84 @@ setInterval(() => {}, 1000);
     expect(resizeStatus).toBe(0);
     expect(output.match(/FIRST_RESIZE_REFLOW/g)).toHaveLength(1);
     expect(output.match(/FINAL_AFTER_TMUX_RESIZE/g)).toHaveLength(1);
+  }, 20_000);
+
+  tmuxIt('reconciles every terminal table row and final tail after a mid-turn tmux reflow', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-table-reconcile-test-'));
+    const bin = join(dir, 'fake-tmux-table-reconcile-agent.mjs');
+    const prompt = 'summarize the validation results';
+    const tableRows = Array.from(
+      { length: 72 },
+      (_, index) => `candidate-${String(index + 1).padStart(2, '0')}    1.000    23.${String(index).padStart(3, '0')}    0.8785`,
+    );
+    const finalTail = '• FINAL_TBDD_GUIDANCE_AFTER_TABLE';
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+let draft = '';
+process.stdout.write('› \\n');
+process.stdin.on('data', (chunk) => {
+  for (const char of chunk) {
+    if (char !== '\\r' && char !== '\\n') {
+      draft += char;
+      continue;
+    }
+    if (draft !== ${JSON.stringify(prompt)}) continue;
+    draft = '';
+    const rows = ${JSON.stringify(tableRows)};
+    process.stdout.write('› ${prompt}\\n• 最新结论：开始核对表格。\\n\\n');
+    process.stdout.write('Candidate    Validity    FCD       Similarity\\n');
+    process.stdout.write('━━━━━━━━━    ━━━━━━━━    ━━━━━━━   ━━━━━━━━━━\\n');
+    let index = 0;
+    const timer = setInterval(() => {
+      process.stdout.write(rows[index] + '\\n');
+      index += 1;
+      if (index < rows.length) return;
+      clearInterval(timer);
+      process.stdout.write('\\n${finalTail}\\n› \\n');
+    }, 12);
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    let resizeStatus: number | null | undefined;
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-table-reconcile-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-table-reconcile',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 500,
+      outputFlushMs: 25,
+      startupTimeoutMs: 6_000,
+      onTerminal: async (terminal) => {
+        setTimeout(() => {
+          resizeStatus = spawnSync(
+            'tmux',
+            ['-S', terminal.socketPath!, 'resize-window', '-t', terminal.sessionName!, '-x', '76', '-y', '32'],
+            { stdio: 'ignore' },
+          ).status;
+        }, 3_300);
+      },
+    });
+
+    const output = textOf(await collect(session.run('tmux-table-reconcile-run', prompt, dir).events));
+    await pool.closeAll();
+
+    expect(resizeStatus).toBe(0);
+    expect(output).toContain('Candidate    Validity    FCD       Similarity');
+    for (const row of tableRows) {
+      expect(output.match(new RegExp(row.split(/\s+/u)[0]!, 'g'))).toHaveLength(1);
+    }
+    expect(output.match(/FINAL_TBDD_GUIDANCE_AFTER_TABLE/g)).toHaveLength(1);
+    expect(output.endsWith(`${finalTail}\n`)).toBe(true);
   }, 20_000);
 
   tmuxIt('submits a first Chinese prompt and streams every delayed task update', async () => {

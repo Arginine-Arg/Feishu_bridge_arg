@@ -39,7 +39,11 @@ export function presentBlocks(blocks: Block[]): PresentedBlocks {
         activity.push(segment.content);
         entries += segment.entries;
       } else {
-        appendTextBlock(presented, segment.content, block.streaming);
+        appendTextBlock(
+          presented,
+          preserveTerminalAlignedTables(segment.content),
+          block.streaming,
+        );
       }
     }
   }
@@ -165,6 +169,92 @@ function isClaudeToolActivity(line: string): boolean {
 function isTerminalChromeActivity(line: string): boolean {
   return /^(?:◦\s*)?(?:exploring|working|thinking|planning)\b/iu.test(line) ||
     /^(?:✻|⏵⏵)\s*(?:thinking|working|running|planning)\b/iu.test(line);
+}
+
+/**
+ * Codex renders Markdown tables into a terminal-width, space-aligned table
+ * before tmux can observe them. Feishu Markdown collapses those spaces, so a
+ * second Markdown render destroys the columns and can make the wide rule rows
+ * dominate the card. Preserve only proven terminal table paragraphs as
+ * monospace text; ordinary prose and already-fenced code remain untouched.
+ */
+export function preserveTerminalAlignedTables(input: string): string {
+  if (!input || !/[━─═╌╍┄┅]/u.test(input)) return input;
+
+  const lines = input.split('\n');
+  const fenced = existingFenceLines(lines);
+  const ranges: Array<{ start: number; end: number }> = [];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    if (fenced[index] || !isTerminalTableRule(lines[index] ?? '')) continue;
+
+    let start = index;
+    while (start > 0 && !fenced[start - 1] && isTerminalTableLine(lines[start - 1] ?? '')) {
+      start -= 1;
+    }
+    let end = index;
+    while (end + 1 < lines.length && !fenced[end + 1] && isTerminalTableLine(lines[end + 1] ?? '')) {
+      end += 1;
+    }
+
+    const previous = ranges.at(-1);
+    if (previous && start <= previous.end + 1) previous.end = Math.max(previous.end, end);
+    else ranges.push({ start, end });
+    index = end;
+  }
+
+  if (ranges.length === 0) return input;
+  const out: string[] = [];
+  let cursor = 0;
+  for (const range of ranges) {
+    out.push(...lines.slice(cursor, range.start));
+    const body = lines.slice(range.start, range.end + 1).join('\n');
+    const fence = '`'.repeat(Math.max(3, longestBacktickRun(body) + 1));
+    out.push(`${fence}PLAIN_TEXT`, body, fence);
+    cursor = range.end + 1;
+  }
+  out.push(...lines.slice(cursor));
+  return out.join('\n');
+}
+
+function isTerminalTableRule(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed || !/^[━─═╌╍┄┅\s]+$/u.test(trimmed)) return false;
+  return (trimmed.match(/[━─═╌╍┄┅]{3,}/gu) ?? []).length >= 2;
+}
+
+function isTerminalTableLine(line: string): boolean {
+  if (isTerminalTableRule(line)) return true;
+  return (line.match(/\s{2,}/gu) ?? []).length >= 2;
+}
+
+function existingFenceLines(lines: string[]): boolean[] {
+  const fenced = Array.from({ length: lines.length }, () => false);
+  let marker: { char: '`' | '~'; length: number } | undefined;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? '';
+    if (!marker) {
+      const opening = line.match(/^\s{0,3}(`{3,}|~{3,})/u)?.[1];
+      if (!opening) continue;
+      marker = { char: opening[0] as '`' | '~', length: opening.length };
+      fenced[index] = true;
+      continue;
+    }
+
+    fenced[index] = true;
+    const closing = new RegExp(`^\\s{0,3}${escapeRegExp(marker.char)}{${marker.length},}\\s*$`, 'u');
+    if (closing.test(line)) marker = undefined;
+  }
+  return fenced;
+}
+
+function longestBacktickRun(input: string): number {
+  return Math.max(0, ...(input.match(/`+/gu) ?? []).map((run) => run.length));
+}
+
+function escapeRegExp(input: string): string {
+  return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function foldActivityContent(content: string, maxBytes: number): string {

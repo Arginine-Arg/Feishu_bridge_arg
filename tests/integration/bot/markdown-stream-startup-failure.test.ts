@@ -85,6 +85,85 @@ afterEach(async () => {
 
 describe('markdown stream startup failures', () => {
   it.each(['markdown', 'card'] as const)(
+    'keeps a redrawn terminal table aligned and delivers the complete final analysis once in %s streams',
+    async (messageReply) => {
+      const markdownUpdates: string[] = [];
+      const cardUpdates: object[] = [];
+      const h = await createHarness({
+        stream: async (_chatId, input) => {
+          if (messageReply === 'markdown') {
+            const producer = (input as {
+              markdown?: (ctrl: { setContent(markdown: string): Promise<void> }) => Promise<void>;
+            }).markdown;
+            if (!producer) throw new Error('expected markdown stream producer');
+            await producer({
+              setContent: async (markdown) => {
+                markdownUpdates.push(markdown);
+              },
+            });
+            return;
+          }
+
+          const producer = (input as {
+            card?: { producer?: (ctrl: { update(next: object): Promise<void> }) => Promise<void> };
+          }).card?.producer;
+          if (!producer) throw new Error('expected card stream producer');
+          await producer({
+            update: async (next) => {
+              cardUpdates.push(next);
+            },
+          });
+        },
+      });
+      h.profileConfig.preferences = { ...(h.profileConfig.preferences ?? {}), messageReply };
+      h.controls.profileConfig.preferences = h.profileConfig.preferences;
+      h.controls.cfg.preferences = h.profileConfig.preferences;
+
+      const prefix = [
+        '• 最新结论：当前瓶颈已从训练不足转为条件表示与生成先验不兼容。',
+        '',
+        '固定 512 scaffold validation    Validity       FCD    Similarity    Fraggle    Morgan',
+        '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━  ━━━━━━━━  ━━━━━━━━━━━━  ━━━━━━━━━  ━━━━━━━━',
+      ].join('\n') + '\n';
+      const suffix = [
+        '当前主基线 ensemble                1.000    23.667        0.8785     0.3054    0.1078',
+        'CURE 原文 unseen-drugs                 -         -         0.948      0.561     0.512',
+        '',
+        '瓶颈：',
+        '- Fraggle 和 Morgan 仍是主要缺口。',
+        '',
+        '对 TBDD 建模的启示：使用 scaffold-disjoint 多指标 gate。',
+      ].join('\n') + '\n';
+      h.agent.setEvents([
+        [
+          { type: 'text', source: 'live-terminal', sequence: 1, delta: prefix },
+          { type: 'text', source: 'live-terminal', sequence: 2, delta: `${prefix}${suffix}` },
+          { type: 'done', terminationReason: 'normal' },
+        ],
+      ]);
+      await startTestBridge(h);
+
+      await h.channel.handlers.message?.(message(`om_terminal_table_${messageReply}`, 'summarize results'));
+      await waitFor(() => {
+        const delivered = messageReply === 'markdown'
+          ? markdownUpdates.at(-1) ?? ''
+          : JSON.stringify(cardUpdates.at(-1) ?? {});
+        return delivered.includes('对 TBDD 建模的启示');
+      });
+
+      const delivered = messageReply === 'markdown'
+        ? markdownUpdates.at(-1) ?? ''
+        : JSON.stringify(cardUpdates.at(-1) ?? {});
+      expect(delivered).toContain('PLAIN_TEXT');
+      expect(delivered).toContain('当前主基线 ensemble                1.000');
+      expect(delivered.match(/最新结论/g)).toHaveLength(1);
+      expect(delivered.match(/固定 512 scaffold validation/g)).toHaveLength(1);
+      expect(delivered.match(/当前主基线 ensemble/g)).toHaveLength(1);
+      expect(delivered.match(/对 TBDD 建模的启示/g)).toHaveLength(1);
+    },
+  );
+
+  it.each(['markdown', 'card'] as const)(
     'delivers terminal reflow history once and retains the final tail in %s streams',
     async (messageReply) => {
       const markdownUpdates: string[] = [];
