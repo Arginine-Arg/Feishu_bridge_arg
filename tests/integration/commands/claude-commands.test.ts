@@ -316,12 +316,12 @@ describe('Claude slash command visible behavior', () => {
     expect(lastMarkdown(h.channel)).toContain('用法:`/exit <id|#>`');
   });
 
-  it('handles /reconnect by acknowledging then calling restart', async () => {
+  it('handles /reconnect by acknowledging durable task detachment then calling restart', async () => {
     const h = await createHarness();
 
     await expect(h.run('/reconnect')).resolves.toBe(true);
 
-    expect(lastMarkdown(h.channel)).toBe('⏳ 正在停止当前运行并重连…');
+    expect(lastMarkdown(h.channel)).toBe('⏳ 正在重连；当前 tmux 任务会继续运行，过程输出不会重放。');
     expect(h.controls.restart).toHaveBeenCalledTimes(1);
   });
 });
