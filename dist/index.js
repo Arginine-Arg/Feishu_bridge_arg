@@ -118,6 +118,199 @@ function truncate(s, max) {
   return s.length > max ? `${s.slice(0, max)}\u2026` : s;
 }
 
+// src/agent/live-interaction-detection.ts
+var MAX_INTERACTION_LINES = 120;
+var FALLBACK_INTERACTION_LINES = 12;
+var NUMBERED_CHOICE_RE = /^(?:[›❯>▸*+-]\s*)?\d{1,2}[.)、:\s-]+\S/u;
+var BINARY_CONTROL_RE = /\b(?:y\/n|yes\/no|no\/yes)\b|\[(?:y|yes)\/(?:n|no)\]|\((?:y|yes)\/(?:n|no)\)/iu;
+var KEY_HINT_RE = /(?:press\s+)?enter\s+to\s+(?:confirm|continue)|esc(?:ape)?\s+to\s+(?:go\s+back|cancel)|(?:↑|↓|up\/down|arrow keys?|use .*arrows?)|(?:按下?|点击)回车(?:键)?.*确认|(?:按下?|点击).*(?:esc|取消|返回)/iu;
+var CODEX_RESUME_CONTROLS_RE = /\benter\s+(?:to\s+)?resume\b[\s\S]{0,600}\besc\s+(?:to\s+)?exit\b/iu;
+function liveInteractionSurface(input) {
+  const recent = input.split("\n").map((line) => line.trim()).filter(Boolean).filter((line) => !/^_(?:🧠 正在思考…|🧰 正在调用工具…|✍️ 正在输出…)_$/u.test(line)).slice(-MAX_INTERACTION_LINES);
+  if (recent.length === 0) return void 0;
+  let start = -1;
+  for (let index = 0; index < recent.length; index += 1) {
+    if (isLiveInteractionPromptStart(recent[index])) start = index;
+  }
+  const candidate = start >= 0 && isCodexResumeControlLine(recent[start]) ? recent.slice(Math.max(0, start - 24)) : start >= 0 ? recent.slice(start) : recent.slice(-FALLBACK_INTERACTION_LINES);
+  if (!isStructuredInteraction(candidate)) return void 0;
+  return candidate.join("\n");
+}
+function isStructuredLiveInteraction(input) {
+  return liveInteractionSurface(input) !== void 0;
+}
+function isLiveInteractionPromptStart(line) {
+  return /claude\s+code\s+running\s+in\s+bypass\s+permissions\s+mode/iu.test(line) || /\bupdate\s+available\b/iu.test(line) || /\bselect\s+(?:a\s+)?(?:model|reasoning|option|permission|session)\b/iu.test(line) || /^(?:reasoning (?:effort|level)|skills?)\b/iu.test(line) || /\bchoose\s+an\s+action\b/iu.test(line) || /\b(?:command )?requires?\s+(?:approval|confirmation)\b/iu.test(line) || /\bresume\s+previous\s+conversation\b/iu.test(line) || isCodexResumeControlLine(line) || /^(?:请选择|请(?:输入|回复).*(?:选项|编号|是|否)|等待(?:你|用户)(?:的)?(?:输入|选择|确认)|是否.*[？?])/u.test(
+    line
+  );
+}
+function isStructuredInteraction(lines) {
+  const text = lines.join("\n");
+  const tail = lines.at(-1) ?? "";
+  const codexResume = CODEX_RESUME_CONTROLS_RE.test(text);
+  const tailIsControl = codexResume || NUMBERED_CHOICE_RE.test(tail) || BINARY_CONTROL_RE.test(tail) || KEY_HINT_RE.test(tail);
+  if (!tailIsControl) return false;
+  const hasNumberedChoice = lines.some((line) => NUMBERED_CHOICE_RE.test(line));
+  const hasBinaryControl = BINARY_CONTROL_RE.test(text);
+  const hasKeyHint = KEY_HINT_RE.test(text);
+  const hasPromptTitle = lines.some(isLiveInteractionPromptStart);
+  const hasConfirmationQuestion = /\b(?:do\s+you\s+want\s+to|would\s+you\s+like\s+to|shall\s+i)\b[\s\S]{0,240}\b(?:proceed|continue|run|execute|apply|approve|allow)\b/iu.test(
+    text
+  );
+  const claudeBypass = /claude\s+code\s+running\s+in\s+bypass\s+permissions\s+mode/iu.test(text) && /\b(?:no,?\s+exit|yes,?\s+i\s+accept)\b/iu.test(text);
+  const codexUpdate = /\bupdate\s+available\b/iu.test(text) && /\bskip(?:\s+until\s+next\s+version)?\b/iu.test(text);
+  return claudeBypass || codexUpdate || codexResume || hasPromptTitle && (hasNumberedChoice || hasBinaryControl || hasKeyHint) || hasConfirmationQuestion && (hasNumberedChoice || hasBinaryControl) || hasNumberedChoice && hasKeyHint || hasBinaryControl && /(?:approval|confirmation|allow|proceed|continue|确认|允许|继续)/iu.test(text);
+}
+function isCodexResumeControlLine(line) {
+  return /\benter\s+(?:to\s+)?resume\b.*\besc\s+(?:to\s+)?exit\b/iu.test(line);
+}
+
+// src/card/activity-presentation.ts
+var ACTIVITY_CARD_BODY_MAX_BYTES = 6e3;
+var ACTIVITY_TEXT_BODY_MAX_BYTES = 3600;
+function presentBlocks(blocks) {
+  const presented = [];
+  const activity = [];
+  let entries = 0;
+  for (const block of blocks) {
+    if (block.kind !== "text") {
+      presented.push(block);
+      continue;
+    }
+    for (const segment of splitTerminalActivity(block.content)) {
+      if (segment.kind === "activity") {
+        activity.push(segment.content);
+        entries += segment.entries;
+      } else {
+        appendTextBlock(presented, segment.content, block.streaming);
+      }
+    }
+  }
+  const content = activity.join("\n\n").trim();
+  return {
+    blocks: presented,
+    ...content ? { activity: { content, entries } } : {}
+  };
+}
+function activityCardBody(activity, maxBytes = ACTIVITY_CARD_BODY_MAX_BYTES) {
+  return foldActivityContent(activity.content, maxBytes);
+}
+function activityTextBody(activity) {
+  return foldActivityContent(activity.content, ACTIVITY_TEXT_BODY_MAX_BYTES);
+}
+function appendTextBlock(blocks, content, streaming) {
+  if (!content) return;
+  const previous = blocks.at(-1);
+  if (previous?.kind === "text" && previous.streaming === streaming) {
+    previous.content += content;
+    return;
+  }
+  blocks.push({ kind: "text", content, streaming });
+}
+function splitTerminalActivity(input) {
+  if (liveInteractionSurface(input)) return [{ kind: "text", content: input }];
+  const segments = [];
+  const prose = [];
+  let activity = [];
+  let entries = 0;
+  const flushProse = () => {
+    const content = prose.join("\n");
+    prose.length = 0;
+    if (content) segments.push({ kind: "text", content });
+  };
+  const flushActivity = () => {
+    const content = activity.join("\n");
+    activity = [];
+    if (content) segments.push({ kind: "activity", content, entries });
+    entries = 0;
+  };
+  for (const line of input.replace(/\r\n?/g, "\n").split("\n")) {
+    if (isActivityStart(line)) {
+      flushProse();
+      flushActivity();
+      activity.push(line);
+      entries = 1;
+      continue;
+    }
+    if (activity.length > 0) {
+      if (startsNormalAgentMessage(line)) {
+        flushActivity();
+        prose.push(line);
+      } else {
+        activity.push(line);
+      }
+      continue;
+    }
+    prose.push(line);
+  }
+  flushActivity();
+  flushProse();
+  return segments;
+}
+function isActivityStart(line) {
+  const trimmed = line.trim();
+  return isCodexActivityLine(trimmed) || isRawCommandActivity(trimmed) || isClaudeToolActivity(trimmed) || isTerminalChromeActivity(trimmed);
+}
+function startsNormalAgentMessage(line) {
+  const trimmed = line.trim();
+  if (!trimmed) return false;
+  if (isActivityStart(trimmed)) return false;
+  return /^[•]\s+/u.test(trimmed) || /^[⏺●]\s+/u.test(trimmed);
+}
+function isCodexActivityLine(line) {
+  return /^[•◦]\s*(?:ran|running|explored|exploring|viewed(?:\s+\w+)?|read|searched|search|listed|list|edited|wrote|applied|patched|checked|inspected|worked(?:\s+for)?|planning|analyzing|investigating)\b/iu.test(
+    line
+  );
+}
+function isRawCommandActivity(line) {
+  return /^[›❯>]\s*\/[\w-]+\b/u.test(line) || /^(?:ran|run|running)\s+(?:\/[\w-]+|(?:pnpm|npm|npx|node|git|rg|grep|find|sed|awk|curl|wget|tmux|python(?:3)?|bash|sh|zsh|fish|ls|cat|cd|docker|kubectl|pytest|vitest|make)\b)/iu.test(
+    line
+  );
+}
+function isClaudeToolActivity(line) {
+  return /^[⏺●]\s*(?:bash|read|write|edit|multiedit|glob|grep|task|websearch|webfetch|todowrite|skill|notebookedit|askuserquestion|exitplanmode|ls|lsp)\s*\(/iu.test(
+    line
+  );
+}
+function isTerminalChromeActivity(line) {
+  return /^(?:◦\s*)?(?:exploring|working|thinking|planning)\b/iu.test(line) || /^(?:✻|⏵⏵)\s*(?:thinking|working|running|planning)\b/iu.test(line);
+}
+function foldActivityContent(content, maxBytes) {
+  if (Buffer.byteLength(content, "utf8") <= maxBytes) return content;
+  const head = utf8Head(content, Math.floor(maxBytes * 0.42));
+  const tail = utf8Tail(content, Math.floor(maxBytes * 0.42));
+  const dropped = Math.max(0, Buffer.byteLength(content, "utf8") - Buffer.byteLength(head, "utf8") - Buffer.byteLength(tail, "utf8"));
+  return `${head}
+
+_\u2026 ${dropped} \u5B57\u8282\u6267\u884C\u6D3B\u52A8\u5DF2\u6298\u53E0\uFF08\u4FDD\u7559\u9996\u5C3E\uFF09\u2026_
+
+${tail}`;
+}
+function utf8Head(input, maxBytes) {
+  let bytes = 0;
+  let output = "";
+  for (const char of input) {
+    const size = Buffer.byteLength(char, "utf8");
+    if (bytes + size > maxBytes) break;
+    output += char;
+    bytes += size;
+  }
+  return output;
+}
+function utf8Tail(input, maxBytes) {
+  let bytes = 0;
+  const output = [];
+  const chars = Array.from(input);
+  for (let index = chars.length - 1; index >= 0; index -= 1) {
+    const char = chars[index];
+    const size = Buffer.byteLength(char, "utf8");
+    if (bytes + size > maxBytes) break;
+    output.push(char);
+    bytes += size;
+  }
+  return output.reverse().join("");
+}
+
 // src/card/run-renderer.ts
 var REASONING_MAX = 1500;
 var COLLAPSE_TOOL_THRESHOLD = 3;
@@ -126,12 +319,18 @@ var TEXT_HEAD_CHARS = 800;
 var TEXT_TAIL_CHARS = 2400;
 function renderCard(state, options = {}) {
   const elements = [];
+  const presentation = presentBlocks(state.blocks);
+  let activityElementIndex;
   if (state.reasoning.content) {
     elements.push(reasoningPanel(state.reasoning.content, state.reasoning.active));
   }
+  if (presentation.activity) {
+    activityElementIndex = elements.length;
+    elements.push(activityPanel(presentation.activity));
+  }
   const groupElementRange = [];
   const textBlockRanges = [];
-  for (const group of groupBlocks(state.blocks)) {
+  for (const group of groupBlocks(presentation.blocks)) {
     if (group.kind === "text") {
       const content = group.content.trim();
       if (content) {
@@ -162,9 +361,16 @@ function renderCard(state, options = {}) {
     }
     elements.push(stopButton(options));
   }
-  return enforceCardByteBudget(state, elements, groupElementRange, textBlockRanges);
+  return enforceCardByteBudget(
+    state,
+    elements,
+    groupElementRange,
+    textBlockRanges,
+    presentation.activity,
+    activityElementIndex
+  );
 }
-function enforceCardByteBudget(state, elements, groupElementRange, textBlockRanges) {
+function enforceCardByteBudget(state, elements, groupElementRange, textBlockRanges, activity, activityElementIndex) {
   const wrap = (body) => ({
     schema: "2.0",
     config: {
@@ -173,11 +379,15 @@ function enforceCardByteBudget(state, elements, groupElementRange, textBlockRang
     },
     body: { elements: body }
   });
-  const sizeOf = (els) => JSON.stringify(wrap(els)).length;
+  const sizeOf = (els) => Buffer.byteLength(JSON.stringify(wrap(els)), "utf8");
   if (sizeOf(elements) <= CARD_BYTE_BUDGET) return wrap(elements);
   let workingElements = elements.slice();
+  if (activity && activityElementIndex !== void 0) {
+    workingElements[activityElementIndex] = activityPanel(activity, 1200);
+    if (sizeOf(workingElements) <= CARD_BYTE_BUDGET) return wrap(workingElements);
+  }
   const groupTools = [];
-  for (const g of groupBlocks(state.blocks)) {
+  for (const g of groupBlocks(presentBlocks(state.blocks).blocks)) {
     if (g.kind === "tools") groupTools.push(g.tools);
   }
   for (let foldCount = 1; foldCount < groupElementRange.length; foldCount++) {
@@ -207,7 +417,7 @@ function enforceCardByteBudget(state, elements, groupElementRange, textBlockRang
     return wrap(workingElements);
   }
   const textContents = [];
-  for (const g of groupBlocks(state.blocks)) {
+  for (const g of groupBlocks(presentBlocks(state.blocks).blocks)) {
     if (g.kind === "text") {
       const c = g.content.trim();
       if (c) textContents.push(c);
@@ -291,6 +501,20 @@ function toolPanel(tool, expanded) {
     border: tool.status === "error" ? "red" : "grey",
     body: toolBodyMd(tool) || "_\u65E0\u8F93\u51FA_"
   });
+}
+function activityPanel(activity, maxBodyBytes) {
+  const body = activityCardBody(activity, maxBodyBytes);
+  return collapsiblePanel({
+    title: `\u25B8 \u6267\u884C\u6D3B\u52A8 \xB7 ${activity.entries} \u9879`,
+    expanded: false,
+    border: "grey",
+    body: `\`\`\`text
+${escapeFence(body)}
+\`\`\``
+  });
+}
+function escapeFence(content) {
+  return content.replace(/```/g, "``\\`");
 }
 function collapsedToolSummary(tools, finalized) {
   const suffix = finalized ? "\uFF08\u5DF2\u7ED3\u675F\uFF09" : "";
@@ -384,7 +608,9 @@ var EFFECTIVE_BUDGET = CARD_BYTE_BUDGET - MARKER_RESERVE;
 var TEXT_HEAD_BYTE_BUDGET = 2400;
 function renderText(state) {
   const parts = [];
-  for (const block of state.blocks) {
+  const presentation = presentBlocks(state.blocks);
+  if (presentation.activity) parts.push(activityQuote(presentation.activity));
+  for (const block of presentation.blocks) {
     const piece = renderBlock(block);
     if (piece) parts.push(piece);
   }
@@ -400,10 +626,17 @@ function renderText(state) {
   }
   return enforceTextByteBudget(parts.join("\n\n"));
 }
+function activityQuote(activity) {
+  const body = activityTextBody(activity);
+  return [
+    `> _\u25B8 \u6267\u884C\u6D3B\u52A8\uFF08${activity.entries} \u9879\uFF09_`,
+    ...body.split("\n").map((line) => `> ${line}`)
+  ].join("\n");
+}
 function enforceTextByteBudget(text) {
   const totalBytes = Buffer.byteLength(text, "utf8");
   if (totalBytes <= EFFECTIVE_BUDGET) return text;
-  const head = utf8Head(text, TEXT_HEAD_BYTE_BUDGET);
+  const head = utf8Head2(text, TEXT_HEAD_BYTE_BUDGET);
   const headBytes = Buffer.byteLength(head, "utf8");
   let tail = "";
   let marker = "";
@@ -417,7 +650,7 @@ ${marker}
 
 `, "utf8");
     const tailBudget = Math.max(0, EFFECTIVE_BUDGET - headBytes - separatorBytes);
-    tail = utf8Tail(text, tailBudget);
+    tail = utf8Tail2(text, tailBudget);
   }
   const tailBytes = Buffer.byteLength(tail, "utf8");
   marker = `_\u2026 ${Math.max(0, totalBytes - headBytes - tailBytes)} \u5B57\u8282\u5DF2\u6298\u53E0\uFF08\u4FDD\u7559\u9996\u5C3E\uFF09\u2026_`;
@@ -427,7 +660,7 @@ ${marker}
 
 ${tail}`;
 }
-function utf8Head(input, maxBytes) {
+function utf8Head2(input, maxBytes) {
   let bytes = 0;
   let out = "";
   for (const char of input) {
@@ -438,7 +671,7 @@ function utf8Head(input, maxBytes) {
   }
   return out;
 }
-function utf8Tail(input, maxBytes) {
+function utf8Tail2(input, maxBytes) {
   let bytes = 0;
   const out = [];
   const chars = Array.from(input);
@@ -801,55 +1034,6 @@ function sanitizeTelemetryError(err) {
 
 // src/bridge-agent/router.ts
 import { createHash } from "crypto";
-
-// src/agent/live-interaction-detection.ts
-var MAX_INTERACTION_LINES = 120;
-var FALLBACK_INTERACTION_LINES = 12;
-var NUMBERED_CHOICE_RE = /^(?:[›❯>▸*+-]\s*)?\d{1,2}[.)、:\s-]+\S/u;
-var BINARY_CONTROL_RE = /\b(?:y\/n|yes\/no|no\/yes)\b|\[(?:y|yes)\/(?:n|no)\]|\((?:y|yes)\/(?:n|no)\)/iu;
-var KEY_HINT_RE = /(?:press\s+)?enter\s+to\s+(?:confirm|continue)|esc(?:ape)?\s+to\s+(?:go\s+back|cancel)|(?:↑|↓|up\/down|arrow keys?|use .*arrows?)|(?:按下?|点击)回车(?:键)?.*确认|(?:按下?|点击).*(?:esc|取消|返回)/iu;
-var CODEX_RESUME_CONTROLS_RE = /\benter\s+(?:to\s+)?resume\b[\s\S]{0,600}\besc\s+(?:to\s+)?exit\b/iu;
-function liveInteractionSurface(input) {
-  const recent = input.split("\n").map((line) => line.trim()).filter(Boolean).filter((line) => !/^_(?:🧠 正在思考…|🧰 正在调用工具…|✍️ 正在输出…)_$/u.test(line)).slice(-MAX_INTERACTION_LINES);
-  if (recent.length === 0) return void 0;
-  let start = -1;
-  for (let index = 0; index < recent.length; index += 1) {
-    if (isLiveInteractionPromptStart(recent[index])) start = index;
-  }
-  const candidate = start >= 0 && isCodexResumeControlLine(recent[start]) ? recent.slice(Math.max(0, start - 24)) : start >= 0 ? recent.slice(start) : recent.slice(-FALLBACK_INTERACTION_LINES);
-  if (!isStructuredInteraction(candidate)) return void 0;
-  return candidate.join("\n");
-}
-function isStructuredLiveInteraction(input) {
-  return liveInteractionSurface(input) !== void 0;
-}
-function isLiveInteractionPromptStart(line) {
-  return /claude\s+code\s+running\s+in\s+bypass\s+permissions\s+mode/iu.test(line) || /\bupdate\s+available\b/iu.test(line) || /\bselect\s+(?:a\s+)?(?:model|reasoning|option|permission|session)\b/iu.test(line) || /^(?:reasoning (?:effort|level)|skills?)\b/iu.test(line) || /\bchoose\s+an\s+action\b/iu.test(line) || /\b(?:command )?requires?\s+(?:approval|confirmation)\b/iu.test(line) || /\bresume\s+previous\s+conversation\b/iu.test(line) || isCodexResumeControlLine(line) || /^(?:请选择|请(?:输入|回复).*(?:选项|编号|是|否)|等待(?:你|用户)(?:的)?(?:输入|选择|确认)|是否.*[？?])/u.test(
-    line
-  );
-}
-function isStructuredInteraction(lines) {
-  const text = lines.join("\n");
-  const tail = lines.at(-1) ?? "";
-  const codexResume = CODEX_RESUME_CONTROLS_RE.test(text);
-  const tailIsControl = codexResume || NUMBERED_CHOICE_RE.test(tail) || BINARY_CONTROL_RE.test(tail) || KEY_HINT_RE.test(tail);
-  if (!tailIsControl) return false;
-  const hasNumberedChoice = lines.some((line) => NUMBERED_CHOICE_RE.test(line));
-  const hasBinaryControl = BINARY_CONTROL_RE.test(text);
-  const hasKeyHint = KEY_HINT_RE.test(text);
-  const hasPromptTitle = lines.some(isLiveInteractionPromptStart);
-  const hasConfirmationQuestion = /\b(?:do\s+you\s+want\s+to|would\s+you\s+like\s+to|shall\s+i)\b[\s\S]{0,240}\b(?:proceed|continue|run|execute|apply|approve|allow)\b/iu.test(
-    text
-  );
-  const claudeBypass = /claude\s+code\s+running\s+in\s+bypass\s+permissions\s+mode/iu.test(text) && /\b(?:no,?\s+exit|yes,?\s+i\s+accept)\b/iu.test(text);
-  const codexUpdate = /\bupdate\s+available\b/iu.test(text) && /\bskip(?:\s+until\s+next\s+version)?\b/iu.test(text);
-  return claudeBypass || codexUpdate || codexResume || hasPromptTitle && (hasNumberedChoice || hasBinaryControl || hasKeyHint) || hasConfirmationQuestion && (hasNumberedChoice || hasBinaryControl) || hasNumberedChoice && hasKeyHint || hasBinaryControl && /(?:approval|confirmation|allow|proceed|continue|确认|允许|继续)/iu.test(text);
-}
-function isCodexResumeControlLine(line) {
-  return /\benter\s+(?:to\s+)?resume\b.*\besc\s+(?:to\s+)?exit\b/iu.test(line);
-}
-
-// src/bridge-agent/router.ts
 var OpenAiCompatibleBridgeClassifier = class {
   endpoint;
   model;

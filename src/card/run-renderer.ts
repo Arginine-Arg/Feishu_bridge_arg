@@ -1,5 +1,6 @@
 import type { Block, FooterStatus, RunState, ToolEntry } from './run-state';
 import { toolBodyMd, toolHeaderText } from './tool-render';
+import { activityCardBody, presentBlocks, type ActivityTranscript } from './activity-presentation';
 
 const REASONING_MAX = 1500;
 const COLLAPSE_TOOL_THRESHOLD = 3;
@@ -49,9 +50,15 @@ export interface RunCardRenderOptions {
 
 export function renderCard(state: RunState, options: RunCardRenderOptions = {}): object {
   const elements: object[] = [];
+  const presentation = presentBlocks(state.blocks);
+  let activityElementIndex: number | undefined;
 
   if (state.reasoning.content) {
     elements.push(reasoningPanel(state.reasoning.content, state.reasoning.active));
+  }
+  if (presentation.activity) {
+    activityElementIndex = elements.length;
+    elements.push(activityPanel(presentation.activity));
   }
 
   // Index of each tool group in `elements` so we can collapse the earliest
@@ -59,7 +66,7 @@ export function renderCard(state: RunState, options: RunCardRenderOptions = {}):
   // latest group is always preserved (it's the one the user is watching).
   const groupElementRange: Array<{ start: number; toolCount: number }> = [];
   const textBlockRanges: Array<{ start: number; markdownElIdx: number }> = [];
-  for (const group of groupBlocks(state.blocks)) {
+  for (const group of groupBlocks(presentation.blocks)) {
     if (group.kind === 'text') {
       const content = group.content.trim();
       if (content) {
@@ -97,7 +104,14 @@ export function renderCard(state: RunState, options: RunCardRenderOptions = {}):
     elements.push(stopButton(options));
   }
 
-  return enforceCardByteBudget(state, elements, groupElementRange, textBlockRanges);
+  return enforceCardByteBudget(
+    state,
+    elements,
+    groupElementRange,
+    textBlockRanges,
+    presentation.activity,
+    activityElementIndex,
+  );
 }
 
 /**
@@ -125,6 +139,8 @@ function enforceCardByteBudget(
   elements: object[],
   groupElementRange: Array<{ start: number; toolCount: number }>,
   textBlockRanges: Array<{ start: number; markdownElIdx: number }>,
+  activity: ActivityTranscript | undefined,
+  activityElementIndex: number | undefined,
 ): object {
   const wrap = (body: object[]): object => ({
     schema: '2.0',
@@ -135,7 +151,7 @@ function enforceCardByteBudget(
     body: { elements: body },
   });
 
-  const sizeOf = (els: object[]): number => JSON.stringify(wrap(els)).length;
+  const sizeOf = (els: object[]): number => Buffer.byteLength(JSON.stringify(wrap(els)), 'utf8');
   if (sizeOf(elements) <= CARD_BYTE_BUDGET) return wrap(elements);
 
   // Pass 1: fold earliest tool groups into header-only summaries.
@@ -144,8 +160,16 @@ function enforceCardByteBudget(
   // still exceed budget. We preserve the most recent tool group's full
   // panels — that's the one the user is watching.
   let workingElements = elements.slice();
+  // The activity panel is already collapsed visually, but its hidden body is
+  // still serialized in the CardKit payload. Tighten it before touching
+  // ordinary prose so an exhaustive command trace cannot hide the final
+  // answer or cause a rejected streaming update.
+  if (activity && activityElementIndex !== undefined) {
+    workingElements[activityElementIndex] = activityPanel(activity, 1_200);
+    if (sizeOf(workingElements) <= CARD_BYTE_BUDGET) return wrap(workingElements);
+  }
   const groupTools: ToolEntry[][] = [];
-  for (const g of groupBlocks(state.blocks)) {
+  for (const g of groupBlocks(presentBlocks(state.blocks).blocks)) {
     if (g.kind === 'tools') groupTools.push(g.tools);
   }
   for (let foldCount = 1; foldCount < groupElementRange.length; foldCount++) {
@@ -184,7 +208,7 @@ function enforceCardByteBudget(
   // largest one until we fit.
   // Re-walk groups to fetch the original (untruncated) text contents.
   const textContents: string[] = [];
-  for (const g of groupBlocks(state.blocks)) {
+  for (const g of groupBlocks(presentBlocks(state.blocks).blocks)) {
     if (g.kind === 'text') {
       const c = g.content.trim();
       if (c) textContents.push(c);
@@ -278,6 +302,20 @@ function toolPanel(tool: ToolEntry, expanded: boolean): object {
     border: tool.status === 'error' ? 'red' : 'grey',
     body: toolBodyMd(tool) || '_无输出_',
   });
+}
+
+function activityPanel(activity: ActivityTranscript, maxBodyBytes?: number): object {
+  const body = activityCardBody(activity, maxBodyBytes);
+  return collapsiblePanel({
+    title: `▸ 执行活动 · ${activity.entries} 项`,
+    expanded: false,
+    border: 'grey',
+    body: `\`\`\`text\n${escapeFence(body)}\n\`\`\``,
+  });
+}
+
+function escapeFence(content: string): string {
+  return content.replace(/```/g, '``\\`');
 }
 
 /**

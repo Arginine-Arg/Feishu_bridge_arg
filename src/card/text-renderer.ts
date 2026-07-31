@@ -1,6 +1,7 @@
 import type { Block, RunState, ToolEntry } from './run-state';
 import { toolHeaderText } from './tool-render';
 import { CARD_BYTE_BUDGET } from './run-renderer';
+import { activityTextBody, presentBlocks, type ActivityTranscript } from './activity-presentation';
 
 const MARKER_RESERVE = 256;
 const EFFECTIVE_BUDGET = CARD_BYTE_BUDGET - MARKER_RESERVE;
@@ -22,8 +23,11 @@ const TEXT_HEAD_BYTE_BUDGET = 2400;
  */
 export function renderText(state: RunState): string {
   const parts: string[] = [];
+  const presentation = presentBlocks(state.blocks);
 
-  for (const block of state.blocks) {
+  if (presentation.activity) parts.push(activityQuote(presentation.activity));
+
+  for (const block of presentation.blocks) {
     const piece = renderBlock(block);
     if (piece) parts.push(piece);
   }
@@ -40,6 +44,14 @@ export function renderText(state: RunState): string {
   }
 
   return enforceTextByteBudget(parts.join('\n\n'));
+}
+
+function activityQuote(activity: ActivityTranscript): string {
+  const body = activityTextBody(activity);
+  return [
+    `> _▸ 执行活动（${activity.entries} 项）_`,
+    ...body.split('\n').map((line) => `> ${line}`),
+  ].join('\n');
 }
 
 function enforceTextByteBudget(text: string): string {
