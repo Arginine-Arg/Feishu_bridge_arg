@@ -73,7 +73,8 @@ function isStructuredInteraction(lines: string[]): boolean {
     codexResume || NUMBERED_CHOICE_RE.test(tail) || BINARY_CONTROL_RE.test(tail) || KEY_HINT_RE.test(tail);
   if (!tailIsControl) return false;
 
-  const hasNumberedChoice = lines.some((line) => NUMBERED_CHOICE_RE.test(line));
+  const numberedChoiceCount = lines.filter((line) => NUMBERED_CHOICE_RE.test(line)).length;
+  const hasNumberedChoice = numberedChoiceCount > 0;
   const hasBinaryControl = BINARY_CONTROL_RE.test(text);
   const hasKeyHint = KEY_HINT_RE.test(text);
   const hasPromptTitle = lines.some(isLiveInteractionPromptStart);
@@ -91,9 +92,13 @@ function isStructuredInteraction(lines: string[]): boolean {
     claudeBypass ||
     codexUpdate ||
     codexResume ||
-    (hasPromptTitle && (hasNumberedChoice || hasBinaryControl || hasKeyHint)) ||
+    // Do not publish a half-drawn menu merely because its first highlighted
+    // row arrived before the remaining choices. A one-row picker is still
+    // accepted once its explicit key hint appears; otherwise wait for a
+    // second choice or a binary control.
+    (hasPromptTitle && (numberedChoiceCount >= 2 || hasBinaryControl || hasKeyHint)) ||
     (hasConfirmationQuestion && (hasNumberedChoice || hasBinaryControl)) ||
-    (hasNumberedChoice && hasKeyHint) ||
+    (numberedChoiceCount >= 2 && hasKeyHint) ||
     (hasBinaryControl && /(?:approval|confirmation|allow|proceed|continue|确认|允许|继续)/iu.test(text))
   );
 }

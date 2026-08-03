@@ -477,6 +477,9 @@ describe('tmux input framing and snapshots', () => {
     expect(
       isLiveTerminalBusy('• Working (14s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close'),
     ).toBe(true);
+    const waiting = '• Waiting for background terminal (3m 34s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close';
+    expect(isLiveTerminalBusy(waiting)).toBe(true);
+    expect(sanitizeLiveTurnOutput(`${waiting}\n• 已完成核心检查。`)).toBe('• 已完成核心检查。');
     expect(isLiveTerminalBusy('tab to queue message 99% context left')).toBe(true);
     expect(isLiveTerminalBusy('› ready for the next task')).toBe(false);
   });
@@ -1299,9 +1302,10 @@ setInterval(() => {}, 1000);
       expect((await interruptedIterator.next()).value).toMatchObject({ type: 'system' });
       expect((await interruptedIterator.next()).value).toMatchObject({ type: 'text' });
       await interruptedTurn.stop();
+      await interruptedTurn.stop();
       await waitForFileText(inputTrace, 'interrupt', 3_000);
       await interruptedIterator.return?.();
-      expect(await readFile(inputTrace, 'utf8')).toContain('interrupt');
+      expect((await readFile(inputTrace, 'utf8')).trim().split('\n')).toEqual(['interrupt']);
       expect(session.isAlive()).toBe(true);
 
       const status = await collect(session.run('tmux-stop-status', '/status', dir, 'command').events);
@@ -1327,6 +1331,47 @@ setInterval(() => {}, 1000);
       });
       expect(history.status).toBe(0);
       expect(history.stdout).toContain('PERSISTED_TMUX_HISTORY');
+    } finally {
+      await pool.closeAll();
+    }
+  }, 20_000);
+
+  tmuxIt('withholds Ctrl-C when the tmux screen has not confirmed an active task', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-safe-stop-test-'));
+    const bin = join(dir, 'fake-tmux-silent-agent.mjs');
+    const inputTrace = join(dir, 'input-trace.txt');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs';
+process.stdin.on('data', (chunk) => appendFileSync(${JSON.stringify(inputTrace)}, chunk));
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-safe-stop-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-safe-stop',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 250,
+      outputFlushMs: 30,
+      startupTimeoutMs: 2_000,
+    });
+
+    try {
+      const turn = session.run('tmux-safe-stop-run', 'a task that never starts', dir);
+      const iterator = turn.events[Symbol.asyncIterator]();
+      expect((await iterator.next()).value).toMatchObject({ type: 'system' });
+      await turn.stop();
+      expect((await iterator.next()).value).toMatchObject({ type: 'done' });
+      await expect(readFile(inputTrace, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(session.isAlive()).toBe(true);
     } finally {
       await pool.closeAll();
     }

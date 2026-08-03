@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
 import {
   liveInteractionCard,
   liveInteractionCardForText,
@@ -134,6 +135,24 @@ describe('liveInteractionCard', () => {
       expect(value.cmd).toBe('live.input');
       expect(value[BRIDGE_CALLBACK_MARKER]).toBe(true);
     }
+  });
+
+  it('waits for a complete picker frame, then preserves its first choice', () => {
+    const firstFrame = [
+      'Select Model and Effort',
+      '› 1. gpt-5.6-sol (current)',
+    ].join('\n');
+    const completeFrame = [
+      firstFrame,
+      '2. gpt-5.6-terra',
+      'Press enter to confirm or esc to go back',
+    ].join('\n');
+
+    expect(liveInteractionCardForText(firstFrame, () => 'partial')).toBeUndefined();
+    const card = liveInteractionCardForText(completeFrame, () => 'complete');
+    expect(card).toBeDefined();
+    expect(buttonValues(card).map((value) => value.input)).toEqual(['1', '2', 'enter', 'esc']);
+    expect(JSON.stringify(card)).toContain('1. gpt-5.6-sol');
   });
 
   it('maps the Claude bypass warning to safe terminal navigation keys', () => {
@@ -415,7 +434,12 @@ describe('liveInteractionCard', () => {
     ].join('\n');
     const first = liveInteractionCardForText(text, () => 'tok');
     expect(first).toBeDefined();
-    expect(liveInteractionCardForText(text, () => 'tok', 'live', new Set([`${text}\n1|2|enter|esc`]))).toBeUndefined();
+    const signature = createHash('sha256')
+      .update(text)
+      .update('\0')
+      .update('1|2|enter|esc')
+      .digest('hex');
+    expect(liveInteractionCardForText(text, () => 'tok', 'live', new Set([signature]))).toBeUndefined();
   });
 
   it('does not convert ordinary text into a live input card', () => {

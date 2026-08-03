@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.64",
+  version: "0.6.65",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -4923,7 +4923,14 @@ async function checkLarkCli(opts) {
     await writeLarkCliSourceProjection(bridgeConfig, appPaths2);
   }
   const larkChannelEnv = opts.larkChannel ? buildLarkChannelEnv(opts.larkChannel) : void 0;
-  const legacyLarkChannelEnv = opts.larkChannel ? buildLarkChannelEnv({ ...opts.larkChannel, larkCliConfigDir: void 0 }) : void 0;
+  const legacyLarkChannelEnv = opts.larkChannel ? {
+    ...buildLarkChannelEnv({ ...opts.larkChannel, larkCliConfigDir: void 0 }),
+    // `runCapture` merges this object over process.env. Explicitly unset
+    // the private profile directory when inspecting a pre-existing local
+    // lark-cli login, otherwise a bridge launched with that variable set
+    // would inspect its own target rather than the user's local config.
+    LARKSUITE_CLI_CONFIG_DIR: void 0
+  } : void 0;
   const profileArgs = privateBinding || !opts.larkChannel?.profile ? [] : ["--profile", opts.larkChannel.profile];
   if (!isLarkCliInstalled()) {
     console.log(
@@ -6010,7 +6017,8 @@ function isStructuredInteraction(lines) {
   const codexResume = CODEX_RESUME_CONTROLS_RE.test(text);
   const tailIsControl = codexResume || NUMBERED_CHOICE_RE.test(tail) || BINARY_CONTROL_RE.test(tail) || KEY_HINT_RE.test(tail);
   if (!tailIsControl) return false;
-  const hasNumberedChoice = lines.some((line) => NUMBERED_CHOICE_RE.test(line));
+  const numberedChoiceCount = lines.filter((line) => NUMBERED_CHOICE_RE.test(line)).length;
+  const hasNumberedChoice = numberedChoiceCount > 0;
   const hasBinaryControl = BINARY_CONTROL_RE.test(text);
   const hasKeyHint = KEY_HINT_RE.test(text);
   const hasPromptTitle = lines.some(isLiveInteractionPromptStart);
@@ -6019,7 +6027,11 @@ function isStructuredInteraction(lines) {
   );
   const claudeBypass = /claude\s+code\s+running\s+in\s+bypass\s+permissions\s+mode/iu.test(text) && /\b(?:no,?\s+exit|yes,?\s+i\s+accept)\b/iu.test(text);
   const codexUpdate = /\bupdate\s+available\b/iu.test(text) && /\bskip(?:\s+until\s+next\s+version)?\b/iu.test(text);
-  return claudeBypass || codexUpdate || codexResume || hasPromptTitle && (hasNumberedChoice || hasBinaryControl || hasKeyHint) || hasConfirmationQuestion && (hasNumberedChoice || hasBinaryControl) || hasNumberedChoice && hasKeyHint || hasBinaryControl && /(?:approval|confirmation|allow|proceed|continue|确认|允许|继续)/iu.test(text);
+  return claudeBypass || codexUpdate || codexResume || // Do not publish a half-drawn menu merely because its first highlighted
+  // row arrived before the remaining choices. A one-row picker is still
+  // accepted once its explicit key hint appears; otherwise wait for a
+  // second choice or a binary control.
+  hasPromptTitle && (numberedChoiceCount >= 2 || hasBinaryControl || hasKeyHint) || hasConfirmationQuestion && (hasNumberedChoice || hasBinaryControl) || numberedChoiceCount >= 2 && hasKeyHint || hasBinaryControl && /(?:approval|confirmation|allow|proceed|continue|确认|允许|继续)/iu.test(text);
 }
 function isCodexResumeControlLine(line) {
   return /\benter\s+(?:to\s+)?resume\b.*\besc\s+(?:to\s+)?exit\b/iu.test(line);
@@ -6744,12 +6756,15 @@ var LiveTerminalSession = class {
   }
   run(runId, prompt, cwd, inputMode) {
     void this.start();
-    const events = this.turnEvents(prompt, cwd, inputMode);
+    const interruption = { requested: false };
+    const events = this.turnEvents(prompt, cwd, inputMode, interruption);
     return {
       runId,
       events,
       stop: async () => {
-        this.write("");
+        if (interruption.requested) return;
+        interruption.requested = true;
+        interruption.cancel?.();
       },
       waitForExit: async () => true
     };
@@ -6869,8 +6884,9 @@ var LiveTerminalSession = class {
       this.resolveTerminalReady = void 0;
     }
     const output = this.cleaner.push(raw);
-    if (output.mode === "snapshot" && output.text.trim()) {
-      this.lastTerminalSnapshot = output.text;
+    const terminalSnapshot = output.terminalText ?? output.text;
+    if (output.mode === "snapshot" && terminalSnapshot.trim()) {
+      this.lastTerminalSnapshot = terminalSnapshot;
     }
     if (output.history?.text.trim()) this.lastTerminalHistory = output.history;
     if (!output.text.trim() && !output.terminalText?.trim() && !output.history?.text.trim()) return;
@@ -6893,7 +6909,7 @@ var LiveTerminalSession = class {
       this.terminalInfo?.backend === "tmux" ? encodeTmuxInputFrame(input) : input
     );
   }
-  async *turnEvents(prompt, cwd, inputMode) {
+  async *turnEvents(prompt, cwd, inputMode, interruption = { requested: false }) {
     yield { type: "system", cwd };
     await this.start();
     const commandMode = inputMode === "command";
@@ -6996,6 +7012,24 @@ var LiveTerminalSession = class {
       } else {
         push({ type: "done", terminationReason: "normal" });
       }
+    };
+    const cancelCurrentTurn = () => {
+      if (done) return;
+      const terminal = this.terminalInfo;
+      const terminalBusy = isLiveTerminalBusy(this.lastTerminalSnapshot) || isLiveTerminalBusy(this.lastTerminalHistory?.text ?? "");
+      if (terminal?.backend !== "tmux" || terminalBusy) {
+        this.write("");
+        log.info("agent-live", "turn-interrupt-sent", {
+          backend: terminal?.backend ?? "unknown",
+          terminalBusy
+        });
+      } else {
+        log.warn("agent-live", "turn-interrupt-withheld", {
+          backend: terminal?.backend ?? "unknown",
+          reason: "terminal-not-confirmed-busy"
+        });
+      }
+      finish();
     };
     const arm = (ms) => {
       if (timer) clearTimeout(timer);
@@ -7163,15 +7197,18 @@ var LiveTerminalSession = class {
       this.emitter.off("exit", onExit);
       this.emitter.off("error", onError);
       if (this.activeTurnCleanup === cleanupTurn) this.activeTurnCleanup = void 0;
+      if (interruption.cancel === cancelCurrentTurn) interruption.cancel = void 0;
       wake?.();
     };
     this.activeTurnCleanup?.();
     this.activeTurnCleanup = cleanupTurn;
+    interruption.cancel = cancelCurrentTurn;
     this.emitter.on("data", onData);
     this.emitter.once("exit", onExit);
     this.emitter.once("error", onError);
     for (const event of this.pendingTerminalOutput.splice(0)) onData(event);
     try {
+      if (interruption.requested) cancelCurrentTurn();
       await this.waitForInputReady(inputGraceMs);
       if (!done) {
         if (startupInteractionText && inputMode !== "control") {
@@ -8915,7 +8952,7 @@ function snapshotInformationScore(input) {
   return input.split("\n").map((line) => line.trim()).filter(Boolean).filter((line) => !/^[╭╰╮╯─│\s]+$/u.test(line)).join("\n").length;
 }
 function isTerminalChromeLine(trimmed) {
-  return /^Tip:/i.test(trimmed) || /^[•◦]\s+Working\s+\((?:\d+h\s+)?(?:\d+m\s+)?\d+s\b.*\)(?:\s+·\s+.*)?$/i.test(trimmed) || /^tab to queue message\b.*context left$/i.test(trimmed) || /^\d+%\s+context left$/i.test(trimmed) || /^[╭╰╮╯─│\s]+$/u.test(trimmed) || /^[›❯]\s*$/.test(trimmed) || isTerminalSuggestionLine(trimmed) || /^[A-Za-z0-9_.-]+(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?\s+·\s+.+$/.test(trimmed);
+  return /^Tip:/i.test(trimmed) || /^[•◦]\s+(?:Working|Waiting\s+for\s+background\s+terminal)\s+\((?:\d+h\s+)?(?:\d+m\s+)?\d+s\b.*\)(?:\s+·\s+.*)?$/i.test(trimmed) || /^tab to queue message\b.*context left$/i.test(trimmed) || /^\d+%\s+context left$/i.test(trimmed) || /^[╭╰╮╯─│\s]+$/u.test(trimmed) || /^[›❯]\s*$/.test(trimmed) || isTerminalSuggestionLine(trimmed) || /^[A-Za-z0-9_.-]+(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?\s+·\s+.+$/.test(trimmed);
 }
 function isTerminalSuggestionLine(trimmed) {
   return /^›\s*(?:Use\s+\/[a-z][\w-]*(?:\s+.*)?|Implement \{feature\}|Summarize recent commits|Find and fix a bug in @filename|Improve documentation in @filename|Explain this codebase|Write tests for @filename|Run \/review on my current changes)\s*$/i.test(
@@ -8924,7 +8961,7 @@ function isTerminalSuggestionLine(trimmed) {
 }
 function isLiveTerminalBusy(input) {
   const recent = cleanTerminalOutput(input).split("\n").slice(-12).join("\n");
-  return /(?:tab\s+to\s+queue\s+message|working\s*\([^)]*(?:esc|escape)\s+to\s+interrupt|esc(?:ape)?\s+to\s+interrupt|compacting(?:\s+context)?)/iu.test(
+  return /(?:tab\s+to\s+queue\s+message|(?:working|waiting\s+for\s+background\s+terminal)\s*\([^)]*(?:esc|escape)\s+to\s+interrupt|esc(?:ape)?\s+to\s+interrupt|compacting(?:\s+context)?)/iu.test(
     recent
   );
 }
@@ -10236,7 +10273,7 @@ bridge \u4F1A\u7ED9\u4F60\u7684\u5B50\u8FDB\u7A0B\u6CE8\u5165\u5F53\u524D\u8FD0\
    \u8FD9\u662F\u5185\u90E8\u987A\u5E8F\u6267\u884C\u8EAB\u4EFD\u7B56\u7565\u6536\u655B,\u4E0D\u8981\u628A strict-mode/default-as \u8FD9\u7C7B\u5185\u90E8\u914D\u7F6E\u547D\u4EE4\u5C55\u793A\u7ED9\u7528\u6237,\u4E5F\u4E0D\u8981\u8BA9\u7528\u6237\u5224\u65AD\u8FD9\u4E9B\u547D\u4EE4\u3002\u9762\u5411\u7528\u6237\u53EA\u8BF4\uFF1A"\u5F53\u524D profile \u8FD8\u6CA1\u6709\u53EF\u7528\u7684\u7528\u6237\u8EAB\u4EFD\u6388\u6743,\u8BF7\u6253\u5F00\u4E0B\u9762\u94FE\u63A5\u5B8C\u6210\u6388\u6743;\u6388\u6743\u5B8C\u6210\u540E\u6211\u4F1A\u7EE7\u7EED\u5904\u7406\u3002"
 5. \u5982\u679C\u5F53\u524D profile \u5DF2\u7ECF\u6709\u7528\u6237\u6388\u6743,\u4F46 \`--as user\` \u4ECD\u88AB strict-mode/default-as \u62D2\u7EDD,\u4E0D\u8981\u5411\u7528\u6237\u5C55\u793A\u5185\u90E8\u547D\u4EE4;\u5728\u7528\u6237\u660E\u786E\u8981\u6C42\u4F7F\u7528\u7528\u6237\u8EAB\u4EFD\u65F6,\u5185\u90E8\u987A\u5E8F\u6267\u884C\u8EAB\u4EFD\u7B56\u7565\u6536\u655B\u540E\u91CD\u8BD5\u539F\u547D\u4EE4\u3002
 6. \u4F60\u524D\u53F0\u963B\u585E\u671F\u95F4\uFF0C\u7528\u6237\u53D1\u7684\u65B0\u6D88\u606F bridge \u4F1A\u81EA\u52A8\u6392\u961F\uFF0C**\u4E0D\u4F1A\u6253\u65AD\u4F60**\uFF1B\u7B49\u4F60 tool_result \u4E00\u56DE\u6765\uFF0C\u4E0B\u4E00\u6279\u6D88\u606F\u518D\u8FDB\u6765\u3002\u6240\u4EE5\u653E\u5FC3\u963B\u585E\u3002
-7. \u5982\u679C\u7528\u6237\u4E2D\u9014\u60F3\u53D6\u6D88\uFF0C\u4ED6\u4EEC\u4F1A\u53D1 \`/stop\`\u2014\u2014\u90A3\u65F6\u88AB kill \u662F\u9884\u671F\u884C\u4E3A\uFF0C\u4E0D\u7528\u515C\u5E95\u3002
+7. \u5982\u679C\u7528\u6237\u4E2D\u9014\u60F3\u53D6\u6D88\uFF0C\u4ED6\u4EEC\u4F1A\u53D1 \`/stop\`\u3002bridge \u53EA\u4F1A\u4E2D\u65AD\u5F53\u524D\u8F6E\u6B21\uFF1B\u4E0D\u8981\u81EA\u884C\u9000\u51FA Codex/Claude\uFF0C\u4E5F\u4E0D\u8981\u5173\u95ED tmux pane\u3002
 `;
 
 // src/agent/capability.ts
@@ -15863,6 +15900,12 @@ async function fetchOwnerId(source) {
 import { randomUUID as randomUUID2 } from "crypto";
 
 // src/bot/active-runs.ts
+function requestRunStop(handle) {
+  if (handle.stopPromise) return handle.stopPromise;
+  handle.stopRequested = true;
+  handle.stopPromise = Promise.resolve().then(() => handle.run.stop());
+  return handle.stopPromise;
+}
 var ActiveRuns = class {
   handles = /* @__PURE__ */ new Map();
   reservations = /* @__PURE__ */ new Set();
@@ -15883,7 +15926,12 @@ var ActiveRuns = class {
       throw new Error(`run already active for scope: ${chatId}`);
     }
     this.reservations.delete(chatId);
-    const handle = { run, interrupted: false, detached: false };
+    const handle = {
+      run,
+      interrupted: false,
+      detached: false,
+      stopRequested: false
+    };
     this.handles.set(chatId, handle);
     return handle;
   }
@@ -15919,8 +15967,8 @@ var ActiveRuns = class {
   }
   /**
    * Interrupt the current run for this chat, if any. Returns true if an
-   * interrupt was issued. Fires stop() fire-and-forget — the old run's
-   * generator exits on its own as the subprocess dies.
+   * interrupt was issued. Delivery is one-shot so a persistent live terminal
+   * cannot receive duplicate Ctrl-C bytes from cleanup races.
    */
   interrupt(chatId) {
     const h = this.handles.get(chatId);
@@ -15928,7 +15976,7 @@ var ActiveRuns = class {
     this.reservations.delete(chatId);
     h.interrupted = true;
     this.handles.delete(chatId);
-    void h.run.stop().catch(() => {
+    void requestRunStop(h).catch(() => {
     });
     return true;
   }
@@ -15937,7 +15985,7 @@ var ActiveRuns = class {
     this.handles.clear();
     this.reservations.clear();
     for (const h of all) h.interrupted = true;
-    await Promise.allSettled(all.map((h) => h.run.stop()));
+    await Promise.allSettled(all.map((h) => requestRunStop(h)));
   }
   /**
    * Drop bridge-side run ownership during a relay restart without signaling
@@ -16137,7 +16185,7 @@ var RunExecutor = class {
             ...dimensions,
             graceMs: this.postDoneExitGraceMs
           });
-          await run.stop().catch((err) => {
+          await requestRunStop(handle).catch((err) => {
             log.warn("run", "post-done-stop-failed", {
               ...dimensions,
               err: err instanceof Error ? err.message : String(err)
@@ -16161,7 +16209,7 @@ var RunExecutor = class {
       subscribe: () => fanout.subscribe(),
       stop: async () => {
         handle.interrupted = true;
-        await run.stop();
+        await requestRunStop(handle);
         await run.waitForExit(this.postDoneExitGraceMs);
         await cleanup(false);
       }
@@ -19076,9 +19124,8 @@ async function runAgentBatch(deps) {
     }
     interactionTextBuffer = `${interactionTextBuffer}
 ${delta}`.slice(-16e3);
-    const outputKind = bridgeAgent.classifyOutput(interactionTextBuffer);
-    const pickerLike = isStartupInteraction || outputKind === "picker";
-    const interaction = pickerLike ? detectLiveInteraction(interactionTextBuffer) : void 0;
+    const interaction = detectLiveInteraction(interactionTextBuffer);
+    const pickerLike = isStartupInteraction || Boolean(interaction);
     if (!isStartupInteraction && (interaction || pickerLike)) {
       pickerObservedAfterInput = true;
     }
@@ -19767,7 +19814,7 @@ async function processAgentStream(handle, events, scope, idleTimeoutMs, progress
       idleFired = true;
       handle.interrupted = true;
       log.warn("agent", "idle-timeout", { scope, idleTimeoutMs });
-      void handle.run.stop().catch(() => {
+      void requestRunStop(handle).catch(() => {
       });
     }, idleTimeoutMs);
   };
@@ -19885,9 +19932,6 @@ async function processAgentStream(handle, events, scope, idleTimeoutMs, progress
   reportMetric("run_e2e_ms", Date.now() - runStart2, { terminal: state.terminal });
   await queueFlush(state);
   await delivery.drain();
-  if (handle.interrupted && !handle.detached) {
-    await handle.run.stop();
-  }
   return state;
 }
 function runStateTextCursor(state) {
@@ -20138,8 +20182,10 @@ function detectLiveInteraction(text, allowBareConfirmation = false) {
   }
   if (buttons.length === 0) return void 0;
   return {
-    signature: `${prompt}
-${buttons.map((button2) => button2.input).join("|")}`.slice(0, 500),
+    // A prefix signature made two long menus look identical whenever they
+    // shared their title and early choices. Hash the complete current surface
+    // so repeated redraws dedupe, while every genuinely nested menu is sent.
+    signature: createHash7("sha256").update(prompt).update("\0").update(buttons.map((button2) => button2.input).join("|")).digest("hex"),
     prompt: displayPrompt.slice(0, isCodexModelPickerPrompt(prompt) ? 4e3 : 1200),
     buttons
   };

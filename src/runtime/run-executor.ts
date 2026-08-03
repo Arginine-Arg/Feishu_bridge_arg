@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { AgentAdapter, AgentEvent, AgentRun } from '../agent/types';
-import { ActiveRuns, type RunHandle } from '../bot/active-runs';
+import { ActiveRuns, requestRunStop, type RunHandle } from '../bot/active-runs';
 import { ProcessPool } from '../bot/process-pool';
 import type { CodexReasoningEffort } from '../config/schema';
 import type { RunPolicyAllow } from '../policy/run-policy';
@@ -180,7 +180,7 @@ export class RunExecutor {
             ...dimensions,
             graceMs: this.postDoneExitGraceMs,
           });
-          await run.stop().catch((err) => {
+          await requestRunStop(handle).catch((err) => {
             log.warn('run', 'post-done-stop-failed', {
               ...dimensions,
               err: err instanceof Error ? err.message : String(err),
@@ -205,7 +205,7 @@ export class RunExecutor {
       subscribe: () => fanout.subscribe(),
       stop: async () => {
         handle.interrupted = true;
-        await run.stop();
+        await requestRunStop(handle);
         await run.waitForExit(this.postDoneExitGraceMs);
         await cleanup(false);
       },

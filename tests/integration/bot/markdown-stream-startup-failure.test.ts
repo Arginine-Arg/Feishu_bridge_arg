@@ -818,6 +818,63 @@ describe('markdown stream startup failures', () => {
     ]);
   });
 
+  it('publishes a fresh nested picker after selecting More Options', async () => {
+    const h = await createHarness({
+      stream: async () => {
+        throw new Error('native live picker output should not use stream');
+      },
+    });
+    h.profileConfig.preferences = {
+      ...(h.profileConfig.preferences ?? {}),
+      messageReply: 'markdown',
+    };
+    h.agent.setEvents([
+      [
+        {
+          type: 'text',
+          delta: [
+            'Select Reasoning Effort for gpt-5.6-sol',
+            '› 1. Low',
+            '2. Medium',
+            '3. High',
+            '4. Extra high',
+            '5. More Options',
+            'Press enter to confirm or esc to go back',
+          ].join('\n'),
+        },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+      [
+        {
+          type: 'text',
+          delta: [
+            'Choose an extended reasoning level',
+            '› 1. Max',
+            '2. Ultra',
+            'Press enter to confirm or esc to go back',
+          ].join('\n'),
+        },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+    ]);
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_reasoning_picker', '/codex /model'));
+    await waitFor(() => h.channel.sent.length === 1);
+    expect(buttonLabels((h.channel.sent[0]?.content as { card?: unknown }).card)).toEqual([
+      '1', '2', '3', '4', '5', 'enter', 'esc',
+    ]);
+
+    await h.channel.handlers.message?.(message('om_reasoning_more', '/codex 5'));
+    await waitFor(() => h.agent.runOptions.length === 2 && h.channel.sent.length === 2, 4000);
+
+    expect(h.agent.runOptions.map((options) => options.prompt)).toEqual(['/model', '5']);
+    expect(h.agent.runOptions.map((options) => options.liveInputMode)).toEqual(['command', 'control']);
+    const nextCard = (h.channel.sent[1]?.content as { card?: unknown }).card;
+    expect(buttonLabels(nextCard)).toEqual(['1', '2', 'enter', 'esc']);
+    expect(JSON.stringify(nextCard)).toContain('extended reasoning level');
+  });
+
   it('keeps rapid group messages as separate live terminal turns', async () => {
     const h = await createHarness();
     h.profileConfig.preferences = {

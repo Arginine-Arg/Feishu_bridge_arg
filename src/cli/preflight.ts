@@ -62,7 +62,14 @@ async function checkLarkCli(opts: PreFlightOptions): Promise<void> {
   }
   const larkChannelEnv = opts.larkChannel ? buildLarkChannelEnv(opts.larkChannel) : undefined;
   const legacyLarkChannelEnv = opts.larkChannel
-    ? buildLarkChannelEnv({ ...opts.larkChannel, larkCliConfigDir: undefined })
+    ? {
+      ...buildLarkChannelEnv({ ...opts.larkChannel, larkCliConfigDir: undefined }),
+      // `runCapture` merges this object over process.env. Explicitly unset
+      // the private profile directory when inspecting a pre-existing local
+      // lark-cli login, otherwise a bridge launched with that variable set
+      // would inspect its own target rather than the user's local config.
+      LARKSUITE_CLI_CONFIG_DIR: undefined,
+    }
     : undefined;
   const profileArgs =
     privateBinding || !opts.larkChannel?.profile ? [] : ['--profile', opts.larkChannel.profile];

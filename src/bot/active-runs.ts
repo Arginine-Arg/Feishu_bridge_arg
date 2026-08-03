@@ -5,6 +5,21 @@ export interface RunHandle {
   interrupted: boolean;
   /** The bridge relay ended, but the underlying agent must keep running. */
   detached: boolean;
+  /** A stop request is a one-shot terminal operation, never a retry loop. */
+  stopRequested: boolean;
+  stopPromise?: Promise<void>;
+}
+
+/**
+ * Several lifecycle paths can converge on a running turn (for example /stop,
+ * the idle watchdog, and run cleanup). A live terminal must receive at most
+ * one interrupt request for that turn.
+ */
+export function requestRunStop(handle: RunHandle): Promise<void> {
+  if (handle.stopPromise) return handle.stopPromise;
+  handle.stopRequested = true;
+  handle.stopPromise = Promise.resolve().then(() => handle.run.stop());
+  return handle.stopPromise;
 }
 
 export class ActiveRuns {
@@ -29,7 +44,12 @@ export class ActiveRuns {
       throw new Error(`run already active for scope: ${chatId}`);
     }
     this.reservations.delete(chatId);
-    const handle: RunHandle = { run, interrupted: false, detached: false };
+    const handle: RunHandle = {
+      run,
+      interrupted: false,
+      detached: false,
+      stopRequested: false,
+    };
     this.handles.set(chatId, handle);
     return handle;
   }
@@ -73,8 +93,8 @@ export class ActiveRuns {
 
   /**
    * Interrupt the current run for this chat, if any. Returns true if an
-   * interrupt was issued. Fires stop() fire-and-forget — the old run's
-   * generator exits on its own as the subprocess dies.
+   * interrupt was issued. Delivery is one-shot so a persistent live terminal
+   * cannot receive duplicate Ctrl-C bytes from cleanup races.
    */
   interrupt(chatId: string): boolean {
     const h = this.handles.get(chatId);
@@ -82,7 +102,7 @@ export class ActiveRuns {
     this.reservations.delete(chatId);
     h.interrupted = true;
     this.handles.delete(chatId);
-    void h.run.stop().catch(() => {
+    void requestRunStop(h).catch(() => {
       /* stop errors are non-fatal */
     });
     return true;
@@ -93,7 +113,7 @@ export class ActiveRuns {
     this.handles.clear();
     this.reservations.clear();
     for (const h of all) h.interrupted = true;
-    await Promise.allSettled(all.map((h) => h.run.stop()));
+    await Promise.allSettled(all.map((h) => requestRunStop(h)));
   }
 
   /**

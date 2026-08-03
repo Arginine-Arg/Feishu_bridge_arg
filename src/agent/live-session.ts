@@ -45,6 +45,10 @@ type LiveOutput = {
   /** Positioned tmux history used to recover output above the visible pane. */
   history?: LiveHistorySnapshot;
 };
+type LiveTurnInterrupt = {
+  requested: boolean;
+  cancel?: () => void;
+};
 export type LiveTerminalBackend = 'auto' | 'tmux' | 'pty' | 'pipe';
 
 export interface LiveTerminalInfo {
@@ -200,15 +204,15 @@ export class LiveTerminalSession {
 
   run(runId: string, prompt: string, cwd: string, inputMode?: LiveTerminalInputMode): AgentRun {
     void this.start();
-    const events = this.turnEvents(prompt, cwd, inputMode);
+    const interruption: LiveTurnInterrupt = { requested: false };
+    const events = this.turnEvents(prompt, cwd, inputMode, interruption);
     return {
       runId,
       events,
       stop: async () => {
-        // Keep /stop on the same unconditional interrupt path as a user
-        // Ctrl-C. Unlike Escape, this does not depend on the current picker
-        // or editor surface and never turns into ordinary terminal text.
-        this.write('\x03');
+        if (interruption.requested) return;
+        interruption.requested = true;
+        interruption.cancel?.();
       },
       waitForExit: async () => true,
     };
@@ -347,8 +351,12 @@ export class LiveTerminalSession {
       this.resolveTerminalReady = undefined;
     }
     const output = this.cleaner.push(raw);
-    if (output.mode === 'snapshot' && output.text.trim()) {
-      this.lastTerminalSnapshot = output.text;
+    const terminalSnapshot = output.terminalText ?? output.text;
+    if (output.mode === 'snapshot' && terminalSnapshot.trim()) {
+      // Keep lifecycle state before presentation filtering. Busy chrome is
+      // intentionally hidden from Feishu, but it is the evidence required to
+      // decide whether an interrupt can safely reach the active CLI turn.
+      this.lastTerminalSnapshot = terminalSnapshot;
     }
     if (output.history?.text.trim()) this.lastTerminalHistory = output.history;
     if (!output.text.trim() && !output.terminalText?.trim() && !output.history?.text.trim()) return;
@@ -377,6 +385,7 @@ export class LiveTerminalSession {
     prompt: string,
     cwd: string,
     inputMode?: LiveTerminalInputMode,
+    interruption: LiveTurnInterrupt = { requested: false },
   ): AsyncGenerator<AgentEvent> {
     yield { type: 'system', cwd };
     await this.start();
@@ -491,6 +500,30 @@ export class LiveTerminalSession {
       } else {
         push({ type: 'done', terminationReason: 'normal' });
       }
+    };
+    const cancelCurrentTurn = (): void => {
+      if (done) return;
+      // A repeated Ctrl-C can close a CLI that is the pane's only process.
+      // Only inject it after the terminal has positively rendered an active
+      // task. If the terminal is silent, end bridge observation instead of
+      // guessing at the focused TUI surface.
+      const terminal = this.terminalInfo;
+      const terminalBusy =
+        isLiveTerminalBusy(this.lastTerminalSnapshot) ||
+        isLiveTerminalBusy(this.lastTerminalHistory?.text ?? '');
+      if (terminal?.backend !== 'tmux' || terminalBusy) {
+        this.write('\x03');
+        log.info('agent-live', 'turn-interrupt-sent', {
+          backend: terminal?.backend ?? 'unknown',
+          terminalBusy,
+        });
+      } else {
+        log.warn('agent-live', 'turn-interrupt-withheld', {
+          backend: terminal?.backend ?? 'unknown',
+          reason: 'terminal-not-confirmed-busy',
+        });
+      }
+      finish();
     };
     const arm = (ms: number): void => {
       if (timer) clearTimeout(timer);
@@ -698,16 +731,19 @@ export class LiveTerminalSession {
       this.emitter.off('exit', onExit);
       this.emitter.off('error', onError);
       if (this.activeTurnCleanup === cleanupTurn) this.activeTurnCleanup = undefined;
+      if (interruption.cancel === cancelCurrentTurn) interruption.cancel = undefined;
       wake?.();
     };
 
     this.activeTurnCleanup?.();
     this.activeTurnCleanup = cleanupTurn;
+    interruption.cancel = cancelCurrentTurn;
     this.emitter.on('data', onData);
     this.emitter.once('exit', onExit);
     this.emitter.once('error', onError);
     for (const event of this.pendingTerminalOutput.splice(0)) onData(event);
     try {
+      if (interruption.requested) cancelCurrentTurn();
       await this.waitForInputReady(inputGraceMs);
       if (!done) {
         if (startupInteractionText && inputMode !== 'control') {
@@ -2827,7 +2863,7 @@ function snapshotInformationScore(input: string): number {
 function isTerminalChromeLine(trimmed: string): boolean {
   return (
     /^Tip:/i.test(trimmed) ||
-    /^[•◦]\s+Working\s+\((?:\d+h\s+)?(?:\d+m\s+)?\d+s\b.*\)(?:\s+·\s+.*)?$/i.test(trimmed) ||
+    /^[•◦]\s+(?:Working|Waiting\s+for\s+background\s+terminal)\s+\((?:\d+h\s+)?(?:\d+m\s+)?\d+s\b.*\)(?:\s+·\s+.*)?$/i.test(trimmed) ||
     /^tab to queue message\b.*context left$/i.test(trimmed) ||
     /^\d+%\s+context left$/i.test(trimmed) ||
     /^[╭╰╮╯─│\s]+$/u.test(trimmed) ||
@@ -2845,7 +2881,7 @@ function isTerminalSuggestionLine(trimmed: string): boolean {
 
 export function isLiveTerminalBusy(input: string): boolean {
   const recent = cleanTerminalOutput(input).split('\n').slice(-12).join('\n');
-  return /(?:tab\s+to\s+queue\s+message|working\s*\([^)]*(?:esc|escape)\s+to\s+interrupt|esc(?:ape)?\s+to\s+interrupt|compacting(?:\s+context)?)/iu.test(
+  return /(?:tab\s+to\s+queue\s+message|(?:working|waiting\s+for\s+background\s+terminal)\s*\([^)]*(?:esc|escape)\s+to\s+interrupt|esc(?:ape)?\s+to\s+interrupt|compacting(?:\s+context)?)/iu.test(
     recent,
   );
 }

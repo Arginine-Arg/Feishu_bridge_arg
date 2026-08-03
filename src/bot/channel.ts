@@ -73,7 +73,7 @@ import { RunExecutor } from '../runtime/run-executor';
 import type { SessionCatalog } from '../session/catalog';
 import type { OutputMode, SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
-import { ActiveRuns, type RunHandle } from './active-runs';
+import { ActiveRuns, requestRunStop, type RunHandle } from './active-runs';
 import { ChatModeCache, type ChatMode } from './chat-mode-cache';
 import { handleCommentMention } from './comments';
 import { recordRunSessionEvent, startRunFlow } from './run-flow';
@@ -1320,13 +1320,13 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       const selection = parseNativeCodexModelSelection(delta);
       if (selection) observedNativeModelSelection = selection;
     }
-    // Keep enough terminal history to reconstruct a full native model menu.
-    // A 4 KB tail can drop the picker title and early choices when Codex
-    // redraws a longer model list over several frames.
+    // Keep enough terminal history to reconstruct the current native menu.
+    // The structured surface is derived from the latest actionable terminal
+    // snapshot, not from a fixed command/menu depth, so selecting "More
+    // options" can publish an arbitrary next-level picker.
     interactionTextBuffer = `${interactionTextBuffer}\n${delta}`.slice(-16_000);
-    const outputKind = bridgeAgent.classifyOutput(interactionTextBuffer);
-    const pickerLike = isStartupInteraction || outputKind === 'picker';
-    const interaction = pickerLike ? detectLiveInteraction(interactionTextBuffer) : undefined;
+    const interaction = detectLiveInteraction(interactionTextBuffer);
+    const pickerLike = isStartupInteraction || Boolean(interaction);
     if (!isStartupInteraction && (interaction || pickerLike)) {
       pickerObservedAfterInput = true;
     }
@@ -2192,7 +2192,7 @@ async function processAgentStream(
       idleFired = true;
       handle.interrupted = true;
       log.warn('agent', 'idle-timeout', { scope, idleTimeoutMs });
-      void handle.run.stop().catch(() => {
+      void requestRunStop(handle).catch(() => {
         /* stop errors are non-fatal */
       });
     }, idleTimeoutMs);
@@ -2345,9 +2345,6 @@ async function processAgentStream(
   reportMetric('run_e2e_ms', Date.now() - runStart, { terminal: state.terminal });
   await queueFlush(state);
   await delivery.drain();
-  if (handle.interrupted && !handle.detached) {
-    await handle.run.stop();
-  }
   return state;
 }
 
@@ -2720,7 +2717,14 @@ function detectLiveInteraction(
   }
   if (buttons.length === 0) return undefined;
   return {
-    signature: `${prompt}\n${buttons.map((button) => button.input).join('|')}`.slice(0, 500),
+    // A prefix signature made two long menus look identical whenever they
+    // shared their title and early choices. Hash the complete current surface
+    // so repeated redraws dedupe, while every genuinely nested menu is sent.
+    signature: createHash('sha256')
+      .update(prompt)
+      .update('\0')
+      .update(buttons.map((button) => button.input).join('|'))
+      .digest('hex'),
     prompt: displayPrompt.slice(0, isCodexModelPickerPrompt(prompt) ? 4_000 : 1_200),
     buttons,
   };
