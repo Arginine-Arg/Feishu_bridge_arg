@@ -15,6 +15,23 @@ const CODEX_RESUME_CONTROLS_RE = /\benter\s+(?:to\s+)?resume\b[\s\S]{0,600}\besc
  * never sufficient: the current tail must expose an actionable control.
  */
 export function liveInteractionSurface(input: string): string | undefined {
+  const candidate = interactionCandidate(input);
+  // Rendering waits for a complete picker frame so the first card does not
+  // omit later options that arrive in the next terminal redraw.
+  if (!candidate || !isStructuredInteraction(candidate, true)) return undefined;
+  return candidate.join('\n');
+}
+
+export function isStructuredLiveInteraction(input: string): boolean {
+  const candidate = interactionCandidate(input);
+  // Classification still identifies an in-progress picker immediately. This
+  // controls relay lifecycle and prevents its first rendered option from
+  // being mistaken for a normal final response; only card publication waits
+  // for a complete frame above.
+  return Boolean(candidate && isStructuredInteraction(candidate, false));
+}
+
+function interactionCandidate(input: string): string[] | undefined {
   const recent = input
     .split('\n')
     .map((line) => line.trim())
@@ -27,18 +44,11 @@ export function liveInteractionSurface(input: string): string | undefined {
   for (let index = 0; index < recent.length; index += 1) {
     if (isLiveInteractionPromptStart(recent[index]!)) start = index;
   }
-  const candidate =
-    start >= 0 && isCodexResumeControlLine(recent[start]!)
-      ? recent.slice(Math.max(0, start - 24))
-      : start >= 0
-        ? recent.slice(start)
-        : recent.slice(-FALLBACK_INTERACTION_LINES);
-  if (!isStructuredInteraction(candidate)) return undefined;
-  return candidate.join('\n');
-}
-
-export function isStructuredLiveInteraction(input: string): boolean {
-  return liveInteractionSurface(input) !== undefined;
+  return start >= 0 && isCodexResumeControlLine(recent[start]!)
+    ? recent.slice(Math.max(0, start - 24))
+    : start >= 0
+      ? recent.slice(start)
+      : recent.slice(-FALLBACK_INTERACTION_LINES);
 }
 
 /** Non-live agent prompts may be semantic questions without terminal controls. */
@@ -65,7 +75,7 @@ export function isLiveInteractionPromptStart(line: string): boolean {
   );
 }
 
-function isStructuredInteraction(lines: string[]): boolean {
+function isStructuredInteraction(lines: string[], requireCompletePickerFrame: boolean): boolean {
   const text = lines.join('\n');
   const tail = lines.at(-1) ?? '';
   const codexResume = CODEX_RESUME_CONTROLS_RE.test(text);
@@ -92,13 +102,13 @@ function isStructuredInteraction(lines: string[]): boolean {
     claudeBypass ||
     codexUpdate ||
     codexResume ||
-    // Do not publish a half-drawn menu merely because its first highlighted
-    // row arrived before the remaining choices. A one-row picker is still
-    // accepted once its explicit key hint appears; otherwise wait for a
-    // second choice or a binary control.
-    (hasPromptTitle && (numberedChoiceCount >= 2 || hasBinaryControl || hasKeyHint)) ||
+    (hasPromptTitle && (
+      (requireCompletePickerFrame ? numberedChoiceCount >= 2 : hasNumberedChoice) ||
+      hasBinaryControl ||
+      hasKeyHint
+    )) ||
     (hasConfirmationQuestion && (hasNumberedChoice || hasBinaryControl)) ||
-    (numberedChoiceCount >= 2 && hasKeyHint) ||
+    ((requireCompletePickerFrame ? numberedChoiceCount >= 2 : hasNumberedChoice) && hasKeyHint) ||
     (hasBinaryControl && /(?:approval|confirmation|allow|proceed|continue|确认|允许|继续)/iu.test(text))
   );
 }
