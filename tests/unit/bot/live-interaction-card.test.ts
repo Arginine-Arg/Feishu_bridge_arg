@@ -7,6 +7,11 @@ import {
   renderLiveAwareReplyCard,
 } from '../../../src/bot/channel.js';
 import type { AgentEvent } from '../../../src/agent/types.js';
+import {
+  isStructuredLiveInteraction,
+  liveInteractionSurface,
+  parseLiveInteractionOptions,
+} from '../../../src/agent/live-interaction-detection.js';
 import { initialState, reduce, type RunState } from '../../../src/card/run-state.js';
 import {
   AGENT_INPUT_CALLBACK_ACTION,
@@ -153,6 +158,131 @@ describe('liveInteractionCard', () => {
     expect(card).toBeDefined();
     expect(buttonValues(card).map((value) => value.input)).toEqual(['1', '2', 'enter', 'esc']);
     expect(JSON.stringify(card)).toContain('1. gpt-5.6-sol');
+  });
+
+  it('detects an untitled letter picker and sends literal keys', () => {
+    const text = [
+      'Which deployment target should receive the change?',
+      'a) staging',
+      'b) production',
+      'Choose one:',
+    ].join('\n');
+
+    expect(isStructuredLiveInteraction(text)).toBe(true);
+    expect(liveInteractionSurface(text)).toBe(text);
+    expect(parseLiveInteractionOptions(text)).toEqual([
+      { key: 'a', label: 'staging', selected: false, navigationOnly: false },
+      { key: 'b', label: 'production', selected: false, navigationOnly: false },
+    ]);
+    const card = liveInteractionCardForText(text, () => 'letter-picker');
+    expect(buttonValues(card).map((value) => value.input)).toEqual(['a', 'b', 'enter', 'esc']);
+  });
+
+  it('detects a question-only picker without vendor or prompt keywords', () => {
+    const text = ['Which environment should receive the deployment?', '1. staging', '2. production'].join('\n');
+
+    expect(isStructuredLiveInteraction(text)).toBe(true);
+    expect(liveInteractionSurface(text)).toBe(text);
+    const card = liveInteractionCardForText(text, () => 'question-only-picker');
+    expect(card).toBeDefined();
+    expect(buttonValues(card).map((value) => value.input)).toEqual(['1', '2', 'enter', 'esc']);
+  });
+
+  it('publishes a one-row picker when an explicit answer prompt is present', () => {
+    const text = ['Select the only available workspace', '1. GPU-5090', 'Press Enter to continue'].join('\n');
+
+    const card = liveInteractionCardForText(text, () => 'single-row-picker');
+    expect(card).toBeDefined();
+    expect(buttonValues(card).map((value) => value.input)).toEqual(['1', 'enter', 'esc']);
+  });
+
+  it('accepts space-delimited numeric and letter option rows', () => {
+    const text = ['Select an environment', '1 staging', '2 production', 'a sandbox', 'b review', 'Answer:'].join(
+      '\n',
+    );
+    expect(parseLiveInteractionOptions(text).map((option) => option.key)).toEqual(['1', '2', 'a', 'b']);
+    expect(liveInteractionCardForText(text, () => 'space-delimited-picker')).toBeDefined();
+  });
+
+  it('maps checkbox and radio rows to navigation controls without vendor names', () => {
+    const text = [
+      'Select capabilities:',
+      '[ ] read-only',
+      '[ ] network access',
+      'Use arrow keys and Enter to continue',
+    ].join('\n');
+    const card = liveInteractionCardForText(text, () => 'checkbox-picker');
+    expect(card).toBeDefined();
+    expect(buttonValues(card).map((value) => value.input)).toEqual([
+      'enter',
+      'down enter',
+      'esc',
+    ]);
+    expect(JSON.stringify(card)).toContain('network access');
+  });
+
+  it('keeps checkbox state separate from the current cursor marker', () => {
+    expect(
+      parseLiveInteractionOptions(
+        ['Select features:', '› [x] already enabled', '  [ ] optional feature', 'Press Enter to continue'].join(
+          '\n',
+        ),
+      ),
+    ).toEqual([
+      { label: 'already enabled', selected: true, checked: true, navigationOnly: true },
+      { label: 'optional feature', selected: false, navigationOnly: true },
+    ]);
+  });
+
+  it('detects a title-free arrow menu and preserves its option rows', () => {
+    const text = ['› deploy to staging', '  deploy to production', 'Choose one:'].join('\n');
+    const card = liveInteractionCardForText(text, () => 'arrow-picker');
+    expect(card).toBeDefined();
+    expect(buttonValues(card).map((value) => value.input)).toEqual(['enter', 'down enter', 'esc']);
+    expect(JSON.stringify(card)).toContain('deploy to production');
+  });
+
+  it('uses navigation for an unknown numeric menu when the terminal requests arrow keys', () => {
+    const text = [
+      'Select a runtime profile',
+      '› 1. local GPU',
+      '2. remote GPU',
+      '3. CPU fallback',
+      'Use arrow keys to navigate, then press Enter to choose',
+    ].join('\n');
+    const card = liveInteractionCardForText(text, () => 'arrow-numeric-picker');
+    expect(card).toBeDefined();
+    expect(buttonValues(card).map((value) => value.input)).toEqual([
+      'enter',
+      'down enter',
+      'down down enter',
+      'esc',
+    ]);
+  });
+
+  it('recognizes a genuine generic bullet menu but ignores quoted activity', () => {
+    const menu = ['Available targets:', '• staging', '• production', 'Press Enter to continue'].join('\n');
+    const menuCard = liveInteractionCardForText(menu, () => 'bullet-picker');
+    expect(menuCard).toBeDefined();
+    expect(buttonValues(menuCard).map((value) => value.input)).toEqual(['enter', 'down enter', 'esc']);
+
+    const quotedActivity = [
+      '> _▸ 执行活动（2 项）_',
+      '> • Explored',
+      '> └ Read src/agent/live-session.ts',
+      '• 已完成检查。',
+    ].join('\n');
+    expect(liveInteractionCardForText(quotedActivity, () => 'quoted-activity')).toBeUndefined();
+  });
+
+  it('keeps a generic menu with more than the old model button cap intact', () => {
+    const options = Array.from({ length: 30 }, (_, index) => `${index + 1}. profile-${index + 1}`);
+    const text = ['Pick a profile:', ...options, 'Press Enter to continue'].join('\n');
+    const card = liveInteractionCardForText(text, () => 'large-picker');
+    expect(buttonValues(card).map((value) => value.input).slice(0, 30)).toEqual(
+      options.map((_, index) => String(index + 1)),
+    );
+    expect(buttonValues(card)).toHaveLength(32);
   });
 
   it('maps the Claude bypass warning to safe terminal navigation keys', () => {

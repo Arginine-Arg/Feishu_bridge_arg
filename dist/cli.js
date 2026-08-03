@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.66",
+  version: "0.6.67",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -5982,10 +5982,94 @@ function normalizeWhitespace(input) {
 // src/agent/live-interaction-detection.ts
 var MAX_INTERACTION_LINES = 120;
 var FALLBACK_INTERACTION_LINES = 12;
-var NUMBERED_CHOICE_RE = /^(?:[›❯>▸*+-]\s*)?\d{1,2}[.)、:\s-]+\S/u;
+var OPTION_LINE_RE = /^(?<selected>[›❯>▸])?\s*(?:(?<number>\d{1,4})(?:[.)、:：-]|\s{1,3})\s*|(?<letter>[A-Za-z])(?:[.)、:：-]|\s{1,3})\s*|\[(?<checkbox>[ xX✓✔])\]\s*|(?<bullet>[-*•])\s+|(?<radio>[◉○●◯])\s*)(?<label>\S.*)$/u;
+var BARE_NAV_OPTION_RE = /^(?<selected>[›❯>▸])\s+(?<label>\S.*)$/u;
+var INDENTED_NAV_OPTION_RE = /^\s{2,}(?<label>\S.*)$/u;
 var BINARY_CONTROL_RE = /\b(?:y\/n|yes\/no|no\/yes)\b|\[(?:y|yes)\/(?:n|no)\]|\((?:y|yes)\/(?:n|no)\)/iu;
 var KEY_HINT_RE = /(?:press\s+)?enter\s+to\s+(?:confirm|continue)|esc(?:ape)?\s+to\s+(?:go\s+back|cancel)|(?:↑|↓|up\/down|arrow keys?|use .*arrows?)|(?:按下?|点击)回车(?:键)?.*确认|(?:按下?|点击).*(?:esc|取消|返回)/iu;
 var CODEX_RESUME_CONTROLS_RE = /\benter\s+(?:to\s+)?resume\b[\s\S]{0,600}\besc\s+(?:to\s+)?exit\b/iu;
+var GENERIC_INPUT_HINT_RE = /(?:choose|select|pick|option|choice|answer|respond|input|type|enter|confirm|continue|proceed|approve|allow|navigate|use\s+(?:the\s+)?(?:arrow|number|letter)|按下?|请输入|输入|选择|选项|编号|确认|继续|批准|允许|回答|回复|回车)/iu;
+var GENERIC_INPUT_PROMPT_RE = /(?:[?:：？]\s*$|(?:^|\s)[›❯>]\s*$|(?:^|\s)_\s*$)/u;
+function parseLiveInteractionOptions(input, parseOptions = {}) {
+  const parsed = [];
+  const seen = /* @__PURE__ */ new Set();
+  const lines = input.split("\n");
+  const ambiguousRows = lines.map(
+    (line) => Boolean(line.trim().match(OPTION_LINE_RE)?.groups?.bullet)
+  );
+  for (const [index, line] of lines.entries()) {
+    const trimmed = line.trim();
+    if (/^>\s+(?:_|[•◦⏺●]|└|│|╰|⚠|✖)\s*/u.test(trimmed)) continue;
+    const match = trimmed.match(OPTION_LINE_RE);
+    const bare = match ? void 0 : trimmed.match(BARE_NAV_OPTION_RE);
+    const continuation = match || bare ? void 0 : line.match(INDENTED_NAV_OPTION_RE);
+    const groups = match?.groups ?? bare?.groups ?? (continuation && hasBareNavigationAnchor(lines, index) ? continuation.groups : void 0);
+    if (!groups?.label) continue;
+    if (isRenderedActivityQuote(groups.label) && (bare || groups.selected === ">" && groups.bullet !== void 0)) {
+      continue;
+    }
+    const bullet = groups.bullet !== void 0;
+    if (bullet && (!parseOptions.includeAmbiguousBullets || !isAmbiguousOptionRun(ambiguousRows, index))) continue;
+    const key = groups.number ?? groups.letter;
+    const label = groups.label.trim();
+    const identity = `${key ?? ""}\0${label}`.toLowerCase();
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    parsed.push({
+      ...key ? { key: key.toLowerCase() } : {},
+      label,
+      selected: Boolean(
+        groups.selected || groups.radio !== void 0 && /^(?:◉|●)$/u.test(groups.radio)
+      ),
+      ...groups.checkbox && /^(?:x|X|✓|✔)$/u.test(groups.checkbox) ? { checked: true } : {},
+      navigationOnly: !key
+    });
+  }
+  return parsed;
+}
+function isRenderedActivityQuote(label) {
+  return /^(?:_|[•◦⏺●]|└|│|╰|⚠|✖)\s*/u.test(label);
+}
+function hasBareNavigationAnchor(lines, index) {
+  for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+    const line = lines[cursor] ?? "";
+    if (!line.trim()) return false;
+    if (line.trim().match(BARE_NAV_OPTION_RE)?.groups?.label) {
+      const label = line.trim().match(BARE_NAV_OPTION_RE)?.groups?.label ?? "";
+      return !isRenderedActivityQuote(label);
+    }
+    if (INDENTED_NAV_OPTION_RE.test(line)) continue;
+    return false;
+  }
+  return false;
+}
+function isOptionSyntaxLine(line) {
+  const trimmed = line.trim();
+  const match = trimmed.match(OPTION_LINE_RE);
+  if (match) return true;
+  const bare = trimmed.match(BARE_NAV_OPTION_RE);
+  return Boolean(bare?.groups?.label && !isRenderedActivityQuote(bare.groups.label));
+}
+function isStrongOptionSyntaxLine(line) {
+  const trimmed = line.trim();
+  const match = trimmed.match(OPTION_LINE_RE);
+  if (match?.groups?.bullet) return false;
+  return Boolean(match || trimmed.match(BARE_NAV_OPTION_RE)?.groups?.label);
+}
+function isOptionSyntaxLineAt(lines, index) {
+  return isOptionSyntaxLine(lines[index] ?? "") || hasBareNavigationAnchor(lines, index);
+}
+function isAmbiguousOptionRun(rows, index) {
+  let start = index;
+  while (start > 0 && rows[start - 1]) start -= 1;
+  let end = index;
+  while (end + 1 < rows.length && rows[end + 1]) end += 1;
+  return end - start + 1 >= 2;
+}
+function isLiveInputPromptLine(line) {
+  const trimmed = line.trim();
+  return Boolean(trimmed) && (GENERIC_INPUT_HINT_RE.test(trimmed) || GENERIC_INPUT_PROMPT_RE.test(trimmed));
+}
 function liveInteractionSurface(input) {
   const candidate = interactionCandidate(input);
   if (!candidate || !isStructuredInteraction(candidate, true)) return void 0;
@@ -5996,13 +6080,26 @@ function isStructuredLiveInteraction(input) {
   return Boolean(candidate && isStructuredInteraction(candidate, false));
 }
 function interactionCandidate(input) {
-  const recent = input.split("\n").map((line) => line.trim()).filter(Boolean).filter((line) => !/^_(?:🧠 正在思考…|🧰 正在调用工具…|✍️ 正在输出…)_$/u.test(line)).slice(-MAX_INTERACTION_LINES);
+  const recent = input.split("\n").map((line) => line.trimEnd()).filter((line) => Boolean(line.trim())).filter((line) => !/^_(?:🧠 正在思考…|🧰 正在调用工具…|✍️ 正在输出…)_$/u.test(line.trim())).slice(-MAX_INTERACTION_LINES);
   if (recent.length === 0) return void 0;
   let start = -1;
   for (let index = 0; index < recent.length; index += 1) {
-    if (isLiveInteractionPromptStart(recent[index])) start = index;
+    const line = recent[index].trim();
+    if (start >= 0 && /^\s*(?:do\s+you|would\s+you|shall\s+i|which\s+)/iu.test(line)) continue;
+    if (isLiveInteractionPromptStart(line)) start = index;
   }
-  return start >= 0 && isCodexResumeControlLine(recent[start]) ? recent.slice(Math.max(0, start - 24)) : start >= 0 ? recent.slice(start) : recent.slice(-FALLBACK_INTERACTION_LINES);
+  if (start >= 0 && isCodexResumeControlLine(recent[start])) {
+    return recent.slice(Math.max(0, start - 24));
+  }
+  if (start >= 0) {
+    let optionStart = start;
+    while (optionStart > 0 && isOptionSyntaxLineAt(recent, optionStart - 1)) {
+      optionStart -= 1;
+    }
+    if (optionStart > 0 && /[?:：？]\s*$/u.test(recent[optionStart - 1])) optionStart -= 1;
+    return recent.slice(optionStart);
+  }
+  return recent.slice(-FALLBACK_INTERACTION_LINES);
 }
 function isBareAgentConfirmation(input) {
   const recent = input.split("\n").map((line) => line.trim()).filter(Boolean).slice(-6).join("\n");
@@ -6011,27 +6108,56 @@ function isBareAgentConfirmation(input) {
   );
 }
 function isLiveInteractionPromptStart(line) {
-  return /claude\s+code\s+running\s+in\s+bypass\s+permissions\s+mode/iu.test(line) || /\bupdate\s+available\b/iu.test(line) || /\bselect\s+(?:a\s+)?(?:model|reasoning|option|permission|session)\b/iu.test(line) || /^(?:reasoning (?:effort|level)|skills?)\b/iu.test(line) || /\bchoose\s+an\s+action\b/iu.test(line) || /\b(?:command )?requires?\s+(?:approval|confirmation)\b/iu.test(line) || /\bresume\s+previous\s+conversation\b/iu.test(line) || isCodexResumeControlLine(line) || /^(?:请选择|请(?:输入|回复).*(?:选项|编号|是|否)|等待(?:你|用户)(?:的)?(?:输入|选择|确认)|是否.*[？?])/u.test(
-    line
-  );
+  return /claude\s+code\s+running\s+in\s+bypass\s+permissions\s+mode/iu.test(line) || /\bupdate\s+available\b/iu.test(line) || /\bselect\s+(?:a\s+)?(?:model|reasoning|option|permission|session)\b/iu.test(line) || /^(?:reasoning (?:effort|level)|skills?)\b/iu.test(line) || /\bchoose\s+an\s+action\b/iu.test(line) || /\b(?:command )?requires?\s+(?:approval|confirmation)\b/iu.test(line) || /\bresume\s+previous\s+conversation\b/iu.test(line) || isCodexResumeControlLine(line) || /^(?:请选择|请(?:输入|回复).*(?:选项|编号|是|否)|等待(?:你|用户)(?:的)?(?:输入|选择|确认)|是否.*[？?])/u.test(line) || // Generic terminal prompts are intentionally broad here. The structural
+  // check below still requires option/control evidence, so ordinary prose
+  // containing "choose" cannot become a card by itself.
+  GENERIC_INPUT_HINT_RE.test(line) && /[?:：？]$|\b(?:now|below|from)\b/iu.test(line.trim());
 }
 function isStructuredInteraction(lines, requireCompletePickerFrame) {
   const text = lines.join("\n");
   const tail = lines.at(-1) ?? "";
   const codexResume = CODEX_RESUME_CONTROLS_RE.test(text);
-  const tailIsControl = codexResume || NUMBERED_CHOICE_RE.test(tail) || BINARY_CONTROL_RE.test(tail) || KEY_HINT_RE.test(tail);
-  if (!tailIsControl) return false;
-  const numberedChoiceCount = lines.filter((line) => NUMBERED_CHOICE_RE.test(line)).length;
+  const tailIsControl = codexResume || BINARY_CONTROL_RE.test(tail) || KEY_HINT_RE.test(tail) || isLiveInputPromptLine(tail) || GENERIC_INPUT_PROMPT_RE.test(tail) || isStrongOptionSyntaxLine(tail);
+  const hasPromptTitle = lines.some((line) => isLiveInteractionPromptStart(line.trim()));
+  const hasPromptMarker = GENERIC_INPUT_PROMPT_RE.test(tail);
+  const options = parseLiveInteractionOptions(lines.join("\n"), {
+    includeAmbiguousBullets: hasPromptTitle || hasPromptMarker || KEY_HINT_RE.test(text)
+  });
+  const numberedChoiceCount = options.filter((option) => option.key && /^\d+$/u.test(option.key)).length;
   const hasNumberedChoice = numberedChoiceCount > 0;
+  const hasOptions = options.length > 0;
   const hasBinaryControl = BINARY_CONTROL_RE.test(text);
   const hasKeyHint = KEY_HINT_RE.test(text);
-  const hasPromptTitle = lines.some(isLiveInteractionPromptStart);
+  const firstOptionIndex = lines.findIndex((line) => isOptionSyntaxLine(line));
+  const hasQuestionBeforeOptions = firstOptionIndex > 0 && lines.slice(Math.max(0, firstOptionIndex - 2), firstOptionIndex).some((line) => /[?？]\s*$/u.test(line.trim()));
+  const lastOptionIndex = lines.reduce(
+    (last, line, index) => isOptionSyntaxLine(line) ? index : last,
+    -1
+  );
+  const hasInputPrompt = lastOptionIndex >= 0 && lines.slice(lastOptionIndex + 1, lastOptionIndex + 5).some(
+    (line) => !isOptionSyntaxLine(line) && !GENERIC_INPUT_PROMPT_RE.test(line.trim()) && isLiveInputPromptLine(line)
+  );
+  const selectedNavigationMenu = options.filter((option) => option.selected).length === 1 && options.some((option) => !option.selected && option.navigationOnly) && lines.filter((line) => /^\s*[›❯>▸]\s+\S/u.test(line)).length >= 2;
   const hasConfirmationQuestion = /\b(?:do\s+you\s+want\s+to|would\s+you\s+like\s+to|shall\s+i)\b[\s\S]{0,240}\b(?:proceed|continue|run|execute|apply|approve|allow)\b/iu.test(
     text
   );
   const claudeBypass = /claude\s+code\s+running\s+in\s+bypass\s+permissions\s+mode/iu.test(text) && /\b(?:no,?\s+exit|yes,?\s+i\s+accept)\b/iu.test(text);
   const codexUpdate = /\bupdate\s+available\b/iu.test(text) && /\bskip(?:\s+until\s+next\s+version)?\b/iu.test(text);
-  return claudeBypass || codexUpdate || codexResume || hasPromptTitle && ((requireCompletePickerFrame ? numberedChoiceCount >= 2 : hasNumberedChoice) || hasBinaryControl || hasKeyHint) || hasConfirmationQuestion && (hasNumberedChoice || hasBinaryControl) || (requireCompletePickerFrame ? numberedChoiceCount >= 2 : hasNumberedChoice) && hasKeyHint || hasBinaryControl && /(?:approval|confirmation|allow|proceed|continue|确认|允许|继续)/iu.test(text);
+  const completeNumberedPicker = numberedChoiceCount >= 2 || hasNumberedChoice && (hasKeyHint || hasPromptMarker || hasInputPrompt);
+  const genericOptionCount = requireCompletePickerFrame ? options.length >= 2 : options.length >= 2 || hasOptions && (hasInputPrompt || hasPromptTitle);
+  const hasStrongOptionRows = lines.some((line) => isStrongOptionSyntaxLine(line));
+  const genericInputEvidence = hasInputPrompt || hasPromptMarker || selectedNavigationMenu || hasQuestionBeforeOptions && hasStrongOptionRows;
+  return claudeBypass || codexUpdate || codexResume || hasPromptTitle && tailIsControl && ((requireCompletePickerFrame ? completeNumberedPicker : hasNumberedChoice) || hasBinaryControl || hasKeyHint && tailIsControl) || hasConfirmationQuestion && (hasNumberedChoice || hasBinaryControl) || (requireCompletePickerFrame ? completeNumberedPicker : hasNumberedChoice) && hasKeyHint && tailIsControl || hasBinaryControl && /(?:approval|confirmation|allow|proceed|continue|确认|允许|继续)/iu.test(text) || // Vendor-neutral menus may have no title or Enter/Esc legend. Requiring
+  // multiple option rows plus a nearby input prompt/marker prevents normal
+  // bullet lists from being promoted to interactive cards. A question mark
+  // immediately before the option block is equivalent prompt evidence for
+  // CLIs that render no title or key legend.
+  hasOptions && // A single highlighted `▸ Running ...` line is ordinary terminal
+  // activity, not enough evidence of a picker. Generic menus need a
+  // complete pair unless an explicit prompt proves that the terminal is
+  // waiting, while titled/native pickers can publish a one-row frame with
+  // an Enter/answer prompt.
+  genericOptionCount && genericInputEvidence;
 }
 function isCodexResumeControlLine(line) {
   return /\benter\s+(?:to\s+)?resume\b.*\besc\s+(?:to\s+)?exit\b/iu.test(line);
@@ -8786,7 +8912,9 @@ function scopeLivePickerSnapshot(lines) {
   }
   let start = -1;
   for (let index = 0; index < lines.length; index += 1) {
-    if (isLivePickerStartLine(lines[index] ?? "")) start = index;
+    const line = (lines[index] ?? "").trim();
+    if (start >= 0 && /^(?:do\s+you|would\s+you|shall\s+i|which\s+)/iu.test(line)) continue;
+    if (isLivePickerStartLine(line)) start = index;
   }
   if (start < 0) return void 0;
   const picker = lines.slice(start).join("\n");
@@ -20121,8 +20249,8 @@ function detectLiveInteraction(text, allowBareConfirmation = false) {
   const surface = liveInteractionSurface(text);
   if (!surface && !(allowBareConfirmation && isBareAgentConfirmation(text))) return void 0;
   const prompt = surface ?? recentLiveInteractionPrompt(text);
-  const numberedChoices = extractNumberedInteractionChoices(prompt);
-  const displayPrompt = formatLiveInteractionPrompt(prompt, numberedChoices);
+  const choices = extractInteractionChoices(prompt);
+  const displayPrompt = formatLiveInteractionPrompt(prompt, choices);
   const buttons = [];
   const seenInputs = /* @__PURE__ */ new Set();
   const add = (label, input) => {
@@ -20131,18 +20259,19 @@ function detectLiveInteraction(text, allowBareConfirmation = false) {
     buttons.push({ label, input });
   };
   const arrowNumberedPrompt = isClaudeBypassPermissionsPrompt(prompt) || isClaudeModelPicker(prompt) || isCodexUpdatePrompt(prompt);
-  const selectedChoice = numberedChoices.findIndex((choice) => choice.selected);
-  const maxButtons = isCodexModelPickerPrompt(prompt) ? 24 : 8;
-  for (const [index, choice] of numberedChoices.slice(0, maxButtons).entries()) {
-    if (!arrowNumberedPrompt) {
-      add(choice.input, choice.input);
-      continue;
-    }
+  const arrowNavigationPrompt = /(?:arrow keys?|use\s+(?:the\s+)?(?:up|down|left|right)\s+keys?|↑\s*\/\s*↓|up\s*\/\s*down|navigate\s+with)/iu.test(
+    prompt
+  );
+  const selectedChoice = choices.findIndex((choice) => choice.selected);
+  for (const [index, choice] of choices.entries()) {
+    const needsNavigation = arrowNumberedPrompt || arrowNavigationPrompt || choice.navigationOnly;
     const distance = index - (selectedChoice >= 0 ? selectedChoice : 0);
     const navigation = distance < 0 ? "up ".repeat(-distance) : "down ".repeat(distance);
-    add(choice.input, `${navigation}enter`.trim());
+    const input = needsNavigation ? `${navigation}enter`.trim() : choice.input;
+    const label = choice.key ?? truncateInteractionButtonLabel(choice.label);
+    add(label, input);
   }
-  const hasNumberedChoices = buttons.length > 0;
+  const hasChoices = buttons.length > 0;
   const isBinaryConfirmation = /\b(?:y\/n|yes\/no|no\/yes)\b|(?:\[y\/n\]|\(y\/n\))/i.test(prompt) || /(?:do you want to|would you like to|shall i|requires? (?:approval|confirmation)|approve|allow).*(?:\?|proceed|continue|run|execute|apply|approve|allow)/i.test(
     prompt
   );
@@ -20156,7 +20285,7 @@ function detectLiveInteraction(text, allowBareConfirmation = false) {
     add("up", "up");
     add("down", "down");
   }
-  if (!hasNumberedChoices && isBinaryConfirmation) {
+  if (!hasChoices && isBinaryConfirmation) {
     add("yes", "yes");
     add("no", "no");
   }
@@ -20170,7 +20299,7 @@ function detectLiveInteraction(text, allowBareConfirmation = false) {
   )) {
     add("esc", "esc");
   }
-  if (hasNumberedChoices && looksLikeAgentPicker(prompt, allowBareConfirmation)) {
+  if (hasChoices && looksLikeAgentPicker(prompt, allowBareConfirmation)) {
     add("enter", "enter");
     add("esc", "esc");
   }
@@ -20197,14 +20326,9 @@ function recentLiveInteractionPrompt(text) {
   const recent = lines.slice(-40);
   let start = -1;
   for (let index = 0; index < recent.length; index += 1) {
-    if (isLiveInteractionPromptStart2(recent[index])) start = index;
+    if (isLiveInteractionPromptStart(recent[index])) start = index;
   }
   return (start >= 0 ? recent.slice(start) : recent.slice(-12)).join("\n");
-}
-function isLiveInteractionPromptStart2(line) {
-  return /claude\s+code\s+running\s+in\s+bypass\s+permissions\s+mode/i.test(line) || /\bupdate\s+available\b/i.test(line) || /\bselect\s+(?:a\s+)?(?:model|reasoning|option)\b/i.test(line) || /^skills?$/i.test(line) || /\bchoose an action\b/i.test(line) || /\b(?:command )?requires? (?:approval|confirmation)\b/i.test(line) || /\b(?:do you want to|would you like to|shall i)\s+(?:proceed|continue|run|execute|apply|approve|allow)\b/i.test(
-    line
-  );
 }
 function isClaudeBypassPermissionsPrompt(text) {
   return /claude\s+code\s+running\s+in\s+bypass\s+permissions\s+mode/i.test(text) && /\b(?:no,?\s+exit|yes,?\s+i\s+accept)\b/i.test(text);
@@ -20218,42 +20342,48 @@ function isCodexResumePicker(text) {
 function isCodexUpdatePrompt(text) {
   return /\bupdate\s+available\b/i.test(text) && /\bskip(?:\s+until\s+next\s+version)?\b/i.test(text);
 }
-function extractNumberedInteractionChoices(prompt) {
-  const choices = /* @__PURE__ */ new Map();
-  for (const line of prompt.split("\n")) {
-    const match = line.match(/^(?:[›❯>▸*+-]\s*)?(\d{1,2})[.)、:\s-]+(.+)$/u);
-    if (!match) continue;
-    addNumberedInteractionChoice(choices, match[1], match[2], /^[›❯>▸]/u.test(line));
-  }
+function extractInteractionChoices(prompt) {
+  const options = parseLiveInteractionOptions(prompt, {
+    // Ambiguous `•`/`-` rows are accepted only when the surrounding frame has
+    // prompt evidence. A pair of contiguous rows is still required by the
+    // parser, so a lone assistant bullet such as `• Model changed ...` stays
+    // ordinary status text.
+    includeAmbiguousBullets: /(?:choose|select|pick|option|choice|answer|input|confirm|continue|navigate|选择|选项|确认|继续|输入)/iu.test(
+      prompt
+    ) || /(?:enter|esc|arrow|按下?|回车|取消|返回)/iu.test(prompt)
+  });
   if (isCodexModelPickerPrompt(prompt)) {
-    const inlineModelChoice = /(?:^|[^0-9])(?:[›>▸*+-]\s*)?(\d{1,2})\s*[.)、:]\s*[a-z]{0,3}(gpt-[a-z0-9][a-z0-9._-]*)/giu;
+    const byKey = new Map(options.flatMap((option) => option.key ? [[option.key, option]] : []));
+    const inlineModelChoice = /(?:^|[^0-9])(?:[›>▸*+-]\s*)?(\d{1,4})\s*[.)、:]\s*[a-z]{0,3}(gpt-[a-z0-9][a-z0-9._-]*)/giu;
     for (const match of prompt.matchAll(inlineModelChoice)) {
-      addNumberedInteractionChoice(choices, match[1], match[2], /[›>▸]/u.test(match[0]));
+      const key = match[1];
+      const model = match[2];
+      const existing = byKey.get(key);
+      if (existing) {
+        if (!existing.label.includes(model)) existing.label = `${existing.label} ${model}`;
+        continue;
+      }
+      const option = {
+        key,
+        label: model,
+        selected: /[›>▸]/u.test(match[0]),
+        navigationOnly: false
+      };
+      options.push(option);
+      byKey.set(key, option);
     }
   }
-  const out = [...choices.values()];
+  const out = options.map((option) => ({
+    ...option,
+    input: option.key ?? option.label,
+    body: option.label,
+    ...option.label.match(/\b(gpt-[a-z0-9][a-z0-9._-]*)\b/iu)?.[1] ? { model: option.label.match(/\b(gpt-[a-z0-9][a-z0-9._-]*)\b/iu)?.[1] } : {},
+    ...option.label.match(/\b(current|default)\b/iu)?.[1] ? { state: option.label.match(/\b(current|default)\b/iu)?.[1]?.toLowerCase() } : {}
+  }));
   if (isCodexModelPickerPrompt(prompt)) {
     out.sort((left, right) => Number(left.input) - Number(right.input));
   }
   return out;
-}
-function addNumberedInteractionChoice(choices, input, body, selected) {
-  const existing = choices.get(input);
-  const model = body.match(/\b(gpt-[a-z0-9][a-z0-9._-]*)\b/iu)?.[1];
-  const state = body.match(/\b(current|default)\b/iu)?.[1]?.toLowerCase();
-  if (existing) {
-    if (!existing.model && model) existing.model = model;
-    if (!existing.state && state) existing.state = state;
-    existing.selected ||= selected;
-    return;
-  }
-  choices.set(input, {
-    input,
-    body,
-    selected,
-    ...model ? { model } : {},
-    ...state ? { state } : {}
-  });
 }
 function formatLiveInteractionPrompt(prompt, choices) {
   if (!isCodexModelPickerPrompt(prompt)) return prompt;
@@ -20269,6 +20399,10 @@ function formatLiveInteractionPrompt(prompt, choices) {
 }
 function isCodexModelPickerPrompt(prompt) {
   return /\bselect\s+(?:a\s+)?model\b/i.test(prompt) && /\bgpt-[a-z0-9]/i.test(prompt);
+}
+function truncateInteractionButtonLabel(label) {
+  const compact = label.replace(/\s+/gu, " ").trim();
+  return compact.length > 48 ? `${compact.slice(0, 45)}...` : compact;
 }
 function liveInteractionCard(interaction, signCallback, inputRoute = "live") {
   const actionName = inputRoute === "live" ? LIVE_INPUT_CALLBACK_ACTION : AGENT_INPUT_CALLBACK_ACTION;

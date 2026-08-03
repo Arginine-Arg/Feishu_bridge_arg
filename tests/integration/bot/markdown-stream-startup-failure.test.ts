@@ -680,6 +680,40 @@ describe('markdown stream startup failures', () => {
     expect(buttonLabels(content?.card)).toEqual(['1', '2', 'enter', 'esc']);
   });
 
+  it('bridges an unknown CLI picker without vendor-specific titles or button caps', async () => {
+    const h = await createHarness({
+      stream: async () => {
+        throw new Error('generic picker output should not use stream');
+      },
+    });
+    h.profileConfig.preferences = {
+      ...(h.profileConfig.preferences ?? {}),
+      messageReply: 'markdown',
+    };
+    h.agent.setEvents([
+      [
+        {
+          type: 'text',
+          delta: [
+            'Pick a deployment target',
+            '› staging',
+            '  production',
+            '  canary',
+            'Choose one:',
+          ].join('\n'),
+        },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+    ]);
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_generic_picker', '/codex /skills'));
+    await waitFor(() => h.channel.sent.length === 1);
+    const content = h.channel.sent[0]?.content as { card?: unknown } | undefined;
+    expect(content?.card).toBeDefined();
+    expect(buttonLabels(content?.card)).toEqual(['staging', 'production', 'canary', 'esc']);
+  });
+
   it('falls back to captured picker text when sending the interaction card fails', async () => {
     const h = await createHarness({
       failCardSendOnce: true,

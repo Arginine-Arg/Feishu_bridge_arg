@@ -2605,7 +2605,12 @@ function scopeLivePickerSnapshot(lines: string[]): string | undefined {
 
   let start = -1;
   for (let index = 0; index < lines.length; index += 1) {
-    if (isLivePickerStartLine(lines[index] ?? '')) start = index;
+    const line = (lines[index] ?? '').trim();
+    // Keep a preceding approval/menu heading when its explanatory question
+    // also matches the generic input-word detector. Otherwise
+    // `Command requires approval` disappears from the captured card.
+    if (start >= 0 && /^(?:do\s+you|would\s+you|shall\s+i|which\s+)/iu.test(line)) continue;
+    if (isLivePickerStartLine(line)) start = index;
   }
   if (start < 0) return undefined;
 

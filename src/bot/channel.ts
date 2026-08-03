@@ -30,8 +30,11 @@ import { consumeInteractivePrompts, PROMPT_CALLBACK_ACTION } from '../card/inter
 import { isLiveControlInput, isLiveInterruptInput } from '../agent/live-session';
 import {
   isBareAgentConfirmation,
+  isLiveInteractionPromptStart,
   isStructuredLiveInteraction,
   liveInteractionSurface,
+  parseLiveInteractionOptions,
+  type LiveInteractionOption,
 } from '../agent/live-interaction-detection';
 import { CallbackAuth } from '../card/callback-auth';
 import { CallbackNonceStore } from '../card/callback-store';
@@ -2626,10 +2629,9 @@ interface LiveInteractionPrompt {
 
 export type LiveInteractionInputRoute = 'live' | 'agent';
 
-interface NumberedInteractionChoice {
+interface InteractionChoice extends LiveInteractionOption {
   input: string;
   body: string;
-  selected: boolean;
   model?: string;
   state?: string;
 }
@@ -2641,8 +2643,8 @@ function detectLiveInteraction(
   const surface = liveInteractionSurface(text);
   if (!surface && !(allowBareConfirmation && isBareAgentConfirmation(text))) return undefined;
   const prompt = surface ?? recentLiveInteractionPrompt(text);
-  const numberedChoices = extractNumberedInteractionChoices(prompt);
-  const displayPrompt = formatLiveInteractionPrompt(prompt, numberedChoices);
+  const choices = extractInteractionChoices(prompt);
+  const displayPrompt = formatLiveInteractionPrompt(prompt, choices);
   const buttons: LiveInteractionButton[] = [];
   const seenInputs = new Set<string>();
   const add = (label: string, input: string): void => {
@@ -2655,22 +2657,24 @@ function detectLiveInteraction(
     isClaudeBypassPermissionsPrompt(prompt) ||
     isClaudeModelPicker(prompt) ||
     isCodexUpdatePrompt(prompt);
-  const selectedChoice = numberedChoices.findIndex((choice) => choice.selected);
-  // A native model picker is a bounded control surface, but it can contain
-  // more than eight models. Preserve the complete practical list in the card;
-  // Feishu supports far more than this many button elements and the prompt
-  // itself remains the authoritative visual record of every choice.
-  const maxButtons = isCodexModelPickerPrompt(prompt) ? 24 : 8;
-  for (const [index, choice] of numberedChoices.slice(0, maxButtons).entries()) {
-    if (!arrowNumberedPrompt) {
-      add(choice.input, choice.input);
-      continue;
-    }
+  const arrowNavigationPrompt =
+    /(?:arrow keys?|use\s+(?:the\s+)?(?:up|down|left|right)\s+keys?|↑\s*\/\s*↓|up\s*\/\s*down|navigate\s+with)/iu.test(
+      prompt,
+    );
+  const selectedChoice = choices.findIndex((choice) => choice.selected);
+  // Explicit keys (numbers/letters) can be typed directly. Rows represented
+  // only by bullets, radios, or checkboxes are reached through the same
+  // arrow-key semantics as a native TUI. No model/vendor-specific option
+  // count is imposed here; the complete detected surface is retained.
+  for (const [index, choice] of choices.entries()) {
+    const needsNavigation = arrowNumberedPrompt || arrowNavigationPrompt || choice.navigationOnly;
     const distance = index - (selectedChoice >= 0 ? selectedChoice : 0);
     const navigation = distance < 0 ? 'up '.repeat(-distance) : 'down '.repeat(distance);
-    add(choice.input, `${navigation}enter`.trim());
+    const input = needsNavigation ? `${navigation}enter`.trim() : choice.input;
+    const label = choice.key ?? truncateInteractionButtonLabel(choice.label);
+    add(label, input);
   }
-  const hasNumberedChoices = buttons.length > 0;
+  const hasChoices = buttons.length > 0;
   const isBinaryConfirmation =
     /\b(?:y\/n|yes\/no|no\/yes)\b|(?:\[y\/n\]|\(y\/n\))/i.test(prompt) ||
     /(?:do you want to|would you like to|shall i|requires? (?:approval|confirmation)|approve|allow).*(?:\?|proceed|continue|run|execute|apply|approve|allow)/i.test(
@@ -2687,7 +2691,7 @@ function detectLiveInteraction(
     add('up', 'up');
     add('down', 'down');
   }
-  if (!hasNumberedChoices && isBinaryConfirmation) {
+  if (!hasChoices && isBinaryConfirmation) {
     add('yes', 'yes');
     add('no', 'no');
   }
@@ -2705,7 +2709,7 @@ function detectLiveInteraction(
   ) {
     add('esc', 'esc');
   }
-  if (hasNumberedChoices && looksLikeAgentPicker(prompt, allowBareConfirmation)) {
+  if (hasChoices && looksLikeAgentPicker(prompt, allowBareConfirmation)) {
     add('enter', 'enter');
     add('esc', 'esc');
   }
@@ -2745,20 +2749,6 @@ function recentLiveInteractionPrompt(text: string): string {
   return (start >= 0 ? recent.slice(start) : recent.slice(-12)).join('\n');
 }
 
-function isLiveInteractionPromptStart(line: string): boolean {
-  return (
-    /claude\s+code\s+running\s+in\s+bypass\s+permissions\s+mode/i.test(line) ||
-    /\bupdate\s+available\b/i.test(line) ||
-    /\bselect\s+(?:a\s+)?(?:model|reasoning|option)\b/i.test(line) ||
-    /^skills?$/i.test(line) ||
-    /\bchoose an action\b/i.test(line) ||
-    /\b(?:command )?requires? (?:approval|confirmation)\b/i.test(line) ||
-    /\b(?:do you want to|would you like to|shall i)\s+(?:proceed|continue|run|execute|apply|approve|allow)\b/i.test(
-      line,
-    )
-  );
-}
-
 function isClaudeBypassPermissionsPrompt(text: string): boolean {
   return (
     /claude\s+code\s+running\s+in\s+bypass\s+permissions\s+mode/i.test(text) &&
@@ -2787,55 +2777,62 @@ function isCodexUpdatePrompt(text: string): boolean {
   );
 }
 
-function extractNumberedInteractionChoices(prompt: string): NumberedInteractionChoice[] {
-  const choices = new Map<string, NumberedInteractionChoice>();
-  for (const line of prompt.split('\n')) {
-    const match = line.match(/^(?:[›❯>▸*+-]\s*)?(\d{1,2})[.)、:\s-]+(.+)$/u);
-    if (!match) continue;
-    addNumberedInteractionChoice(choices, match[1]!, match[2]!, /^[›❯>▸]/u.test(line));
-  }
-
+function extractInteractionChoices(prompt: string): InteractionChoice[] {
+  const options = parseLiveInteractionOptions(prompt, {
+    // Ambiguous `•`/`-` rows are accepted only when the surrounding frame has
+    // prompt evidence. A pair of contiguous rows is still required by the
+    // parser, so a lone assistant bullet such as `• Model changed ...` stays
+    // ordinary status text.
+    includeAmbiguousBullets:
+      /(?:choose|select|pick|option|choice|answer|input|confirm|continue|navigate|选择|选项|确认|继续|输入)/iu.test(
+        prompt,
+      ) ||
+      /(?:enter|esc|arrow|按下?|回车|取消|返回)/iu.test(prompt),
+  });
   if (isCodexModelPickerPrompt(prompt)) {
-    const inlineModelChoice = /(?:^|[^0-9])(?:[›>▸*+-]\s*)?(\d{1,2})\s*[.)、:]\s*[a-z]{0,3}(gpt-[a-z0-9][a-z0-9._-]*)/giu;
+    // Some terminal widths reflow adjacent rows into prose, e.g.
+    // `... 6.rgpt-5.4-mini ... 7. gpt-5.2`. Recover those explicit model
+    // keys without making the generic interaction detector depend on Codex.
+    const byKey = new Map(options.flatMap((option) => option.key ? [[option.key, option]] as const : []));
+    const inlineModelChoice = /(?:^|[^0-9])(?:[›>▸*+-]\s*)?(\d{1,4})\s*[.)、:]\s*[a-z]{0,3}(gpt-[a-z0-9][a-z0-9._-]*)/giu;
     for (const match of prompt.matchAll(inlineModelChoice)) {
-      addNumberedInteractionChoice(choices, match[1]!, match[2]!, /[›>▸]/u.test(match[0]));
+      const key = match[1]!;
+      const model = match[2]!;
+      const existing = byKey.get(key);
+      if (existing) {
+        if (!existing.label.includes(model)) existing.label = `${existing.label} ${model}`;
+        continue;
+      }
+      const option: LiveInteractionOption = {
+        key,
+        label: model,
+        selected: /[›>▸]/u.test(match[0]),
+        navigationOnly: false,
+      };
+      options.push(option);
+      byKey.set(key, option);
     }
   }
-
-  const out = [...choices.values()];
+  const out = options.map((option) => ({
+    ...option,
+    input: option.key ?? option.label,
+    body: option.label,
+    ...(option.label.match(/\b(gpt-[a-z0-9][a-z0-9._-]*)\b/iu)?.[1]
+      ? { model: option.label.match(/\b(gpt-[a-z0-9][a-z0-9._-]*)\b/iu)?.[1] }
+      : {}),
+    ...(option.label.match(/\b(current|default)\b/iu)?.[1]
+      ? { state: option.label.match(/\b(current|default)\b/iu)?.[1]?.toLowerCase() }
+      : {}),
+  }));
   if (isCodexModelPickerPrompt(prompt)) {
     out.sort((left, right) => Number(left.input) - Number(right.input));
   }
   return out;
 }
 
-function addNumberedInteractionChoice(
-  choices: Map<string, NumberedInteractionChoice>,
-  input: string,
-  body: string,
-  selected: boolean,
-): void {
-  const existing = choices.get(input);
-  const model = body.match(/\b(gpt-[a-z0-9][a-z0-9._-]*)\b/iu)?.[1];
-  const state = body.match(/\b(current|default)\b/iu)?.[1]?.toLowerCase();
-  if (existing) {
-    if (!existing.model && model) existing.model = model;
-    if (!existing.state && state) existing.state = state;
-    existing.selected ||= selected;
-    return;
-  }
-  choices.set(input, {
-    input,
-    body,
-    selected,
-    ...(model ? { model } : {}),
-    ...(state ? { state } : {}),
-  });
-}
-
 function formatLiveInteractionPrompt(
   prompt: string,
-  choices: NumberedInteractionChoice[],
+  choices: InteractionChoice[],
 ): string {
   if (!isCodexModelPickerPrompt(prompt)) return prompt;
   const modelChoices = choices.filter((choice) => choice.model);
@@ -2855,6 +2852,11 @@ function formatLiveInteractionPrompt(
 
 function isCodexModelPickerPrompt(prompt: string): boolean {
   return /\bselect\s+(?:a\s+)?model\b/i.test(prompt) && /\bgpt-[a-z0-9]/i.test(prompt);
+}
+
+function truncateInteractionButtonLabel(label: string): string {
+  const compact = label.replace(/\s+/gu, ' ').trim();
+  return compact.length > 48 ? `${compact.slice(0, 45)}...` : compact;
 }
 
 export function liveInteractionCard(
