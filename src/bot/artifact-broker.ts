@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { lstat, mkdir, readFile, realpath, rm } from 'node:fs/promises';
 import { createServer, type Server, type Socket } from 'node:net';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
@@ -57,8 +57,10 @@ export class ArtifactBroker {
   private server: Server | undefined;
   private saving: Promise<void> = Promise.resolve();
 
+  private readonly socketPath: string;
+
   constructor(
-    private readonly socketPath: string,
+    socketPath: string,
     private readonly channel: LarkChannel,
     private readonly allowLocalFileRoot: (root: string) => Promise<boolean>,
     /**
@@ -68,12 +70,16 @@ export class ArtifactBroker {
      * and written 0600; short turn-mode grants are never persisted.
      */
     private readonly persistentStatePath?: string,
-  ) {}
+  ) {
+    this.socketPath = artifactBrokerSocketPath(socketPath);
+  }
 
   async start(): Promise<void> {
     await this.loadPersistentGrants();
-    await mkdir(dirname(this.socketPath), { recursive: true });
-    await rm(this.socketPath, { force: true }).catch(() => {});
+    if (process.platform !== 'win32') {
+      await mkdir(dirname(this.socketPath), { recursive: true });
+      await rm(this.socketPath, { force: true }).catch(() => {});
+    }
     this.server = createServer((socket) => {
       void this.handle(socket);
     });
@@ -148,7 +154,7 @@ export class ArtifactBroker {
     if (server) {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
-    await rm(this.socketPath, { force: true }).catch(() => {});
+    if (process.platform !== 'win32') await rm(this.socketPath, { force: true }).catch(() => {});
   }
 
   async flush(): Promise<void> {
@@ -204,7 +210,7 @@ export class ArtifactBroker {
     if (!entry.isFile()) throw new Error('只能发送普通文件');
     if (entry.size > grant.maxFileBytes) throw new Error(`文件超过发送上限（${grant.maxFileBytes} B）`);
     const resolved = await realpath(requested);
-    const root = grant.allowedRoots.find((candidate) => isPathWithinRoot(resolved, candidate));
+    const root = await findCanonicalAllowedRoot(resolved, grant.allowedRoots);
     if (!root) throw new Error('文件不在当前任务允许的目录内');
     if (!(await this.allowLocalFileRoot(root))) throw new Error('bridge 未允许该文件目录');
 
@@ -273,6 +279,25 @@ export function isPathWithinRoot(path: string, root: string): boolean {
   const pathRelative = relative(root, path);
   return pathRelative === '' ||
     (pathRelative !== '..' && !pathRelative.startsWith(`..${sep}`) && !isAbsolute(pathRelative));
+}
+
+/**
+ * Node only supports IPC sockets through named pipes on Windows. Derive a
+ * stable, opaque pipe name from the profile-local socket path so a persisted
+ * live terminal capability still works after the bridge restarts.
+ */
+export function artifactBrokerSocketPath(socketPath: string): string {
+  if (process.platform !== 'win32') return socketPath;
+  const digest = createHash('sha256').update(resolve(socketPath)).digest('hex').slice(0, 32);
+  return `\\\\.\\pipe\\arg-bridge-artifact-${digest}`;
+}
+
+async function findCanonicalAllowedRoot(path: string, roots: readonly string[]): Promise<string | undefined> {
+  for (const root of roots) {
+    const canonicalRoot = await realpath(root).catch(() => undefined);
+    if (canonicalRoot && isPathWithinRoot(path, canonicalRoot)) return root;
+  }
+  return undefined;
 }
 
 function isPersistentGrant(value: unknown): value is ActiveGrant {

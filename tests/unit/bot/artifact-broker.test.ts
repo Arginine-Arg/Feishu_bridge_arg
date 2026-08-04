@@ -1,5 +1,5 @@
 import { connect } from 'node:net';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -74,7 +74,7 @@ describe('ArtifactBroker', () => {
 
     expect(second).toEqual(first);
     expect(broker.persistentDeliveries()).toEqual([
-      { scope: 'chat-live', socketPath: join(root, 'broker.sock'), token: first.token },
+      { scope: 'chat-live', socketPath: first.socketPath, token: first.token },
     ]);
     expect(broker.activate(second.token, [workspace])).toBe(true);
     await expect(request(second.socketPath, { token: first.token, path: 'report.txt' })).resolves.toMatchObject({ ok: true });
@@ -114,7 +114,8 @@ describe('ArtifactBroker', () => {
       await rm(root, { recursive: true, force: true });
     });
 
-    await expect(request(socketPath, {
+    const restored = second.persistentDeliveries().find((delivery) => delivery.scope === 'chat-live');
+    await expect(request(restored!.socketPath, {
       token: grant.token,
       path: 'report.txt',
       caption: '实验结果',
@@ -130,6 +131,36 @@ describe('ArtifactBroker', () => {
       'oc-1',
       { markdown: '实验结果' },
       { replyTo: 'om-before-restart' },
+    );
+  });
+
+  it('allows a file beneath an authorized symlinked workspace root', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'artifact-broker-symlink-root-'));
+    const workspace = join(root, 'workspace');
+    const workspaceLink = join(root, 'workspace-link');
+    await mkdir(workspace);
+    await writeFile(join(workspace, 'report.txt'), 'done');
+    await symlink(workspace, workspaceLink, process.platform === 'win32' ? 'junction' : 'dir');
+    const send = vi.fn(async () => ({ messageId: 'om-file' }));
+    const broker = new ArtifactBroker(join(root, 'broker.sock'), { send } as never, async () => true);
+    await broker.start();
+    cleanups.push(async () => {
+      await broker.close();
+      await rm(root, { recursive: true, force: true });
+    });
+    const grant = broker.issue({
+      scope: 'chat-symlink',
+      chatId: 'oc-1',
+      replyTo: 'om-1',
+      allowedRoots: [workspaceLink],
+      maxFileBytes: 1024,
+    });
+
+    await expect(request(grant.socketPath, { token: grant.token, path: 'report.txt' })).resolves.toMatchObject({ ok: true });
+    expect(send).toHaveBeenCalledWith(
+      'oc-1',
+      { file: { source: join(workspace, 'report.txt'), fileName: 'report.txt' } },
+      { replyTo: 'om-1' },
     );
   });
 });

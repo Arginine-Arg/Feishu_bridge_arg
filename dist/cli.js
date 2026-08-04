@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.71",
+  version: "0.6.72",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -6948,6 +6948,7 @@ var DEFAULT_IDLE_MS = 3500;
 var DEFAULT_OUTPUT_FLUSH_MS = 500;
 var DEFAULT_STARTUP_TIMEOUT_MS = 15e3;
 var STARTUP_INPUT_GRACE_MS = 25;
+var PIPE_STARTUP_OUTPUT_GRACE_MS = 2500;
 var COMMAND_FRESH_SESSION_GRACE_MS = 1200;
 var FRESH_TERMINAL_GRACE_MS = 2500;
 var CONTROL_KEY_GAP_MS = 40;
@@ -7024,6 +7025,8 @@ var LiveTerminalSession = class {
   lastTerminalHistory;
   terminalReady = Promise.resolve();
   resolveTerminalReady;
+  firstTerminalOutput = Promise.resolve();
+  resolveFirstTerminalOutput;
   startPromise;
   constructor(opts, onClose = () => {
   }) {
@@ -7118,6 +7121,9 @@ var LiveTerminalSession = class {
     this.terminalReady = new Promise((resolve5) => {
       this.resolveTerminalReady = resolve5;
     });
+    this.firstTerminalOutput = new Promise((resolve5) => {
+      this.resolveFirstTerminalOutput = resolve5;
+    });
     this.child = spawned.child;
     this.terminalInfo = spawned.terminal;
     if (spawned.terminal.backend !== "tmux") this.resolveTerminalReady?.();
@@ -7175,6 +7181,10 @@ var LiveTerminalSession = class {
   }
   emitData(chunk) {
     const raw = chunk.toString("utf8");
+    if (raw) {
+      this.resolveFirstTerminalOutput?.();
+      this.resolveFirstTerminalOutput = void 0;
+    }
     if (raw.includes(TMUX_READY_FRAME)) {
       this.resolveTerminalReady?.();
       this.resolveTerminalReady = void 0;
@@ -7505,7 +7515,10 @@ var LiveTerminalSession = class {
     for (const event of this.pendingTerminalOutput.splice(0)) onData(event);
     try {
       if (interruption.requested) cancelCurrentTurn();
-      await this.waitForInputReady(inputGraceMs);
+      await this.waitForInputReady(
+        inputGraceMs,
+        !commandMode && inputMode !== "control" && !prompt.trim().startsWith("/")
+      );
       if (!done) {
         if (startupInteractionText && inputMode !== "control") {
           log.info("agent-live", "startup-interaction-dismiss", {
@@ -7589,7 +7602,17 @@ var LiveTerminalSession = class {
     const freshSessionGraceMs = COMMAND_FRESH_SESSION_GRACE_MS;
     return Math.max(STARTUP_INPUT_GRACE_MS, freshSessionGraceMs - ageMs);
   }
-  async waitForInputReady(inputGraceMs) {
+  async waitForInputReady(inputGraceMs, awaitStartupPipeOutput) {
+    if (this.terminalInfo?.backend === "pipe") {
+      if (awaitStartupPipeOutput) {
+        await Promise.race([
+          this.firstTerminalOutput,
+          delay(PIPE_STARTUP_OUTPUT_GRACE_MS)
+        ]);
+      }
+      await delay(inputGraceMs);
+      return;
+    }
     if (this.terminalInfo?.backend !== "tmux") {
       await delay(inputGraceMs);
       return;
@@ -10413,7 +10436,7 @@ function isWindowsCommandNotFoundLine2(line) {
 
 // src/bot/channel.ts
 import { createLarkChannel } from "@larksuite/channel";
-import { createHash as createHash7 } from "crypto";
+import { createHash as createHash8 } from "crypto";
 import { homedir as homedir8 } from "os";
 import { dirname as dirname20, join as join24 } from "path";
 
@@ -17825,18 +17848,17 @@ async function removeReaction(channel, messageId, reactionId) {
 }
 
 // src/bot/artifact-broker.ts
-import { randomBytes as randomBytes5 } from "crypto";
+import { createHash as createHash7, randomBytes as randomBytes5 } from "crypto";
 import { lstat as lstat2, mkdir as mkdir16, readFile as readFile14, realpath as realpath5, rm as rm12 } from "fs/promises";
 import { createServer } from "net";
 import { basename as basename6, dirname as dirname19, isAbsolute as isAbsolute4, relative as relative2, resolve as resolve4, sep as sep2 } from "path";
 var ArtifactBroker = class {
   constructor(socketPath, channel, allowLocalFileRoot, persistentStatePath) {
-    this.socketPath = socketPath;
     this.channel = channel;
     this.allowLocalFileRoot = allowLocalFileRoot;
     this.persistentStatePath = persistentStatePath;
+    this.socketPath = artifactBrokerSocketPath(socketPath);
   }
-  socketPath;
   channel;
   allowLocalFileRoot;
   persistentStatePath;
@@ -17844,11 +17866,14 @@ var ArtifactBroker = class {
   persistentTokensByScope = /* @__PURE__ */ new Map();
   server;
   saving = Promise.resolve();
+  socketPath;
   async start() {
     await this.loadPersistentGrants();
-    await mkdir16(dirname19(this.socketPath), { recursive: true });
-    await rm12(this.socketPath, { force: true }).catch(() => {
-    });
+    if (process.platform !== "win32") {
+      await mkdir16(dirname19(this.socketPath), { recursive: true });
+      await rm12(this.socketPath, { force: true }).catch(() => {
+      });
+    }
     this.server = createServer((socket) => {
       void this.handle(socket);
     });
@@ -17915,7 +17940,7 @@ var ArtifactBroker = class {
     if (server) {
       await new Promise((resolve5) => server.close(() => resolve5()));
     }
-    await rm12(this.socketPath, { force: true }).catch(() => {
+    if (process.platform !== "win32") await rm12(this.socketPath, { force: true }).catch(() => {
     });
   }
   async flush() {
@@ -17969,7 +17994,7 @@ var ArtifactBroker = class {
     if (!entry.isFile()) throw new Error("\u53EA\u80FD\u53D1\u9001\u666E\u901A\u6587\u4EF6");
     if (entry.size > grant.maxFileBytes) throw new Error(`\u6587\u4EF6\u8D85\u8FC7\u53D1\u9001\u4E0A\u9650\uFF08${grant.maxFileBytes} B\uFF09`);
     const resolved = await realpath5(requested);
-    const root = grant.allowedRoots.find((candidate) => isPathWithinRoot2(resolved, candidate));
+    const root = await findCanonicalAllowedRoot(resolved, grant.allowedRoots);
     if (!root) throw new Error("\u6587\u4EF6\u4E0D\u5728\u5F53\u524D\u4EFB\u52A1\u5141\u8BB8\u7684\u76EE\u5F55\u5185");
     if (!await this.allowLocalFileRoot(root)) throw new Error("bridge \u672A\u5141\u8BB8\u8BE5\u6587\u4EF6\u76EE\u5F55");
     const caption = normalizeCaption(request.caption);
@@ -18032,6 +18057,18 @@ var ArtifactBroker = class {
 function isPathWithinRoot2(path, root) {
   const pathRelative = relative2(root, path);
   return pathRelative === "" || pathRelative !== ".." && !pathRelative.startsWith(`..${sep2}`) && !isAbsolute4(pathRelative);
+}
+function artifactBrokerSocketPath(socketPath) {
+  if (process.platform !== "win32") return socketPath;
+  const digest = createHash7("sha256").update(resolve4(socketPath)).digest("hex").slice(0, 32);
+  return `\\\\.\\pipe\\arg-bridge-artifact-${digest}`;
+}
+async function findCanonicalAllowedRoot(path, roots) {
+  for (const root of roots) {
+    const canonicalRoot = await realpath5(root).catch(() => void 0);
+    if (canonicalRoot && isPathWithinRoot2(path, canonicalRoot)) return root;
+  }
+  return void 0;
 }
 function isPersistentGrant(value) {
   if (!value || typeof value !== "object") return false;
@@ -20223,7 +20260,7 @@ async function processAgentStream(handle, events, scope, idleTimeoutMs, progress
     interrupted: handle.interrupted,
     sourceChars: finalSourceText.length,
     sourceBytes: Buffer.byteLength(finalSourceText, "utf8"),
-    sourceSha256: createHash7("sha256").update(finalSourceText).digest("hex"),
+    sourceSha256: createHash8("sha256").update(finalSourceText).digest("hex"),
     renderedMarkdownBytes: Buffer.byteLength(finalMarkdown, "utf8"),
     renderedCardBytes: Buffer.byteLength(finalCard, "utf8")
   });
@@ -20482,7 +20519,7 @@ function detectLiveInteraction(text, allowBareConfirmation = false) {
     // A prefix signature made two long menus look identical whenever they
     // shared their title and early choices. Hash the complete current surface
     // so repeated redraws dedupe, while every genuinely nested menu is sent.
-    signature: createHash7("sha256").update(prompt).update("\0").update(buttons.map((button2) => button2.input).join("|")).digest("hex"),
+    signature: createHash8("sha256").update(prompt).update("\0").update(buttons.map((button2) => button2.input).join("|")).digest("hex"),
     prompt: displayPrompt.slice(0, isCodexModelPickerPrompt(prompt) ? 4e3 : 1200),
     buttons
   };

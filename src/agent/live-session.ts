@@ -86,6 +86,7 @@ const DEFAULT_IDLE_MS = 3500;
 const DEFAULT_OUTPUT_FLUSH_MS = 500;
 const DEFAULT_STARTUP_TIMEOUT_MS = 15_000;
 const STARTUP_INPUT_GRACE_MS = 25;
+const PIPE_STARTUP_OUTPUT_GRACE_MS = 2_500;
 const COMMAND_FRESH_SESSION_GRACE_MS = 1200;
 const FRESH_TERMINAL_GRACE_MS = 2500;
 const CONTROL_KEY_GAP_MS = 40;
@@ -172,6 +173,8 @@ export class LiveTerminalSession {
   private lastTerminalHistory: LiveHistorySnapshot | undefined;
   private terminalReady: Promise<void> = Promise.resolve();
   private resolveTerminalReady: (() => void) | undefined;
+  private firstTerminalOutput: Promise<void> = Promise.resolve();
+  private resolveFirstTerminalOutput: (() => void) | undefined;
   private startPromise: Promise<void> | undefined;
 
   constructor(opts: LiveSessionCommand, onClose: () => void = () => {}) {
@@ -287,6 +290,9 @@ export class LiveTerminalSession {
     this.terminalReady = new Promise<void>((resolve) => {
       this.resolveTerminalReady = resolve;
     });
+    this.firstTerminalOutput = new Promise<void>((resolve) => {
+      this.resolveFirstTerminalOutput = resolve;
+    });
     this.child = spawned.child;
     this.terminalInfo = spawned.terminal;
     if (spawned.terminal.backend !== 'tmux') this.resolveTerminalReady?.();
@@ -346,6 +352,10 @@ export class LiveTerminalSession {
 
   private emitData(chunk: Buffer): void {
     const raw = chunk.toString('utf8');
+    if (raw) {
+      this.resolveFirstTerminalOutput?.();
+      this.resolveFirstTerminalOutput = undefined;
+    }
     if (raw.includes(TMUX_READY_FRAME)) {
       this.resolveTerminalReady?.();
       this.resolveTerminalReady = undefined;
@@ -744,7 +754,10 @@ export class LiveTerminalSession {
     for (const event of this.pendingTerminalOutput.splice(0)) onData(event);
     try {
       if (interruption.requested) cancelCurrentTurn();
-      await this.waitForInputReady(inputGraceMs);
+      await this.waitForInputReady(
+        inputGraceMs,
+        !commandMode && inputMode !== 'control' && !prompt.trim().startsWith('/'),
+      );
       if (!done) {
         if (startupInteractionText && inputMode !== 'control') {
           log.info('agent-live', 'startup-interaction-dismiss', {
@@ -835,7 +848,21 @@ export class LiveTerminalSession {
     return Math.max(STARTUP_INPUT_GRACE_MS, freshSessionGraceMs - ageMs);
   }
 
-  private async waitForInputReady(inputGraceMs: number): Promise<void> {
+  private async waitForInputReady(inputGraceMs: number, awaitStartupPipeOutput: boolean): Promise<void> {
+    if (this.terminalInfo?.backend === 'pipe') {
+      // On non-Linux hosts a live session uses ordinary pipes. Wait briefly
+      // for the first terminal frame so an already-rendered picker can be
+      // dismissed before a normal Feishu task is typed into it. Explicit
+      // commands and picker controls must remain immediate.
+      if (awaitStartupPipeOutput) {
+        await Promise.race([
+          this.firstTerminalOutput,
+          delay(PIPE_STARTUP_OUTPUT_GRACE_MS),
+        ]);
+      }
+      await delay(inputGraceMs);
+      return;
+    }
     if (this.terminalInfo?.backend !== 'tmux') {
       await delay(inputGraceMs);
       return;
