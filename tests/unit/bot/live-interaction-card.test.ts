@@ -950,6 +950,35 @@ describe('liveInteractionCard', () => {
     expect(rendered).not.toContain('› continue');
     expect(rendered).not.toContain('/permissions');
   });
+
+  it('reconstructs a missing first model row after a title-less redraw', () => {
+    const text = [
+      '1. gpt-5.6-sol (default)   Latest frontier agentic coding model.',
+      '2. gpt-5.6-terra           Balanced agentic coding model for everyday work.',
+      '› 3. gpt-5.6-luna (current) Fast and affordable agentic coding model.',
+      '4. gpt-5.5                 Frontier model for complex coding.',
+      '5. gpt-5.2                 Optimized for professional work.',
+      '2. gpt-5.6-terra           Balanced agentic coding model for everyday work.',
+      '› 3. gpt-5.6-luna (current) Fast and affordable agentic coding model.',
+      '4. gpt-5.5                 Frontier model for complex coding.',
+      '5. gpt-5.2                 Optimized for professional work.',
+    ].join('\n');
+
+    const surface = liveInteractionSurface(text);
+    expect(surface).toContain('Select Model and Effort');
+    expect(surface).toContain('1. gpt-5.6-sol');
+    const card = liveInteractionCardForText(text, () => 'recovered-model-token');
+    expect(card).toBeDefined();
+    expect(buttonValues(card).map((value) => value.input)).toEqual([
+      '1',
+      '2',
+      '3',
+      '4',
+      '5',
+      'enter',
+      'esc',
+    ]);
+  });
 });
 
 function stateFrom(events: AgentEvent[]): RunState {

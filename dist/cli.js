@@ -5980,7 +5980,7 @@ function normalizeWhitespace(input) {
 }
 
 // src/agent/live-interaction-detection.ts
-var MAX_INTERACTION_LINES = 120;
+var MAX_INTERACTION_LINES = 240;
 var FALLBACK_INTERACTION_LINES = 12;
 var OPTION_LINE_RE = /^(?<selected>[›❯>▸])?\s*(?:(?<number>\d{1,4})(?:[.)、:：-]|\s{1,3})\s*|(?<letter>[A-Za-z])(?:[.)、:：-]|\s{1,3})\s*|\[(?<checkbox>[ xX✓✔])\]\s*|(?<bullet>[-*•])\s+|(?<radio>[◉○●◯])\s*)(?<label>\S.*)$/u;
 var BARE_NAV_OPTION_RE = /^(?<selected>[›❯>▸])\s+(?<label>\S.*)$/u;
@@ -6154,6 +6154,8 @@ function interactionCandidate(input) {
 function fallbackInteractionCandidate(lines) {
   const numericBlock = latestContiguousNumericOptionBlock(lines);
   if (numericBlock) {
+    const recoveredModelFrame = recoverNativeModelPickerFrame(lines, numericBlock);
+    if (recoveredModelFrame) return recoveredModelFrame;
     const previous = lines[numericBlock.start - 1]?.trim() ?? "";
     const includePrevious = /[?？]\s*$/u.test(previous) || isExplicitPickerHeading(previous);
     return lines.slice(
@@ -6189,6 +6191,140 @@ function fallbackInteractionCandidate(lines) {
     contextStart = Math.max(0, optionStart - MAX_INTERACTION_LINES);
   }
   return lines.slice(contextStart, end + 1);
+}
+function recoverNativeModelPickerFrame(lines, currentBlock) {
+  const current = lines.slice(currentBlock.start, currentBlock.end + 1);
+  const currentOptions = parseLiveInteractionOptions(current.join("\n"));
+  if (!isNativeModelOptionSet(currentOptions)) return void 0;
+  const currentKeys = new Set(
+    currentOptions.flatMap((option) => option.key ? [option.key] : [])
+  );
+  const currentNumericKeys = currentOptions.flatMap((option) => option.key && /^\d+$/u.test(option.key) ? [Number(option.key)] : []).sort((left, right) => left - right);
+  if (currentNumericKeys.length === 0 || currentNumericKeys[0] <= 1) return void 0;
+  if (hasConflictingNativeModelKeys(lines)) return void 0;
+  const blocks = contiguousNumericOptionBlocks(lines);
+  const blockIndex = blocks.findIndex(
+    (block) => block.start === currentBlock.start && block.end === currentBlock.end
+  );
+  if (blockIndex > 0) {
+    for (let index = blockIndex - 1; index >= 0; index -= 1) {
+      const previousBlock = blocks[index];
+      const previousOptions = parseLiveInteractionOptions(
+        lines.slice(previousBlock.start, previousBlock.end + 1).join("\n")
+      );
+      if (!isNativeModelOptionSet(previousOptions)) continue;
+      const overlap = previousOptions.filter(
+        (option) => option.key && currentKeys.has(option.key) && modelOptionId(option.label) === modelOptionId(
+          currentOptions.find((candidate) => candidate.key === option.key)?.label ?? ""
+        )
+      ).length;
+      if (overlap < 2) continue;
+      const missing = previousOptions.filter(
+        (option) => option.key && !currentKeys.has(option.key)
+      );
+      if (missing.length === 0) return void 0;
+      return composeRecoveredModelFrame(
+        lines,
+        previousBlock,
+        currentBlock,
+        current,
+        missing
+      );
+    }
+  }
+  if (currentOptions.some((option) => option.selected)) {
+    return composeRecoveredModelFrame(lines, void 0, currentBlock, current, []);
+  }
+  return void 0;
+}
+function composeRecoveredModelFrame(lines, previousBlock, currentBlock, current, missing) {
+  const heading = findNativeModelHeading(lines, previousBlock?.start ?? currentBlock.start);
+  const missingRows = missing.sort((left, right) => Number(left.key) - Number(right.key)).map((option) => {
+    const source = previousBlock ? lines.slice(previousBlock.start, previousBlock.end + 1).find((line) => line.trim().match(OPTION_LINE_RE)?.groups?.number === option.key) : void 0;
+    if (source) return source.replace(/^(\s*)[›❯>▸]\s*/u, "$1  ");
+    return `  ${option.key}. ${option.label}`;
+  });
+  const hint = findNativeModelHint(lines, currentBlock.end, previousBlock?.end);
+  return [
+    heading ?? "Select Model and Effort",
+    ...missingRows,
+    ...current,
+    ...hint && !current.some((line) => KEY_HINT_RE.test(line)) ? [hint] : []
+  ];
+}
+function contiguousNumericOptionBlocks(lines) {
+  const blocks = [];
+  let runLength = 0;
+  let previousKey;
+  let runStart2 = 0;
+  const finish = (end) => {
+    if (runLength >= 2) blocks.push({ start: runStart2, end });
+    runLength = 0;
+    previousKey = void 0;
+  };
+  for (const [index, line] of lines.entries()) {
+    const match = line.trim().match(OPTION_LINE_RE);
+    const rawKey = match?.groups?.number;
+    if (!rawKey || isCodeLikeInteractionLine(line)) {
+      finish(index - 1);
+      continue;
+    }
+    const key = Number(rawKey);
+    if (previousKey !== void 0 && key === previousKey + 1) {
+      runLength += 1;
+    } else {
+      finish(index - 1);
+      runLength = 1;
+      runStart2 = index;
+    }
+    previousKey = key;
+  }
+  finish(lines.length - 1);
+  return blocks;
+}
+function isNativeModelOptionSet(options) {
+  return options.length >= 2 && options.filter((option) => Boolean(option.key && modelOptionId(option.label))).length >= 2;
+}
+function modelOptionId(label) {
+  return label.match(/\b(?:gpt|claude|gemini|llama|deepseek|qwen|o\d)[a-z0-9._-]*/iu)?.[0]?.toLowerCase();
+}
+function hasConflictingNativeModelKeys(lines) {
+  const keysByModel = /* @__PURE__ */ new Map();
+  for (const option of parseLiveInteractionOptions(lines.join("\n"))) {
+    if (!option.key) continue;
+    const model = modelOptionId(option.label);
+    if (!model) continue;
+    const keys = keysByModel.get(model) ?? /* @__PURE__ */ new Set();
+    keys.add(option.key);
+    keysByModel.set(model, keys);
+  }
+  return [...keysByModel.values()].some((keys) => keys.size > 1);
+}
+function findNativeModelHeading(lines, before) {
+  for (let index = before - 1; index >= Math.max(0, before - 12); index -= 1) {
+    const line = lines[index]?.trim() ?? "";
+    if (isCodeLikeInteractionLine(line)) continue;
+    const isHeading = /^(?:select\s+(?:a\s+)?model|model(?:\s+and\s+effort)?|reasoning\s+(?:effort|level))\b/iu.test(line);
+    if (isHeading && !/^model\s+changed\b/iu.test(line)) {
+      return line;
+    }
+  }
+  return void 0;
+}
+function findNativeModelHint(lines, currentEnd, previousEnd) {
+  const start = currentEnd + 1;
+  const end = Math.min(lines.length, start + 8);
+  for (let index = start; index < end; index += 1) {
+    const line = lines[index]?.trim() ?? "";
+    if (KEY_HINT_RE.test(line)) return line;
+  }
+  if (previousEnd !== void 0) {
+    for (let index = previousEnd + 1; index < Math.min(lines.length, previousEnd + 8); index += 1) {
+      const line = lines[index]?.trim() ?? "";
+      if (KEY_HINT_RE.test(line)) return line;
+    }
+  }
+  return void 0;
 }
 function mergeRepeatedPickerOptions(lines, latestStart, current) {
   const title = lines[latestStart]?.trim();
@@ -7574,7 +7710,10 @@ var LiveTerminalSession = class {
           }
         } else {
           if (commandMode) log.info("agent-live", "command-submit", { commandText: prompt });
-          if (inputMode === "control" && shouldDeferControlLiteralSubmit(prompt)) {
+          if (inputMode === "control" && isNumericControlLiteral(prompt)) {
+            log.info("agent-live", "control-literal-type", { input: prompt });
+            this.write(prompt);
+          } else if (inputMode === "control" && shouldDeferControlLiteralSubmit(prompt)) {
             log.info("agent-live", "control-literal-type", { input: prompt });
             this.write(prompt);
             controlLiteralConfirmTimer = setTimeout(() => {
@@ -8340,6 +8479,9 @@ function isPendingLiveCommandDraft(input, prompt) {
 function shouldDeferControlLiteralSubmit(input) {
   const trimmed = input.trim();
   return /^\d{1,2}$/u.test(trimmed) || /^(?:y|yes|n|no)$/iu.test(trimmed);
+}
+function isNumericControlLiteral(input) {
+  return /^\d{1,2}$/u.test(input.trim());
 }
 function isKnownSilentLiveCommand(input) {
   return /^\/(?:clear|cls)\s*$/iu.test(input.trim());
@@ -9135,8 +9277,66 @@ function scopeLivePickerSnapshot(lines) {
     if (isLivePickerStartLine(line)) start = index;
   }
   if (start < 0) return void 0;
-  const picker = lines.slice(start).join("\n");
+  const pickerLines = recoverNativeModelPickerRows(lines, start);
+  const picker = pickerLines.join("\n");
   return isLikelyLivePickerOutput(picker) ? picker : void 0;
+}
+function recoverNativeModelPickerRows(lines, latestStart) {
+  const current = lines.slice(latestStart);
+  const title = lines[latestStart]?.trim() ?? "";
+  if (!title || !/^select\s+(?:a\s+)?model\b/iu.test(title)) return current;
+  const currentOptions = parseLiveInteractionOptions(current.join("\n"));
+  const currentNumeric = currentOptions.filter(
+    (option) => option.key && /^\d+$/u.test(option.key) && pickerModelId(option.label)
+  );
+  if (currentNumeric.length < 2 || Number(currentNumeric[0]?.key ?? 0) <= 1) return current;
+  if (pickerModelKeyConflict(currentNumeric)) return current;
+  let previousStart = -1;
+  for (let index = latestStart - 1; index >= 0; index -= 1) {
+    const line = lines[index]?.trim() ?? "";
+    if (!line) continue;
+    if (line === title) {
+      previousStart = index;
+      break;
+    }
+    if (isLiveInteractionPromptStart(line)) break;
+  }
+  if (previousStart < 0) return current;
+  const previous = lines.slice(previousStart, latestStart);
+  const previousOptions = parseLiveInteractionOptions(previous.join("\n")).filter(
+    (option) => option.key && /^\d+$/u.test(option.key) && pickerModelId(option.label)
+  );
+  if (previousOptions.length < 2 || pickerModelKeyConflict(previousOptions)) return current;
+  const currentByKey = new Map(
+    currentNumeric.map((option) => [option.key, pickerModelId(option.label)])
+  );
+  const overlap = previousOptions.filter(
+    (option) => option.key && currentByKey.get(option.key) === pickerModelId(option.label)
+  ).length;
+  if (overlap < 2) return current;
+  const currentKeys = new Set(currentNumeric.map((option) => option.key));
+  const missing = previousOptions.filter((option) => option.key && !currentKeys.has(option.key)).sort((left, right) => Number(left.key) - Number(right.key));
+  if (missing.length === 0) return current;
+  return [
+    current[0],
+    ...missing.map((option) => `  ${option.key}. ${option.label}`),
+    ...current.slice(1)
+  ];
+}
+function pickerModelId(label) {
+  return label.match(/\b(?:gpt|claude|gemini|llama|deepseek|qwen|o\d)[a-z0-9._-]*/iu)?.[0]?.toLowerCase();
+}
+function pickerModelKeyConflict(options) {
+  const keysByModel = /* @__PURE__ */ new Map();
+  for (const option of options) {
+    if (!option.key) continue;
+    const model = pickerModelId(option.label);
+    if (!model) continue;
+    const keys = keysByModel.get(model) ?? /* @__PURE__ */ new Set();
+    keys.add(option.key);
+    keysByModel.set(model, keys);
+  }
+  return [...keysByModel.values()].some((keys) => keys.size > 1);
 }
 function isLivePickerCommand(input) {
   return /^\/(?:model|skills|permissions|resume)(?:\s|$)/iu.test(input.trim());
@@ -19540,7 +19740,7 @@ async function runAgentBatch(deps) {
       if (selection) observedNativeModelSelection = selection;
     }
     interactionTextBuffer = `${interactionTextBuffer}
-${delta}`.slice(-16e3);
+${delta}`.slice(-64e3);
     const interaction = detectLiveInteraction(interactionTextBuffer);
     const pickerLike = isStartupInteraction || Boolean(interaction);
     if (!isStartupInteraction && (interaction || pickerLike)) {
@@ -19559,7 +19759,9 @@ ${delta}`.slice(-16e3);
     }
     if (opts.sendInteractionCard === false || currentOutputMode() === "off" && bridgeRoute?.kind !== "native-command") return;
     if (isStartupInteraction && liveInputMode === "control") return;
-    if (!interaction || !cardRenderOptions.signCallback) return;
+    if (!interaction || !cardRenderOptions.signCallback || !isReadyToPublishLiveInteraction(interaction.prompt)) {
+      return;
+    }
     if (!useLiveSession && (sentInteractionSignatures.size > 0 || pendingInteractionSignatures.size > 0)) {
       return;
     }
@@ -19619,11 +19821,14 @@ ${delta}`.slice(-16e3);
     return { ...state, blocks: state.blocks.filter((b) => b.kind !== "tool") };
   };
   const withNativeEmptyFallback = (state) => {
-    if (!useLiveSession || bridgeRoute?.kind !== "native-command" || state.terminal !== "done" || renderText(state).trim()) {
+    if (!useLiveSession || bridgeRoute?.kind !== "native-command" || state.terminal !== "done") {
       return state;
     }
     const observed = interactionTextBuffer.trim();
-    if (observed && looksLikeAgentPicker(observed)) {
+    const observedSurface = observed ? liveInteractionSurface(observed) : void 0;
+    const currentText = renderText(state);
+    const shouldUseObservedPicker = Boolean(observedSurface) && (!currentText.trim() || looksLikeAgentPicker(currentText));
+    if (shouldUseObservedPicker && observedSurface) {
       log.info("agent-live", "picker-final-fallback", {
         scope,
         chars: observed.length
@@ -19633,7 +19838,7 @@ ${delta}`.slice(-16e3);
         blocks: [
           {
             kind: "text",
-            content: `${observed}
+            content: `${observedSurface}
 `,
             streaming: false
           }
@@ -20704,6 +20909,16 @@ function detectLiveInteraction(text, allowBareConfirmation = false) {
     prompt: displayPrompt.slice(0, isCodexModelPickerPrompt(prompt) ? 4e3 : 1200),
     buttons
   };
+}
+function isReadyToPublishLiveInteraction(prompt) {
+  const options = parseLiveInteractionOptions(prompt);
+  const modelOptions = options.filter(
+    (option) => Boolean(option.key && /^\d+$/u.test(option.key)) && /\b(?:gpt|claude|gemini|llama|deepseek|qwen|o\d)[a-z0-9._-]*/iu.test(option.label)
+  );
+  if (modelOptions.length < 2) return true;
+  return /(?:press\s+)?enter\s+to\s+(?:confirm|continue).*esc(?:ape)?\s+to\s+(?:go\s+back|cancel)/iu.test(
+    prompt
+  );
 }
 function recentLiveInteractionPrompt(text) {
   const surface = liveInteractionSurface(text);

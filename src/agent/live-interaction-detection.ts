@@ -1,7 +1,11 @@
 // Native model pickers can list more than a single terminal viewport. Keep
 // enough history to reconstruct the complete choice set instead of making the
 // card depend on whatever rows happened to be visible during a redraw.
-const MAX_INTERACTION_LINES = 120;
+// A native picker can be redrawn after its first rows have scrolled out of the
+// viewport. Keep a wider bounded window so the current frame can be reconciled
+// with the immediately preceding model frame without retaining an unbounded
+// terminal transcript.
+const MAX_INTERACTION_LINES = 240;
 const FALLBACK_INTERACTION_LINES = 12;
 
 const OPTION_LINE_RE = /^(?<selected>[›❯>▸])?\s*(?:(?<number>\d{1,4})(?:[.)、:：-]|\s{1,3})\s*|(?<letter>[A-Za-z])(?:[.)、:：-]|\s{1,3})\s*|\[(?<checkbox>[ xX✓✔])\]\s*|(?<bullet>[-*•])\s+|(?<radio>[◉○●◯])\s*)(?<label>\S.*)$/u;
@@ -298,6 +302,11 @@ function fallbackInteractionCandidate(lines: string[]): string[] {
   // drafts such as `› c`, `› continue`, and `/m` are not menu choices.
   const numericBlock = latestContiguousNumericOptionBlock(lines);
   if (numericBlock) {
+    // Codex's model picker often redraws as `2..5` after the first frame's
+    // `1..5` has scrolled away. Recover only a matching native-model frame;
+    // generic numbered prose must continue through the stricter path below.
+    const recoveredModelFrame = recoverNativeModelPickerFrame(lines, numericBlock);
+    if (recoveredModelFrame) return recoveredModelFrame;
     // Preserve the question for untitled, vendor-neutral pickers, but never
     // reach farther into scrollback. A previous composer draft such as
     // `› /mod` must not be carried into the card merely because the menu
@@ -347,6 +356,196 @@ function fallbackInteractionCandidate(lines: string[]): string[] {
     contextStart = Math.max(0, optionStart - MAX_INTERACTION_LINES);
   }
   return lines.slice(contextStart, end + 1);
+}
+
+interface NumericOptionBlock {
+  start: number;
+  end: number;
+}
+
+/**
+ * Recover a native model picker whose title and first row were scrolled out of
+ * the current terminal viewport. This is deliberately model-specific: blindly
+ * merging arbitrary numbered blocks is how source-code traces become fake
+ * selection cards.
+ */
+function recoverNativeModelPickerFrame(
+  lines: string[],
+  currentBlock: NumericOptionBlock,
+): string[] | undefined {
+  const current = lines.slice(currentBlock.start, currentBlock.end + 1);
+  const currentOptions = parseLiveInteractionOptions(current.join('\n'));
+  if (!isNativeModelOptionSet(currentOptions)) return undefined;
+  const currentKeys = new Set(
+    currentOptions.flatMap((option) => (option.key ? [option.key] : [])),
+  );
+  const currentNumericKeys = currentOptions
+    .flatMap((option) => (option.key && /^\d+$/u.test(option.key) ? [Number(option.key)] : []))
+    .sort((left, right) => left - right);
+  if (currentNumericKeys.length === 0 || currentNumericKeys[0]! <= 1) return undefined;
+
+  // A model label appearing under multiple numeric keys is characteristic of
+  // a source diff/history replay, not a redraw of the same menu. Reject the
+  // recovery before it can manufacture an apparently complete picker.
+  if (hasConflictingNativeModelKeys(lines)) return undefined;
+
+  const blocks = contiguousNumericOptionBlocks(lines);
+  const blockIndex = blocks.findIndex(
+    (block) => block.start === currentBlock.start && block.end === currentBlock.end,
+  );
+  if (blockIndex > 0) {
+    for (let index = blockIndex - 1; index >= 0; index -= 1) {
+      const previousBlock = blocks[index]!;
+      const previousOptions = parseLiveInteractionOptions(
+        lines.slice(previousBlock.start, previousBlock.end + 1).join('\n'),
+      );
+      if (!isNativeModelOptionSet(previousOptions)) continue;
+      const overlap = previousOptions.filter(
+        (option) =>
+          option.key &&
+          currentKeys.has(option.key) &&
+          modelOptionId(option.label) === modelOptionId(
+            currentOptions.find((candidate) => candidate.key === option.key)?.label ?? '',
+          ),
+      ).length;
+      if (overlap < 2) continue;
+      const missing = previousOptions.filter(
+        (option) => option.key && !currentKeys.has(option.key),
+      );
+      if (missing.length === 0) return undefined;
+      return composeRecoveredModelFrame(
+        lines,
+        previousBlock,
+        currentBlock,
+        current,
+        missing,
+      );
+    }
+  }
+
+  // If the previous frame is no longer in the bounded buffer, the selected
+  // contiguous gpt/model rows are still strong enough to label the surface.
+  // This restores arrow-navigation semantics, while never applying to generic
+  // numbered output or a block with no current selection.
+  if (currentOptions.some((option) => option.selected)) {
+    return composeRecoveredModelFrame(lines, undefined, currentBlock, current, []);
+  }
+  return undefined;
+}
+
+function composeRecoveredModelFrame(
+  lines: string[],
+  previousBlock: NumericOptionBlock | undefined,
+  currentBlock: NumericOptionBlock,
+  current: string[],
+  missing: LiveInteractionOption[],
+): string[] {
+  const heading = findNativeModelHeading(lines, previousBlock?.start ?? currentBlock.start);
+  const missingRows = missing
+    .sort((left, right) => Number(left.key) - Number(right.key))
+    .map((option) => {
+      const source = previousBlock
+        ? lines
+            .slice(previousBlock.start, previousBlock.end + 1)
+            .find((line) => line.trim().match(OPTION_LINE_RE)?.groups?.number === option.key)
+        : undefined;
+      if (source) return source.replace(/^(\s*)[›❯>▸]\s*/u, '$1  ');
+      return `  ${option.key}. ${option.label}`;
+    });
+  const hint = findNativeModelHint(lines, currentBlock.end, previousBlock?.end);
+  return [
+    heading ?? 'Select Model and Effort',
+    ...missingRows,
+    ...current,
+    ...(hint && !current.some((line) => KEY_HINT_RE.test(line)) ? [hint] : []),
+  ];
+}
+
+function contiguousNumericOptionBlocks(lines: string[]): NumericOptionBlock[] {
+  const blocks: NumericOptionBlock[] = [];
+  let runLength = 0;
+  let previousKey: number | undefined;
+  let runStart = 0;
+  const finish = (end: number): void => {
+    if (runLength >= 2) blocks.push({ start: runStart, end });
+    runLength = 0;
+    previousKey = undefined;
+  };
+  for (const [index, line] of lines.entries()) {
+    const match = line.trim().match(OPTION_LINE_RE);
+    const rawKey = match?.groups?.number;
+    if (!rawKey || isCodeLikeInteractionLine(line)) {
+      finish(index - 1);
+      continue;
+    }
+    const key = Number(rawKey);
+    if (previousKey !== undefined && key === previousKey + 1) {
+      runLength += 1;
+    } else {
+      finish(index - 1);
+      runLength = 1;
+      runStart = index;
+    }
+    previousKey = key;
+  }
+  finish(lines.length - 1);
+  return blocks;
+}
+
+function isNativeModelOptionSet(options: LiveInteractionOption[]): boolean {
+  return (
+    options.length >= 2 &&
+    options.filter((option) => Boolean(option.key && modelOptionId(option.label))).length >= 2
+  );
+}
+
+function modelOptionId(label: string): string | undefined {
+  return label.match(/\b(?:gpt|claude|gemini|llama|deepseek|qwen|o\d)[a-z0-9._-]*/iu)?.[0]?.toLowerCase();
+}
+
+function hasConflictingNativeModelKeys(lines: string[]): boolean {
+  const keysByModel = new Map<string, Set<string>>();
+  for (const option of parseLiveInteractionOptions(lines.join('\n'))) {
+    if (!option.key) continue;
+    const model = modelOptionId(option.label);
+    if (!model) continue;
+    const keys = keysByModel.get(model) ?? new Set<string>();
+    keys.add(option.key);
+    keysByModel.set(model, keys);
+  }
+  return [...keysByModel.values()].some((keys) => keys.size > 1);
+}
+
+function findNativeModelHeading(lines: string[], before: number): string | undefined {
+  for (let index = before - 1; index >= Math.max(0, before - 12); index -= 1) {
+    const line = lines[index]?.trim() ?? '';
+    if (isCodeLikeInteractionLine(line)) continue;
+    const isHeading = /^(?:select\s+(?:a\s+)?model|model(?:\s+and\s+effort)?|reasoning\s+(?:effort|level))\b/iu.test(line);
+    if (isHeading && !/^model\s+changed\b/iu.test(line)) {
+      return line;
+    }
+  }
+  return undefined;
+}
+
+function findNativeModelHint(
+  lines: string[],
+  currentEnd: number,
+  previousEnd: number | undefined,
+): string | undefined {
+  const start = currentEnd + 1;
+  const end = Math.min(lines.length, start + 8);
+  for (let index = start; index < end; index += 1) {
+    const line = lines[index]?.trim() ?? '';
+    if (KEY_HINT_RE.test(line)) return line;
+  }
+  if (previousEnd !== undefined) {
+    for (let index = previousEnd + 1; index < Math.min(lines.length, previousEnd + 8); index += 1) {
+      const line = lines[index]?.trim() ?? '';
+      if (KEY_HINT_RE.test(line)) return line;
+    }
+  }
+  return undefined;
 }
 
 /**

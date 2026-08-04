@@ -1333,7 +1333,10 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     // The structured surface is derived from the latest actionable terminal
     // snapshot, not from a fixed command/menu depth, so selecting "More
     // options" can publish an arbitrary next-level picker.
-    interactionTextBuffer = `${interactionTextBuffer}\n${delta}`.slice(-16_000);
+    // Keep enough bounded history to reconcile a model-picker redraw whose
+    // first row scrolled out of the latest viewport. The detector applies its
+    // own line bound and rejects conflicting source/diff rows.
+    interactionTextBuffer = `${interactionTextBuffer}\n${delta}`.slice(-64_000);
     const interaction = detectLiveInteraction(interactionTextBuffer);
     const pickerLike = isStartupInteraction || Boolean(interaction);
     if (!isStartupInteraction && (interaction || pickerLike)) {
@@ -1358,7 +1361,15 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       (currentOutputMode() === 'off' && bridgeRoute?.kind !== 'native-command')
     ) return;
     if (isStartupInteraction && liveInputMode === 'control') return;
-    if (!interaction || !cardRenderOptions.signCallback) return;
+    // A model picker is rendered row-by-row by the native TUI. Publishing as
+    // soon as two rows arrive can expose a truncated card (for example 2..5
+    // before row 1 and the confirmation footer are drawn). Keep lifecycle
+    // state active immediately, but wait for the explicit footer before
+    // sending a standalone card. The final reply path still publishes the
+    // accumulated picker if the terminal finishes without a footer.
+    if (!interaction || !cardRenderOptions.signCallback || !isReadyToPublishLiveInteraction(interaction.prompt)) {
+      return;
+    }
     if (!useLiveSession && (sentInteractionSignatures.size > 0 || pendingInteractionSignatures.size > 0)) {
       return;
     }
@@ -1449,13 +1460,18 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     if (
       !useLiveSession ||
       bridgeRoute?.kind !== 'native-command' ||
-      state.terminal !== 'done' ||
-      renderText(state).trim()
+      state.terminal !== 'done'
     ) {
       return state;
     }
     const observed = interactionTextBuffer.trim();
-    if (observed && looksLikeAgentPicker(observed)) {
+    const observedSurface = observed ? liveInteractionSurface(observed) : undefined;
+    const currentText = renderText(state);
+    const shouldUseObservedPicker =
+      Boolean(observedSurface) &&
+      (!currentText.trim() ||
+        looksLikeAgentPicker(currentText));
+    if (shouldUseObservedPicker && observedSurface) {
       log.info('agent-live', 'picker-final-fallback', {
         scope,
         chars: observed.length,
@@ -1465,7 +1481,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         blocks: [
           {
             kind: 'text',
-            content: `${observed}\n`,
+            content: `${observedSurface}\n`,
             streaming: false,
           },
         ],
@@ -2856,6 +2872,23 @@ function detectLiveInteraction(
     prompt: displayPrompt.slice(0, isCodexModelPickerPrompt(prompt) ? 4_000 : 1_200),
     buttons,
   };
+}
+
+function isReadyToPublishLiveInteraction(prompt: string): boolean {
+  const options = parseLiveInteractionOptions(prompt);
+  const modelOptions = options.filter(
+    (option) =>
+      Boolean(option.key && /^\d+$/u.test(option.key)) &&
+      /\b(?:gpt|claude|gemini|llama|deepseek|qwen|o\d)[a-z0-9._-]*/iu.test(option.label),
+  );
+  if (modelOptions.length < 2) return true;
+
+  // Model/reasoning rows are painted progressively. The footer is the only
+  // vendor-neutral indication that the native picker has finished rendering;
+  // without it, wait for the final reply path to use the accumulated frame.
+  return /(?:press\s+)?enter\s+to\s+(?:confirm|continue).*esc(?:ape)?\s+to\s+(?:go\s+back|cancel)/iu.test(
+    prompt,
+  );
 }
 
 function recentLiveInteractionPrompt(text: string): string {

@@ -503,6 +503,48 @@ describe('markdown stream startup failures', () => {
     expect(buttonLabels(content?.card)).toEqual(['1', '2', 'enter', 'esc']);
   });
 
+  it('waits for a complete model-picker frame before publishing its card', async () => {
+    const h = await createHarness({
+      stream: async () => {
+        throw new Error('native live picker output should not use stream');
+      },
+    });
+    h.agent.setEvents([
+      [
+        {
+          type: 'text',
+          delta: [
+            'Select Model and Effort',
+            '2. gpt-5.6-terra',
+            '› 3. gpt-5.6-luna (current)',
+          ].join('\n'),
+        },
+        {
+          type: 'text',
+          delta: [
+            'Select Model and Effort',
+            '1. gpt-5.6-sol',
+            '2. gpt-5.6-terra',
+            '› 3. gpt-5.6-luna (current)',
+            '4. gpt-5.5',
+            '5. gpt-5.2',
+            'Press enter to confirm or esc to go back',
+          ].join('\n'),
+        },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+    ]);
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_model_frame_stability', '/codex /model'));
+    await waitFor(() => h.channel.sent.length >= 1);
+    expect(h.channel.sent).toHaveLength(1);
+
+    const card = (h.channel.sent[0]?.content as { card?: unknown }).card;
+    expect(buttonLabels(card)).toEqual(['1', '2', '3', '4', '5', 'enter', 'esc']);
+    expect(JSON.stringify(card)).toContain('1. gpt-5.6-sol');
+  });
+
   it('uses the native Codex model picker and syncs its selection into later turn runs', async () => {
     const h = await createHarness();
     h.profileConfig.preferences = {

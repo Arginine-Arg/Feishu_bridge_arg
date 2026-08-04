@@ -17,6 +17,7 @@ import {
 } from './terminal-text';
 import {
   isLiveInteractionPromptStart,
+  parseLiveInteractionOptions,
   isStructuredLiveInteraction,
 } from './live-interaction-detection';
 import {
@@ -791,7 +792,15 @@ export class LiveTerminalSession {
           }
         } else {
           if (commandMode) log.info('agent-live', 'command-submit', { commandText: prompt });
-          if (inputMode === 'control' && shouldDeferControlLiteralSubmit(prompt)) {
+          if (inputMode === 'control' && isNumericControlLiteral(prompt)) {
+            // A numeric picker choice can open a nested menu (Codex's
+            // "More reasoning…" is one example). Never synthesize Enter after
+            // the literal: the user can press the explicit card Enter button
+            // when this menu is meant to be confirmed. This prevents a delayed
+            // fallback key from selecting the nested menu's default option.
+            log.info('agent-live', 'control-literal-type', { input: prompt });
+            this.write(prompt);
+          } else if (inputMode === 'control' && shouldDeferControlLiteralSubmit(prompt)) {
             log.info('agent-live', 'control-literal-type', { input: prompt });
             this.write(prompt);
             controlLiteralConfirmTimer = setTimeout(() => {
@@ -1640,6 +1649,10 @@ export function isPendingLiveCommandDraft(input: string, prompt: string): boolea
 function shouldDeferControlLiteralSubmit(input: string): boolean {
   const trimmed = input.trim();
   return /^\d{1,2}$/u.test(trimmed) || /^(?:y|yes|n|no)$/iu.test(trimmed);
+}
+
+function isNumericControlLiteral(input: string): boolean {
+  return /^\d{1,2}$/u.test(input.trim());
 }
 
 function isKnownSilentLiveCommand(input: string): boolean {
@@ -2641,8 +2654,86 @@ function scopeLivePickerSnapshot(lines: string[]): string | undefined {
   }
   if (start < 0) return undefined;
 
-  const picker = lines.slice(start).join('\n');
+  // TUI redraws can scroll the first model row out of the visible frame. The
+  // history capture still contains the preceding frame, but returning only
+  // `lines.slice(start)` would discard it before the Feishu picker detector can
+  // reconcile the two. Recover only a native model frame with matching keys
+  // and model IDs; arbitrary numbered terminal output must remain untouched.
+  const pickerLines = recoverNativeModelPickerRows(lines, start);
+  const picker = pickerLines.join('\n');
   return isLikelyLivePickerOutput(picker) ? picker : undefined;
+}
+
+function recoverNativeModelPickerRows(lines: string[], latestStart: number): string[] {
+  const current = lines.slice(latestStart);
+  const title = lines[latestStart]?.trim() ?? '';
+  if (!title || !/^select\s+(?:a\s+)?model\b/iu.test(title)) return current;
+
+  const currentOptions = parseLiveInteractionOptions(current.join('\n'));
+  const currentNumeric = currentOptions.filter(
+    (option) => option.key && /^\d+$/u.test(option.key) && pickerModelId(option.label),
+  );
+  if (currentNumeric.length < 2 || Number(currentNumeric[0]?.key ?? 0) <= 1) return current;
+  if (pickerModelKeyConflict(currentNumeric)) return current;
+
+  let previousStart = -1;
+  for (let index = latestStart - 1; index >= 0; index -= 1) {
+    const line = lines[index]?.trim() ?? '';
+    if (!line) continue;
+    if (line === title) {
+      previousStart = index;
+      break;
+    }
+    // A different picker heading marks a nested/new menu. Never borrow its
+    // rows just because the numeric keys happen to overlap.
+    if (isLiveInteractionPromptStart(line)) break;
+  }
+  if (previousStart < 0) return current;
+
+  const previous = lines.slice(previousStart, latestStart);
+  const previousOptions = parseLiveInteractionOptions(previous.join('\n')).filter(
+    (option) => option.key && /^\d+$/u.test(option.key) && pickerModelId(option.label),
+  );
+  if (previousOptions.length < 2 || pickerModelKeyConflict(previousOptions)) return current;
+
+  const currentByKey = new Map(
+    currentNumeric.map((option) => [option.key!, pickerModelId(option.label)!]),
+  );
+  const overlap = previousOptions.filter(
+    (option) => option.key && currentByKey.get(option.key) === pickerModelId(option.label),
+  ).length;
+  if (overlap < 2) return current;
+
+  const currentKeys = new Set(currentNumeric.map((option) => option.key));
+  const missing = previousOptions
+    .filter((option) => option.key && !currentKeys.has(option.key))
+    .sort((left, right) => Number(left.key) - Number(right.key));
+  if (missing.length === 0) return current;
+
+  return [
+    current[0]!,
+    ...missing.map((option) => `  ${option.key}. ${option.label}`),
+    ...current.slice(1),
+  ];
+}
+
+function pickerModelId(label: string): string | undefined {
+  return label
+    .match(/\b(?:gpt|claude|gemini|llama|deepseek|qwen|o\d)[a-z0-9._-]*/iu)?.[0]
+    ?.toLowerCase();
+}
+
+function pickerModelKeyConflict(options: Array<{ key?: string; label: string }>): boolean {
+  const keysByModel = new Map<string, Set<string>>();
+  for (const option of options) {
+    if (!option.key) continue;
+    const model = pickerModelId(option.label);
+    if (!model) continue;
+    const keys = keysByModel.get(model) ?? new Set<string>();
+    keys.add(option.key);
+    keysByModel.set(model, keys);
+  }
+  return [...keysByModel.values()].some((keys) => keys.size > 1);
 }
 
 function isLivePickerCommand(input: string): boolean {

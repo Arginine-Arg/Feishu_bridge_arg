@@ -392,6 +392,33 @@ describe('tmux input framing and snapshots', () => {
       ].join('\n'),
     );
 
+    const redrawnModel = [
+      'Select Model and Effort',
+      '1. gpt-5.6-sol',
+      '2. gpt-5.6-terra',
+      '› 3. gpt-5.6-luna (current)',
+      '4. gpt-5.5',
+      '5. gpt-5.2',
+      'Press enter to confirm or esc to go back',
+      'Select Model and Effort',
+      '2. gpt-5.6-terra',
+      '› 3. gpt-5.6-luna (current)',
+      '4. gpt-5.5',
+      '5. gpt-5.2',
+      'Press enter to confirm or esc to go back',
+    ].join('\n');
+    expect(scopeLiveSnapshotToPrompt(redrawnModel, '/model')).toBe(
+      [
+        'Select Model and Effort',
+        '  1. gpt-5.6-sol',
+        '2. gpt-5.6-terra',
+        '› 3. gpt-5.6-luna (current)',
+        '4. gpt-5.5',
+        '5. gpt-5.2',
+        'Press enter to confirm or esc to go back',
+      ].join('\n'),
+    );
+
     const modelChanged = [
       '› an earlier request',
       '• earlier answer',
@@ -1605,9 +1632,9 @@ setInterval(() => {}, 1000);
     expect(text).not.toContain('confirmed-too-early');
   }, 15_000);
 
-  it('presses enter after a picker literal when typing it produces no output', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'live-session-control-literal-confirm-test-'));
-    const bin = join(dir, 'fake-control-literal-confirm-agent.mjs');
+  it('does not auto-confirm a numeric picker literal when it produces no output', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-control-literal-no-confirm-test-'));
+    const bin = join(dir, 'fake-control-literal-no-confirm-agent.mjs');
     await writeFile(
       bin,
       `#!/usr/bin/env node
@@ -1616,7 +1643,7 @@ let buf = '';
 process.stdin.on('data', (chunk) => {
   buf += chunk;
   if (buf.includes('1') && /[\\r\\n]/.test(buf)) {
-    process.stdout.write('confirmed-after-delay\\n');
+    process.stdout.write('confirmed-too-early\\n');
     buf = '';
   }
 });
@@ -1627,21 +1654,21 @@ setInterval(() => {}, 1000);
     await chmod(bin, 0o755);
 
     const pool = new LiveSessionPool();
-    const session = pool.getOrCreate('control-literal-confirm-scope', {
+    const session = pool.getOrCreate('control-literal-no-confirm-scope', {
       command: process.execPath,
       args: [bin],
       cwd: dir,
-      signature: 'control-literal-confirm',
+      signature: 'control-literal-no-confirm',
       usePty: false,
       idleMs: 80,
       outputFlushMs: 10,
       startupTimeoutMs: 1000,
     });
 
-    const events = await collect(session.run('control-literal-confirm-run', '1', dir, 'control').events);
+    const events = await collect(session.run('control-literal-no-confirm-run', '1', dir, 'control').events);
     await pool.closeAll();
 
-    expect(textOf(events)).toContain('confirmed-after-delay');
+    expect(textOf(events)).not.toContain('confirmed-too-early');
   }, 15_000);
 
   it('cleans up a previous live turn when a new turn starts', async () => {
