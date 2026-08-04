@@ -37,8 +37,21 @@ export function parseLiveInteractionOptions(
   const ambiguousRows = lines.map((line) =>
     Boolean(line.trim().match(OPTION_LINE_RE)?.groups?.bullet),
   );
+  let inMarkdownFence = false;
   for (const [index, line] of lines.entries()) {
     const trimmed = line.trim();
+    if (/^(?:```|~~~)/u.test(trimmed)) {
+      inMarkdownFence = !inMarkdownFence;
+      continue;
+    }
+    if (inMarkdownFence) continue;
+    // Terminal pickers commonly indent their Enter/Esc legend. It is part of
+    // the prompt surface, never an answer row, even when it follows a bare
+    // arrow option and therefore looks like a navigation continuation.
+    if (isInteractionHintLine(trimmed)) continue;
+    // Diff hunks and quoted source literals can contain perfectly valid
+    // looking `1. ...` rows. They are output prose, not terminal controls.
+    if (isCodeLikeInteractionLine(trimmed)) continue;
     // Activity blocks are rendered as Markdown quotes by the Feishu card
     // renderer. A quoted `> • Ran`/`> └ Read` row must never become an option
     // merely because a nearby prompt happens to mention Enter or choose.
@@ -93,6 +106,7 @@ function isRenderedActivityQuote(label: string): boolean {
 function hasBareNavigationAnchor(lines: string[], index: number): boolean {
   for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
     const line = lines[cursor] ?? '';
+    if (isInteractionHintLine(line)) return false;
     if (!line.trim()) return false;
     if (line.trim().match(BARE_NAV_OPTION_RE)?.groups?.label) {
       const label = line.trim().match(BARE_NAV_OPTION_RE)?.groups?.label ?? '';
@@ -102,6 +116,27 @@ function hasBareNavigationAnchor(lines: string[], index: number): boolean {
     return false;
   }
   return false;
+}
+
+function isInteractionHintLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed || OPTION_LINE_RE.test(trimmed) || BARE_NAV_OPTION_RE.test(trimmed)) return false;
+  return Boolean(
+    /^(?:press|hit|type)\s+(?:enter|return|esc|escape)\b/iu.test(trimmed) ||
+      /^(?:enter|return)\s+to\s+(?:confirm|continue|choose|select)\b/iu.test(trimmed) ||
+      /^(?:esc|escape)\s+to\s+(?:go\s+back|cancel|exit)\b/iu.test(trimmed) ||
+      /^(?:use\s+)?(?:↑|↓|up\/down|arrow\s+keys?)(?:\s|$)/iu.test(trimmed) ||
+      /^(?:按下?|点击)(?:回车|回车键|esc|方向键).*(?:确认|继续|取消|返回|选择)/u.test(trimmed),
+  );
+}
+
+function isCodeLikeInteractionLine(line: string): boolean {
+  const trimmed = line.trim();
+  return (
+    /^\d{1,5}\s+[+-]\s*['"`]/u.test(trimmed) ||
+    /^[+-]\s*(?:['"`]|(?:const|let|var|function|return|import|export)\b)/iu.test(trimmed) ||
+    /^['"`].*['"`],?$/u.test(trimmed)
+  );
 }
 
 function isOptionSyntaxLine(line: string): boolean {
@@ -147,10 +182,11 @@ export function isLiveInputPromptLine(line: string): boolean {
  */
 export function liveInteractionSurface(input: string): string | undefined {
   const candidate = interactionCandidate(input);
+  const usable = candidate ? stripInteractionCodeFences(candidate) : undefined;
   // Rendering waits for a complete picker frame so the first card does not
   // omit later options that arrive in the next terminal redraw.
-  if (!candidate || !isStructuredInteraction(candidate, true)) return undefined;
-  return candidate.join('\n');
+  if (!usable || !isStructuredInteraction(usable, true)) return undefined;
+  return usable.join('\n');
 }
 
 export function isStructuredLiveInteraction(input: string): boolean {
@@ -159,7 +195,22 @@ export function isStructuredLiveInteraction(input: string): boolean {
   // controls relay lifecycle and prevents its first rendered option from
   // being mistaken for a normal final response; only card publication waits
   // for a complete frame above.
-  return Boolean(candidate && isStructuredInteraction(candidate, false));
+  const usable = candidate ? stripInteractionCodeFences(candidate) : undefined;
+  return Boolean(usable && isStructuredInteraction(usable, false));
+}
+
+function stripInteractionCodeFences(lines: string[]): string[] {
+  const out: string[] = [];
+  let inFence = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (/^(?:```|~~~)/u.test(trimmed)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (!inFence) out.push(line);
+  }
+  return out;
 }
 
 function interactionCandidate(input: string): string[] | undefined {
@@ -193,9 +244,109 @@ function interactionCandidate(input: string): string[] | undefined {
       optionStart -= 1;
     }
     if (optionStart > 0 && /[?:：？]\s*$/u.test(recent[optionStart - 1]!)) optionStart -= 1;
-    return recent.slice(optionStart);
+    return mergeRepeatedPickerOptions(recent, start, recent.slice(optionStart));
   }
-  return recent.slice(-FALLBACK_INTERACTION_LINES);
+  return fallbackInteractionCandidate(recent);
+}
+
+/**
+ * Pickers without a recognizable title still commonly end with an Enter/Esc
+ * legend.  A fixed tail window can cut off the first rows (and, more
+ * importantly, the source/diff line that made those rows look like a menu).
+ * Scope the fallback to the latest control hint and the contiguous option
+ * block immediately before it, retaining one adjacent question/code line for
+ * the structural checks.
+ */
+function fallbackInteractionCandidate(lines: string[]): string[] {
+  let controlIndex = -1;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]?.trim() ?? '';
+    if (
+      !isOptionSyntaxLine(line) &&
+      KEY_HINT_RE.test(line)
+    ) {
+      controlIndex = index;
+      break;
+    }
+  }
+  const lastOption = lines.reduce(
+    (last, line, index) => (isOptionSyntaxLine(line) ? index : last),
+    -1,
+  );
+  if (lastOption < 0) return lines.slice(-FALLBACK_INTERACTION_LINES);
+
+  const end = Math.max(lastOption, controlIndex);
+  let optionStart = lastOption;
+  while (optionStart >= 0 && isOptionSyntaxLine(lines[optionStart] ?? '')) optionStart -= 1;
+
+  let contextStart = optionStart;
+  for (let index = optionStart - 1; index >= Math.max(0, optionStart - MAX_INTERACTION_LINES); index -= 1) {
+    const line = lines[index]?.trim() ?? '';
+    if (isLiveInteractionPromptStart(line) || /[?？]\s*$/u.test(line)) {
+      contextStart = index;
+      break;
+    }
+  }
+  // If no title/question was found, keep the nearby context. This preserves
+  // known vendor prompts (which may use a warning prefix) while still keeping
+  // the candidate bounded to one terminal surface.
+  if (contextStart === optionStart) {
+    contextStart = Math.max(0, optionStart - MAX_INTERACTION_LINES);
+  }
+  return lines.slice(contextStart, end + 1);
+}
+
+/**
+ * A full-screen picker may redraw after the selected row moves. The redraw can
+ * scroll the first rows out of the viewport even though an earlier frame in
+ * the same turn contained them. Retain only missing explicitly keyed rows
+ * from an immediately preceding frame with the same heading; a different
+ * heading starts a genuinely nested menu and must not inherit stale choices.
+ */
+function mergeRepeatedPickerOptions(
+  lines: string[],
+  latestStart: number,
+  current: string[],
+): string[] {
+  const title = lines[latestStart]?.trim();
+  if (!title) return current;
+
+  let previousStart = -1;
+  for (let index = latestStart - 1; index >= 0; index -= 1) {
+    const line = lines[index]?.trim() ?? '';
+    if (!line) continue;
+    if (!isLiveInteractionPromptStart(line)) continue;
+    if (line === title) previousStart = index;
+    break;
+  }
+  if (previousStart < 0) return current;
+
+  const currentOptions = parseLiveInteractionOptions(current.join('\n'));
+  // Do not turn a redraw that contains only the heading into a stale card.
+  // Wait until the current frame exposes at least a real pair of rows.
+  if (currentOptions.length < 2) return current;
+  const previousOptions = parseLiveInteractionOptions(
+    lines.slice(previousStart, latestStart).join('\n'),
+  );
+  const keyedCurrent = new Set(
+    currentOptions.flatMap((option) => (option.key ? [option.key] : [])),
+  );
+  const missing = previousOptions.filter(
+    (option) => option.key && !keyedCurrent.has(option.key),
+  );
+  if (missing.length === 0) return current;
+
+  const rows = missing
+    .sort((left, right) => {
+      if (/^\d+$/u.test(left.key!) && /^\d+$/u.test(right.key!)) {
+        return Number(left.key) - Number(right.key);
+      }
+      return 0;
+    })
+    .map((option) => `${option.selected ? '›' : ' '} ${option.key}. ${option.label}`);
+  const firstOption = current.findIndex((line) => isOptionSyntaxLine(line));
+  const insertion = firstOption >= 0 ? firstOption : Math.min(1, current.length);
+  return [...current.slice(0, insertion), ...rows, ...current.slice(insertion)];
 }
 
 /** Non-live agent prompts may be semantic questions without terminal controls. */
@@ -207,20 +358,22 @@ export function isBareAgentConfirmation(input: string): boolean {
 }
 
 export function isLiveInteractionPromptStart(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed || isCodeLikeInteractionLine(trimmed)) return false;
   return (
-    /claude\s+code\s+running\s+in\s+bypass\s+permissions\s+mode/iu.test(line) ||
-    /\bupdate\s+available\b/iu.test(line) ||
-    /\bselect\s+(?:a\s+)?(?:model|reasoning|option|permission|session)\b/iu.test(line) ||
-    /^(?:reasoning (?:effort|level)|skills?)\b/iu.test(line) ||
-    /\bchoose\s+an\s+action\b/iu.test(line) ||
-    /\b(?:command )?requires?\s+(?:approval|confirmation)\b/iu.test(line) ||
-    /\bresume\s+previous\s+conversation\b/iu.test(line) ||
-    isCodexResumeControlLine(line) ||
+    /\bclaude\s+code\s+running\s+in\s+bypass\s+permissions\s+mode/iu.test(trimmed) ||
+    /\bupdate\s+available\b/iu.test(trimmed) ||
+    (/^select\b/iu.test(trimmed) && !/[.!。！？]\s*$/u.test(trimmed)) ||
+    /^(?:reasoning (?:effort|level)|skills?)\b/iu.test(trimmed) ||
+    /^choose\s+an\s+action\b/iu.test(trimmed) ||
+    /^(?:command )?requires?\s+(?:approval|confirmation)\b/iu.test(trimmed) ||
+    /^resume\s+previous\s+conversation\b/iu.test(trimmed) ||
+    isCodexResumeControlLine(trimmed) ||
     /^(?:请选择|请(?:输入|回复).*(?:选项|编号|是|否)|等待(?:你|用户)(?:的)?(?:输入|选择|确认)|是否.*[？?])/u.test(line) ||
     // Generic terminal prompts are intentionally broad here. The structural
     // check below still requires option/control evidence, so ordinary prose
     // containing "choose" cannot become a card by itself.
-    (GENERIC_INPUT_HINT_RE.test(line) && /[?:：？]$|\b(?:now|below|from)\b/iu.test(line.trim()))
+    (GENERIC_INPUT_HINT_RE.test(trimmed) && /[?:：？]$|\b(?:now|below|from)\b/iu.test(trimmed))
   );
 }
 
@@ -285,6 +438,8 @@ function isStructuredInteraction(lines: string[], requireCompletePickerFrame: bo
     ? options.length >= 2
     : options.length >= 2 || (hasOptions && (hasInputPrompt || hasPromptTitle));
   const hasStrongOptionRows = lines.some((line) => isStrongOptionSyntaxLine(line));
+  const hasCodeLikeNoise = lines.some((line) => isCodeLikeInteractionLine(line));
+  const hasCleanNumericOptionBlock = hasContiguousNumericOptionBlock(lines);
   const genericInputEvidence =
     hasInputPrompt ||
     hasPromptMarker ||
@@ -292,7 +447,8 @@ function isStructuredInteraction(lines: string[], requireCompletePickerFrame: bo
     (hasQuestionBeforeOptions && hasStrongOptionRows);
 
   return (
-    claudeBypass ||
+    !hasCodeLikeNoise &&
+    (claudeBypass ||
     codexUpdate ||
     codexResume ||
     (hasPromptTitle && tailIsControl && (
@@ -301,11 +457,15 @@ function isStructuredInteraction(lines: string[], requireCompletePickerFrame: bo
       (hasKeyHint && tailIsControl)
     )) ||
     (hasConfirmationQuestion && (hasNumberedChoice || hasBinaryControl)) ||
-    ((requireCompletePickerFrame ? completeNumberedPicker : hasNumberedChoice) && hasKeyHint && tailIsControl) ||
+    ((requireCompletePickerFrame ? completeNumberedPicker : hasNumberedChoice) &&
+      hasKeyHint &&
+      tailIsControl &&
+      !hasCodeLikeNoise &&
+      (hasPromptTitle || hasQuestionBeforeOptions || hasCleanNumericOptionBlock)) ||
     (hasBinaryControl && /(?:approval|confirmation|allow|proceed|continue|确认|允许|继续)/iu.test(text)) ||
     // Vendor-neutral menus may have no title or Enter/Esc legend. Requiring
     // multiple option rows plus a nearby input prompt/marker prevents normal
-    // bullet lists from being promoted to interactive cards. A question mark
+      // bullet lists from being promoted to interactive cards. A question mark
     // immediately before the option block is equivalent prompt evidence for
     // CLIs that render no title or key legend.
     (hasOptions &&
@@ -315,8 +475,28 @@ function isStructuredInteraction(lines: string[], requireCompletePickerFrame: bo
       // waiting, while titled/native pickers can publish a one-row frame with
       // an Enter/answer prompt.
       genericOptionCount &&
-      genericInputEvidence)
+      genericInputEvidence))
   );
+}
+
+function hasContiguousNumericOptionBlock(lines: string[]): boolean {
+  let runLength = 0;
+  let previousKey: number | undefined;
+  for (const line of lines) {
+    const match = line.trim().match(OPTION_LINE_RE);
+    const rawKey = match?.groups?.number;
+    if (!rawKey) {
+      if (runLength >= 2) return true;
+      runLength = 0;
+      previousKey = undefined;
+      continue;
+    }
+    const key = Number(rawKey);
+    if (previousKey !== undefined && key === previousKey + 1) runLength += 1;
+    else runLength = 1;
+    previousKey = key;
+  }
+  return runLength >= 2;
 }
 
 function isCodexResumeControlLine(line: string): boolean {

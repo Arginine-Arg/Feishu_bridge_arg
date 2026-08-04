@@ -142,6 +142,104 @@ describe('liveInteractionCard', () => {
     }
   });
 
+  it('keeps indented confirmation hints in the prompt without making them buttons', () => {
+    const text = [
+      'Select Reasoning Level for gpt-5.6-luna',
+      '  1. Low                        Fast responses with lighter reasoning',
+      '  2. Medium (default)           Balances speed and reasoning depth for everyday tasks',
+      '› 3. High                       Greater reasoning depth for complex problems',
+      '  4. Extra high                 Extra high reasoning depth for complex problems',
+      '  5. More reasoning… (current)  Max consumes usage limits faster',
+      '  Press enter to confirm or esc to go back',
+    ].join('\n');
+
+    expect(parseLiveInteractionOptions(text).map((option) => option.key ?? option.label)).toEqual([
+      '1',
+      '2',
+      '3',
+      '4',
+      '5',
+    ]);
+    const card = liveInteractionCardForText(text, () => 'reasoning-token');
+    expect(card).toBeDefined();
+    expect(buttonValues(card).map((value) => value.input)).toEqual(['1', '2', '3', '4', '5', 'enter', 'esc']);
+    expect(JSON.stringify(card)).toContain('Press enter to confirm or esc to go back');
+  });
+
+  it('recovers a choice that scrolled out during a same-menu redraw', () => {
+    const text = [
+      'Select Model',
+      '› 1. gpt-5.6-sol (current)',
+      '2. gpt-5.6-terra',
+      '3. gpt-5.6-luna',
+      '4. gpt-5.5',
+      '5. gpt-5.2',
+      'Press enter to confirm or esc to go back',
+      'Select Model',
+      '2. gpt-5.6-terra',
+      '› 3. gpt-5.6-luna (current)',
+      '4. gpt-5.5',
+      '5. gpt-5.2',
+      'Press enter to confirm or esc to go back',
+    ].join('\n');
+
+    const card = liveInteractionCardForText(text, () => 'redraw-token');
+    expect(card).toBeDefined();
+    expect(buttonValues(card).map((value) => value.input)).toEqual(['1', '2', '3', '4', '5', 'enter', 'esc']);
+    expect(JSON.stringify(card)).toContain('gpt-5.6-sol');
+  });
+
+  it('does not hide an explicit option whose label mentions Enter', () => {
+    const text = ['Select an action', '1. Enter to continue setup', '2. Cancel', 'Choose one:'].join('\n');
+    expect(parseLiveInteractionOptions(text).map((option) => option.key)).toEqual(['1', '2']);
+  });
+
+  it('does not promote source-code diffs containing picker-looking rows', () => {
+    const text = [
+      "171 +      'Select Model',",
+      '1. gpt-5.6-sol (selected)',
+      '2. gpt-5.6-terra',
+      '3. gpt-5.6-luna',
+      '4. gpt-5.5',
+      '5. gpt-5.2',
+      '172. gpt-5.6-sol (current)',
+      '173. gpt-5.6-terra',
+      '174. gpt-5.6-luna',
+      '175. gpt-5.5',
+      '176. gpt-5.2',
+      'Press enter to confirm or esc to go back',
+    ].join('\n');
+
+    expect(isStructuredLiveInteraction(text)).toBe(false);
+    expect(liveInteractionCardForText(text, () => 'source-code-token')).toBeUndefined();
+  });
+
+  it('does not promote a long source diff after the fallback tail drops its first line', () => {
+    const text = [
+      "171 +      'Select Model',",
+      '1. gpt-5.6-sol (selected)',
+      '2. gpt-5.6-terra',
+      '3. gpt-5.6-luna',
+      '4. gpt-5.5',
+      '5. gpt-5.2',
+      '172. gpt-5.6-sol (current)',
+      '173. gpt-5.6-terra',
+      '174. gpt-5.6-luna',
+      '175. gpt-5.5',
+      '176. gpt-5.2',
+      '179. gpt-5.6-terra',
+      '180. gpt-5.6-luna (current)',
+      '181. gpt-5.5',
+      '182. gpt-5.2',
+      '189. gpt-5.6-sol',
+      'Press enter to confirm or esc to go back',
+    ].join('\n');
+
+    expect(isStructuredLiveInteraction(text)).toBe(false);
+    expect(liveInteractionSurface(text)).toBeUndefined();
+    expect(liveInteractionCardForText(text, () => 'long-source-code-token')).toBeUndefined();
+  });
+
   it('waits for a complete picker frame, then preserves its first choice', () => {
     const firstFrame = [
       'Select Model and Effort',
@@ -202,6 +300,14 @@ describe('liveInteractionCard', () => {
     );
     expect(parseLiveInteractionOptions(text).map((option) => option.key)).toEqual(['1', '2', 'a', 'b']);
     expect(liveInteractionCardForText(text, () => 'space-delimited-picker')).toBeDefined();
+  });
+
+  it('does not confuse a hyphen-separated numeric choice with a source diff', () => {
+    const text = ['Select a runtime profile', '1 - local GPU', '2 - remote GPU', 'Press Enter to continue'].join(
+      '\n',
+    );
+    expect(liveInteractionCardForText(text, () => 'hyphen-picker')).toBeDefined();
+    expect(buttonValues(liveInteractionCardForText(text, () => 'hyphen-picker'))).toHaveLength(4);
   });
 
   it('maps checkbox and radio rows to navigation controls without vendor names', () => {

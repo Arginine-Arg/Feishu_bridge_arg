@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.67",
+  version: "0.6.68",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -5997,8 +5997,16 @@ function parseLiveInteractionOptions(input, parseOptions = {}) {
   const ambiguousRows = lines.map(
     (line) => Boolean(line.trim().match(OPTION_LINE_RE)?.groups?.bullet)
   );
+  let inMarkdownFence = false;
   for (const [index, line] of lines.entries()) {
     const trimmed = line.trim();
+    if (/^(?:```|~~~)/u.test(trimmed)) {
+      inMarkdownFence = !inMarkdownFence;
+      continue;
+    }
+    if (inMarkdownFence) continue;
+    if (isInteractionHintLine(trimmed)) continue;
+    if (isCodeLikeInteractionLine(trimmed)) continue;
     if (/^>\s+(?:_|[•◦⏺●]|└|│|╰|⚠|✖)\s*/u.test(trimmed)) continue;
     const match = trimmed.match(OPTION_LINE_RE);
     const bare = match ? void 0 : trimmed.match(BARE_NAV_OPTION_RE);
@@ -6033,6 +6041,7 @@ function isRenderedActivityQuote(label) {
 function hasBareNavigationAnchor(lines, index) {
   for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
     const line = lines[cursor] ?? "";
+    if (isInteractionHintLine(line)) return false;
     if (!line.trim()) return false;
     if (line.trim().match(BARE_NAV_OPTION_RE)?.groups?.label) {
       const label = line.trim().match(BARE_NAV_OPTION_RE)?.groups?.label ?? "";
@@ -6042,6 +6051,17 @@ function hasBareNavigationAnchor(lines, index) {
     return false;
   }
   return false;
+}
+function isInteractionHintLine(line) {
+  const trimmed = line.trim();
+  if (!trimmed || OPTION_LINE_RE.test(trimmed) || BARE_NAV_OPTION_RE.test(trimmed)) return false;
+  return Boolean(
+    /^(?:press|hit|type)\s+(?:enter|return|esc|escape)\b/iu.test(trimmed) || /^(?:enter|return)\s+to\s+(?:confirm|continue|choose|select)\b/iu.test(trimmed) || /^(?:esc|escape)\s+to\s+(?:go\s+back|cancel|exit)\b/iu.test(trimmed) || /^(?:use\s+)?(?:↑|↓|up\/down|arrow\s+keys?)(?:\s|$)/iu.test(trimmed) || /^(?:按下?|点击)(?:回车|回车键|esc|方向键).*(?:确认|继续|取消|返回|选择)/u.test(trimmed)
+  );
+}
+function isCodeLikeInteractionLine(line) {
+  const trimmed = line.trim();
+  return /^\d{1,5}\s+[+-]\s*['"`]/u.test(trimmed) || /^[+-]\s*(?:['"`]|(?:const|let|var|function|return|import|export)\b)/iu.test(trimmed) || /^['"`].*['"`],?$/u.test(trimmed);
 }
 function isOptionSyntaxLine(line) {
   const trimmed = line.trim();
@@ -6072,12 +6092,27 @@ function isLiveInputPromptLine(line) {
 }
 function liveInteractionSurface(input) {
   const candidate = interactionCandidate(input);
-  if (!candidate || !isStructuredInteraction(candidate, true)) return void 0;
-  return candidate.join("\n");
+  const usable = candidate ? stripInteractionCodeFences(candidate) : void 0;
+  if (!usable || !isStructuredInteraction(usable, true)) return void 0;
+  return usable.join("\n");
 }
 function isStructuredLiveInteraction(input) {
   const candidate = interactionCandidate(input);
-  return Boolean(candidate && isStructuredInteraction(candidate, false));
+  const usable = candidate ? stripInteractionCodeFences(candidate) : void 0;
+  return Boolean(usable && isStructuredInteraction(usable, false));
+}
+function stripInteractionCodeFences(lines) {
+  const out = [];
+  let inFence = false;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (/^(?:```|~~~)/u.test(trimmed)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (!inFence) out.push(line);
+  }
+  return out;
 }
 function interactionCandidate(input) {
   const recent = input.split("\n").map((line) => line.trimEnd()).filter((line) => Boolean(line.trim())).filter((line) => !/^_(?:🧠 正在思考…|🧰 正在调用工具…|✍️ 正在输出…)_$/u.test(line.trim())).slice(-MAX_INTERACTION_LINES);
@@ -6097,9 +6132,73 @@ function interactionCandidate(input) {
       optionStart -= 1;
     }
     if (optionStart > 0 && /[?:：？]\s*$/u.test(recent[optionStart - 1])) optionStart -= 1;
-    return recent.slice(optionStart);
+    return mergeRepeatedPickerOptions(recent, start, recent.slice(optionStart));
   }
-  return recent.slice(-FALLBACK_INTERACTION_LINES);
+  return fallbackInteractionCandidate(recent);
+}
+function fallbackInteractionCandidate(lines) {
+  let controlIndex = -1;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]?.trim() ?? "";
+    if (!isOptionSyntaxLine(line) && KEY_HINT_RE.test(line)) {
+      controlIndex = index;
+      break;
+    }
+  }
+  const lastOption = lines.reduce(
+    (last, line, index) => isOptionSyntaxLine(line) ? index : last,
+    -1
+  );
+  if (lastOption < 0) return lines.slice(-FALLBACK_INTERACTION_LINES);
+  const end = Math.max(lastOption, controlIndex);
+  let optionStart = lastOption;
+  while (optionStart >= 0 && isOptionSyntaxLine(lines[optionStart] ?? "")) optionStart -= 1;
+  let contextStart = optionStart;
+  for (let index = optionStart - 1; index >= Math.max(0, optionStart - MAX_INTERACTION_LINES); index -= 1) {
+    const line = lines[index]?.trim() ?? "";
+    if (isLiveInteractionPromptStart(line) || /[?？]\s*$/u.test(line)) {
+      contextStart = index;
+      break;
+    }
+  }
+  if (contextStart === optionStart) {
+    contextStart = Math.max(0, optionStart - MAX_INTERACTION_LINES);
+  }
+  return lines.slice(contextStart, end + 1);
+}
+function mergeRepeatedPickerOptions(lines, latestStart, current) {
+  const title = lines[latestStart]?.trim();
+  if (!title) return current;
+  let previousStart = -1;
+  for (let index = latestStart - 1; index >= 0; index -= 1) {
+    const line = lines[index]?.trim() ?? "";
+    if (!line) continue;
+    if (!isLiveInteractionPromptStart(line)) continue;
+    if (line === title) previousStart = index;
+    break;
+  }
+  if (previousStart < 0) return current;
+  const currentOptions = parseLiveInteractionOptions(current.join("\n"));
+  if (currentOptions.length < 2) return current;
+  const previousOptions = parseLiveInteractionOptions(
+    lines.slice(previousStart, latestStart).join("\n")
+  );
+  const keyedCurrent = new Set(
+    currentOptions.flatMap((option) => option.key ? [option.key] : [])
+  );
+  const missing = previousOptions.filter(
+    (option) => option.key && !keyedCurrent.has(option.key)
+  );
+  if (missing.length === 0) return current;
+  const rows = missing.sort((left, right) => {
+    if (/^\d+$/u.test(left.key) && /^\d+$/u.test(right.key)) {
+      return Number(left.key) - Number(right.key);
+    }
+    return 0;
+  }).map((option) => `${option.selected ? "\u203A" : " "} ${option.key}. ${option.label}`);
+  const firstOption = current.findIndex((line) => isOptionSyntaxLine(line));
+  const insertion = firstOption >= 0 ? firstOption : Math.min(1, current.length);
+  return [...current.slice(0, insertion), ...rows, ...current.slice(insertion)];
 }
 function isBareAgentConfirmation(input) {
   const recent = input.split("\n").map((line) => line.trim()).filter(Boolean).slice(-6).join("\n");
@@ -6108,10 +6207,12 @@ function isBareAgentConfirmation(input) {
   );
 }
 function isLiveInteractionPromptStart(line) {
-  return /claude\s+code\s+running\s+in\s+bypass\s+permissions\s+mode/iu.test(line) || /\bupdate\s+available\b/iu.test(line) || /\bselect\s+(?:a\s+)?(?:model|reasoning|option|permission|session)\b/iu.test(line) || /^(?:reasoning (?:effort|level)|skills?)\b/iu.test(line) || /\bchoose\s+an\s+action\b/iu.test(line) || /\b(?:command )?requires?\s+(?:approval|confirmation)\b/iu.test(line) || /\bresume\s+previous\s+conversation\b/iu.test(line) || isCodexResumeControlLine(line) || /^(?:请选择|请(?:输入|回复).*(?:选项|编号|是|否)|等待(?:你|用户)(?:的)?(?:输入|选择|确认)|是否.*[？?])/u.test(line) || // Generic terminal prompts are intentionally broad here. The structural
+  const trimmed = line.trim();
+  if (!trimmed || isCodeLikeInteractionLine(trimmed)) return false;
+  return /\bclaude\s+code\s+running\s+in\s+bypass\s+permissions\s+mode/iu.test(trimmed) || /\bupdate\s+available\b/iu.test(trimmed) || /^select\b/iu.test(trimmed) && !/[.!。！？]\s*$/u.test(trimmed) || /^(?:reasoning (?:effort|level)|skills?)\b/iu.test(trimmed) || /^choose\s+an\s+action\b/iu.test(trimmed) || /^(?:command )?requires?\s+(?:approval|confirmation)\b/iu.test(trimmed) || /^resume\s+previous\s+conversation\b/iu.test(trimmed) || isCodexResumeControlLine(trimmed) || /^(?:请选择|请(?:输入|回复).*(?:选项|编号|是|否)|等待(?:你|用户)(?:的)?(?:输入|选择|确认)|是否.*[？?])/u.test(line) || // Generic terminal prompts are intentionally broad here. The structural
   // check below still requires option/control evidence, so ordinary prose
   // containing "choose" cannot become a card by itself.
-  GENERIC_INPUT_HINT_RE.test(line) && /[?:：？]$|\b(?:now|below|from)\b/iu.test(line.trim());
+  GENERIC_INPUT_HINT_RE.test(trimmed) && /[?:：？]$|\b(?:now|below|from)\b/iu.test(trimmed);
 }
 function isStructuredInteraction(lines, requireCompletePickerFrame) {
   const text = lines.join("\n");
@@ -6146,8 +6247,10 @@ function isStructuredInteraction(lines, requireCompletePickerFrame) {
   const completeNumberedPicker = numberedChoiceCount >= 2 || hasNumberedChoice && (hasKeyHint || hasPromptMarker || hasInputPrompt);
   const genericOptionCount = requireCompletePickerFrame ? options.length >= 2 : options.length >= 2 || hasOptions && (hasInputPrompt || hasPromptTitle);
   const hasStrongOptionRows = lines.some((line) => isStrongOptionSyntaxLine(line));
+  const hasCodeLikeNoise = lines.some((line) => isCodeLikeInteractionLine(line));
+  const hasCleanNumericOptionBlock = hasContiguousNumericOptionBlock(lines);
   const genericInputEvidence = hasInputPrompt || hasPromptMarker || selectedNavigationMenu || hasQuestionBeforeOptions && hasStrongOptionRows;
-  return claudeBypass || codexUpdate || codexResume || hasPromptTitle && tailIsControl && ((requireCompletePickerFrame ? completeNumberedPicker : hasNumberedChoice) || hasBinaryControl || hasKeyHint && tailIsControl) || hasConfirmationQuestion && (hasNumberedChoice || hasBinaryControl) || (requireCompletePickerFrame ? completeNumberedPicker : hasNumberedChoice) && hasKeyHint && tailIsControl || hasBinaryControl && /(?:approval|confirmation|allow|proceed|continue|确认|允许|继续)/iu.test(text) || // Vendor-neutral menus may have no title or Enter/Esc legend. Requiring
+  return !hasCodeLikeNoise && (claudeBypass || codexUpdate || codexResume || hasPromptTitle && tailIsControl && ((requireCompletePickerFrame ? completeNumberedPicker : hasNumberedChoice) || hasBinaryControl || hasKeyHint && tailIsControl) || hasConfirmationQuestion && (hasNumberedChoice || hasBinaryControl) || (requireCompletePickerFrame ? completeNumberedPicker : hasNumberedChoice) && hasKeyHint && tailIsControl && !hasCodeLikeNoise && (hasPromptTitle || hasQuestionBeforeOptions || hasCleanNumericOptionBlock) || hasBinaryControl && /(?:approval|confirmation|allow|proceed|continue|确认|允许|继续)/iu.test(text) || // Vendor-neutral menus may have no title or Enter/Esc legend. Requiring
   // multiple option rows plus a nearby input prompt/marker prevents normal
   // bullet lists from being promoted to interactive cards. A question mark
   // immediately before the option block is equivalent prompt evidence for
@@ -6157,7 +6260,26 @@ function isStructuredInteraction(lines, requireCompletePickerFrame) {
   // complete pair unless an explicit prompt proves that the terminal is
   // waiting, while titled/native pickers can publish a one-row frame with
   // an Enter/answer prompt.
-  genericOptionCount && genericInputEvidence;
+  genericOptionCount && genericInputEvidence);
+}
+function hasContiguousNumericOptionBlock(lines) {
+  let runLength = 0;
+  let previousKey;
+  for (const line of lines) {
+    const match = line.trim().match(OPTION_LINE_RE);
+    const rawKey = match?.groups?.number;
+    if (!rawKey) {
+      if (runLength >= 2) return true;
+      runLength = 0;
+      previousKey = void 0;
+      continue;
+    }
+    const key = Number(rawKey);
+    if (previousKey !== void 0 && key === previousKey + 1) runLength += 1;
+    else runLength = 1;
+    previousKey = key;
+  }
+  return runLength >= 2;
 }
 function isCodexResumeControlLine(line) {
   return /\benter\s+(?:to\s+)?resume\b.*\besc\s+(?:to\s+)?exit\b/iu.test(line);
