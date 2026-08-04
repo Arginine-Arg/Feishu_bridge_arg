@@ -1,5 +1,5 @@
 import { connect } from 'node:net';
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -18,6 +18,7 @@ describe('ArtifactBroker', () => {
     await writeFile(join(root, 'placeholder'), 'x');
     await mkdir(workspace);
     await writeFile(join(workspace, 'report.txt'), 'done');
+    const reportPath = await realpath(join(workspace, 'report.txt'));
     const send = vi.fn(async () => ({ messageId: 'om-file' }));
     const broker = new ArtifactBroker(join(root, 'broker.sock'), { send } as never, async () => true);
     await broker.start();
@@ -36,7 +37,7 @@ describe('ArtifactBroker', () => {
     await expect(request(grant.socketPath, { token: grant.token, path: 'report.txt' })).resolves.toMatchObject({ ok: true });
     expect(send).toHaveBeenCalledWith(
       'oc-1',
-      { file: { source: join(workspace, 'report.txt'), fileName: 'report.txt' } },
+      { file: { source: reportPath, fileName: 'report.txt' } },
       { replyTo: 'om-1' },
     );
     await expect(request(grant.socketPath, { token: grant.token, path: '../placeholder' })).resolves.toMatchObject({ ok: false });
@@ -47,6 +48,7 @@ describe('ArtifactBroker', () => {
     const workspace = join(root, 'workspace');
     await mkdir(workspace);
     await writeFile(join(workspace, 'report.txt'), 'done');
+    const reportPath = await realpath(join(workspace, 'report.txt'));
     const send = vi.fn(async () => ({ messageId: 'om-file' }));
     const broker = new ArtifactBroker(join(root, 'broker.sock'), { send } as never, async () => true);
     await broker.start();
@@ -80,7 +82,7 @@ describe('ArtifactBroker', () => {
     await expect(request(second.socketPath, { token: first.token, path: 'report.txt' })).resolves.toMatchObject({ ok: true });
     expect(send).toHaveBeenCalledWith(
       'oc-1',
-      { file: { source: join(workspace, 'report.txt'), fileName: 'report.txt' } },
+      { file: { source: reportPath, fileName: 'report.txt' } },
       { replyTo: 'om-second' },
     );
   });
@@ -92,6 +94,7 @@ describe('ArtifactBroker', () => {
     const statePath = join(root, 'artifact-grants.json');
     await mkdir(workspace);
     await writeFile(join(workspace, 'report.txt'), 'done');
+    const reportPath = await realpath(join(workspace, 'report.txt'));
     const firstSend = vi.fn(async () => ({ messageId: 'om-file' }));
     const first = new ArtifactBroker(socketPath, { send: firstSend } as never, async () => true, statePath);
     await first.start();
@@ -123,7 +126,7 @@ describe('ArtifactBroker', () => {
     expect(secondSend).toHaveBeenNthCalledWith(
       1,
       'oc-1',
-      { file: { source: join(workspace, 'report.txt'), fileName: 'report.txt' } },
+      { file: { source: reportPath, fileName: 'report.txt' } },
       { replyTo: 'om-before-restart' },
     );
     expect(secondSend).toHaveBeenNthCalledWith(
@@ -140,6 +143,7 @@ describe('ArtifactBroker', () => {
     const workspaceLink = join(root, 'workspace-link');
     await mkdir(workspace);
     await writeFile(join(workspace, 'report.txt'), 'done');
+    const reportPath = await realpath(join(workspace, 'report.txt'));
     await symlink(workspace, workspaceLink, process.platform === 'win32' ? 'junction' : 'dir');
     const send = vi.fn(async () => ({ messageId: 'om-file' }));
     const broker = new ArtifactBroker(join(root, 'broker.sock'), { send } as never, async () => true);
@@ -159,7 +163,7 @@ describe('ArtifactBroker', () => {
     await expect(request(grant.socketPath, { token: grant.token, path: 'report.txt' })).resolves.toMatchObject({ ok: true });
     expect(send).toHaveBeenCalledWith(
       'oc-1',
-      { file: { source: join(workspace, 'report.txt'), fileName: 'report.txt' } },
+      { file: { source: reportPath, fileName: 'report.txt' } },
       { replyTo: 'om-1' },
     );
   });

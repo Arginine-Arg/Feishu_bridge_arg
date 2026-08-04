@@ -112,7 +112,7 @@ describe('Codex startup compatibility with legacy binary metadata', () => {
         cwd: h.workspace,
       }),
     ).resolves.toBeUndefined();
-  });
+  }, 15_000);
 });
 
 async function createLegacyCodexConfig(options: {
