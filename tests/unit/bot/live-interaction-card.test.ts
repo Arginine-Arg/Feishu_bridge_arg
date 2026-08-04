@@ -240,6 +240,32 @@ describe('liveInteractionCard', () => {
     expect(liveInteractionCardForText(text, () => 'long-source-code-token')).toBeUndefined();
   });
 
+  it('rejects repeated source rows even when the diff line is outside the tail window', () => {
+    const text = [
+      "171 +      'Select Model',",
+      ...Array.from({ length: 130 }, (_, index) => `history line ${index}`),
+      '1. gpt-5.6-sol (selected)',
+      '2. gpt-5.6-terra',
+      '3. gpt-5.6-luna',
+      '4. gpt-5.5',
+      '5. gpt-5.2',
+      '172. gpt-5.6-sol (current)',
+      '173. gpt-5.6-terra',
+      '174. gpt-5.6-luna',
+      '175. gpt-5.5',
+      '176. gpt-5.2',
+      '179. gpt-5.6-terra',
+      '180. gpt-5.6-luna (current)',
+      '181. gpt-5.5',
+      '182. gpt-5.2',
+      '189. gpt-5.6-sol',
+      'Press enter to confirm or esc to go back',
+    ].join('\n');
+
+    expect(isStructuredLiveInteraction(text)).toBe(false);
+    expect(liveInteractionCardForText(text, () => 'distant-source-code-token')).toBeUndefined();
+  });
+
   it('waits for a complete picker frame, then preserves its first choice', () => {
     const firstFrame = [
       'Select Model and Effort',

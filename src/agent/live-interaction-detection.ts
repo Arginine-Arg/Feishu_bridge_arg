@@ -439,6 +439,7 @@ function isStructuredInteraction(lines: string[], requireCompletePickerFrame: bo
     : options.length >= 2 || (hasOptions && (hasInputPrompt || hasPromptTitle));
   const hasStrongOptionRows = lines.some((line) => isStrongOptionSyntaxLine(line));
   const hasCodeLikeNoise = lines.some((line) => isCodeLikeInteractionLine(line));
+  const hasRepeatedKeyedOptionLabels = repeatedKeyedOptionLabelGroups(options) >= 2;
   const hasCleanNumericOptionBlock = hasContiguousNumericOptionBlock(lines);
   const genericInputEvidence =
     hasInputPrompt ||
@@ -448,6 +449,7 @@ function isStructuredInteraction(lines: string[], requireCompletePickerFrame: bo
 
   return (
     !hasCodeLikeNoise &&
+    !hasRepeatedKeyedOptionLabels &&
     (claudeBypass ||
     codexUpdate ||
     codexResume ||
@@ -477,6 +479,34 @@ function isStructuredInteraction(lines: string[], requireCompletePickerFrame: bo
       genericOptionCount &&
       genericInputEvidence))
   );
+}
+
+/**
+ * A source diff or a reflowed history replay can leave several numbered
+ * copies of the same model row in the tail (for example keys 2, 173 and 179
+ * all carrying `gpt-5.6-terra`). Real pickers assign one key per label; two or
+ * more repeated labels are therefore strong evidence that the visible rows
+ * are not one actionable menu.
+ */
+function repeatedKeyedOptionLabelGroups(options: LiveInteractionOption[]): number {
+  const keysByLabel = new Map<string, Set<string>>();
+  for (const option of options) {
+    if (!option.key) continue;
+    const label = option.label
+      .replace(/\s*\((?:current|selected|default)\)\s*$/iu, '')
+      .replace(/\s+/gu, ' ')
+      .trim()
+      .toLocaleLowerCase();
+    if (!label) continue;
+    const keys = keysByLabel.get(label) ?? new Set<string>();
+    keys.add(option.key);
+    keysByLabel.set(label, keys);
+  }
+  let groups = 0;
+  for (const keys of keysByLabel.values()) {
+    if (keys.size >= 2) groups += 1;
+  }
+  return groups;
 }
 
 function hasContiguousNumericOptionBlock(lines: string[]): boolean {

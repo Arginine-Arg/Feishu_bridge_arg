@@ -381,9 +381,10 @@ function isStructuredInteraction(lines, requireCompletePickerFrame) {
   const genericOptionCount = requireCompletePickerFrame ? options.length >= 2 : options.length >= 2 || hasOptions && (hasInputPrompt || hasPromptTitle);
   const hasStrongOptionRows = lines.some((line) => isStrongOptionSyntaxLine(line));
   const hasCodeLikeNoise = lines.some((line) => isCodeLikeInteractionLine(line));
+  const hasRepeatedKeyedOptionLabels = repeatedKeyedOptionLabelGroups(options) >= 2;
   const hasCleanNumericOptionBlock = hasContiguousNumericOptionBlock(lines);
   const genericInputEvidence = hasInputPrompt || hasPromptMarker || selectedNavigationMenu || hasQuestionBeforeOptions && hasStrongOptionRows;
-  return !hasCodeLikeNoise && (claudeBypass || codexUpdate || codexResume || hasPromptTitle && tailIsControl && ((requireCompletePickerFrame ? completeNumberedPicker : hasNumberedChoice) || hasBinaryControl || hasKeyHint && tailIsControl) || hasConfirmationQuestion && (hasNumberedChoice || hasBinaryControl) || (requireCompletePickerFrame ? completeNumberedPicker : hasNumberedChoice) && hasKeyHint && tailIsControl && !hasCodeLikeNoise && (hasPromptTitle || hasQuestionBeforeOptions || hasCleanNumericOptionBlock) || hasBinaryControl && /(?:approval|confirmation|allow|proceed|continue|确认|允许|继续)/iu.test(text) || // Vendor-neutral menus may have no title or Enter/Esc legend. Requiring
+  return !hasCodeLikeNoise && !hasRepeatedKeyedOptionLabels && (claudeBypass || codexUpdate || codexResume || hasPromptTitle && tailIsControl && ((requireCompletePickerFrame ? completeNumberedPicker : hasNumberedChoice) || hasBinaryControl || hasKeyHint && tailIsControl) || hasConfirmationQuestion && (hasNumberedChoice || hasBinaryControl) || (requireCompletePickerFrame ? completeNumberedPicker : hasNumberedChoice) && hasKeyHint && tailIsControl && !hasCodeLikeNoise && (hasPromptTitle || hasQuestionBeforeOptions || hasCleanNumericOptionBlock) || hasBinaryControl && /(?:approval|confirmation|allow|proceed|continue|确认|允许|继续)/iu.test(text) || // Vendor-neutral menus may have no title or Enter/Esc legend. Requiring
   // multiple option rows plus a nearby input prompt/marker prevents normal
   // bullet lists from being promoted to interactive cards. A question mark
   // immediately before the option block is equivalent prompt evidence for
@@ -394,6 +395,22 @@ function isStructuredInteraction(lines, requireCompletePickerFrame) {
   // waiting, while titled/native pickers can publish a one-row frame with
   // an Enter/answer prompt.
   genericOptionCount && genericInputEvidence);
+}
+function repeatedKeyedOptionLabelGroups(options) {
+  const keysByLabel = /* @__PURE__ */ new Map();
+  for (const option of options) {
+    if (!option.key) continue;
+    const label = option.label.replace(/\s*\((?:current|selected|default)\)\s*$/iu, "").replace(/\s+/gu, " ").trim().toLocaleLowerCase();
+    if (!label) continue;
+    const keys = keysByLabel.get(label) ?? /* @__PURE__ */ new Set();
+    keys.add(option.key);
+    keysByLabel.set(label, keys);
+  }
+  let groups = 0;
+  for (const keys of keysByLabel.values()) {
+    if (keys.size >= 2) groups += 1;
+  }
+  return groups;
 }
 function hasContiguousNumericOptionBlock(lines) {
   let runLength = 0;
