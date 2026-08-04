@@ -292,6 +292,25 @@ function interactionCandidate(input: string): string[] | undefined {
  * the structural checks.
  */
 function fallbackInteractionCandidate(lines: string[]): string[] {
+  // A partially visible native picker often keeps its numbered choices on
+  // screen after the title and Enter/Esc legend have scrolled away. Prefer
+  // that latest contiguous block over a broad history tail: old composer
+  // drafts such as `› c`, `› continue`, and `/m` are not menu choices.
+  const numericBlock = latestContiguousNumericOptionBlock(lines);
+  if (numericBlock) {
+    // Preserve the question for untitled, vendor-neutral pickers, but never
+    // reach farther into scrollback. A previous composer draft such as
+    // `› /mod` must not be carried into the card merely because the menu
+    // header has scrolled out of the captured viewport.
+    const previous = lines[numericBlock.start - 1]?.trim() ?? '';
+    const includePrevious =
+      /[?？]\s*$/u.test(previous) || isExplicitPickerHeading(previous);
+    return lines.slice(
+      includePrevious ? numericBlock.start - 1 : numericBlock.start,
+      numericBlock.end + 1,
+    );
+  }
+
   let controlIndex = -1;
   for (let index = lines.length - 1; index >= 0; index -= 1) {
     const line = lines[index]?.trim() ?? '';
@@ -486,6 +505,9 @@ function isStructuredInteraction(lines: string[], requireCompletePickerFrame: bo
   const hasCodeLikeNoise = lines.some((line) => isCodeLikeInteractionLine(line));
   const hasRepeatedKeyedOptionLabels = repeatedKeyedOptionLabelGroups(options) >= 2;
   const hasCleanNumericOptionBlock = hasContiguousNumericOptionBlock(lines);
+  const hasSelectedNumberedChoice = options.some(
+    (option) => option.selected && Boolean(option.key && /^\d+$/u.test(option.key)),
+  );
   const toolTraceRows = lines.filter(isToolTraceLine).length;
   const strongToolTraceRows = lines.filter((line) => {
     const trimmed = line.trim().replace(/^(?:[•◦⏺●]\s*)/u, '');
@@ -532,6 +554,10 @@ function isStructuredInteraction(lines: string[], requireCompletePickerFrame: bo
       tailIsControl &&
       !hasCodeLikeNoise &&
       (hasPromptTitle || hasQuestionBeforeOptions || hasCleanNumericOptionBlock)) ||
+    // A native picker may retain only its numbered viewport rows. A selected
+    // numeric row is the TUI's direct evidence that this is an active menu;
+    // do not infer that state from arbitrary numbered prose.
+    (hasCleanNumericOptionBlock && hasSelectedNumberedChoice) ||
     (hasBinaryControl && /(?:approval|confirmation|allow|proceed|continue|确认|允许|继续)/iu.test(text)) ||
     // Vendor-neutral menus may have no title or Enter/Esc legend. Requiring
     // multiple option rows plus a nearby input prompt/marker prevents normal
@@ -578,23 +604,36 @@ function repeatedKeyedOptionLabelGroups(options: LiveInteractionOption[]): numbe
 }
 
 function hasContiguousNumericOptionBlock(lines: string[]): boolean {
+  return latestContiguousNumericOptionBlock(lines) !== undefined;
+}
+
+function latestContiguousNumericOptionBlock(
+  lines: string[],
+): { start: number; end: number } | undefined {
   let runLength = 0;
   let previousKey: number | undefined;
-  for (const line of lines) {
+  let runStart = 0;
+  let latest: { start: number; end: number } | undefined;
+  for (const [index, line] of lines.entries()) {
     const match = line.trim().match(OPTION_LINE_RE);
     const rawKey = match?.groups?.number;
-    if (!rawKey) {
-      if (runLength >= 2) return true;
+    if (!rawKey || isCodeLikeInteractionLine(line)) {
+      if (runLength >= 2) latest = { start: runStart, end: index - 1 };
       runLength = 0;
       previousKey = undefined;
       continue;
     }
     const key = Number(rawKey);
-    if (previousKey !== undefined && key === previousKey + 1) runLength += 1;
-    else runLength = 1;
+    if (previousKey !== undefined && key === previousKey + 1) {
+      runLength += 1;
+    } else {
+      runLength = 1;
+      runStart = index;
+    }
     previousKey = key;
   }
-  return runLength >= 2;
+  if (runLength >= 2) latest = { start: runStart, end: lines.length - 1 };
+  return latest;
 }
 
 function isCodexResumeControlLine(line: string): boolean {

@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.73",
+  version: "0.6.74",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -6152,6 +6152,15 @@ function interactionCandidate(input) {
   return fallbackInteractionCandidate(recent);
 }
 function fallbackInteractionCandidate(lines) {
+  const numericBlock = latestContiguousNumericOptionBlock(lines);
+  if (numericBlock) {
+    const previous = lines[numericBlock.start - 1]?.trim() ?? "";
+    const includePrevious = /[?？]\s*$/u.test(previous) || isExplicitPickerHeading(previous);
+    return lines.slice(
+      includePrevious ? numericBlock.start - 1 : numericBlock.start,
+      numericBlock.end + 1
+    );
+  }
   let controlIndex = -1;
   for (let index = lines.length - 1; index >= 0; index -= 1) {
     const line = lines[index]?.trim() ?? "";
@@ -6272,6 +6281,9 @@ function isStructuredInteraction(lines, requireCompletePickerFrame) {
   const hasCodeLikeNoise = lines.some((line) => isCodeLikeInteractionLine(line));
   const hasRepeatedKeyedOptionLabels = repeatedKeyedOptionLabelGroups(options) >= 2;
   const hasCleanNumericOptionBlock = hasContiguousNumericOptionBlock(lines);
+  const hasSelectedNumberedChoice = options.some(
+    (option) => option.selected && Boolean(option.key && /^\d+$/u.test(option.key))
+  );
   const toolTraceRows = lines.filter(isToolTraceLine).length;
   const strongToolTraceRows = lines.filter((line) => {
     const trimmed = line.trim().replace(/^(?:[•◦⏺●]\s*)/u, "");
@@ -6282,7 +6294,10 @@ function isStructuredInteraction(lines, requireCompletePickerFrame) {
   const hasExplicitPickerHeading = lines.some(isExplicitPickerHeading);
   const activityOnlySurface = hasToolTraceEvidence && !hasExplicitPickerHeading && !hasConfirmationQuestion && !hasBinaryControl && !codexResume && !codexUpdate;
   const genericInputEvidence = hasInputPrompt || hasPromptMarker || selectedNavigationMenu || hasQuestionBeforeOptions && hasStrongOptionRows;
-  return !hasCodeLikeNoise && !hasRepeatedKeyedOptionLabels && !activityOnlySurface && (claudeBypass || codexUpdate || codexResume || hasPromptTitle && tailIsControl && ((requireCompletePickerFrame ? completeNumberedPicker : hasNumberedChoice) || hasBinaryControl || hasKeyHint && tailIsControl) || hasConfirmationQuestion && (hasNumberedChoice || hasBinaryControl) || (requireCompletePickerFrame ? completeNumberedPicker : hasNumberedChoice) && hasKeyHint && tailIsControl && !hasCodeLikeNoise && (hasPromptTitle || hasQuestionBeforeOptions || hasCleanNumericOptionBlock) || hasBinaryControl && /(?:approval|confirmation|allow|proceed|continue|确认|允许|继续)/iu.test(text) || // Vendor-neutral menus may have no title or Enter/Esc legend. Requiring
+  return !hasCodeLikeNoise && !hasRepeatedKeyedOptionLabels && !activityOnlySurface && (claudeBypass || codexUpdate || codexResume || hasPromptTitle && tailIsControl && ((requireCompletePickerFrame ? completeNumberedPicker : hasNumberedChoice) || hasBinaryControl || hasKeyHint && tailIsControl) || hasConfirmationQuestion && (hasNumberedChoice || hasBinaryControl) || (requireCompletePickerFrame ? completeNumberedPicker : hasNumberedChoice) && hasKeyHint && tailIsControl && !hasCodeLikeNoise && (hasPromptTitle || hasQuestionBeforeOptions || hasCleanNumericOptionBlock) || // A native picker may retain only its numbered viewport rows. A selected
+  // numeric row is the TUI's direct evidence that this is an active menu;
+  // do not infer that state from arbitrary numbered prose.
+  hasCleanNumericOptionBlock && hasSelectedNumberedChoice || hasBinaryControl && /(?:approval|confirmation|allow|proceed|continue|确认|允许|继续)/iu.test(text) || // Vendor-neutral menus may have no title or Enter/Esc legend. Requiring
   // multiple option rows plus a nearby input prompt/marker prevents normal
   // bullet lists from being promoted to interactive cards. A question mark
   // immediately before the option block is equivalent prompt evidence for
@@ -6311,23 +6326,33 @@ function repeatedKeyedOptionLabelGroups(options) {
   return groups;
 }
 function hasContiguousNumericOptionBlock(lines) {
+  return latestContiguousNumericOptionBlock(lines) !== void 0;
+}
+function latestContiguousNumericOptionBlock(lines) {
   let runLength = 0;
   let previousKey;
-  for (const line of lines) {
+  let runStart2 = 0;
+  let latest;
+  for (const [index, line] of lines.entries()) {
     const match = line.trim().match(OPTION_LINE_RE);
     const rawKey = match?.groups?.number;
-    if (!rawKey) {
-      if (runLength >= 2) return true;
+    if (!rawKey || isCodeLikeInteractionLine(line)) {
+      if (runLength >= 2) latest = { start: runStart2, end: index - 1 };
       runLength = 0;
       previousKey = void 0;
       continue;
     }
     const key = Number(rawKey);
-    if (previousKey !== void 0 && key === previousKey + 1) runLength += 1;
-    else runLength = 1;
+    if (previousKey !== void 0 && key === previousKey + 1) {
+      runLength += 1;
+    } else {
+      runLength = 1;
+      runStart2 = index;
+    }
     previousKey = key;
   }
-  return runLength >= 2;
+  if (runLength >= 2) latest = { start: runStart2, end: lines.length - 1 };
+  return latest;
 }
 function isCodexResumeControlLine(line) {
   return /\benter\s+(?:to\s+)?resume\b.*\besc\s+(?:to\s+)?exit\b/iu.test(line);

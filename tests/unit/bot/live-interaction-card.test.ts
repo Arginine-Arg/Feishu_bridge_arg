@@ -875,6 +875,45 @@ describe('liveInteractionCard', () => {
     expect(liveInteractionSurface(text)).toBeUndefined();
     expect(liveInteractionCardForText(text, () => 'command-transcript-token')).toBeUndefined();
   });
+
+  it('scopes a partial model picker to its active numbered viewport', () => {
+    const text = [
+      '›     • Ran /usr/bin/tmux -S /tmp/tmux/default capture-pane -p -t codex:0.0 -S -30',
+      '› c',
+      '› co',
+      '› con',
+      '› cont',
+      '› conti',
+      '› contin',
+      '› continue',
+      'socket。临时复现进程正在清理',
+      '› continue',
+      '/fast          1.5x speed, increased usage',
+      '  /permissions   choose what Codex is allowed to do',
+      '› /m',
+      '  /model     choose what model and reasoning effort to use',
+      '› /mod',
+      '1. gpt-5.6-sol (default)   Latest frontier agentic coding model.',
+      '2. gpt-5.6-terra           Balanced agentic coding model for everyday work.',
+      '› 3. gpt-5.6-luna (current)  Fast and affordable agentic coding model.',
+      '4. gpt-5.5                 Frontier model for complex coding and research.',
+      '5. gpt-5.2                 Optimized for professional work.',
+    ].join('\n');
+
+    expect(liveInteractionSurface(text)).toEqual([
+      '1. gpt-5.6-sol (default)   Latest frontier agentic coding model.',
+      '2. gpt-5.6-terra           Balanced agentic coding model for everyday work.',
+      '› 3. gpt-5.6-luna (current)  Fast and affordable agentic coding model.',
+      '4. gpt-5.5                 Frontier model for complex coding and research.',
+      '5. gpt-5.2                 Optimized for professional work.',
+    ].join('\n'));
+    const card = liveInteractionCardForText(text, () => 'partial-model-token');
+    expect(card).toBeDefined();
+    expect(buttonValues(card).map((value) => value.input)).toEqual(['1', '2', '3', '4', '5', 'enter', 'esc']);
+    const rendered = JSON.stringify(card);
+    expect(rendered).not.toContain('› continue');
+    expect(rendered).not.toContain('/permissions');
+  });
 });
 
 function stateFrom(events: AgentEvent[]): RunState {
