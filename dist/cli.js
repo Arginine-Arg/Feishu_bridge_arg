@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.68",
+  version: "0.6.69",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -5990,6 +5990,10 @@ var KEY_HINT_RE = /(?:press\s+)?enter\s+to\s+(?:confirm|continue)|esc(?:ape)?\s+
 var CODEX_RESUME_CONTROLS_RE = /\benter\s+(?:to\s+)?resume\b[\s\S]{0,600}\besc\s+(?:to\s+)?exit\b/iu;
 var GENERIC_INPUT_HINT_RE = /(?:choose|select|pick|option|choice|answer|respond|input|type|enter|confirm|continue|proceed|approve|allow|navigate|use\s+(?:the\s+)?(?:arrow|number|letter)|按下?|请输入|输入|选择|选项|编号|确认|继续|批准|允许|回答|回复|回车)/iu;
 var GENERIC_INPUT_PROMPT_RE = /(?:[?:：？]\s*$|(?:^|\s)[›❯>]\s*$|(?:^|\s)_\s*$)/u;
+var TOOL_TRACE_VERB_RE = /^(?:ran|running|explored|exploring|searched|search|listed|list|edited|wrote|applied|patched|checked|inspected|worked|waiting|thinking|planning|analyzing|investigating)\b/iu;
+var TOOL_TRACE_READ_RE = /^read\s+(?:[`'"/]?[A-Za-z0-9_.~$@-]+(?:[/.\\]|\b)|https?:\/\/)/iu;
+var TOOL_TRACE_RUN_RE = /^run\s+(?:(?:pnpm|npm|npx|node|git|rg|grep|find|sed|awk|curl|wget|tmux|python(?:3)?|bash|sh|zsh|fish|ls|cat|cd|docker|kubectl|pytest|vitest|make)\b|[/$`]|\S+\s+--?\w)/iu;
+var ACTIVITY_CONNECTOR_RE = /^(?:[│└╰├┤┌┐┘└]|\.\.\.)\s*/u;
 function parseLiveInteractionOptions(input, parseOptions = {}) {
   const parsed = [];
   const seen = /* @__PURE__ */ new Set();
@@ -6037,6 +6041,17 @@ function parseLiveInteractionOptions(input, parseOptions = {}) {
 }
 function isRenderedActivityQuote(label) {
   return /^(?:_|[•◦⏺●]|└|│|╰|⚠|✖)\s*/u.test(label);
+}
+function isToolTraceLine(line) {
+  const trimmed = line.trim().replace(/^(?:[•◦⏺●]\s*)/u, "");
+  return TOOL_TRACE_VERB_RE.test(trimmed) || TOOL_TRACE_READ_RE.test(trimmed) || TOOL_TRACE_RUN_RE.test(trimmed);
+}
+function isActivityConnectorLine(line) {
+  return ACTIVITY_CONNECTOR_RE.test(line.trim());
+}
+function isExplicitPickerHeading(line) {
+  const trimmed = line.trim();
+  return /^(?:select|choose|pick)\b/iu.test(trimmed) || /^(?:reasoning (?:effort|level)|skills?)\b/iu.test(trimmed) || /^(?:command )?requires?\s+(?:approval|confirmation)\b/iu.test(trimmed) || /^resume\s+previous\s+conversation\b/iu.test(trimmed) || /^(?:请选择|请(?:输入|回复).*(?:选项|编号|是|否)|等待(?:你|用户)(?:的)?(?:输入|选择|确认))/u.test(trimmed) || /\b(?:update\s+available|claude\s+code\s+running\s+in\s+bypass\s+permissions\s+mode)\b/iu.test(trimmed);
 }
 function hasBareNavigationAnchor(lines, index) {
   for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
@@ -6250,8 +6265,13 @@ function isStructuredInteraction(lines, requireCompletePickerFrame) {
   const hasCodeLikeNoise = lines.some((line) => isCodeLikeInteractionLine(line));
   const hasRepeatedKeyedOptionLabels = repeatedKeyedOptionLabelGroups(options) >= 2;
   const hasCleanNumericOptionBlock = hasContiguousNumericOptionBlock(lines);
+  const toolTraceRows = lines.filter(isToolTraceLine).length;
+  const hasActivityConnector = lines.some(isActivityConnectorLine);
+  const hasToolTraceEvidence = toolTraceRows >= 2 || toolTraceRows >= 1 && hasActivityConnector;
+  const hasExplicitPickerHeading = lines.some(isExplicitPickerHeading);
+  const activityOnlySurface = hasToolTraceEvidence && !hasExplicitPickerHeading && !hasConfirmationQuestion && !hasBinaryControl && !codexResume && !codexUpdate;
   const genericInputEvidence = hasInputPrompt || hasPromptMarker || selectedNavigationMenu || hasQuestionBeforeOptions && hasStrongOptionRows;
-  return !hasCodeLikeNoise && !hasRepeatedKeyedOptionLabels && (claudeBypass || codexUpdate || codexResume || hasPromptTitle && tailIsControl && ((requireCompletePickerFrame ? completeNumberedPicker : hasNumberedChoice) || hasBinaryControl || hasKeyHint && tailIsControl) || hasConfirmationQuestion && (hasNumberedChoice || hasBinaryControl) || (requireCompletePickerFrame ? completeNumberedPicker : hasNumberedChoice) && hasKeyHint && tailIsControl && !hasCodeLikeNoise && (hasPromptTitle || hasQuestionBeforeOptions || hasCleanNumericOptionBlock) || hasBinaryControl && /(?:approval|confirmation|allow|proceed|continue|确认|允许|继续)/iu.test(text) || // Vendor-neutral menus may have no title or Enter/Esc legend. Requiring
+  return !hasCodeLikeNoise && !hasRepeatedKeyedOptionLabels && !activityOnlySurface && (claudeBypass || codexUpdate || codexResume || hasPromptTitle && tailIsControl && ((requireCompletePickerFrame ? completeNumberedPicker : hasNumberedChoice) || hasBinaryControl || hasKeyHint && tailIsControl) || hasConfirmationQuestion && (hasNumberedChoice || hasBinaryControl) || (requireCompletePickerFrame ? completeNumberedPicker : hasNumberedChoice) && hasKeyHint && tailIsControl && !hasCodeLikeNoise && (hasPromptTitle || hasQuestionBeforeOptions || hasCleanNumericOptionBlock) || hasBinaryControl && /(?:approval|confirmation|allow|proceed|continue|确认|允许|继续)/iu.test(text) || // Vendor-neutral menus may have no title or Enter/Esc legend. Requiring
   // multiple option rows plus a nearby input prompt/marker prevents normal
   // bullet lists from being promoted to interactive cards. A question mark
   // immediately before the option block is equivalent prompt evidence for

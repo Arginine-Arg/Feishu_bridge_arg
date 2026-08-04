@@ -742,6 +742,88 @@ describe('liveInteractionCard', () => {
       ),
     ).toBeUndefined();
   });
+
+  it('does not turn bridge tool traces and progress updates into a picker', () => {
+    const text = [
+      '0fc351f (HEAD -> release-v0.6.35, tag: v0.6.68, origin/main) fix(picker): prevent false interactive cards and preserve redrawn choices',
+      '• Ran node dist/cli.js --version && node -e "const p=require(\'./package.json\'); if(p.version!==\'0.6.68\') process.exit(1)"; sha256sum dist/cli.js dist/index.js package.json',
+      '  │ process.exit(1); console.log(\'package version\',p.version)"; git status --short',
+      '• GitHub 已接收提交，Release 和三路 CI 工作流都在运行中；标签对应的 Release 资产尚未生成。',
+      '• Ran curl -fsSL --max-time 20 https://api.github.com/repos/Arginine-Arg/Feishu_bridge_arg/actions/runs/30869317268 | node -e "let s=\'\'; process.stdin.on(\'data\',d=>s+=d)"',
+      '  │ console.log(JSON.stringify({status:r.status,conclusion:r.conclusion,html_url:r.html_url}));',
+      '• 我又做了一个边界压力测试：如果污染代码行距离当前选择窗超过 120 行，旧逻辑仍可能误判。',
+      '• Ran curl -fsSL --max-time 20 https://api.github.com/repos/Arginine-Arg/Feishu_bridge_arg/actions/runs/30869317268',
+    ].join('\n');
+
+    expect(isStructuredLiveInteraction(text)).toBe(false);
+    expect(liveInteractionSurface(text)).toBeUndefined();
+    expect(liveInteractionCardForText(text, () => 'tool-trace-token')).toBeUndefined();
+  });
+
+  it('does not classify the full release-verification trace as a picker', () => {
+    const text = [
+      '0fc351f (HEAD -> release-v0.6.35, tag: v0.6.68, origin/release-v0.6.35, origin/main, origin/HEAD) fix(picker):',
+      '    prevent false interactive cards and preserve redrawn choices',
+      '• Ran node dist/cli.js --version && node -e "const p=require(\'./package.json\'); if(p.version!==\'0.6.68\')',
+      '  │ process.exit(1); console.log(\'package version\',p.version)"; sha256sum dist/cli.js dist/index.js package.json',
+      '  │ -e "let s=\'\'; process.stdin.on(\'data\',d=>s+=d); process.stdin.on(\'end\',()=>{const x=JSON.parse(s);',
+      '  │ https://api.github.com/repos/Arginine-Arg/Feishu_bridge_arg/actions/runs?event=push\\&per_page=5 | node -e "let',
+      '• GitHub 已接收提交，Release 和三路 CI 工作流都在运行中；标签对应的 Release 资产尚未生成（不是 404 配置问题，而是工作流尚未完成）。',
+      '• Ran curl -fsSL --max-time 20 https://api.github.com/repos/Arginine-Arg/Feishu_bridge_arg/actions/runs/30869317268 |',
+      '  │ console.log(JSON.stringify({status:r.status,conclusion:r.conclusion,html_url:r.html_url,updated_at:r.updated_at},null,2));',
+      '• 我又做了一个边界压力测试：如果污染代码行距离当前选择窗超过 120 行，旧逻辑仍可能只看到重复的数字行而误判。',
+      '• Ran curl -fsSL --max-time 20 https://api.github.com/repos/Arginine-Arg/Feishu_bridge_arg/actions/runs/30869317268',
+      '```',
+    ].join('\n');
+
+    expect(isStructuredLiveInteraction(text)).toBe(false);
+    expect(liveInteractionSurface(text)).toBeUndefined();
+    expect(liveInteractionCardForText(text, () => 'release-trace-token')).toBeUndefined();
+  });
+
+  it('does not promote command traces with a stale cursor row into a picker', () => {
+    const text = [
+      '• Ran node dist/cli.js --version',
+      '  │ package version 0.6.68',
+      '• GitHub 已接收提交，Release 工作流正在运行。',
+      '• Ran curl -fsSL --max-time 20 https://api.github.com/repos/Arginine-Arg/Feishu_bridge_arg/actions/runs/30869317268',
+      '› m',
+      '• 远端 Release 尚未生成，继续等待检查结果。',
+      'Press enter to confirm or esc to go back',
+    ].join('\n');
+
+    expect(isStructuredLiveInteraction(text)).toBe(false);
+    expect(liveInteractionSurface(text)).toBeUndefined();
+    expect(liveInteractionCardForText(text, () => 'stale-cursor-token')).toBeUndefined();
+  });
+
+  it('keeps a real titled action menu even when a tool trace precedes it', () => {
+    const text = [
+      '• Ran pnpm build',
+      'Select an action',
+      '› 1. Continue',
+      '2. Stop',
+      'Press enter to confirm or esc to go back',
+    ].join('\n');
+
+    const card = liveInteractionCardForText(text, () => 'titled-menu-token');
+    expect(card).toBeDefined();
+    expect(buttonValues(card).map((value) => value.input)).toEqual(['1', '2', 'enter', 'esc']);
+  });
+
+  it('does not treat repeated activity bullets and a footer hint as a generic menu', () => {
+    const text = [
+      '• Explored',
+      '  └ Read src/agent/live-session.ts',
+      '• Ran rg --files -g \'!node_modules\'',
+      '  └ tests/unit/bot/live-interaction-card.test.ts',
+      '• Worked for 2m 21s',
+      '  esc to interrupt',
+    ].join('\n');
+
+    expect(isStructuredLiveInteraction(text)).toBe(false);
+    expect(liveInteractionCardForText(text, () => 'activity-footer-token')).toBeUndefined();
+  });
 });
 
 function stateFrom(events: AgentEvent[]): RunState {
