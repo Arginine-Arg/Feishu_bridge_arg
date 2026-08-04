@@ -30,6 +30,7 @@ import { consumeInteractivePrompts, PROMPT_CALLBACK_ACTION } from '../card/inter
 import { isLiveControlInput, isLiveInterruptInput } from '../agent/live-session';
 import {
   isBareAgentConfirmation,
+  isActionableBinaryConfirmation,
   isLiveInteractionPromptStart,
   isStructuredLiveInteraction,
   liveInteractionSurface,
@@ -2677,9 +2678,7 @@ function detectLiveInteraction(
   const hasChoices = buttons.length > 0;
   const isBinaryConfirmation =
     /\b(?:y\/n|yes\/no|no\/yes)\b|(?:\[y\/n\]|\(y\/n\))/i.test(prompt) ||
-    /(?:do you want to|would you like to|shall i|requires? (?:approval|confirmation)|approve|allow).*(?:\?|proceed|continue|run|execute|apply|approve|allow)/i.test(
-      prompt,
-    );
+    isActionableBinaryConfirmation(prompt);
 
   if (isCodexResumePicker(prompt)) {
     add('enter', 'enter');

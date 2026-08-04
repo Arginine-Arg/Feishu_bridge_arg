@@ -837,6 +837,44 @@ describe('liveInteractionCard', () => {
     expect(card).toBeDefined();
     expect(buttonValues(card).map((value) => value.input)).toEqual(['enter', 'down enter', 'esc']);
   });
+
+  it('does not turn a normal Codex greeting and progress update into yes/no input', () => {
+    const text = [
+      '• Nihao! What would you like to work on?',
+      '• 我是 Codex，一个可以帮你读代码、写代码、排查问题和处理项目文件的 AI 助手。',
+      '• Model changed to gpt-5.6-sol high',
+      '• 我是 Codex，基于 GPT-5。',
+      '• 已经定位并修复。根因不是 SSH 或 TTY，而是 tmux 版本不匹配：',
+      '```',
+    ].join('\n');
+
+    expect(isStructuredLiveInteraction(text)).toBe(false);
+    expect(liveInteractionSurface(text)).toBeUndefined();
+    expect(liveInteractionCardForText(text, () => 'greeting-progress-token')).toBeUndefined();
+  });
+
+  it('does not truncate a command transcript by promoting its output rows to a picker', () => {
+    const text = [
+      '• Nihao! What would you like to work on?',
+      '│  Context window:       98% left (16.6K used / 258K)                        │',
+      '• 我是 Codex，一个可以帮你读代码、写代码、排查问题和处理项目文件的 AI 助手。',
+      '• Model changed to gpt-5.6-sol high',
+      '• 兼容客户端的配置已写入并通过新 shell 验证。',
+      '• Ran find /tmp -maxdepth 1 -type s -name \'test-tmux*.sock\' -print',
+      '  │ ps -eo pid,ppid,user,tty,stat,cmd | rg \'test-tmux\' || true',
+      '• Ran git -C /workspace status --short; sed -n \'1,40p\' ~/.bash_aliases',
+      '  └ fatal: not a git repository (or any of the parent directories): .git',
+      '• Ran ps -o pid,ppid,user,tty,stat,cmd -p 3462868,740093',
+      '1. process output row one',
+      '2. process output row two',
+      '3. process output row three',
+      'Press enter to confirm or esc to cancel',
+    ].join('\n');
+
+    expect(isStructuredLiveInteraction(text)).toBe(false);
+    expect(liveInteractionSurface(text)).toBeUndefined();
+    expect(liveInteractionCardForText(text, () => 'command-transcript-token')).toBeUndefined();
+  });
 });
 
 function stateFrom(events: AgentEvent[]): RunState {

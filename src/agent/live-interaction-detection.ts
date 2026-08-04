@@ -11,7 +11,11 @@ const BINARY_CONTROL_RE = /\b(?:y\/n|yes\/no|no\/yes)\b|\[(?:y|yes)\/(?:n|no)\]|
 const KEY_HINT_RE = /(?:press\s+)?enter\s+to\s+(?:confirm|continue)|esc(?:ape)?\s+to\s+(?:go\s+back|cancel)|(?:↑|↓|up\/down|arrow keys?|use .*arrows?)|(?:按下?|点击)回车(?:键)?.*确认|(?:按下?|点击).*(?:esc|取消|返回)/iu;
 const CODEX_RESUME_CONTROLS_RE = /\benter\s+(?:to\s+)?resume\b[\s\S]{0,600}\besc\s+(?:to\s+)?exit\b/iu;
 const GENERIC_INPUT_HINT_RE = /(?:choose|select|pick|option|choice|answer|respond|input|type|enter|confirm|continue|proceed|approve|allow|navigate|use\s+(?:the\s+)?(?:arrow|number|letter)|按下?|请输入|输入|选择|选项|编号|确认|继续|批准|允许|回答|回复|回车)/iu;
-const GENERIC_INPUT_PROMPT_RE = /(?:[?:：？]\s*$|(?:^|\s)[›❯>]\s*$|(?:^|\s)_\s*$)/u;
+// A naked terminal cursor is an input marker. Punctuation alone is not:
+// assistant updates commonly end in `:`/`：` while introducing code or a
+// conclusion, and treating every such line as a prompt turns ordinary output
+// into a truncated picker card.
+const GENERIC_INPUT_PROMPT_RE = /(?:(?:^|\s)[›❯>]\s*$|(?:^|\s)_\s*$)/u;
 const TOOL_TRACE_VERB_RE = /^(?:ran|running|explored|exploring|edited|wrote|applied|patched|worked|waiting|thinking|planning|analyzing|investigating)\b/iu;
 const TOOL_TRACE_READ_RE = /^read\s+(?:[`'"/]?[A-Za-z0-9_.~$@-]+(?:[/.\\]|\b)|https?:\/\/)/iu;
 const TOOL_TRACE_RUN_RE = /^run\s+(?:(?:pnpm|npm|npx|node|git|rg|grep|find|sed|awk|curl|wget|tmux|python(?:3)?|bash|sh|zsh|fish|ls|cat|cd|docker|kubectl|pytest|vitest|make)\b|[/$`]|\S+\s+--?\w)/iu;
@@ -384,6 +388,17 @@ export function isBareAgentConfirmation(input: string): boolean {
   const recent = input.split('\n').map((line) => line.trim()).filter(Boolean).slice(-6).join('\n');
   return /\b(?:do\s+you\s+want\s+to|would\s+you\s+like\s+to|shall\s+i)\b[\s\S]{0,240}\b(?:proceed|continue|run|execute|apply|approve|allow)\b[\s\S]*\?\s*$/iu.test(
     recent,
+  );
+}
+
+export function isActionableBinaryConfirmation(text: string): boolean {
+  return (
+    /\b(?:do\s+you\s+want\s+to|would\s+you\s+like\s+to|shall\s+i)\s+(?:proceed|continue|run|execute|apply|approve|allow|save|delete|overwrite|install|restart|stop|cancel)\b/iu.test(
+      text,
+    ) ||
+    /\b(?:requires?\s+(?:approval|confirmation)|approve|allow)\b[\s\S]{0,240}\b(?:proceed|continue|run|execute|apply|approve|allow)\b/iu.test(
+      text,
+    )
   );
 }
 
