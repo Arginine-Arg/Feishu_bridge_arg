@@ -9,7 +9,7 @@
  * looks like "repeats of the same message" to the user.
  */
 import { describe, expect, it } from 'vitest';
-import { renderText } from '../../../src/card/text-renderer';
+import { renderText, splitTextForDelivery } from '../../../src/card/text-renderer';
 import { initialState, reduce, type RunState } from '../../../src/card/run-state';
 
 function bigTextState(n: number): RunState {
@@ -74,5 +74,30 @@ describe('renderText byte budget (v0.6.32)', () => {
     const a = renderText(state);
     const b = renderText(state);
     expect(a).toBe(b);
+  });
+
+  it('splits complete multibyte replies without exceeding the message budget', () => {
+    const source = [
+      '一、完整训练结构',
+      'Bio Transformer -> chemical queries -> shared DeFoG flow',
+      '二、验证门：correct-own > shuffled-cross',
+      '最终结论：先完成 teacher-forced probe，再进入 blind sampling。',
+    ].join('\n\n').repeat(80);
+
+    const chunks = splitTextForDelivery(source, 900);
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks.every((chunk) => Buffer.byteLength(chunk, 'utf8') <= 900)).toBe(true);
+    expect(chunks.join('\n\n')).toBe(source);
+    expect(chunks[0]).toContain('一、完整训练结构');
+    expect(chunks.at(-1)).toContain('blind sampling');
+  });
+
+  it('keeps the complete terminal activity when explicitly rendering without a cap', () => {
+    const activity = Array.from({ length: 260 }, (_, index) => `• Ran command-${index} --check`).join('\n');
+    const state = reduce(initialState, { type: 'text', delta: activity });
+    const complete = renderText(state, { maxBytes: Number.POSITIVE_INFINITY });
+    expect(complete).toContain('command-0');
+    expect(complete).toContain('command-259');
+    expect(complete).not.toContain('执行活动已折叠');
   });
 });

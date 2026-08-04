@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.74",
+  version: "0.6.75",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -11967,8 +11967,8 @@ function presentBlocks(blocks) {
 function activityCardBody(activity, maxBytes = ACTIVITY_CARD_BODY_MAX_BYTES) {
   return foldActivityContent(activity.content, maxBytes);
 }
-function activityTextBody(activity) {
-  return foldActivityContent(activity.content, ACTIVITY_TEXT_BODY_MAX_BYTES);
+function activityTextBody(activity, maxBytes = ACTIVITY_TEXT_BODY_MAX_BYTES) {
+  return foldActivityContent(activity.content, maxBytes);
 }
 function appendTextBlock(blocks, content, streaming) {
   if (!content) return;
@@ -15851,10 +15851,16 @@ var CallbackNonceStore = class {
 var MARKER_RESERVE = 256;
 var EFFECTIVE_BUDGET = CARD_BYTE_BUDGET - MARKER_RESERVE;
 var TEXT_HEAD_BYTE_BUDGET = 2400;
-function renderText(state) {
+function renderText(state, options = {}) {
   const parts = [];
   const presentation = presentBlocks(state.blocks);
-  if (presentation.activity) parts.push(activityQuote(presentation.activity));
+  if (presentation.activity) {
+    const activityBody = activityTextBody(
+      presentation.activity,
+      options.maxBytes === Number.POSITIVE_INFINITY ? Number.POSITIVE_INFINITY : void 0
+    );
+    parts.push(activityQuote({ ...presentation.activity, content: activityBody }));
+  }
   for (const block of presentation.blocks) {
     const piece = renderBlock(block);
     if (piece) parts.push(piece);
@@ -15869,18 +15875,67 @@ function renderText(state) {
   } else if (state.terminal === "running" && state.footer) {
     parts.push(footerLine(state.footer));
   }
-  return enforceTextByteBudget(parts.join("\n\n"));
+  return enforceTextByteBudget(parts.join("\n\n"), options.maxBytes ?? EFFECTIVE_BUDGET);
+}
+function splitTextForDelivery(text, maxBytes = 12e3) {
+  if (!text.trim()) return [];
+  if (!Number.isFinite(maxBytes) || Buffer.byteLength(text, "utf8") <= maxBytes) {
+    return [text];
+  }
+  const chunks = [];
+  let current = "";
+  const append = (piece) => {
+    const trimmed = piece.trim();
+    if (!trimmed) return;
+    const candidate = current ? `${current}
+
+${trimmed}` : trimmed;
+    if (Buffer.byteLength(candidate, "utf8") <= maxBytes) {
+      current = candidate;
+      return;
+    }
+    if (current) {
+      chunks.push(current);
+      current = "";
+    }
+    if (Buffer.byteLength(trimmed, "utf8") <= maxBytes) {
+      current = trimmed;
+      return;
+    }
+    const pieces = splitOversizedMarkdownPiece(trimmed, maxBytes);
+    chunks.push(...pieces.slice(0, -1));
+    current = pieces.at(-1) ?? "";
+  };
+  for (const paragraph of text.split(/\n{2,}/u)) append(paragraph);
+  if (current) chunks.push(current);
+  return chunks;
+}
+function splitOversizedMarkdownPiece(input, maxBytes) {
+  const pieces = [];
+  let remaining = input;
+  while (remaining) {
+    if (Buffer.byteLength(remaining, "utf8") <= maxBytes) {
+      pieces.push(remaining);
+      break;
+    }
+    const head = utf8Head2(remaining, maxBytes);
+    let cut = head.lastIndexOf("\n");
+    if (cut <= 0) cut = head.length;
+    const piece = remaining.slice(0, cut).trim();
+    if (piece) pieces.push(piece);
+    remaining = remaining.slice(cut).replace(/^\n+/u, "").trimStart();
+  }
+  return pieces;
 }
 function activityQuote(activity) {
-  const body = activityTextBody(activity);
   return [
     `> _\u25B8 \u6267\u884C\u6D3B\u52A8\uFF08${activity.entries} \u9879\uFF09_`,
-    ...body.split("\n").map((line) => `> ${line}`)
+    ...activity.content.split("\n").map((line) => `> ${line}`)
   ].join("\n");
 }
-function enforceTextByteBudget(text) {
+function enforceTextByteBudget(text, maxBytes) {
   const totalBytes = Buffer.byteLength(text, "utf8");
-  if (totalBytes <= EFFECTIVE_BUDGET) return text;
+  if (!Number.isFinite(maxBytes) || totalBytes <= maxBytes) return text;
   const head = utf8Head2(text, TEXT_HEAD_BYTE_BUDGET);
   const headBytes = Buffer.byteLength(head, "utf8");
   let tail = "";
@@ -15894,7 +15949,7 @@ function enforceTextByteBudget(text) {
 ${marker}
 
 `, "utf8");
-    const tailBudget = Math.max(0, EFFECTIVE_BUDGET - headBytes - separatorBytes);
+    const tailBudget = Math.max(0, maxBytes - headBytes - separatorBytes);
     tail = utf8Tail2(text, tailBudget);
   }
   const tailBytes = Buffer.byteLength(tail, "utf8");
@@ -18590,6 +18645,8 @@ var DEBOUNCE_MS = 600;
 var STREAM_TERMINAL_GRACE_MS = 3e3;
 var STREAM_ROLLOVER_MS = 8 * 6e4;
 var REACTION_CLEANUP_GRACE_MS = 1e3;
+var LONG_REPLY_CARD_THRESHOLD_BYTES = 2e4;
+var LONG_REPLY_CHUNK_BYTES = 12e3;
 var SUPPRESSED_API_ERROR_CODES = /* @__PURE__ */ new Set([
   131005,
   // wiki.space.getNode "not found" — the doc isn't a wiki node
@@ -19763,20 +19820,39 @@ ${delta}`.slice(-16e3);
       const stateForDelivery = (state) => currentOutputMode() === "final" ? finalAnswerOnlyState(prepareStateForReply(state)) : stateForSegment(state);
       let streamDegraded = false;
       let freshFinalPosted = false;
+      let longReplyText;
+      let longReplyDelivered = false;
       let cardCtrl;
+      const deliverLongReply = async () => {
+        if (!longReplyText || longReplyDelivered || handle.detached) return;
+        if (currentOutputMode() === "off") return;
+        longReplyDelivered = true;
+        freshFinalPosted = true;
+        await sendCompleteReplyChunks({
+          channel,
+          chatId,
+          sendOpts,
+          text: longReplyText,
+          scope
+        });
+      };
       const postFreshFinal = async (state) => {
         if (handle.detached) return;
         if (freshFinalPosted) return;
         if (currentOutputMode() === "off") return;
         freshFinalPosted = true;
+        const replyState = currentOutputMode() === "final" ? finalAnswerOnlyState(prepareStateForReply(state)) : prepareStateForReply(state);
+        const complete = completeReplyText(replyState);
+        if (isLongReplyText(complete) && !looksLikeAgentPicker(complete, useLiveSession ? false : true)) {
+          longReplyText = complete;
+          await channel.send(chatId, { card: longReplyNoticeCard(complete) }, sendOpts);
+          await deliverLongReply();
+          return;
+        }
         await channel.send(
           chatId,
           {
-            card: renderLiveAwareReplyCard(
-              currentOutputMode() === "final" ? finalAnswerOnlyState(prepareStateForReply(state)) : prepareStateForReply(state),
-              cardRenderOptions,
-              useLiveSession ? "live" : "agent"
-            )
+            card: renderLiveAwareReplyCard(replyState, cardRenderOptions, useLiveSession ? "live" : "agent")
           },
           sendOpts
         );
@@ -19796,8 +19872,32 @@ ${delta}`.slice(-16e3);
             return;
           }
           if (cardCtrl) {
+            const replyState = stateForDelivery(state);
+            if (state.terminal !== "running") {
+              const complete = completeReplyText(
+                currentOutputMode() === "final" ? finalAnswerOnlyState(prepareStateForReply(state)) : prepareStateForReply(state)
+              );
+              if (isLongReplyText(complete) && !looksLikeAgentPicker(complete, useLiveSession ? false : true)) {
+                longReplyText = complete;
+                const notice = longReplyNoticeCard(complete);
+                const noticeSerialized = JSON.stringify(notice);
+                if (noticeSerialized === lastSentCardSerialized) return;
+                lastSentCardSerialized = noticeSerialized;
+                try {
+                  await cardCtrl.update(notice);
+                } catch (err) {
+                  streamDegraded = true;
+                  cardCtrl = void 0;
+                  log.warn("stream", "long-reply-notice-failed", {
+                    scope,
+                    err: err instanceof Error ? err.message : String(err)
+                  });
+                }
+                return;
+              }
+            }
             const nextCard = renderLiveAwareReplyCard(
-              stateForDelivery(state),
+              replyState,
               cardRenderOptions,
               useLiveSession ? "live" : "agent"
             );
@@ -19872,6 +19972,7 @@ ${delta}`.slice(-16e3);
         },
         fallback: postFreshFinal
       });
+      await deliverLongReply();
       if (!handle.detached && streamDegraded && currentOutputMode() !== "off") {
         await postFreshFinal(prepareStateForReply(latestState));
       }
@@ -19882,15 +19983,35 @@ ${delta}`.slice(-16e3);
       const stateForDelivery = (state) => currentOutputMode() === "final" ? finalAnswerOnlyState(prepareStateForReply(state)) : stateForSegment(state);
       let streamDegraded = false;
       let freshFinalPosted = false;
+      let longReplyText;
+      let longReplyDelivered = false;
       let markdownCtrl;
+      const deliverLongReply = async () => {
+        if (!longReplyText || longReplyDelivered || handle.detached) return;
+        if (currentOutputMode() === "off") return;
+        longReplyDelivered = true;
+        freshFinalPosted = true;
+        await sendCompleteReplyChunks({
+          channel,
+          chatId,
+          sendOpts,
+          text: longReplyText,
+          scope
+        });
+      };
       const postFreshFinal = async (state) => {
         if (handle.detached) return;
         if (freshFinalPosted) return;
         if (currentOutputMode() === "off") return;
         freshFinalPosted = true;
-        const body = renderText(
-          currentOutputMode() === "final" ? finalAnswerOnlyState(prepareStateForReply(state)) : prepareStateForReply(state)
-        );
+        const replyState = currentOutputMode() === "final" ? finalAnswerOnlyState(prepareStateForReply(state)) : prepareStateForReply(state);
+        const complete = completeReplyText(replyState);
+        if (isLongReplyText(complete) && !looksLikeAgentPicker(complete, useLiveSession ? false : true)) {
+          longReplyText = complete;
+          await deliverLongReply();
+          return;
+        }
+        const body = renderText(replyState);
         if (body.trim()) {
           await channel.send(chatId, { markdown: body }, sendOpts);
         }
@@ -19910,7 +20031,30 @@ ${delta}`.slice(-16e3);
             return;
           }
           if (markdownCtrl) {
-            const nextText = renderText(stateForDelivery(state));
+            const replyState = stateForDelivery(state);
+            if (state.terminal !== "running") {
+              const complete = completeReplyText(
+                currentOutputMode() === "final" ? finalAnswerOnlyState(prepareStateForReply(state)) : prepareStateForReply(state)
+              );
+              if (isLongReplyText(complete) && !looksLikeAgentPicker(complete, useLiveSession ? false : true)) {
+                longReplyText = complete;
+                const notice = "\u6B63\u6587\u8F83\u957F\uFF0C\u5B8C\u6574\u7B54\u590D\u5C06\u5728\u540E\u7EED\u6D88\u606F\u4E2D\u5206\u6BB5\u53D1\u9001\u3002";
+                if (notice === lastSentMarkdownText) return;
+                lastSentMarkdownText = notice;
+                try {
+                  await markdownCtrl.setContent(notice);
+                } catch (err) {
+                  streamDegraded = true;
+                  markdownCtrl = void 0;
+                  log.warn("stream", "long-reply-notice-failed", {
+                    scope,
+                    err: err instanceof Error ? err.message : String(err)
+                  });
+                }
+                return;
+              }
+            }
+            const nextText = renderText(replyState);
             if (nextText === lastSentMarkdownText) return;
             lastSentMarkdownText = nextText;
             try {
@@ -19966,6 +20110,7 @@ ${delta}`.slice(-16e3);
         },
         fallback: postFreshFinal
       });
+      await deliverLongReply();
       if (!handle.detached && streamDegraded && currentOutputMode() !== "off") {
         await postFreshFinal(prepareStateForReply(latestState));
       }
@@ -20038,6 +20183,17 @@ ${delta}`.slice(-16e3);
 }
 async function sendFinalReply(input) {
   const body = renderText(input.state);
+  const completeBody = completeReplyText(input.state);
+  if (isLongReplyText(completeBody) && !looksLikeAgentPicker(completeBody, input.liveInteractionInputRoute === "agent")) {
+    await sendCompleteReplyChunks({
+      channel: input.channel,
+      chatId: input.chatId,
+      sendOpts: input.sendOpts,
+      text: completeBody,
+      scope: input.scope
+    });
+    return;
+  }
   if (input.replyMode === "card") {
     if (isSkippedLiveInteractionForText(body, input.skipLiveInteractionSignatures)) {
       log.info("outbound", "skipped", outboundLogFields(input, "live-interaction-duplicate", body));
@@ -20697,6 +20853,45 @@ function isLiveInteractionCardForText(text, inputRoute, skipSignatures) {
   if (!looksLikeAgentPicker(text, allowBareConfirmation)) return false;
   const interaction = detectLiveInteraction(text, allowBareConfirmation);
   return Boolean(interaction && !skipSignatures?.has(interaction.signature));
+}
+function completeReplyText(state) {
+  return renderText(state, { maxBytes: Number.POSITIVE_INFINITY });
+}
+function isLongReplyText(text) {
+  return Buffer.byteLength(text, "utf8") > LONG_REPLY_CARD_THRESHOLD_BYTES;
+}
+function longReplyNoticeCard(text) {
+  const chunks = splitTextForDelivery(text, LONG_REPLY_CHUNK_BYTES);
+  return {
+    schema: "2.0",
+    config: {
+      streaming_mode: false,
+      summary: { content: "\u6B63\u6587\u8F83\u957F\uFF0C\u5DF2\u62C6\u5206\u53D1\u9001" }
+    },
+    body: {
+      elements: [
+        {
+          tag: "markdown",
+          content: `\u6B63\u6587\u8F83\u957F\uFF08\u7EA6 ${Buffer.byteLength(text, "utf8")} \u5B57\u8282\uFF09\uFF0C\u5DF2\u62C6\u5206\u4E3A ${chunks.length} \u6761\u5B8C\u6574\u6D88\u606F\u53D1\u9001\u3002`
+        }
+      ]
+    }
+  };
+}
+async function sendCompleteReplyChunks(input) {
+  const chunks = splitTextForDelivery(input.text, LONG_REPLY_CHUNK_BYTES);
+  if (chunks.length === 0) return;
+  for (const [index, chunk] of chunks.entries()) {
+    const content = chunks.length > 1 ? `\uFF08\u5B8C\u6574\u7B54\u590D ${index + 1}/${chunks.length}\uFF09
+
+${chunk}` : chunk;
+    await input.channel.send(input.chatId, { markdown: content }, input.sendOpts);
+  }
+  log.info("outbound", "long-reply-split", {
+    scope: input.scope,
+    chunks: chunks.length,
+    bytes: Buffer.byteLength(input.text, "utf8")
+  });
 }
 function isSkippedLiveInteractionForText(text, skipSignatures) {
   if (!skipSignatures || !looksLikeAgentPicker(text)) return false;

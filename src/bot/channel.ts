@@ -48,7 +48,7 @@ import {
   reduce,
   type RunState,
 } from '../card/run-state';
-import { renderText } from '../card/text-renderer';
+import { renderText, splitTextForDelivery } from '../card/text-renderer';
 import { saveProfileModelPreferences, tryHandleCommand, type Controls } from '../commands';
 import type { AppConfig, CodexReasoningEffort } from '../config/schema';
 import {
@@ -111,6 +111,11 @@ const DEBOUNCE_MS = 600;
 const STREAM_TERMINAL_GRACE_MS = 3000;
 const STREAM_ROLLOVER_MS = 8 * 60_000;
 const REACTION_CLEANUP_GRACE_MS = 1000;
+// Keep streamed cards comfortably below CardKit's payload ceiling. A long
+// answer is delivered as complete follow-up markdown chunks instead of being
+// silently folded to its head and tail inside one card.
+const LONG_REPLY_CARD_THRESHOLD_BYTES = 20_000;
+const LONG_REPLY_CHUNK_BYTES = 12_000;
 
 // Lark SDK logs API errors at error level even when the caller catches them.
 // These specific codes are EXPECTED in our flow (wiki-node lookup that
@@ -1683,24 +1688,47 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       // and post the final answer as a fresh message if the last patch failed.
       let streamDegraded = false;
       let freshFinalPosted = false;
+      let longReplyText: string | undefined;
+      let longReplyDelivered = false;
       let cardCtrl:
         | { update(next: object | ((current: object) => object)): Promise<void> }
         | undefined;
+      const deliverLongReply = async (): Promise<void> => {
+        if (!longReplyText || longReplyDelivered || handle.detached) return;
+        if (currentOutputMode() === 'off') return;
+        longReplyDelivered = true;
+        freshFinalPosted = true;
+        await sendCompleteReplyChunks({
+          channel,
+          chatId,
+          sendOpts,
+          text: longReplyText,
+          scope,
+        });
+      };
       const postFreshFinal = async (state: RunState): Promise<void> => {
         if (handle.detached) return;
         if (freshFinalPosted) return;
         if (currentOutputMode() === 'off') return;
         freshFinalPosted = true;
+        const replyState =
+          currentOutputMode() === 'final'
+            ? finalAnswerOnlyState(prepareStateForReply(state))
+            : prepareStateForReply(state);
+        const complete = completeReplyText(replyState);
+        if (
+          isLongReplyText(complete) &&
+          !looksLikeAgentPicker(complete, useLiveSession ? false : true)
+        ) {
+          longReplyText = complete;
+          await channel.send(chatId, { card: longReplyNoticeCard(complete) }, sendOpts);
+          await deliverLongReply();
+          return;
+        }
         await channel.send(
           chatId,
           {
-            card: renderLiveAwareReplyCard(
-              currentOutputMode() === 'final'
-                ? finalAnswerOnlyState(prepareStateForReply(state))
-                : prepareStateForReply(state),
-              cardRenderOptions,
-              useLiveSession ? 'live' : 'agent',
-            ),
+            card: renderLiveAwareReplyCard(replyState, cardRenderOptions, useLiveSession ? 'live' : 'agent'),
           },
           sendOpts,
         );
@@ -1720,13 +1748,42 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
             return;
           }
           if (cardCtrl) {
+            const replyState = stateForDelivery(state);
+            if (state.terminal !== 'running') {
+              const complete = completeReplyText(
+                currentOutputMode() === 'final'
+                  ? finalAnswerOnlyState(prepareStateForReply(state))
+                  : prepareStateForReply(state),
+              );
+              if (
+                isLongReplyText(complete) &&
+                !looksLikeAgentPicker(complete, useLiveSession ? false : true)
+              ) {
+                longReplyText = complete;
+                const notice = longReplyNoticeCard(complete);
+                const noticeSerialized = JSON.stringify(notice);
+                if (noticeSerialized === lastSentCardSerialized) return;
+                lastSentCardSerialized = noticeSerialized;
+                try {
+                  await cardCtrl.update(notice);
+                } catch (err) {
+                  streamDegraded = true;
+                  cardCtrl = undefined;
+                  log.warn('stream', 'long-reply-notice-failed', {
+                    scope,
+                    err: err instanceof Error ? err.message : String(err),
+                  });
+                }
+                return;
+              }
+            }
             // Dedup: skip PATCH if the rendered card is byte-identical to the
             // last one we sent. SDK throttle absorbs most redundant updates,
             // but during long runs with no state change the reducer still
             // emits `done` / `usage` events that re-render → identical card.
             // Without this guard we PATCH the same JSON many times in a row.
             const nextCard = renderLiveAwareReplyCard(
-              stateForDelivery(state),
+              replyState,
               cardRenderOptions,
               useLiveSession ? 'live' : 'agent',
             );
@@ -1803,6 +1860,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         },
         fallback: postFreshFinal,
       });
+      await deliverLongReply();
       if (!handle.detached && streamDegraded && currentOutputMode() !== 'off') {
         await postFreshFinal(prepareStateForReply(latestState));
       }
@@ -1819,17 +1877,41 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       // message instead of aborting the run and losing the answer.
       let streamDegraded = false;
       let freshFinalPosted = false;
+      let longReplyText: string | undefined;
+      let longReplyDelivered = false;
       let markdownCtrl: { setContent(markdown: string): Promise<void> } | undefined;
+      const deliverLongReply = async (): Promise<void> => {
+        if (!longReplyText || longReplyDelivered || handle.detached) return;
+        if (currentOutputMode() === 'off') return;
+        longReplyDelivered = true;
+        freshFinalPosted = true;
+        await sendCompleteReplyChunks({
+          channel,
+          chatId,
+          sendOpts,
+          text: longReplyText,
+          scope,
+        });
+      };
       const postFreshFinal = async (state: RunState): Promise<void> => {
         if (handle.detached) return;
         if (freshFinalPosted) return;
         if (currentOutputMode() === 'off') return;
         freshFinalPosted = true;
-        const body = renderText(
+        const replyState =
           currentOutputMode() === 'final'
             ? finalAnswerOnlyState(prepareStateForReply(state))
-            : prepareStateForReply(state),
-        );
+            : prepareStateForReply(state);
+        const complete = completeReplyText(replyState);
+        if (
+          isLongReplyText(complete) &&
+          !looksLikeAgentPicker(complete, useLiveSession ? false : true)
+        ) {
+          longReplyText = complete;
+          await deliverLongReply();
+          return;
+        }
+        const body = renderText(replyState);
         if (body.trim()) {
           await channel.send(chatId, { markdown: body }, sendOpts);
         }
@@ -1849,12 +1931,40 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
             return;
           }
           if (markdownCtrl) {
+            const replyState = stateForDelivery(state);
+            if (state.terminal !== 'running') {
+              const complete = completeReplyText(
+                currentOutputMode() === 'final'
+                  ? finalAnswerOnlyState(prepareStateForReply(state))
+                  : prepareStateForReply(state),
+              );
+              if (
+                isLongReplyText(complete) &&
+                !looksLikeAgentPicker(complete, useLiveSession ? false : true)
+              ) {
+                longReplyText = complete;
+                const notice = '正文较长，完整答复将在后续消息中分段发送。';
+                if (notice === lastSentMarkdownText) return;
+                lastSentMarkdownText = notice;
+                try {
+                  await markdownCtrl.setContent(notice);
+                } catch (err) {
+                  streamDegraded = true;
+                  markdownCtrl = undefined;
+                  log.warn('stream', 'long-reply-notice-failed', {
+                    scope,
+                    err: err instanceof Error ? err.message : String(err),
+                  });
+                }
+                return;
+              }
+            }
             // Dedup: skip PATCH if rendered markdown is identical to the
             // last one we sent. SDK throttle absorbs most redundant updates,
             // but on text-heavy streams (v0.6.32 motivation: bridge echoed
             // a 6KB+ reply 30+ times), this kills the perceived "duplicate"
             // symptom in Feishu.
-            const nextText = renderText(stateForDelivery(state));
+            const nextText = renderText(replyState);
             if (nextText === lastSentMarkdownText) return;
             lastSentMarkdownText = nextText;
             try {
@@ -1912,6 +2022,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         },
         fallback: postFreshFinal,
       });
+      await deliverLongReply();
       if (!handle.detached && streamDegraded && currentOutputMode() !== 'off') {
         await postFreshFinal(prepareStateForReply(latestState));
       }
@@ -2008,6 +2119,20 @@ async function sendFinalReply(input: {
   liveInteractionInputRoute?: LiveInteractionInputRoute;
 }): Promise<void> {
   const body = renderText(input.state);
+  const completeBody = completeReplyText(input.state);
+  if (
+    isLongReplyText(completeBody) &&
+    !looksLikeAgentPicker(completeBody, input.liveInteractionInputRoute === 'agent')
+  ) {
+    await sendCompleteReplyChunks({
+      channel: input.channel,
+      chatId: input.chatId,
+      sendOpts: input.sendOpts,
+      text: completeBody,
+      scope: input.scope,
+    });
+    return;
+  }
 
   if (input.replyMode === 'card') {
     if (isSkippedLiveInteractionForText(body, input.skipLiveInteractionSignatures)) {
@@ -2949,6 +3074,56 @@ function isLiveInteractionCardForText(
   if (!looksLikeAgentPicker(text, allowBareConfirmation)) return false;
   const interaction = detectLiveInteraction(text, allowBareConfirmation);
   return Boolean(interaction && !skipSignatures?.has(interaction.signature));
+}
+
+function completeReplyText(state: RunState): string {
+  return renderText(state, { maxBytes: Number.POSITIVE_INFINITY });
+}
+
+function isLongReplyText(text: string): boolean {
+  return Buffer.byteLength(text, 'utf8') > LONG_REPLY_CARD_THRESHOLD_BYTES;
+}
+
+function longReplyNoticeCard(text: string): object {
+  const chunks = splitTextForDelivery(text, LONG_REPLY_CHUNK_BYTES);
+  return {
+    schema: '2.0',
+    config: {
+      streaming_mode: false,
+      summary: { content: '正文较长，已拆分发送' },
+    },
+    body: {
+      elements: [
+        {
+          tag: 'markdown',
+          content: `正文较长（约 ${Buffer.byteLength(text, 'utf8')} 字节），已拆分为 ${chunks.length} 条完整消息发送。`,
+        },
+      ],
+    },
+  };
+}
+
+async function sendCompleteReplyChunks(input: {
+  channel: LarkChannel;
+  chatId: string;
+  sendOpts: { replyTo: string; replyInThread?: boolean };
+  text: string;
+  scope: string;
+}): Promise<void> {
+  const chunks = splitTextForDelivery(input.text, LONG_REPLY_CHUNK_BYTES);
+  if (chunks.length === 0) return;
+  for (const [index, chunk] of chunks.entries()) {
+    const content =
+      chunks.length > 1
+        ? `（完整答复 ${index + 1}/${chunks.length}）\n\n${chunk}`
+        : chunk;
+    await input.channel.send(input.chatId, { markdown: content }, input.sendOpts);
+  }
+  log.info('outbound', 'long-reply-split', {
+    scope: input.scope,
+    chunks: chunks.length,
+    bytes: Buffer.byteLength(input.text, 'utf8'),
+  });
 }
 
 function isSkippedLiveInteractionForText(

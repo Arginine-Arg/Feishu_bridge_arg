@@ -108,6 +108,10 @@ interface RunCardRenderOptions {
 }
 declare function renderCard(state: RunState, options?: RunCardRenderOptions): object;
 
+interface RenderTextOptions {
+    /** Set to Infinity when the caller will split the complete text itself. */
+    maxBytes?: number;
+}
 /**
  * Render `RunState` as plain markdown text — used in `messageReply: 'text'`
  * mode where we stream a markdown message instead of a card.
@@ -121,7 +125,7 @@ declare function renderCard(state: RunState, options?: RunCardRenderOptions): ob
  * Output is bounded to `EFFECTIVE_BUDGET` bytes with a global head/tail
  * fold. The marker stays in the middle so the final answer remains visible.
  */
-declare function renderText(state: RunState): string;
+declare function renderText(state: RunState, options?: RenderTextOptions): string;
 
 /**
  * Structured logger.

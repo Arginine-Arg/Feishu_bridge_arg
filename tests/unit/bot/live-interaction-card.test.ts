@@ -741,6 +741,42 @@ describe('liveInteractionCard', () => {
         'live',
       ),
     ).toBeUndefined();
+    const academicDesign = [
+      'generated molecule',
+      '推理时禁止出现：',
+      '目标 SMILES',
+      '目标分子 MMELON embedding',
+      '目标 fragment',
+      '目标 graph',
+      '目标 node count',
+      '目标 attachment',
+      '8. 为什么这可能比当前 Bio bridge 有效',
+      '当前 Bio 失败可能不是 Bio 没有信息，而是：',
+      'Bio information -> pooled representation -> source bridge -> DeFoG graph trajectory',
+      '推荐的实验顺序是：',
+      'A. 当前 Bio bridge',
+      'B. Bio denoising/AR only',
+      'C. Bio AR + linear chemical bridge',
+      'D. Bio AR + bridge + shared DeFoG flow',
+      '更详细的告诉我这个原理，和方案细节',
+      '• 先明确一个边界：这套方案目前是新方案设计，不是当前 V126/V128 的已有实现。',
+      '一、完整训练结构',
+      'K 个 chemical queries',
+      'attention pooling',
+      'c_bio [B,768]',
+      'molecular bridge',
+      'u_m^teacher',
+      '二、Bio Transformer 到底学习什么输入仍然是：[FATE_UP][PATHWAY_UP][GENES][PATHWAY_DOWN][FATE_DOWN]',
+      '三、chemical teacher 是什么',
+      '1. Bio representation gate',
+      '2. Teacher-forced chemical gate',
+      '3. Reference-blind Bio C gate',
+      '4. 独立生物学 gate',
+      '当前最应该先做的是一个低成本的 linear probe。',
+    ].join('\n');
+    expect(isStructuredLiveInteraction(academicDesign)).toBe(false);
+    expect(liveInteractionSurface(academicDesign)).toBeUndefined();
+    expect(liveInteractionCardForText(academicDesign, () => 'academic-design-token')).toBeUndefined();
   });
 
   it('does not turn bridge tool traces and progress updates into a picker', () => {

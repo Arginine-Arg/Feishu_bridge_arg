@@ -62,8 +62,11 @@ export function activityCardBody(
   return foldActivityContent(activity.content, maxBytes);
 }
 
-export function activityTextBody(activity: ActivityTranscript): string {
-  return foldActivityContent(activity.content, ACTIVITY_TEXT_BODY_MAX_BYTES);
+export function activityTextBody(
+  activity: ActivityTranscript,
+  maxBytes = ACTIVITY_TEXT_BODY_MAX_BYTES,
+): string {
+  return foldActivityContent(activity.content, maxBytes);
 }
 
 function appendTextBlock(blocks: Block[], content: string, streaming: boolean): void {

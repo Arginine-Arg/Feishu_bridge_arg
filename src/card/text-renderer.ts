@@ -8,6 +8,11 @@ const EFFECTIVE_BUDGET = CARD_BYTE_BUDGET - MARKER_RESERVE;
 
 const TEXT_HEAD_BYTE_BUDGET = 2400;
 
+export interface RenderTextOptions {
+  /** Set to Infinity when the caller will split the complete text itself. */
+  maxBytes?: number;
+}
+
 /**
  * Render `RunState` as plain markdown text — used in `messageReply: 'text'`
  * mode where we stream a markdown message instead of a card.
@@ -21,11 +26,17 @@ const TEXT_HEAD_BYTE_BUDGET = 2400;
  * Output is bounded to `EFFECTIVE_BUDGET` bytes with a global head/tail
  * fold. The marker stays in the middle so the final answer remains visible.
  */
-export function renderText(state: RunState): string {
+export function renderText(state: RunState, options: RenderTextOptions = {}): string {
   const parts: string[] = [];
   const presentation = presentBlocks(state.blocks);
 
-  if (presentation.activity) parts.push(activityQuote(presentation.activity));
+  if (presentation.activity) {
+    const activityBody = activityTextBody(
+      presentation.activity,
+      options.maxBytes === Number.POSITIVE_INFINITY ? Number.POSITIVE_INFINITY : undefined,
+    );
+    parts.push(activityQuote({ ...presentation.activity, content: activityBody }));
+  }
 
   for (const block of presentation.blocks) {
     const piece = renderBlock(block);
@@ -43,20 +54,76 @@ export function renderText(state: RunState): string {
     parts.push(footerLine(state.footer));
   }
 
-  return enforceTextByteBudget(parts.join('\n\n'));
+  return enforceTextByteBudget(parts.join('\n\n'), options.maxBytes ?? EFFECTIVE_BUDGET);
+}
+
+/**
+ * Split a complete markdown reply into independently sendable messages.
+ * Splitting at paragraph/line boundaries keeps headings and code blocks
+ * readable while the byte limit leaves room for Feishu message metadata.
+ */
+export function splitTextForDelivery(text: string, maxBytes = 12_000): string[] {
+  if (!text.trim()) return [];
+  if (!Number.isFinite(maxBytes) || Buffer.byteLength(text, 'utf8') <= maxBytes) {
+    return [text];
+  }
+
+  const chunks: string[] = [];
+  let current = '';
+  const append = (piece: string): void => {
+    const trimmed = piece.trim();
+    if (!trimmed) return;
+    const candidate = current ? `${current}\n\n${trimmed}` : trimmed;
+    if (Buffer.byteLength(candidate, 'utf8') <= maxBytes) {
+      current = candidate;
+      return;
+    }
+    if (current) {
+      chunks.push(current);
+      current = '';
+    }
+    if (Buffer.byteLength(trimmed, 'utf8') <= maxBytes) {
+      current = trimmed;
+      return;
+    }
+    const pieces = splitOversizedMarkdownPiece(trimmed, maxBytes);
+    chunks.push(...pieces.slice(0, -1));
+    current = pieces.at(-1) ?? '';
+  };
+
+  for (const paragraph of text.split(/\n{2,}/u)) append(paragraph);
+  if (current) chunks.push(current);
+  return chunks;
+}
+
+function splitOversizedMarkdownPiece(input: string, maxBytes: number): string[] {
+  const pieces: string[] = [];
+  let remaining = input;
+  while (remaining) {
+    if (Buffer.byteLength(remaining, 'utf8') <= maxBytes) {
+      pieces.push(remaining);
+      break;
+    }
+    const head = utf8Head(remaining, maxBytes);
+    let cut = head.lastIndexOf('\n');
+    if (cut <= 0) cut = head.length;
+    const piece = remaining.slice(0, cut).trim();
+    if (piece) pieces.push(piece);
+    remaining = remaining.slice(cut).replace(/^\n+/u, '').trimStart();
+  }
+  return pieces;
 }
 
 function activityQuote(activity: ActivityTranscript): string {
-  const body = activityTextBody(activity);
   return [
     `> _▸ 执行活动（${activity.entries} 项）_`,
-    ...body.split('\n').map((line) => `> ${line}`),
+    ...activity.content.split('\n').map((line) => `> ${line}`),
   ].join('\n');
 }
 
-function enforceTextByteBudget(text: string): string {
+function enforceTextByteBudget(text: string, maxBytes: number): string {
   const totalBytes = Buffer.byteLength(text, 'utf8');
-  if (totalBytes <= EFFECTIVE_BUDGET) return text;
+  if (!Number.isFinite(maxBytes) || totalBytes <= maxBytes) return text;
 
   const head = utf8Head(text, TEXT_HEAD_BYTE_BUDGET);
   const headBytes = Buffer.byteLength(head, 'utf8');
@@ -70,7 +137,7 @@ function enforceTextByteBudget(text: string): string {
     const droppedBytes = Math.max(0, totalBytes - headBytes - tailBytes);
     marker = `_… ${droppedBytes} 字节已折叠（保留首尾）…_`;
     const separatorBytes = Buffer.byteLength(`\n\n${marker}\n\n`, 'utf8');
-    const tailBudget = Math.max(0, EFFECTIVE_BUDGET - headBytes - separatorBytes);
+    const tailBudget = Math.max(0, maxBytes - headBytes - separatorBytes);
     tail = utf8Tail(text, tailBudget);
   }
 

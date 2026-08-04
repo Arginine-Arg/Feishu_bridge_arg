@@ -85,6 +85,68 @@ afterEach(async () => {
 
 describe('markdown stream startup failures', () => {
   it.each(['markdown', 'card'] as const)(
+    'delivers an oversized academic answer completely in %s mode',
+    async (messageReply) => {
+      const markdownUpdates: string[] = [];
+      const cardUpdates: object[] = [];
+      const h = await createHarness({
+        stream: async (_chatId, input) => {
+          if (messageReply === 'markdown') {
+            const producer = (input as {
+              markdown?: (ctrl: { setContent(markdown: string): Promise<void> }) => Promise<void>;
+            }).markdown;
+            if (!producer) throw new Error('expected markdown stream producer');
+            await producer({
+              setContent: async (markdown) => {
+                markdownUpdates.push(markdown);
+              },
+            });
+            return;
+          }
+          const producer = (input as {
+            card?: { producer?: (ctrl: { update(next: object): Promise<void> }) => Promise<void> };
+          }).card?.producer;
+          if (!producer) throw new Error('expected card stream producer');
+          await producer({
+            update: async (next) => {
+              cardUpdates.push(next);
+            },
+          });
+        },
+      });
+      h.profileConfig.preferences = { ...(h.profileConfig.preferences ?? {}), messageReply };
+      h.controls.profileConfig.preferences = h.profileConfig.preferences;
+      h.controls.cfg.preferences = h.profileConfig.preferences;
+
+      const longAnswer = [
+        '一、完整训练结构',
+        'Bio Transformer -> chemical queries -> shared DeFoG flow',
+        '二、验证门：correct-own > shuffled-cross',
+        '每个阶段都必须保留生物学含义和化学条件控制。',
+      ].join('\n\n').repeat(180) + '\n\n最终结论：先完成 teacher-forced probe，再进入 blind sampling。';
+      h.agent.setEvents([
+        [{ type: 'text', delta: longAnswer }, { type: 'done', terminationReason: 'normal' }],
+      ]);
+      await startTestBridge(h);
+
+      await h.channel.handlers.message?.(message(`om_long_answer_${messageReply}`, 'summarize the design'));
+      await waitFor(() =>
+        h.channel.sent.some((item) => JSON.stringify(item.content).includes('最终结论：先完成 teacher-forced probe')),
+      );
+
+      const delivered = h.channel.sent
+        .map((item) => (item.content as { markdown?: string }).markdown ?? '')
+        .join('\n\n');
+      expect(delivered).toContain('一、完整训练结构');
+      expect(delivered).toContain('最终结论：先完成 teacher-forced probe，再进入 blind sampling。');
+      expect(h.channel.sent.length).toBeGreaterThan(1);
+      expect(
+        JSON.stringify(messageReply === 'markdown' ? markdownUpdates : cardUpdates),
+      ).toContain('正文较长');
+    },
+  );
+
+  it.each(['markdown', 'card'] as const)(
     'keeps a redrawn terminal table aligned and delivers the complete final analysis once in %s streams',
     async (messageReply) => {
       const markdownUpdates: string[] = [];

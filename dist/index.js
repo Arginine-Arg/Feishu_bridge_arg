@@ -518,8 +518,8 @@ function presentBlocks(blocks) {
 function activityCardBody(activity, maxBytes = ACTIVITY_CARD_BODY_MAX_BYTES) {
   return foldActivityContent(activity.content, maxBytes);
 }
-function activityTextBody(activity) {
-  return foldActivityContent(activity.content, ACTIVITY_TEXT_BODY_MAX_BYTES);
+function activityTextBody(activity, maxBytes = ACTIVITY_TEXT_BODY_MAX_BYTES) {
+  return foldActivityContent(activity.content, maxBytes);
 }
 function appendTextBlock(blocks, content, streaming) {
   if (!content) return;
@@ -1049,10 +1049,16 @@ function truncate2(s, max) {
 var MARKER_RESERVE = 256;
 var EFFECTIVE_BUDGET = CARD_BYTE_BUDGET - MARKER_RESERVE;
 var TEXT_HEAD_BYTE_BUDGET = 2400;
-function renderText(state) {
+function renderText(state, options = {}) {
   const parts = [];
   const presentation = presentBlocks(state.blocks);
-  if (presentation.activity) parts.push(activityQuote(presentation.activity));
+  if (presentation.activity) {
+    const activityBody = activityTextBody(
+      presentation.activity,
+      options.maxBytes === Number.POSITIVE_INFINITY ? Number.POSITIVE_INFINITY : void 0
+    );
+    parts.push(activityQuote({ ...presentation.activity, content: activityBody }));
+  }
   for (const block of presentation.blocks) {
     const piece = renderBlock(block);
     if (piece) parts.push(piece);
@@ -1067,18 +1073,17 @@ function renderText(state) {
   } else if (state.terminal === "running" && state.footer) {
     parts.push(footerLine(state.footer));
   }
-  return enforceTextByteBudget(parts.join("\n\n"));
+  return enforceTextByteBudget(parts.join("\n\n"), options.maxBytes ?? EFFECTIVE_BUDGET);
 }
 function activityQuote(activity) {
-  const body = activityTextBody(activity);
   return [
     `> _\u25B8 \u6267\u884C\u6D3B\u52A8\uFF08${activity.entries} \u9879\uFF09_`,
-    ...body.split("\n").map((line) => `> ${line}`)
+    ...activity.content.split("\n").map((line) => `> ${line}`)
   ].join("\n");
 }
-function enforceTextByteBudget(text) {
+function enforceTextByteBudget(text, maxBytes) {
   const totalBytes = Buffer.byteLength(text, "utf8");
-  if (totalBytes <= EFFECTIVE_BUDGET) return text;
+  if (!Number.isFinite(maxBytes) || totalBytes <= maxBytes) return text;
   const head = utf8Head2(text, TEXT_HEAD_BYTE_BUDGET);
   const headBytes = Buffer.byteLength(head, "utf8");
   let tail = "";
@@ -1092,7 +1097,7 @@ function enforceTextByteBudget(text) {
 ${marker}
 
 `, "utf8");
-    const tailBudget = Math.max(0, EFFECTIVE_BUDGET - headBytes - separatorBytes);
+    const tailBudget = Math.max(0, maxBytes - headBytes - separatorBytes);
     tail = utf8Tail2(text, tailBudget);
   }
   const tailBytes = Buffer.byteLength(tail, "utf8");
