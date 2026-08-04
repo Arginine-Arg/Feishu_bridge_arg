@@ -12,7 +12,7 @@ const KEY_HINT_RE = /(?:press\s+)?enter\s+to\s+(?:confirm|continue)|esc(?:ape)?\
 const CODEX_RESUME_CONTROLS_RE = /\benter\s+(?:to\s+)?resume\b[\s\S]{0,600}\besc\s+(?:to\s+)?exit\b/iu;
 const GENERIC_INPUT_HINT_RE = /(?:choose|select|pick|option|choice|answer|respond|input|type|enter|confirm|continue|proceed|approve|allow|navigate|use\s+(?:the\s+)?(?:arrow|number|letter)|按下?|请输入|输入|选择|选项|编号|确认|继续|批准|允许|回答|回复|回车)/iu;
 const GENERIC_INPUT_PROMPT_RE = /(?:[?:：？]\s*$|(?:^|\s)[›❯>]\s*$|(?:^|\s)_\s*$)/u;
-const TOOL_TRACE_VERB_RE = /^(?:ran|running|explored|exploring|searched|search|listed|list|edited|wrote|applied|patched|checked|inspected|worked|waiting|thinking|planning|analyzing|investigating)\b/iu;
+const TOOL_TRACE_VERB_RE = /^(?:ran|running|explored|exploring|edited|wrote|applied|patched|worked|waiting|thinking|planning|analyzing|investigating)\b/iu;
 const TOOL_TRACE_READ_RE = /^read\s+(?:[`'"/]?[A-Za-z0-9_.~$@-]+(?:[/.\\]|\b)|https?:\/\/)/iu;
 const TOOL_TRACE_RUN_RE = /^run\s+(?:(?:pnpm|npm|npx|node|git|rg|grep|find|sed|awk|curl|wget|tmux|python(?:3)?|bash|sh|zsh|fish|ls|cat|cd|docker|kubectl|pytest|vitest|make)\b|[/$`]|\S+\s+--?\w)/iu;
 const ACTIVITY_CONNECTOR_RE = /^(?:[│└╰├┤┌┐┘└]|\.\.\.)\s*/u;
@@ -109,7 +109,12 @@ function isRenderedActivityQuote(label: string): boolean {
 
 function isToolTraceLine(line: string): boolean {
   const trimmed = line.trim().replace(/^(?:[•◦⏺●]\s*)/u, '');
-  return TOOL_TRACE_VERB_RE.test(trimmed) || TOOL_TRACE_READ_RE.test(trimmed) || TOOL_TRACE_RUN_RE.test(trimmed);
+  return (
+    TOOL_TRACE_VERB_RE.test(trimmed) ||
+    TOOL_TRACE_READ_RE.test(trimmed) ||
+    TOOL_TRACE_RUN_RE.test(trimmed) ||
+    /^(?:searched|search|listed|list|checked|inspected)\b/iu.test(trimmed)
+  );
 }
 
 function isActivityConnectorLine(line: string): boolean {
@@ -467,8 +472,15 @@ function isStructuredInteraction(lines: string[], requireCompletePickerFrame: bo
   const hasRepeatedKeyedOptionLabels = repeatedKeyedOptionLabelGroups(options) >= 2;
   const hasCleanNumericOptionBlock = hasContiguousNumericOptionBlock(lines);
   const toolTraceRows = lines.filter(isToolTraceLine).length;
+  const strongToolTraceRows = lines.filter((line) => {
+    const trimmed = line.trim().replace(/^(?:[•◦⏺●]\s*)/u, '');
+    return TOOL_TRACE_VERB_RE.test(trimmed) || TOOL_TRACE_RUN_RE.test(trimmed);
+  }).length;
   const hasActivityConnector = lines.some(isActivityConnectorLine);
-  const hasToolTraceEvidence = toolTraceRows >= 2 || (toolTraceRows >= 1 && hasActivityConnector);
+  const hasToolTraceEvidence =
+    strongToolTraceRows >= 2 ||
+    (strongToolTraceRows >= 1 && hasActivityConnector) ||
+    (toolTraceRows >= 3 && hasActivityConnector);
   const hasExplicitPickerHeading = lines.some(isExplicitPickerHeading);
   // A stream of bridge activity can contain bullets, arrows, command output,
   // and even an `Esc`/`Enter` phrase from a status footer. Those rows are not

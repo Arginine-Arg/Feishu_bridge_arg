@@ -824,6 +824,19 @@ describe('liveInteractionCard', () => {
     expect(isStructuredLiveInteraction(text)).toBe(false);
     expect(liveInteractionCardForText(text, () => 'activity-footer-token')).toBeUndefined();
   });
+
+  it('does not mistake verb-shaped choices for tool traces without command evidence', () => {
+    const text = [
+      'Which reference set should be opened?',
+      '• Read docs',
+      '• Read examples',
+      'Press Enter to continue',
+    ].join('\n');
+
+    const card = liveInteractionCardForText(text, () => 'verb-choice-token');
+    expect(card).toBeDefined();
+    expect(buttonValues(card).map((value) => value.input)).toEqual(['enter', 'down enter', 'esc']);
+  });
 });
 
 function stateFrom(events: AgentEvent[]): RunState {
