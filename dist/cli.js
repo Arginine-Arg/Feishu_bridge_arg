@@ -12185,6 +12185,7 @@ function splitTerminalActivity(input) {
   const prose = [];
   let activity = [];
   let entries = 0;
+  let activityHasBlankLine = false;
   const flushProse = () => {
     const content = prose.join("\n");
     prose.length = 0;
@@ -12195,13 +12196,19 @@ function splitTerminalActivity(input) {
     activity = [];
     if (content) segments.push({ kind: "activity", content, entries });
     entries = 0;
+    activityHasBlankLine = false;
   };
-  for (const line of input.replace(/\r\n?/g, "\n").split("\n")) {
+  for (const line of normalizeActivityBoundaries(input).replace(/\r\n?/g, "\n").split("\n")) {
+    if (activity.length > 0 && isActivityContinuation(line)) {
+      activity.push(line);
+      continue;
+    }
     if (isActivityStart(line)) {
       flushProse();
       flushActivity();
       activity.push(line);
       entries = 1;
+      activityHasBlankLine = false;
       continue;
     }
     if (activity.length > 0) {
@@ -12212,7 +12219,12 @@ function splitTerminalActivity(input) {
         prose.push(...tablePrelude, line);
         continue;
       }
-      if (startsNormalAgentMessage(line)) {
+      if (!line.trim()) {
+        activity.push(line);
+        activityHasBlankLine = true;
+        continue;
+      }
+      if (startsNormalAgentMessage(line) || activityHasBlankLine && isLikelyPlainProse(line)) {
         flushActivity();
         prose.push(line);
       } else {
@@ -12226,6 +12238,12 @@ function splitTerminalActivity(input) {
   flushProse();
   return segments;
 }
+function normalizeActivityBoundaries(input) {
+  return input.replace(
+    /([^\n])([•◦・]\s*(?:ran|running|explored|exploring|viewed(?:\s+\w+)?|read|searched|search|listed|list|edited|wrote|applied|patched|checked|inspected|worked(?:\s+for)?|planning|analyzing|investigating)\b)/giu,
+    "$1\n$2"
+  );
+}
 function isActivityStart(line) {
   const trimmed = line.trim();
   return isCodexActivityLine(trimmed) || isRawCommandActivity(trimmed) || isClaudeToolActivity(trimmed) || isTerminalChromeActivity(trimmed);
@@ -12234,12 +12252,22 @@ function startsNormalAgentMessage(line) {
   const trimmed = line.trim();
   if (!trimmed) return false;
   if (isActivityStart(trimmed)) return false;
-  return /^[•]\s+/u.test(trimmed) || /^[⏺●]\s+/u.test(trimmed);
+  return /^[•・]\s+/u.test(trimmed) || /^[⏺●]\s+/u.test(trimmed);
+}
+function isLikelyPlainProse(line) {
+  const trimmed = line.trim();
+  if (!trimmed || isActivityStart(trimmed)) return false;
+  if (/^[│└├╰╭╴|>`~$]/u.test(trimmed)) return false;
+  if (/^(?:[A-Za-z]:[\\/]|\.\.?[\\/]|\/(?:\w|tmp|home)|~[\\/])/u.test(trimmed)) return false;
+  if (/^(?:pid|ppid|stat|cmd|fatal:|error:|warning:|npm\s|pnpm\s|node\s|git\s|curl\s|tmux\s)/iu.test(trimmed)) {
+    return false;
+  }
+  return trimmed.length >= 8 || /[\u3400-\u9fff]/u.test(trimmed);
 }
 function isCodexActivityLine(line) {
-  return /^[•◦]\s*(?:ran|running|explored|exploring|viewed(?:\s+\w+)?|read|searched|search|listed|list|edited|wrote|applied|patched|checked|inspected|worked(?:\s+for)?|planning|analyzing|investigating)\b/iu.test(
+  return /^[•◦・]\s*(?:ran|running|explored|exploring|viewed(?:\s+\w+)?|read|searched|search|listed|list|edited|wrote|applied|patched|checked|inspected|worked(?:\s+for)?|planning|analyzing|investigating)\b/iu.test(
     line
-  );
+  ) || /^(?:ran|running|explored|exploring|edited|wrote|applied|patched|checked|inspected)\b/iu.test(line);
 }
 function isRawCommandActivity(line) {
   return /^[›❯>]\s*\/[\w-]+\b/u.test(line) || /^(?:ran|run|running)\s+(?:\/[\w-]+|(?:pnpm|npm|npx|node|git|rg|grep|find|sed|awk|curl|wget|tmux|python(?:3)?|bash|sh|zsh|fish|ls|cat|cd|docker|kubectl|pytest|vitest|make)\b)/iu.test(
@@ -12252,7 +12280,12 @@ function isClaudeToolActivity(line) {
   );
 }
 function isTerminalChromeActivity(line) {
-  return /^(?:◦\s*)?(?:exploring|working|thinking|planning)\b/iu.test(line) || /^(?:✻|⏵⏵)\s*(?:thinking|working|running|planning)\b/iu.test(line);
+  return /^(?:◦\s*)?(?:exploring|working|thinking|planning)\b/iu.test(line) || /^(?:✻|⏵⏵)\s*(?:thinking|working|running|planning)\b/iu.test(line) || /^(?:[•◦・]\s*)?waiting for background terminal\b/iu.test(line) || /(?:esc to interrupt|background terminal running|\/ps to view|\/stop to close)/iu.test(line);
+}
+function isActivityContinuation(line) {
+  return /(?:esc to interrupt|background terminal running|\/ps to view|\/stop to close)/iu.test(
+    line.trim()
+  );
 }
 function preserveTerminalAlignedTables(input) {
   if (!input || !/[━─═╌╍┄┅]/u.test(input)) return input;
@@ -16054,12 +16087,13 @@ var TEXT_HEAD_BYTE_BUDGET = 2400;
 function renderText(state, options = {}) {
   const parts = [];
   const presentation = presentBlocks(state.blocks);
-  if (presentation.activity) {
-    const activityBody = activityTextBody(
+  const activityMode = options.activityMode ?? "full";
+  if (presentation.activity && activityMode !== "none") {
+    const activityBody = activityMode === "summary" ? void 0 : activityTextBody(
       presentation.activity,
       options.maxBytes === Number.POSITIVE_INFINITY ? Number.POSITIVE_INFINITY : void 0
     );
-    parts.push(activityQuote({ ...presentation.activity, content: activityBody }));
+    parts.push(activityQuote(presentation.activity, activityBody));
   }
   for (const block of presentation.blocks) {
     const piece = renderBlock(block);
@@ -16127,10 +16161,13 @@ function splitOversizedMarkdownPiece(input, maxBytes) {
   }
   return pieces;
 }
-function activityQuote(activity) {
+function activityQuote(activity, content) {
+  if (content === void 0) {
+    return `> _\u25B8 \u6267\u884C\u6D3B\u52A8\uFF08${activity.entries} \u9879\uFF0C\u5DF2\u6298\u53E0\uFF09_`;
+  }
   return [
     `> _\u25B8 \u6267\u884C\u6D3B\u52A8\uFF08${activity.entries} \u9879\uFF09_`,
-    ...activity.content.split("\n").map((line) => `> ${line}`)
+    ...content.split("\n").map((line) => `> ${line}`)
   ].join("\n");
 }
 function enforceTextByteBudget(text, maxBytes) {
@@ -19826,7 +19863,7 @@ ${delta}`.slice(-64e3);
     }
     const observed = interactionTextBuffer.trim();
     const observedSurface = observed ? liveInteractionSurface(observed) : void 0;
-    const currentText = renderText(state);
+    const currentText = renderText(state, { activityMode: "none" });
     const shouldUseObservedPicker = Boolean(observedSurface) && (!currentText.trim() || looksLikeAgentPicker(currentText));
     if (shouldUseObservedPicker && observedSurface) {
       log.info("agent-live", "picker-final-fallback", {
@@ -20216,7 +20253,7 @@ ${delta}`.slice(-64e3);
           await deliverLongReply();
           return;
         }
-        const body = renderText(replyState);
+        const body = renderText(replyState, { activityMode: "summary" });
         if (body.trim()) {
           await channel.send(chatId, { markdown: body }, sendOpts);
         }
@@ -20243,7 +20280,7 @@ ${delta}`.slice(-64e3);
               );
               if (isLongReplyText(complete) && !looksLikeAgentPicker(complete, useLiveSession ? false : true)) {
                 longReplyText = complete;
-                const notice = "\u6B63\u6587\u8F83\u957F\uFF0C\u5B8C\u6574\u7B54\u590D\u5C06\u5728\u540E\u7EED\u6D88\u606F\u4E2D\u5206\u6BB5\u53D1\u9001\u3002";
+                const notice = "\u6B63\u6587\u8F83\u957F\uFF0C\u5DF2\u5206\u6BB5\u53D1\u9001\u3002";
                 if (notice === lastSentMarkdownText) return;
                 lastSentMarkdownText = notice;
                 try {
@@ -20259,7 +20296,7 @@ ${delta}`.slice(-64e3);
                 return;
               }
             }
-            const nextText = renderText(replyState);
+            const nextText = renderText(replyState, { activityMode: "summary" });
             if (nextText === lastSentMarkdownText) return;
             lastSentMarkdownText = nextText;
             try {
@@ -20292,7 +20329,7 @@ ${delta}`.slice(-64e3);
                 streamDegraded = false;
                 markdownCtrl = ctrl;
                 try {
-                  await ctrl.setContent(renderText(currentSegmentState));
+                  await ctrl.setContent(renderText(currentSegmentState, { activityMode: "summary" }));
                 } catch (err) {
                   streamDegraded = true;
                   markdownCtrl = void 0;
@@ -20387,7 +20424,7 @@ ${delta}`.slice(-64e3);
   }
 }
 async function sendFinalReply(input) {
-  const body = renderText(input.state);
+  const body = renderText(input.state, { activityMode: "summary" });
   const completeBody = completeReplyText(input.state);
   if (isLongReplyText(completeBody) && !looksLikeAgentPicker(completeBody, input.liveInteractionInputRoute === "agent")) {
     await sendCompleteReplyChunks({
@@ -21060,7 +21097,7 @@ function liveInteractionCardForText(text, signCallback, inputRoute = "live", ski
   return liveInteractionCard(interaction, signCallback, inputRoute);
 }
 function renderLiveAwareReplyCard(state, cardRenderOptions = {}, inputRoute = "live", skipSignatures) {
-  const body = renderText(state);
+  const body = renderText(state, { activityMode: "none" });
   return liveInteractionCardForText(body, cardRenderOptions.signCallback, inputRoute, skipSignatures) ?? renderCard(state, cardRenderOptions);
 }
 function isLiveInteractionCardForText(text, inputRoute, skipSignatures) {
@@ -21070,7 +21107,10 @@ function isLiveInteractionCardForText(text, inputRoute, skipSignatures) {
   return Boolean(interaction && !skipSignatures?.has(interaction.signature));
 }
 function completeReplyText(state) {
-  return renderText(state, { maxBytes: Number.POSITIVE_INFINITY });
+  return renderText(state, {
+    maxBytes: Number.POSITIVE_INFINITY,
+    activityMode: "none"
+  });
 }
 function isLongReplyText(text) {
   return Buffer.byteLength(text, "utf8") > LONG_REPLY_CARD_THRESHOLD_BYTES;
@@ -21087,7 +21127,7 @@ function longReplyNoticeCard(text) {
       elements: [
         {
           tag: "markdown",
-          content: `\u6B63\u6587\u8F83\u957F\uFF08\u7EA6 ${Buffer.byteLength(text, "utf8")} \u5B57\u8282\uFF09\uFF0C\u5DF2\u62C6\u5206\u4E3A ${chunks.length} \u6761\u5B8C\u6574\u6D88\u606F\u53D1\u9001\u3002`
+          content: `\u6B63\u6587\u8F83\u957F\uFF0C\u5DF2\u5206\u6210 ${chunks.length} \u6761\u6D88\u606F\u53D1\u9001\u3002`
         }
       ]
     }
@@ -21097,7 +21137,7 @@ async function sendCompleteReplyChunks(input) {
   const chunks = splitTextForDelivery(input.text, LONG_REPLY_CHUNK_BYTES);
   if (chunks.length === 0) return;
   for (const [index, chunk] of chunks.entries()) {
-    const content = chunks.length > 1 ? `\uFF08\u5B8C\u6574\u7B54\u590D ${index + 1}/${chunks.length}\uFF09
+    const content = chunks.length > 1 ? `\uFF08${index + 1}/${chunks.length}\uFF09
 
 ${chunk}` : chunk;
     await input.channel.send(input.chatId, { markdown: content }, input.sendOpts);

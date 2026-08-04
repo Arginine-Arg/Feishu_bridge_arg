@@ -128,6 +128,71 @@ describe('terminal activity presentation', () => {
     expect(text.endsWith('最终结论：消息尾部完整保留。')).toBe(true);
   });
 
+  it('ends an activity frame before a bare, blank-line-separated answer paragraph', () => {
+    const state = stateFromText([
+      '• Ran pnpm test --runInBand',
+      '└ 803 tests passed',
+      '',
+      '先明确一个边界：这套方案目前是新方案设计，不是当前实现。',
+      '',
+      '一、完整训练结构',
+      'Bio Transformer -> chemical queries -> shared DeFoG flow',
+    ].join('\n'));
+
+    const presentation = presentBlocks(state.blocks);
+    const text = renderText(state);
+
+    expect(presentation.activity?.content).toContain('Ran pnpm test');
+    expect(presentation.activity?.content).not.toContain('先明确一个边界');
+    expect(text).toContain('先明确一个边界：这套方案目前是新方案设计');
+    expect(text).toContain('一、完整训练结构');
+  });
+
+  it('supports compact activity output for streaming and final delivery', () => {
+    const state = stateFromText([
+      '・Explored',
+      '└ Read src/card/run-renderer.ts',
+      '・Waiting for background terminal (3m 34s)',
+      '  /ps to view',
+      '',
+      '最终结论：正文应完整保留。',
+    ].join('\n'));
+
+    const summary = renderText(state, { activityMode: 'summary' });
+    const final = renderText(state, {
+      activityMode: 'none',
+      maxBytes: Number.POSITIVE_INFINITY,
+    });
+
+    expect(summary).toContain('执行活动（2 项，已折叠）');
+    expect(summary).not.toContain('Read src/card/run-renderer.ts');
+    expect(summary).not.toContain('Waiting for background terminal');
+    expect(final).not.toContain('执行活动');
+    expect(final).not.toContain('/ps to view');
+    expect(final).toContain('最终结论：正文应完整保留。');
+  });
+
+  it('removes tool frames from a repeated long final answer', () => {
+    const answer = [
+      '• Explored',
+      '└ Read src/bot/run-delivery.ts',
+      '',
+      '一、完整训练结构',
+      'Bio Transformer -> chemical queries -> shared DeFoG flow',
+      '二、验证门：correct-own > shuffled-cross',
+      '最终结论：先完成 teacher-forced probe，再进入 blind sampling。',
+    ].join('\n\n').repeat(180);
+    const state = stateFromText(answer);
+    const final = renderText(state, {
+      activityMode: 'none',
+      maxBytes: Number.POSITIVE_INFINITY,
+    });
+
+    expect(final).not.toContain('Read src/bot/run-delivery.ts');
+    expect(final).toContain('一、完整训练结构');
+    expect(final).toContain('最终结论：先完成 teacher-forced probe');
+  });
+
   it('recognizes Claude tool surfaces without hiding ordinary Claude prose', () => {
     const state = stateFromText([
       '⏺ Read(file_path: "src/bot/channel.ts")',

@@ -11,6 +11,15 @@ const TEXT_HEAD_BYTE_BUDGET = 2400;
 export interface RenderTextOptions {
   /** Set to Infinity when the caller will split the complete text itself. */
   maxBytes?: number;
+  /**
+   * Controls how terminal-derived execution activity is represented.
+   *
+   * `full` keeps the existing quoted trace for an in-progress diagnostic
+   * view, `summary` keeps only the item count, and `none` removes the trace
+   * from user-facing final-answer delivery. Activity is still retained in
+   * RunState and can be inspected through the run diagnostics.
+   */
+  activityMode?: 'full' | 'summary' | 'none';
 }
 
 /**
@@ -29,13 +38,17 @@ export interface RenderTextOptions {
 export function renderText(state: RunState, options: RenderTextOptions = {}): string {
   const parts: string[] = [];
   const presentation = presentBlocks(state.blocks);
+  const activityMode = options.activityMode ?? 'full';
 
-  if (presentation.activity) {
-    const activityBody = activityTextBody(
-      presentation.activity,
-      options.maxBytes === Number.POSITIVE_INFINITY ? Number.POSITIVE_INFINITY : undefined,
-    );
-    parts.push(activityQuote({ ...presentation.activity, content: activityBody }));
+  if (presentation.activity && activityMode !== 'none') {
+    const activityBody =
+      activityMode === 'summary'
+        ? undefined
+        : activityTextBody(
+            presentation.activity,
+            options.maxBytes === Number.POSITIVE_INFINITY ? Number.POSITIVE_INFINITY : undefined,
+          );
+    parts.push(activityQuote(presentation.activity, activityBody));
   }
 
   for (const block of presentation.blocks) {
@@ -114,10 +127,13 @@ function splitOversizedMarkdownPiece(input: string, maxBytes: number): string[] 
   return pieces;
 }
 
-function activityQuote(activity: ActivityTranscript): string {
+function activityQuote(activity: ActivityTranscript, content?: string): string {
+  if (content === undefined) {
+    return `> _▸ 执行活动（${activity.entries} 项，已折叠）_`;
+  }
   return [
     `> _▸ 执行活动（${activity.entries} 项）_`,
-    ...activity.content.split('\n').map((line) => `> ${line}`),
+    ...content.split('\n').map((line) => `> ${line}`),
   ].join('\n');
 }
 

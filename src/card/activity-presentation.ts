@@ -88,6 +88,7 @@ function splitTerminalActivity(input: string): TextSegment[] {
   const prose: string[] = [];
   let activity: string[] = [];
   let entries = 0;
+  let activityHasBlankLine = false;
 
   const flushProse = (): void => {
     const content = prose.join('\n');
@@ -99,14 +100,20 @@ function splitTerminalActivity(input: string): TextSegment[] {
     activity = [];
     if (content) segments.push({ kind: 'activity', content, entries });
     entries = 0;
+    activityHasBlankLine = false;
   };
 
-  for (const line of input.replace(/\r\n?/g, '\n').split('\n')) {
+  for (const line of normalizeActivityBoundaries(input).replace(/\r\n?/g, '\n').split('\n')) {
+    if (activity.length > 0 && isActivityContinuation(line)) {
+      activity.push(line);
+      continue;
+    }
     if (isActivityStart(line)) {
       flushProse();
       flushActivity();
       activity.push(line);
       entries = 1;
+      activityHasBlankLine = false;
       continue;
     }
     if (activity.length > 0) {
@@ -117,10 +124,15 @@ function splitTerminalActivity(input: string): TextSegment[] {
         prose.push(...tablePrelude, line);
         continue;
       }
+      if (!line.trim()) {
+        activity.push(line);
+        activityHasBlankLine = true;
+        continue;
+      }
       // Codex puts tool stdout below `Ran` in an unstructured terminal
       // frame. Keep it with that activity until a new normal bullet/prose
       // message begins, so the command and its output stay together.
-      if (startsNormalAgentMessage(line)) {
+      if (startsNormalAgentMessage(line) || (activityHasBlankLine && isLikelyPlainProse(line))) {
         flushActivity();
         prose.push(line);
       } else {
@@ -133,6 +145,20 @@ function splitTerminalActivity(input: string): TextSegment[] {
   flushActivity();
   flushProse();
   return segments;
+}
+
+/**
+ * A stream delta can be appended directly to the previous terminal frame.
+ * When the provider omits the separator, `...answer.• Explored` would make
+ * the following `└ Read ...` row look like ordinary prose and leak into the
+ * final answer. Split only well-known activity markers; ordinary inline
+ * bullets remain untouched.
+ */
+function normalizeActivityBoundaries(input: string): string {
+  return input.replace(
+    /([^\n])([•◦・]\s*(?:ran|running|explored|exploring|viewed(?:\s+\w+)?|read|searched|search|listed|list|edited|wrote|applied|patched|checked|inspected|worked(?:\s+for)?|planning|analyzing|investigating)\b)/giu,
+    '$1\n$2',
+  );
 }
 
 function isActivityStart(line: string): boolean {
@@ -152,12 +178,35 @@ function startsNormalAgentMessage(line: string): boolean {
   // Codex assistant prose conventionally starts with a filled bullet. This
   // boundary is deliberately narrow: bare terminal output remains attached
   // to the preceding command instead of being mistaken for an answer.
-  return /^[•]\s+/u.test(trimmed) || /^[⏺●]\s+/u.test(trimmed);
+  return /^[•・]\s+/u.test(trimmed) || /^[⏺●]\s+/u.test(trimmed);
+}
+
+/**
+ * A terminal tool frame is followed by indented/box-drawn stdout most of the
+ * time, while the final assistant answer often resumes as a bare paragraph.
+ * Once a blank line has separated the two, recognize that paragraph as prose.
+ * Conservative terminal-looking prefixes stay attached to the activity so a
+ * shell transcript or source listing is not promoted into the answer.
+ */
+function isLikelyPlainProse(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed || isActivityStart(trimmed)) return false;
+  if (/^[│└├╰╭╴|>`~$]/u.test(trimmed)) return false;
+  if (/^(?:[A-Za-z]:[\\/]|\.\.?[\\/]|\/(?:\w|tmp|home)|~[\\/])/u.test(trimmed)) return false;
+  if (/^(?:pid|ppid|stat|cmd|fatal:|error:|warning:|npm\s|pnpm\s|node\s|git\s|curl\s|tmux\s)/iu.test(trimmed)) {
+    return false;
+  }
+  // Keep one-character cursor fragments and shell punctuation in the frame;
+  // ordinary prose, headings, and Chinese paragraphs are longer than that.
+  return trimmed.length >= 8 || /[\u3400-\u9fff]/u.test(trimmed);
 }
 
 function isCodexActivityLine(line: string): boolean {
-  return /^[•◦]\s*(?:ran|running|explored|exploring|viewed(?:\s+\w+)?|read|searched|search|listed|list|edited|wrote|applied|patched|checked|inspected|worked(?:\s+for)?|planning|analyzing|investigating)\b/iu.test(
-    line,
+  return (
+    /^[•◦・]\s*(?:ran|running|explored|exploring|viewed(?:\s+\w+)?|read|searched|search|listed|list|edited|wrote|applied|patched|checked|inspected|worked(?:\s+for)?|planning|analyzing|investigating)\b/iu.test(
+      line,
+    ) ||
+    /^(?:ran|running|explored|exploring|edited|wrote|applied|patched|checked|inspected)\b/iu.test(line)
   );
 }
 
@@ -177,8 +226,18 @@ function isClaudeToolActivity(line: string): boolean {
 }
 
 function isTerminalChromeActivity(line: string): boolean {
-  return /^(?:◦\s*)?(?:exploring|working|thinking|planning)\b/iu.test(line) ||
-    /^(?:✻|⏵⏵)\s*(?:thinking|working|running|planning)\b/iu.test(line);
+  return (
+    /^(?:◦\s*)?(?:exploring|working|thinking|planning)\b/iu.test(line) ||
+    /^(?:✻|⏵⏵)\s*(?:thinking|working|running|planning)\b/iu.test(line) ||
+    /^(?:[•◦・]\s*)?waiting for background terminal\b/iu.test(line) ||
+    /(?:esc to interrupt|background terminal running|\/ps to view|\/stop to close)/iu.test(line)
+  );
+}
+
+function isActivityContinuation(line: string): boolean {
+  return /(?:esc to interrupt|background terminal running|\/ps to view|\/stop to close)/iu.test(
+    line.trim(),
+  );
 }
 
 /**

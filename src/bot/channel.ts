@@ -1466,7 +1466,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     }
     const observed = interactionTextBuffer.trim();
     const observedSurface = observed ? liveInteractionSurface(observed) : undefined;
-    const currentText = renderText(state);
+    const currentText = renderText(state, { activityMode: 'none' });
     const shouldUseObservedPicker =
       Boolean(observedSurface) &&
       (!currentText.trim() ||
@@ -1927,7 +1927,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           await deliverLongReply();
           return;
         }
-        const body = renderText(replyState);
+        const body = renderText(replyState, { activityMode: 'summary' });
         if (body.trim()) {
           await channel.send(chatId, { markdown: body }, sendOpts);
         }
@@ -1959,7 +1959,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
                 !looksLikeAgentPicker(complete, useLiveSession ? false : true)
               ) {
                 longReplyText = complete;
-                const notice = '正文较长，完整答复将在后续消息中分段发送。';
+                const notice = '正文较长，已分段发送。';
                 if (notice === lastSentMarkdownText) return;
                 lastSentMarkdownText = notice;
                 try {
@@ -1980,7 +1980,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
             // but on text-heavy streams (v0.6.32 motivation: bridge echoed
             // a 6KB+ reply 30+ times), this kills the perceived "duplicate"
             // symptom in Feishu.
-            const nextText = renderText(replyState);
+            const nextText = renderText(replyState, { activityMode: 'summary' });
             if (nextText === lastSentMarkdownText) return;
             lastSentMarkdownText = nextText;
             try {
@@ -2014,7 +2014,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
                 streamDegraded = false;
                 markdownCtrl = ctrl;
                 try {
-                  await ctrl.setContent(renderText(currentSegmentState));
+                  await ctrl.setContent(renderText(currentSegmentState, { activityMode: 'summary' }));
                 } catch (err) {
                   streamDegraded = true;
                   markdownCtrl = undefined;
@@ -2134,7 +2134,10 @@ async function sendFinalReply(input: {
   skipLiveInteractionSignatures?: ReadonlySet<string>;
   liveInteractionInputRoute?: LiveInteractionInputRoute;
 }): Promise<void> {
-  const body = renderText(input.state);
+  // Terminal activity is useful while a run is live, but it is not part of
+  // the final answer. Keep only a one-line count for the short fallback and
+  // remove it entirely from complete long-reply chunks below.
+  const body = renderText(input.state, { activityMode: 'summary' });
   const completeBody = completeReplyText(input.state);
   if (
     isLongReplyText(completeBody) &&
@@ -3091,7 +3094,9 @@ export function renderLiveAwareReplyCard(
   inputRoute: LiveInteractionInputRoute = 'live',
   skipSignatures?: ReadonlySet<string>,
 ): object {
-  const body = renderText(state);
+  // Picker detection must inspect the assistant text, not a long historical
+  // tool trace. The card renderer still owns the collapsed activity panel.
+  const body = renderText(state, { activityMode: 'none' });
   return (
     liveInteractionCardForText(body, cardRenderOptions.signCallback, inputRoute, skipSignatures) ??
     renderCard(state, cardRenderOptions)
@@ -3110,7 +3115,10 @@ function isLiveInteractionCardForText(
 }
 
 function completeReplyText(state: RunState): string {
-  return renderText(state, { maxBytes: Number.POSITIVE_INFINITY });
+  return renderText(state, {
+    maxBytes: Number.POSITIVE_INFINITY,
+    activityMode: 'none',
+  });
 }
 
 function isLongReplyText(text: string): boolean {
@@ -3129,7 +3137,7 @@ function longReplyNoticeCard(text: string): object {
       elements: [
         {
           tag: 'markdown',
-          content: `正文较长（约 ${Buffer.byteLength(text, 'utf8')} 字节），已拆分为 ${chunks.length} 条完整消息发送。`,
+          content: `正文较长，已分成 ${chunks.length} 条消息发送。`,
         },
       ],
     },
@@ -3148,7 +3156,7 @@ async function sendCompleteReplyChunks(input: {
   for (const [index, chunk] of chunks.entries()) {
     const content =
       chunks.length > 1
-        ? `（完整答复 ${index + 1}/${chunks.length}）\n\n${chunk}`
+        ? `（${index + 1}/${chunks.length}）\n\n${chunk}`
         : chunk;
     await input.channel.send(input.chatId, { markdown: content }, input.sendOpts);
   }

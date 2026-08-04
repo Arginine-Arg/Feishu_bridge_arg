@@ -119,6 +119,9 @@ describe('markdown stream startup failures', () => {
       h.controls.cfg.preferences = h.profileConfig.preferences;
 
       const longAnswer = [
+        '• Explored',
+        '└ Read src/bot/run-delivery.ts',
+        '',
         '一、完整训练结构',
         'Bio Transformer -> chemical queries -> shared DeFoG flow',
         '二、验证门：correct-own > shuffled-cross',
@@ -139,6 +142,8 @@ describe('markdown stream startup failures', () => {
         .join('\n\n');
       expect(delivered).toContain('一、完整训练结构');
       expect(delivered).toContain('最终结论：先完成 teacher-forced probe，再进入 blind sampling。');
+      expect(delivered).not.toContain('Read src/bot/run-delivery.ts');
+      expect(delivered).not.toContain('完整答复 1/');
       expect(h.channel.sent.length).toBeGreaterThan(1);
       expect(
         JSON.stringify(messageReply === 'markdown' ? markdownUpdates : cardUpdates),
@@ -226,7 +231,13 @@ describe('markdown stream startup failures', () => {
         : JSON.stringify(cardUpdates.at(-1) ?? {});
       expect(delivered).toContain('PLAIN_TEXT');
       expect(delivered.match(/当前可以把多版本实验归纳/g)).toHaveLength(1);
-      expect(delivered.match(/Read stablefate_v126_cgate_interpretation/g)).toHaveLength(1);
+      if (messageReply === 'markdown') {
+        // Markdown streams keep terminal activity as a compact count; the
+        // actual trace must not be repeated into the final answer.
+        expect(delivered).not.toContain('Read stablefate_v126_cgate_interpretation');
+      } else {
+        expect(delivered.match(/Read stablefate_v126_cgate_interpretation/g)).toHaveLength(1);
+      }
       expect(delivered.match(/问题 结果 结论/g)).toHaveLength(1);
       expect(delivered.match(/MMELON/g)).toHaveLength(1);
       expect(delivered.match(/Bio/g)).toHaveLength(1);

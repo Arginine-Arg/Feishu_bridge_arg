@@ -111,6 +111,15 @@ declare function renderCard(state: RunState, options?: RunCardRenderOptions): ob
 interface RenderTextOptions {
     /** Set to Infinity when the caller will split the complete text itself. */
     maxBytes?: number;
+    /**
+     * Controls how terminal-derived execution activity is represented.
+     *
+     * `full` keeps the existing quoted trace for an in-progress diagnostic
+     * view, `summary` keeps only the item count, and `none` removes the trace
+     * from user-facing final-answer delivery. Activity is still retained in
+     * RunState and can be inspected through the run diagnostics.
+     */
+    activityMode?: 'full' | 'summary' | 'none';
 }
 /**
  * Render `RunState` as plain markdown text — used in `messageReply: 'text'`

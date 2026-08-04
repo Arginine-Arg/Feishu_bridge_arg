@@ -672,6 +672,7 @@ function splitTerminalActivity(input) {
   const prose = [];
   let activity = [];
   let entries = 0;
+  let activityHasBlankLine = false;
   const flushProse = () => {
     const content = prose.join("\n");
     prose.length = 0;
@@ -682,13 +683,19 @@ function splitTerminalActivity(input) {
     activity = [];
     if (content) segments.push({ kind: "activity", content, entries });
     entries = 0;
+    activityHasBlankLine = false;
   };
-  for (const line of input.replace(/\r\n?/g, "\n").split("\n")) {
+  for (const line of normalizeActivityBoundaries(input).replace(/\r\n?/g, "\n").split("\n")) {
+    if (activity.length > 0 && isActivityContinuation(line)) {
+      activity.push(line);
+      continue;
+    }
     if (isActivityStart(line)) {
       flushProse();
       flushActivity();
       activity.push(line);
       entries = 1;
+      activityHasBlankLine = false;
       continue;
     }
     if (activity.length > 0) {
@@ -699,7 +706,12 @@ function splitTerminalActivity(input) {
         prose.push(...tablePrelude, line);
         continue;
       }
-      if (startsNormalAgentMessage(line)) {
+      if (!line.trim()) {
+        activity.push(line);
+        activityHasBlankLine = true;
+        continue;
+      }
+      if (startsNormalAgentMessage(line) || activityHasBlankLine && isLikelyPlainProse(line)) {
         flushActivity();
         prose.push(line);
       } else {
@@ -713,6 +725,12 @@ function splitTerminalActivity(input) {
   flushProse();
   return segments;
 }
+function normalizeActivityBoundaries(input) {
+  return input.replace(
+    /([^\n])([•◦・]\s*(?:ran|running|explored|exploring|viewed(?:\s+\w+)?|read|searched|search|listed|list|edited|wrote|applied|patched|checked|inspected|worked(?:\s+for)?|planning|analyzing|investigating)\b)/giu,
+    "$1\n$2"
+  );
+}
 function isActivityStart(line) {
   const trimmed = line.trim();
   return isCodexActivityLine(trimmed) || isRawCommandActivity(trimmed) || isClaudeToolActivity(trimmed) || isTerminalChromeActivity(trimmed);
@@ -721,12 +739,22 @@ function startsNormalAgentMessage(line) {
   const trimmed = line.trim();
   if (!trimmed) return false;
   if (isActivityStart(trimmed)) return false;
-  return /^[•]\s+/u.test(trimmed) || /^[⏺●]\s+/u.test(trimmed);
+  return /^[•・]\s+/u.test(trimmed) || /^[⏺●]\s+/u.test(trimmed);
+}
+function isLikelyPlainProse(line) {
+  const trimmed = line.trim();
+  if (!trimmed || isActivityStart(trimmed)) return false;
+  if (/^[│└├╰╭╴|>`~$]/u.test(trimmed)) return false;
+  if (/^(?:[A-Za-z]:[\\/]|\.\.?[\\/]|\/(?:\w|tmp|home)|~[\\/])/u.test(trimmed)) return false;
+  if (/^(?:pid|ppid|stat|cmd|fatal:|error:|warning:|npm\s|pnpm\s|node\s|git\s|curl\s|tmux\s)/iu.test(trimmed)) {
+    return false;
+  }
+  return trimmed.length >= 8 || /[\u3400-\u9fff]/u.test(trimmed);
 }
 function isCodexActivityLine(line) {
-  return /^[•◦]\s*(?:ran|running|explored|exploring|viewed(?:\s+\w+)?|read|searched|search|listed|list|edited|wrote|applied|patched|checked|inspected|worked(?:\s+for)?|planning|analyzing|investigating)\b/iu.test(
+  return /^[•◦・]\s*(?:ran|running|explored|exploring|viewed(?:\s+\w+)?|read|searched|search|listed|list|edited|wrote|applied|patched|checked|inspected|worked(?:\s+for)?|planning|analyzing|investigating)\b/iu.test(
     line
-  );
+  ) || /^(?:ran|running|explored|exploring|edited|wrote|applied|patched|checked|inspected)\b/iu.test(line);
 }
 function isRawCommandActivity(line) {
   return /^[›❯>]\s*\/[\w-]+\b/u.test(line) || /^(?:ran|run|running)\s+(?:\/[\w-]+|(?:pnpm|npm|npx|node|git|rg|grep|find|sed|awk|curl|wget|tmux|python(?:3)?|bash|sh|zsh|fish|ls|cat|cd|docker|kubectl|pytest|vitest|make)\b)/iu.test(
@@ -739,7 +767,12 @@ function isClaudeToolActivity(line) {
   );
 }
 function isTerminalChromeActivity(line) {
-  return /^(?:◦\s*)?(?:exploring|working|thinking|planning)\b/iu.test(line) || /^(?:✻|⏵⏵)\s*(?:thinking|working|running|planning)\b/iu.test(line);
+  return /^(?:◦\s*)?(?:exploring|working|thinking|planning)\b/iu.test(line) || /^(?:✻|⏵⏵)\s*(?:thinking|working|running|planning)\b/iu.test(line) || /^(?:[•◦・]\s*)?waiting for background terminal\b/iu.test(line) || /(?:esc to interrupt|background terminal running|\/ps to view|\/stop to close)/iu.test(line);
+}
+function isActivityContinuation(line) {
+  return /(?:esc to interrupt|background terminal running|\/ps to view|\/stop to close)/iu.test(
+    line.trim()
+  );
 }
 function preserveTerminalAlignedTables(input) {
   if (!input || !/[━─═╌╍┄┅]/u.test(input)) return input;
@@ -1188,12 +1221,13 @@ var TEXT_HEAD_BYTE_BUDGET = 2400;
 function renderText(state, options = {}) {
   const parts = [];
   const presentation = presentBlocks(state.blocks);
-  if (presentation.activity) {
-    const activityBody = activityTextBody(
+  const activityMode = options.activityMode ?? "full";
+  if (presentation.activity && activityMode !== "none") {
+    const activityBody = activityMode === "summary" ? void 0 : activityTextBody(
       presentation.activity,
       options.maxBytes === Number.POSITIVE_INFINITY ? Number.POSITIVE_INFINITY : void 0
     );
-    parts.push(activityQuote({ ...presentation.activity, content: activityBody }));
+    parts.push(activityQuote(presentation.activity, activityBody));
   }
   for (const block of presentation.blocks) {
     const piece = renderBlock(block);
@@ -1211,10 +1245,13 @@ function renderText(state, options = {}) {
   }
   return enforceTextByteBudget(parts.join("\n\n"), options.maxBytes ?? EFFECTIVE_BUDGET);
 }
-function activityQuote(activity) {
+function activityQuote(activity, content) {
+  if (content === void 0) {
+    return `> _\u25B8 \u6267\u884C\u6D3B\u52A8\uFF08${activity.entries} \u9879\uFF0C\u5DF2\u6298\u53E0\uFF09_`;
+  }
   return [
     `> _\u25B8 \u6267\u884C\u6D3B\u52A8\uFF08${activity.entries} \u9879\uFF09_`,
-    ...activity.content.split("\n").map((line) => `> ${line}`)
+    ...content.split("\n").map((line) => `> ${line}`)
   ].join("\n");
 }
 function enforceTextByteBudget(text, maxBytes) {
