@@ -39,6 +39,12 @@ import {
 } from '../agent/live-interaction-detection';
 import { CallbackAuth } from '../card/callback-auth';
 import { CallbackNonceStore } from '../card/callback-store';
+import {
+  answerCard,
+  answerHasStructuredBlocks,
+  parseAnswerBlocks,
+  splitAnswerForDelivery,
+} from '../card/answer-presentation';
 import { renderCard } from '../card/run-renderer';
 import {
   initialState,
@@ -1720,6 +1726,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           sendOpts,
           text: longReplyText,
           scope,
+          replyMode: 'card',
         });
       };
       const postFreshFinal = async (state: RunState): Promise<void> => {
@@ -1907,6 +1914,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           sendOpts,
           text: longReplyText,
           scope,
+          replyMode: 'markdown',
         });
       };
       const postFreshFinal = async (state: RunState): Promise<void> => {
@@ -2149,6 +2157,7 @@ async function sendFinalReply(input: {
       sendOpts: input.sendOpts,
       text: completeBody,
       scope: input.scope,
+      replyMode: input.replyMode,
     });
     return;
   }
@@ -3097,10 +3106,40 @@ export function renderLiveAwareReplyCard(
   // Picker detection must inspect the assistant text, not a long historical
   // tool trace. The card renderer still owns the collapsed activity panel.
   const body = renderText(state, { activityMode: 'none' });
-  return (
-    liveInteractionCardForText(body, cardRenderOptions.signCallback, inputRoute, skipSignatures) ??
-    renderCard(state, cardRenderOptions)
+  const liveCard = liveInteractionCardForText(
+    body,
+    cardRenderOptions.signCallback,
+    inputRoute,
+    skipSignatures,
   );
+  if (liveCard) return liveCard;
+  // Keep streaming updates lightweight. Once the run is complete, preserve
+  // code fences, diffs, tables and terminal diagrams as collapsed panels so a
+  // final answer is never presented as one unreadable wall of Markdown.
+  const answerState = finalAnswerOnlyState(state);
+  const answerBody = renderText(answerState, { activityMode: 'none' });
+  if (state.terminal !== 'running' && answerHasStructuredBlocks(answerBody)) {
+    const base = renderCard(state, cardRenderOptions) as {
+      body?: { elements?: unknown[] };
+    };
+    const preserved = (base.body?.elements ?? []).filter((element) => {
+      if (!element || typeof element !== 'object') return false;
+      const candidate = element as { tag?: unknown; text_size?: unknown };
+      return (
+        candidate.tag === 'collapsible_panel' ||
+        candidate.tag === 'button' ||
+        (candidate.tag === 'markdown' && candidate.text_size === 'notation')
+      );
+    });
+    const answer = answerCard(parseAnswerBlocks(answerBody)) as {
+      body: { elements: object[] };
+    };
+    return {
+      ...answer,
+      body: { elements: [...preserved, ...answer.body.elements] },
+    };
+  }
+  return renderCard(state, cardRenderOptions);
 }
 
 function isLiveInteractionCardForText(
@@ -3122,11 +3161,20 @@ function completeReplyText(state: RunState): string {
 }
 
 function isLongReplyText(text: string): boolean {
-  return Buffer.byteLength(text, 'utf8') > LONG_REPLY_CARD_THRESHOLD_BYTES;
+  const bytes = Buffer.byteLength(text, 'utf8');
+  // Structured panels carry headers, borders and a code fence in addition to
+  // the source text. Promote them earlier so a single final card never grows
+  // beyond CardKit's payload ceiling.
+  return (
+    bytes > LONG_REPLY_CARD_THRESHOLD_BYTES ||
+    (answerHasStructuredBlocks(text) && bytes > LONG_REPLY_CARD_THRESHOLD_BYTES - 4_000)
+  );
 }
 
 function longReplyNoticeCard(text: string): object {
-  const chunks = splitTextForDelivery(text, LONG_REPLY_CHUNK_BYTES);
+  const chunks = answerHasStructuredBlocks(text)
+    ? splitAnswerForDelivery(text, LONG_REPLY_CHUNK_BYTES)
+    : splitTextForDelivery(text, LONG_REPLY_CHUNK_BYTES);
   return {
     schema: '2.0',
     config: {
@@ -3150,7 +3198,30 @@ async function sendCompleteReplyChunks(input: {
   sendOpts: { replyTo: string; replyInThread?: boolean };
   text: string;
   scope: string;
+  replyMode: ReturnType<typeof getMessageReplyMode>;
 }): Promise<void> {
+  const structured = answerHasStructuredBlocks(input.text);
+  const promoteToCards = input.replyMode === 'card' || structured;
+  if (promoteToCards) {
+    const chunks = splitAnswerForDelivery(input.text, LONG_REPLY_CHUNK_BYTES);
+    if (chunks.length === 0) return;
+    for (const [index, chunk] of chunks.entries()) {
+      await input.channel.send(
+        input.chatId,
+        { card: answerCard(chunk, index + 1, chunks.length) },
+        input.sendOpts,
+      );
+    }
+    log.info('outbound', 'long-reply-split', {
+      scope: input.scope,
+      chunks: chunks.length,
+      mode: 'card',
+      structured,
+      bytes: Buffer.byteLength(input.text, 'utf8'),
+    });
+    return;
+  }
+
   const chunks = splitTextForDelivery(input.text, LONG_REPLY_CHUNK_BYTES);
   if (chunks.length === 0) return;
   for (const [index, chunk] of chunks.entries()) {
@@ -3163,6 +3234,7 @@ async function sendCompleteReplyChunks(input: {
   log.info('outbound', 'long-reply-split', {
     scope: input.scope,
     chunks: chunks.length,
+    mode: 'markdown',
     bytes: Buffer.byteLength(input.text, 'utf8'),
   });
 }

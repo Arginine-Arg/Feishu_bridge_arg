@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.76",
+  version: "0.6.77",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -6428,9 +6428,11 @@ function isStructuredInteraction(lines, requireCompletePickerFrame) {
   const hasActivityConnector = lines.some(isActivityConnectorLine);
   const hasToolTraceEvidence = strongToolTraceRows >= 2 || strongToolTraceRows >= 1 && hasActivityConnector || toolTraceRows >= 3 && hasActivityConnector;
   const hasExplicitPickerHeading = lines.some(isExplicitPickerHeading);
+  const hasDocumentEvidence = lines.some(isAnswerDocumentLine) || hasAnswerDocumentShape(lines);
   const activityOnlySurface = hasToolTraceEvidence && !hasExplicitPickerHeading && !hasConfirmationQuestion && !hasBinaryControl && !codexResume && !codexUpdate;
+  const documentOnlySurface = hasDocumentEvidence && !hasExplicitPickerHeading && !hasConfirmationQuestion && !codexResume && !codexUpdate && !selectedNavigationMenu;
   const genericInputEvidence = hasInputPrompt || hasPromptMarker || selectedNavigationMenu || hasQuestionBeforeOptions && hasStrongOptionRows;
-  return !hasCodeLikeNoise && !hasRepeatedKeyedOptionLabels && !activityOnlySurface && (claudeBypass || codexUpdate || codexResume || hasPromptTitle && tailIsControl && ((requireCompletePickerFrame ? completeNumberedPicker : hasNumberedChoice) || hasBinaryControl || hasKeyHint && tailIsControl) || hasConfirmationQuestion && (hasNumberedChoice || hasBinaryControl) || (requireCompletePickerFrame ? completeNumberedPicker : hasNumberedChoice) && hasKeyHint && tailIsControl && !hasCodeLikeNoise && (hasPromptTitle || hasQuestionBeforeOptions || hasCleanNumericOptionBlock) || // A native picker may retain only its numbered viewport rows. A selected
+  return !hasCodeLikeNoise && !hasRepeatedKeyedOptionLabels && !activityOnlySurface && !documentOnlySurface && (claudeBypass || codexUpdate || codexResume || hasPromptTitle && tailIsControl && ((requireCompletePickerFrame ? completeNumberedPicker : hasNumberedChoice) || hasBinaryControl || hasKeyHint && tailIsControl) || hasConfirmationQuestion && (hasNumberedChoice || hasBinaryControl) || (requireCompletePickerFrame ? completeNumberedPicker : hasNumberedChoice) && hasKeyHint && tailIsControl && !hasCodeLikeNoise && (hasPromptTitle || hasQuestionBeforeOptions || hasCleanNumericOptionBlock) || // A native picker may retain only its numbered viewport rows. A selected
   // numeric row is the TUI's direct evidence that this is an active menu;
   // do not infer that state from arbitrary numbered prose.
   hasCleanNumericOptionBlock && hasSelectedNumberedChoice || hasBinaryControl && /(?:approval|confirmation|allow|proceed|continue|确认|允许|继续)/iu.test(text) || // Vendor-neutral menus may have no title or Enter/Esc legend. Requiring
@@ -6444,6 +6446,25 @@ function isStructuredInteraction(lines, requireCompletePickerFrame) {
   // waiting, while titled/native pickers can publish a one-row frame with
   // an Enter/answer prompt.
   genericOptionCount && genericInputEvidence);
+}
+function isAnswerDocumentLine(line) {
+  const trimmed = line.trim();
+  if (!trimmed) return false;
+  return /^(?:#{1,6}\s+|[一二三四五六七八九十百]+[、.]\s*|(?:建议|推荐|当前|完整|详细|方案|说明|实现|优化|测试|验证|正文|另外|这里|因此|首先|其次)\b)/u.test(
+    trimmed
+  ) || /(?:^|\s)(?:src|tests?|lib|dist|chem|research_[a-z0-9_-]+)\/[A-Za-z0-9_.~@+-]+(?:\/[A-Za-z0-9_.~@+-]+)*(?::\d+)?/u.test(
+    trimmed
+  ) || /\b(?:sendCompleteReplyChunks|collapsible_panel|Markdown|TypeScript|Python|DeFoG|MMELON)\b/u.test(
+    trimmed
+  );
+}
+function hasAnswerDocumentShape(lines) {
+  const numberedRows = lines.filter((line) => /^\s*\d{1,2}[.)、:：]\s+\S/u.test(line)).length;
+  const proseRows = lines.filter((line) => {
+    const trimmed = line.trim();
+    return trimmed.length >= 24 && !isOptionSyntaxLine(trimmed) && !isInteractionHintLine(trimmed);
+  }).length;
+  return numberedRows >= 2 && proseRows >= 2;
 }
 function repeatedKeyedOptionLabelGroups(options) {
   const keysByLabel = /* @__PURE__ */ new Map();
@@ -16080,6 +16101,338 @@ var CallbackNonceStore = class {
   }
 };
 
+// src/card/answer-presentation.ts
+var DEFAULT_CARD_CHUNK_BYTES = 12e3;
+var CARD_OVERHEAD_BYTES = 900;
+var MIN_LAYOUT_LINES = 3;
+function parseAnswerBlocks(input) {
+  if (!input.trim()) return [];
+  const lines = input.replace(/\r\n?/gu, "\n").split("\n");
+  const blocks = [];
+  let markdownLines = [];
+  const flushMarkdown = () => {
+    if (markdownLines.length === 0) return;
+    const content = markdownLines.join("\n");
+    if (content.trim()) blocks.push({ kind: "markdown", content });
+    markdownLines = [];
+  };
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index] ?? "";
+    const fence = parseFenceStart(line);
+    if (fence) {
+      flushMarkdown();
+      const body = [];
+      let cursor = index + 1;
+      let closed = false;
+      for (; cursor < lines.length; cursor += 1) {
+        if (isFenceClose(lines[cursor] ?? "", fence)) {
+          closed = true;
+          break;
+        }
+        body.push(lines[cursor] ?? "");
+      }
+      blocks.push({
+        kind: classifyCodeFence(fence.info),
+        content: body.join("\n"),
+        ...fence.info ? { language: fence.info } : {}
+      });
+      index = closed ? cursor + 1 : lines.length;
+      continue;
+    }
+    const patchKind = explicitPatchStart(line);
+    if (patchKind) {
+      flushMarkdown();
+      const patch = [line];
+      let cursor = index + 1;
+      if (patchKind === "begin-patch") {
+        while (cursor < lines.length) {
+          patch.push(lines[cursor] ?? "");
+          const done = /^\s*\*{3}\s+End\s+Patch\s*$/u.test(lines[cursor] ?? "");
+          cursor += 1;
+          if (done) break;
+        }
+      } else {
+        let blankRun = 0;
+        while (cursor < lines.length) {
+          const next = lines[cursor] ?? "";
+          if (!next.trim()) {
+            blankRun += 1;
+            patch.push(next);
+            cursor += 1;
+            if (blankRun >= 2) break;
+            continue;
+          }
+          if (blankRun > 0 && !isPatchContinuation(next)) break;
+          blankRun = 0;
+          patch.push(next);
+          cursor += 1;
+        }
+      }
+      blocks.push({ kind: "diff", content: trimBlockEnd(patch.join("\n")) });
+      index = cursor;
+      continue;
+    }
+    const table = readTable(lines, index);
+    if (table) {
+      flushMarkdown();
+      blocks.push({ kind: "layout", layoutKind: "table", content: table.content });
+      index = table.nextIndex;
+      continue;
+    }
+    const diagram = readDiagram(lines, index);
+    if (diagram) {
+      flushMarkdown();
+      blocks.push({ kind: "layout", layoutKind: "diagram", content: diagram.content });
+      index = diagram.nextIndex;
+      continue;
+    }
+    markdownLines.push(line);
+    index += 1;
+  }
+  flushMarkdown();
+  return blocks;
+}
+function answerHasStructuredBlocks(input) {
+  return parseAnswerBlocks(input).some((block) => block.kind !== "markdown");
+}
+function splitAnswerForDelivery(input, maxBytes = DEFAULT_CARD_CHUNK_BYTES) {
+  const blocks = parseAnswerBlocks(input);
+  if (blocks.length === 0) return [];
+  const limit = Math.max(256, maxBytes - CARD_OVERHEAD_BYTES);
+  const fragments = blocks.flatMap((block) => splitBlock(block, limit));
+  const chunks = [];
+  let current = [];
+  const safeMaxBytes = Math.max(800, maxBytes - 256);
+  const fits = (candidate) => Buffer.byteLength(JSON.stringify(answerCard(candidate, 1, 999)), "utf8") <= safeMaxBytes;
+  for (const fragment of fragments) {
+    const candidate = [...current, fragment];
+    if (current.length > 0 && !fits(candidate)) {
+      chunks.push(current);
+      current = [fragment];
+    } else {
+      current = candidate;
+    }
+  }
+  if (current.length > 0) chunks.push(current);
+  return chunks;
+}
+function answerCard(blocks, segment = 1, total = 1) {
+  const elements = [];
+  if (total > 1) {
+    elements.push({
+      tag: "markdown",
+      content: `\uFF08${segment}/${total}\uFF09`,
+      text_size: "notation"
+    });
+  }
+  for (const block of blocks) {
+    const element = renderBlock(block);
+    if (element) elements.push(element);
+  }
+  return {
+    schema: "2.0",
+    config: {
+      streaming_mode: false,
+      summary: { content: total > 1 ? "\u5B8C\u6574\u7B54\u590D\uFF08\u5206\u6BB5\uFF09" : "\u5B8C\u6574\u7B54\u590D" }
+    },
+    body: { elements }
+  };
+}
+function renderBlock(block) {
+  if (!block.content && block.kind === "markdown") return void 0;
+  if (block.kind === "markdown") return { tag: "markdown", content: block.content };
+  const title = blockTitle(block);
+  const body = fencedText(block.content, block.language);
+  return {
+    tag: "collapsible_panel",
+    expanded: block.kind === "layout",
+    header: {
+      title: { tag: "markdown", content: title },
+      vertical_align: "center",
+      icon: { tag: "standard_icon", token: "down-small-ccm_outlined", size: "16px 16px" },
+      icon_position: "follow_text",
+      icon_expanded_angle: -180
+    },
+    border: { color: block.kind === "diff" ? "blue" : "grey", corner_radius: "5px" },
+    vertical_spacing: "8px",
+    padding: "8px 8px 8px 8px",
+    elements: [{ tag: "markdown", content: body, text_size: "notation" }]
+  };
+}
+function blockTitle(block) {
+  const lineCount = Math.max(1, block.content.split("\n").length);
+  if (block.kind === "diff") return `\u4EE3\u7801\u4FEE\u6539 \xB7 ${lineCount} \u884C`;
+  if (block.kind === "layout") {
+    return `${block.layoutKind === "table" ? "\u8868\u683C" : "\u7ED3\u6784\u56FE"} \xB7 ${lineCount} \u884C`;
+  }
+  const language = block.language ? displayLanguage(block.language) : "\u4EE3\u7801";
+  return `${language} \xB7 ${lineCount} \u884C`;
+}
+function displayLanguage(language) {
+  const normalized = language.trim().toLowerCase();
+  const names = {
+    js: "JavaScript \u4EE3\u7801",
+    jsx: "JSX \u4EE3\u7801",
+    ts: "TypeScript \u4EE3\u7801",
+    tsx: "TSX \u4EE3\u7801",
+    py: "Python \u4EE3\u7801",
+    python: "Python \u4EE3\u7801",
+    sh: "Shell \u4EE3\u7801",
+    bash: "Shell \u4EE3\u7801",
+    zsh: "Shell \u4EE3\u7801",
+    json: "JSON \u4EE3\u7801",
+    yaml: "YAML \u4EE3\u7801",
+    yml: "YAML \u4EE3\u7801",
+    sql: "SQL \u4EE3\u7801",
+    diff: "\u4EE3\u7801\u4FEE\u6539",
+    patch: "\u4EE3\u7801\u4FEE\u6539",
+    text: "\u6587\u672C",
+    plain: "\u6587\u672C"
+  };
+  return names[normalized] ?? `${language.trim()} \u4EE3\u7801`;
+}
+function fencedText(content, language) {
+  const maxBackticks = Math.max(
+    2,
+    ...Array.from(content.matchAll(/`+/gu), (match) => match[0].length)
+  );
+  const fence = "`".repeat(Math.max(3, maxBackticks + 1));
+  const suffix = content.endsWith("\n") ? "" : "\n";
+  return `${fence}${language ?? "text"}
+${content}${suffix}${fence}`;
+}
+function splitBlock(block, maxBytes) {
+  const safeMaxBytes = Math.max(800, maxBytes - 256);
+  if (Buffer.byteLength(JSON.stringify(answerCard([block], 1, 999)), "utf8") <= safeMaxBytes) {
+    return [block];
+  }
+  const lines = block.content.split("\n");
+  const parts = [];
+  let current = [];
+  const pushCurrent = () => {
+    if (current.length === 0) return;
+    parts.push({ ...block, content: current.join("\n") });
+    current = [];
+  };
+  for (const line of lines) {
+    const candidate = [...current, line].join("\n");
+    const candidateBlock = { ...block, content: candidate };
+    if (current.length > 0 && Buffer.byteLength(JSON.stringify(answerCard([candidateBlock], 1, 999)), "utf8") > safeMaxBytes) {
+      pushCurrent();
+      current = [line];
+      continue;
+    }
+    if (current.length === 0 && Buffer.byteLength(JSON.stringify(answerCard([candidateBlock], 1, 999)), "utf8") > safeMaxBytes) {
+      const pieces = splitLongLine(line, block, safeMaxBytes);
+      parts.push(...pieces);
+      continue;
+    }
+    current.push(line);
+  }
+  pushCurrent();
+  return parts.length > 0 ? parts : [{ ...block, content: "" }];
+}
+function splitLongLine(line, block, maxBytes) {
+  const pieces = [];
+  let rest = Array.from(line);
+  while (rest.length > 0) {
+    let low = 1;
+    let high = rest.length;
+    let best = 1;
+    while (low <= high) {
+      const mid = Math.floor((low + high) / 2);
+      const candidate = { ...block, content: rest.slice(0, mid).join("") };
+      if (Buffer.byteLength(JSON.stringify(answerCard([candidate], 1, 999)), "utf8") <= maxBytes) {
+        best = mid;
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+    pieces.push({ ...block, content: rest.slice(0, best).join("") });
+    rest = rest.slice(best);
+  }
+  return pieces;
+}
+function parseFenceStart(line) {
+  const match = line.match(/^\s*(?<marker>`{3,}|~{3,})\s*(?<info>[^\s`]*)[^`]*$/u);
+  if (!match?.groups?.marker) return void 0;
+  return {
+    marker: match.groups.marker[0],
+    length: match.groups.marker.length,
+    info: match.groups.info?.trim() ?? ""
+  };
+}
+function isFenceClose(line, fence) {
+  const match = line.match(/^\s*(?<marker>`{3,}|~{3,})\s*$/u);
+  return Boolean(
+    match?.groups?.marker && match.groups.marker[0] === fence.marker && match.groups.marker.length >= fence.length
+  );
+}
+function classifyCodeFence(info) {
+  return /^(?:diff|patch)$/iu.test(info.trim()) ? "diff" : "code";
+}
+function explicitPatchStart(line) {
+  const trimmed = line.trim();
+  if (/^\*{3}\s+(?:Begin|Update|Add|Delete)\s+Patch\b/iu.test(trimmed)) return "begin-patch";
+  if (/^diff --git\s+/u.test(trimmed) || /^Index:\s+\S/u.test(trimmed)) return "diff";
+  if (/^@@\s*[-+]?\d+(?:,\d+)?\s+[-+]\d+(?:,\d+)?\s*@@/u.test(trimmed)) return "diff";
+  return void 0;
+}
+function isPatchContinuation(line) {
+  const trimmed = line.trim();
+  return /^diff --git\s+/u.test(trimmed) || /^(?:index|old mode|new mode|similarity index|rename from|rename to|---|\+\+\+|@@)\b/u.test(trimmed) || /^[ +\\-]/u.test(line) || /^\*{3}\s+(?:Begin|End|Update|Add|Delete)\s+Patch\b/iu.test(trimmed);
+}
+function readTable(lines, start) {
+  if (start + 1 >= lines.length || !isTableRow(lines[start] ?? "") || !isTableDivider(lines[start + 1] ?? "")) {
+    return void 0;
+  }
+  const table = [];
+  let index = start;
+  while (index < lines.length && isTableRow(lines[index] ?? "")) {
+    table.push(lines[index] ?? "");
+    index += 1;
+  }
+  return { content: table.join("\n"), nextIndex: index };
+}
+function isTableRow(line) {
+  const trimmed = line.trim();
+  return Boolean(trimmed && trimmed.includes("|") && trimmed.split("|").length >= 3);
+}
+function isTableDivider(line) {
+  const cells = line.trim().replace(/^\||\|$/gu, "").split("|");
+  return cells.length >= 2 && cells.every((cell) => /^\s*:?-{3,}:?\s*$/u.test(cell));
+}
+function readDiagram(lines, start) {
+  let index = start;
+  const candidate = [];
+  while (index < lines.length && lines[index]?.trim()) {
+    candidate.push(lines[index] ?? "");
+    index += 1;
+  }
+  if (candidate.length < MIN_LAYOUT_LINES) return void 0;
+  const score = candidate.reduce((total, line) => total + diagramLineScore(line), 0);
+  const specialLines = candidate.filter(
+    (line) => /[│└├┌┐┘┤┬┴─═]/u.test(line) || /(?:-{2,}|={2,})\s*[>↓←↑]/u.test(line) || /(?:^|\s)[|v^<>](?:\s|$)/u.test(line)
+  ).length;
+  if (score < 2 || specialLines < 2) {
+    return void 0;
+  }
+  return { content: candidate.join("\n"), nextIndex: index };
+}
+function diagramLineScore(line) {
+  let score = 0;
+  if (/[│└├┌┐┘┤┬┴─═]/u.test(line)) score += 2;
+  if (/(?:^|\s)[|v^<>](?:\s|$)/u.test(line)) score += 1;
+  if (/(?:-{2,}|={2,})\s*[>↓←↑]/u.test(line)) score += 2;
+  if (/\[[^\]]+\]/u.test(line) && /(?:->|→|↓|\|)/u.test(line)) score += 1;
+  return score;
+}
+function trimBlockEnd(value) {
+  return value.replace(/\n+$/u, "");
+}
+
 // src/card/text-renderer.ts
 var MARKER_RESERVE = 256;
 var EFFECTIVE_BUDGET = CARD_BYTE_BUDGET - MARKER_RESERVE;
@@ -16096,7 +16449,7 @@ function renderText(state, options = {}) {
     parts.push(activityQuote(presentation.activity, activityBody));
   }
   for (const block of presentation.blocks) {
-    const piece = renderBlock(block);
+    const piece = renderBlock2(block);
     if (piece) parts.push(piece);
   }
   if (state.terminal === "interrupted") {
@@ -16221,7 +16574,7 @@ function utf8Tail2(input, maxBytes) {
   }
   return out.reverse().join("");
 }
-function renderBlock(block) {
+function renderBlock2(block) {
   if (block.kind === "text") {
     return block.content.trim();
   }
@@ -20075,7 +20428,8 @@ ${delta}`.slice(-64e3);
           chatId,
           sendOpts,
           text: longReplyText,
-          scope
+          scope,
+          replyMode: "card"
         });
       };
       const postFreshFinal = async (state) => {
@@ -20238,7 +20592,8 @@ ${delta}`.slice(-64e3);
           chatId,
           sendOpts,
           text: longReplyText,
-          scope
+          scope,
+          replyMode: "markdown"
         });
       };
       const postFreshFinal = async (state) => {
@@ -20432,7 +20787,8 @@ async function sendFinalReply(input) {
       chatId: input.chatId,
       sendOpts: input.sendOpts,
       text: completeBody,
-      scope: input.scope
+      scope: input.scope,
+      replyMode: input.replyMode
     });
     return;
   }
@@ -21098,7 +21454,29 @@ function liveInteractionCardForText(text, signCallback, inputRoute = "live", ski
 }
 function renderLiveAwareReplyCard(state, cardRenderOptions = {}, inputRoute = "live", skipSignatures) {
   const body = renderText(state, { activityMode: "none" });
-  return liveInteractionCardForText(body, cardRenderOptions.signCallback, inputRoute, skipSignatures) ?? renderCard(state, cardRenderOptions);
+  const liveCard = liveInteractionCardForText(
+    body,
+    cardRenderOptions.signCallback,
+    inputRoute,
+    skipSignatures
+  );
+  if (liveCard) return liveCard;
+  const answerState = finalAnswerOnlyState(state);
+  const answerBody = renderText(answerState, { activityMode: "none" });
+  if (state.terminal !== "running" && answerHasStructuredBlocks(answerBody)) {
+    const base = renderCard(state, cardRenderOptions);
+    const preserved = (base.body?.elements ?? []).filter((element) => {
+      if (!element || typeof element !== "object") return false;
+      const candidate = element;
+      return candidate.tag === "collapsible_panel" || candidate.tag === "button" || candidate.tag === "markdown" && candidate.text_size === "notation";
+    });
+    const answer = answerCard(parseAnswerBlocks(answerBody));
+    return {
+      ...answer,
+      body: { elements: [...preserved, ...answer.body.elements] }
+    };
+  }
+  return renderCard(state, cardRenderOptions);
 }
 function isLiveInteractionCardForText(text, inputRoute, skipSignatures) {
   const allowBareConfirmation = inputRoute === "agent";
@@ -21113,10 +21491,11 @@ function completeReplyText(state) {
   });
 }
 function isLongReplyText(text) {
-  return Buffer.byteLength(text, "utf8") > LONG_REPLY_CARD_THRESHOLD_BYTES;
+  const bytes = Buffer.byteLength(text, "utf8");
+  return bytes > LONG_REPLY_CARD_THRESHOLD_BYTES || answerHasStructuredBlocks(text) && bytes > LONG_REPLY_CARD_THRESHOLD_BYTES - 4e3;
 }
 function longReplyNoticeCard(text) {
-  const chunks = splitTextForDelivery(text, LONG_REPLY_CHUNK_BYTES);
+  const chunks = answerHasStructuredBlocks(text) ? splitAnswerForDelivery(text, LONG_REPLY_CHUNK_BYTES) : splitTextForDelivery(text, LONG_REPLY_CHUNK_BYTES);
   return {
     schema: "2.0",
     config: {
@@ -21134,6 +21513,27 @@ function longReplyNoticeCard(text) {
   };
 }
 async function sendCompleteReplyChunks(input) {
+  const structured = answerHasStructuredBlocks(input.text);
+  const promoteToCards = input.replyMode === "card" || structured;
+  if (promoteToCards) {
+    const chunks2 = splitAnswerForDelivery(input.text, LONG_REPLY_CHUNK_BYTES);
+    if (chunks2.length === 0) return;
+    for (const [index, chunk] of chunks2.entries()) {
+      await input.channel.send(
+        input.chatId,
+        { card: answerCard(chunk, index + 1, chunks2.length) },
+        input.sendOpts
+      );
+    }
+    log.info("outbound", "long-reply-split", {
+      scope: input.scope,
+      chunks: chunks2.length,
+      mode: "card",
+      structured,
+      bytes: Buffer.byteLength(input.text, "utf8")
+    });
+    return;
+  }
   const chunks = splitTextForDelivery(input.text, LONG_REPLY_CHUNK_BYTES);
   if (chunks.length === 0) return;
   for (const [index, chunk] of chunks.entries()) {
@@ -21145,6 +21545,7 @@ ${chunk}` : chunk;
   log.info("outbound", "long-reply-split", {
     scope: input.scope,
     chunks: chunks.length,
+    mode: "markdown",
     bytes: Buffer.byteLength(input.text, "utf8")
   });
 }

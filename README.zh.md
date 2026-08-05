@@ -43,7 +43,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 0.6.76
+sh /tmp/install-arg-bridge.sh --version 0.6.77
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -87,10 +87,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.76"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.77"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.76`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.77`。
 
 ### 4. Node 或 npm 全局目录错误
 
@@ -280,7 +280,7 @@ arg-bridge profile export <name> --include-secrets --yes
 - **消息排队(看起来没反应)**:同一个 chat / 话题已经有任务在跑时,你新发的普通消息**不会打断它,会排队**到当前任务结束后处理。忙时提示按 30 秒限频,所以稍后再次询问仍会收到存活回执,短时间连发又不会刷屏。只读的 `/status` 和 `/session status` 不会再清空已排队消息。**要立刻打断,发 `/stop`。**
 - **流式卡片续接与失效降级**:飞书/Lark 会在约 10 分钟后自动关闭流式卡片。任务仍在运行时,bridge 每 8 分钟新建一张续接卡片；每一段从文本游标继续，只包含之后新产生的输出，不会重放已发送的完整历史。如果卡片被撤回或失效(飞书 `230011 withdrawn`),bridge 仍会继续消费 agent 输出,并**把完整答案作为一条全新消息补发**。
 - **终端历史隔离**：live tmux 只捕获当前提示词对应的输出，并在每次更新前与本轮投递账本归并。终端重绘、早先任务内容、旧版 bridge 信封和足够长的内嵌历史回放都会被移除；回放前后真正新增的文本及长任务最后答复行仍会发送。
-- **低强调终端活动**：Codex 的 `Ran`/`Explored` 帧、Claude 工具表面和非交互命令回显会保留在一块默认折叠的“执行活动”面板中。纯文本流只显示活动项数量，最终答复完全不携带这些轨迹；正常进度、代码、表格和正文都会完整保留。`/model` 等原生选择器绝不进入压缩路径，因此签名控制卡仍保留完整选项。
+- **低强调终端活动**：Codex 的 `Ran`/`Explored` 帧、Claude 工具表面和非交互命令回显会保留在一块默认折叠的“执行活动”面板中。纯文本流只显示活动项数量，最终答复完全不携带这些轨迹；正常进度、代码、表格和正文都会完整保留。完成态中的 fenced code 和 diff 会进入可展开面板，表格、架构图和字符画保持等宽对齐。`/model` 等原生选择器绝不进入压缩路径，因此签名控制卡仍保留完整选项。
 - **幂等事件投递**：每条飞书 message ID 会在排队前持久化认领，因此 websocket 重放或 bridge 重启都不会再启动第二个 turn。tmux 屏幕输出携带单调序号并归并为新后缀；心跳和 agent 更新共用一个有序投递队列。
 - **投递策略（不中断控制）**：`/output live` 持续显示过程和最终答复，`/output final` 只发送最终答复，`/output off` 静默 agent 发出的消息但让任务继续运行；它和 `/timeout` 完全独立。
 - **持久 tmux 身份**：每个 scope 会保存 bridge 托管 tmux session 及已接管的 agent pane。关闭本地终端、detach tmux、`arg-bridge restart`、服务自动重启或 `/reconnect` 都只会断开 bridge 转发，不会向 tmux agent 写入 Ctrl-C，也不会创建新的原生对话。重连时会严格校验 profile、agent kind、Feishu chat/topic scope 和 workspace，不能接管其他会话的 pane；下一个飞书 turn 会重新附着到原 session。若重启发生在任务运行中，任务会继续在 tmux 执行，但已断开的 bridge 不会回放或补发这轮中间输出。若你在同一托管 session 的新选中 pane 中手动运行 `codex resume` 或 `claude --resume`，bridge 会接管并持久记录该 pane；后续飞书输入和 `/tmux tail` 都会指向已恢复的对话。tmux 所在主机真的重启时，进程必然结束；需要跨客户端关机持续执行时，应把 bridge 和 tmux 部署在稳定的服务器主机上。
@@ -295,7 +295,7 @@ arg-bridge profile export <name> --include-secrets --yes
 
 `/config` 可以调整三类展示选项：
 
-- **消息回复方式**：`消息卡片` 流式更新最终回复；`纯文本` 在 run 完成后一次性发送。
+- **消息回复方式**：`消息卡片` 流式更新最终回复；`纯文本` 在 run 完成后一次性发送。包含代码、diff 或终端布局的长答复会自动升级为卡片，避免代码围栏被切开或变成普通长文本。
 - **工具调用显示**：控制最终回复卡片 / markdown 中是否展示工具块。
 - **COT 过程消息**：`关闭` 只发送最终回复；`简略` 先用 COT 消息展示 agent 的过程文本和工具摘要；`详细` 还会展示工具参数和截断后的输出。
 

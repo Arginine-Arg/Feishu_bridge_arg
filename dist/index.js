@@ -554,9 +554,11 @@ function isStructuredInteraction(lines, requireCompletePickerFrame) {
   const hasActivityConnector = lines.some(isActivityConnectorLine);
   const hasToolTraceEvidence = strongToolTraceRows >= 2 || strongToolTraceRows >= 1 && hasActivityConnector || toolTraceRows >= 3 && hasActivityConnector;
   const hasExplicitPickerHeading = lines.some(isExplicitPickerHeading);
+  const hasDocumentEvidence = lines.some(isAnswerDocumentLine) || hasAnswerDocumentShape(lines);
   const activityOnlySurface = hasToolTraceEvidence && !hasExplicitPickerHeading && !hasConfirmationQuestion && !hasBinaryControl && !codexResume && !codexUpdate;
+  const documentOnlySurface = hasDocumentEvidence && !hasExplicitPickerHeading && !hasConfirmationQuestion && !codexResume && !codexUpdate && !selectedNavigationMenu;
   const genericInputEvidence = hasInputPrompt || hasPromptMarker || selectedNavigationMenu || hasQuestionBeforeOptions && hasStrongOptionRows;
-  return !hasCodeLikeNoise && !hasRepeatedKeyedOptionLabels && !activityOnlySurface && (claudeBypass || codexUpdate || codexResume || hasPromptTitle && tailIsControl && ((requireCompletePickerFrame ? completeNumberedPicker : hasNumberedChoice) || hasBinaryControl || hasKeyHint && tailIsControl) || hasConfirmationQuestion && (hasNumberedChoice || hasBinaryControl) || (requireCompletePickerFrame ? completeNumberedPicker : hasNumberedChoice) && hasKeyHint && tailIsControl && !hasCodeLikeNoise && (hasPromptTitle || hasQuestionBeforeOptions || hasCleanNumericOptionBlock) || // A native picker may retain only its numbered viewport rows. A selected
+  return !hasCodeLikeNoise && !hasRepeatedKeyedOptionLabels && !activityOnlySurface && !documentOnlySurface && (claudeBypass || codexUpdate || codexResume || hasPromptTitle && tailIsControl && ((requireCompletePickerFrame ? completeNumberedPicker : hasNumberedChoice) || hasBinaryControl || hasKeyHint && tailIsControl) || hasConfirmationQuestion && (hasNumberedChoice || hasBinaryControl) || (requireCompletePickerFrame ? completeNumberedPicker : hasNumberedChoice) && hasKeyHint && tailIsControl && !hasCodeLikeNoise && (hasPromptTitle || hasQuestionBeforeOptions || hasCleanNumericOptionBlock) || // A native picker may retain only its numbered viewport rows. A selected
   // numeric row is the TUI's direct evidence that this is an active menu;
   // do not infer that state from arbitrary numbered prose.
   hasCleanNumericOptionBlock && hasSelectedNumberedChoice || hasBinaryControl && /(?:approval|confirmation|allow|proceed|continue|确认|允许|继续)/iu.test(text) || // Vendor-neutral menus may have no title or Enter/Esc legend. Requiring
@@ -570,6 +572,25 @@ function isStructuredInteraction(lines, requireCompletePickerFrame) {
   // waiting, while titled/native pickers can publish a one-row frame with
   // an Enter/answer prompt.
   genericOptionCount && genericInputEvidence);
+}
+function isAnswerDocumentLine(line) {
+  const trimmed = line.trim();
+  if (!trimmed) return false;
+  return /^(?:#{1,6}\s+|[一二三四五六七八九十百]+[、.]\s*|(?:建议|推荐|当前|完整|详细|方案|说明|实现|优化|测试|验证|正文|另外|这里|因此|首先|其次)\b)/u.test(
+    trimmed
+  ) || /(?:^|\s)(?:src|tests?|lib|dist|chem|research_[a-z0-9_-]+)\/[A-Za-z0-9_.~@+-]+(?:\/[A-Za-z0-9_.~@+-]+)*(?::\d+)?/u.test(
+    trimmed
+  ) || /\b(?:sendCompleteReplyChunks|collapsible_panel|Markdown|TypeScript|Python|DeFoG|MMELON)\b/u.test(
+    trimmed
+  );
+}
+function hasAnswerDocumentShape(lines) {
+  const numberedRows = lines.filter((line) => /^\s*\d{1,2}[.)、:：]\s+\S/u.test(line)).length;
+  const proseRows = lines.filter((line) => {
+    const trimmed = line.trim();
+    return trimmed.length >= 24 && !isOptionSyntaxLine(trimmed) && !isInteractionHintLine(trimmed);
+  }).length;
+  return numberedRows >= 2 && proseRows >= 2;
 }
 function repeatedKeyedOptionLabelGroups(options) {
   const keysByLabel = /* @__PURE__ */ new Map();

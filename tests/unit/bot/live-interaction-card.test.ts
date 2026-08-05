@@ -666,6 +666,20 @@ describe('liveInteractionCard', () => {
     ]);
   });
 
+  it('renders completed code blocks as collapsed answer panels', () => {
+    const card = renderLiveAwareReplyCard(
+      stateFrom([
+        { type: 'text', delta: '结论\n\n```python\nprint("ok")\n```' },
+        { type: 'done', terminationReason: 'normal' },
+      ]),
+    );
+    const serialized = JSON.stringify(card);
+    expect(serialized).toContain('collapsible_panel');
+    expect(serialized).toContain('Python 代码');
+    expect(serialized).toContain('print(\\"ok\\")');
+    expect(serialized).toContain('"expanded":false');
+  });
+
   it('renders non-live prompts as signed agent input controls', () => {
     let n = 0;
     const card = liveInteractionCardForText(
@@ -887,6 +901,61 @@ describe('liveInteractionCard', () => {
     expect(isStructuredLiveInteraction(text)).toBe(false);
     expect(liveInteractionSurface(text)).toBeUndefined();
     expect(liveInteractionCardForText(text, () => 'greeting-progress-token')).toBeUndefined();
+  });
+
+  it('does not promote a long answer plan with paths and numbered sections into a picker', () => {
+    const text = [
+      '先明确一个边界：这套方案目前是新方案设计，不是当前 V126/V128 的已有实现。',
+      '当前 Bio 路径仍然是：',
+      '冻结 Bio registers [16,256]',
+      'V126 Bio bridge',
+      'shared DeFoG',
+      '尚未加入 Bio denoising/AR、W_bio chemical bridge 或 u_m^teacher 回归损失。',
+      '一、完整训练结构',
+      'Bio 条件 B_i',
+      'Bio Transformer E_bio',
+      'H_bio [B,L,256]',
+      'K 个 chemical queries',
+      'attention pooling',
+      'c_bio [B,768]',
+      'src/bot/channel.ts:2140',
+      '普通正文',
+      'fenced code block',
+      'diff / patch',
+      '1. 先把最终答案解析成语义块',
+      '2. 卡片模式下使用可展开面板',
+      '3. Markdown 模式下保留完整围栏',
+      '4. 增加长 Python/TypeScript 代码测试',
+      '正文内容不截断，只有执行活动和重复状态信息折叠。',
+      '更详细的告诉我这个原理，和方案细节',
+    ].join('\n');
+
+    expect(isStructuredLiveInteraction(text)).toBe(false);
+    expect(liveInteractionSurface(text)).toBeUndefined();
+    expect(liveInteractionCardForText(text, () => 'answer-plan-token')).toBeUndefined();
+  });
+
+  it('rejects forwarded picker wording embedded in an answer document', () => {
+    const text = [
+      'live CLI 正在等待选择：',
+      '当前结构中，长回复会走 sendCompleteReplyChunks，它直接发送 Markdown 分段，绕过了卡片渲染器：',
+      '- src/bot/channel.ts:2140',
+      '- 普通正文',
+      '- fenced code block',
+      '- diff / patch',
+      '- src/bot/channel.ts:3147',
+      '建议的优化方案',
+      '1. 先把最终答案解析成语义块',
+      '2. 卡片模式下使用可展开的 collapsible_panel',
+      '3. Markdown 模式下保留完整围栏',
+      '4. 增加 StableFate 架构图和 ASCII 字符图测试',
+      'Press enter to confirm or esc to go back',
+      '正文内容不截断，只有执行活动和重复状态信息折叠。',
+    ].join('\n');
+
+    expect(isStructuredLiveInteraction(text)).toBe(false);
+    expect(liveInteractionSurface(text)).toBeUndefined();
+    expect(liveInteractionCardForText(text, () => 'forwarded-picker-token')).toBeUndefined();
   });
 
   it('does not truncate a command transcript by promoting its output rows to a picker', () => {

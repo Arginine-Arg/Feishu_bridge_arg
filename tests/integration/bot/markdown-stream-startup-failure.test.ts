@@ -138,7 +138,10 @@ describe('markdown stream startup failures', () => {
       );
 
       const delivered = h.channel.sent
-        .map((item) => (item.content as { markdown?: string }).markdown ?? '')
+        .map((item) => {
+          const content = item.content as { markdown?: string; card?: unknown };
+          return content.markdown ?? (content.card ? JSON.stringify(content.card) : '');
+        })
         .join('\n\n');
       expect(delivered).toContain('一、完整训练结构');
       expect(delivered).toContain('最终结论：先完成 teacher-forced probe，再进入 blind sampling。');

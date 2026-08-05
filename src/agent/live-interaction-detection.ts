@@ -718,6 +718,7 @@ function isStructuredInteraction(lines: string[], requireCompletePickerFrame: bo
     (strongToolTraceRows >= 1 && hasActivityConnector) ||
     (toolTraceRows >= 3 && hasActivityConnector);
   const hasExplicitPickerHeading = lines.some(isExplicitPickerHeading);
+  const hasDocumentEvidence = lines.some(isAnswerDocumentLine) || hasAnswerDocumentShape(lines);
   // A stream of bridge activity can contain bullets, arrows, command output,
   // and even an `Esc`/`Enter` phrase from a status footer. Those rows are not
   // actionable choices. Only allow such a surface through when a real picker
@@ -729,6 +730,13 @@ function isStructuredInteraction(lines: string[], requireCompletePickerFrame: bo
     !hasBinaryControl &&
     !codexResume &&
     !codexUpdate;
+  const documentOnlySurface =
+    hasDocumentEvidence &&
+    !hasExplicitPickerHeading &&
+    !hasConfirmationQuestion &&
+    !codexResume &&
+    !codexUpdate &&
+    !selectedNavigationMenu;
   const genericInputEvidence =
     hasInputPrompt ||
     hasPromptMarker ||
@@ -739,6 +747,7 @@ function isStructuredInteraction(lines: string[], requireCompletePickerFrame: bo
     !hasCodeLikeNoise &&
     !hasRepeatedKeyedOptionLabels &&
     !activityOnlySurface &&
+    !documentOnlySurface &&
     (claudeBypass ||
     codexUpdate ||
     codexResume ||
@@ -772,6 +781,31 @@ function isStructuredInteraction(lines: string[], requireCompletePickerFrame: bo
       genericOptionCount &&
       genericInputEvidence))
   );
+}
+
+function isAnswerDocumentLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) return false;
+  return (
+    /^(?:#{1,6}\s+|[一二三四五六七八九十百]+[、.]\s*|(?:建议|推荐|当前|完整|详细|方案|说明|实现|优化|测试|验证|正文|另外|这里|因此|首先|其次)\b)/u.test(
+      trimmed,
+    ) ||
+    /(?:^|\s)(?:src|tests?|lib|dist|chem|research_[a-z0-9_-]+)\/[A-Za-z0-9_.~@+-]+(?:\/[A-Za-z0-9_.~@+-]+)*(?::\d+)?/u.test(
+      trimmed,
+    ) ||
+    /\b(?:sendCompleteReplyChunks|collapsible_panel|Markdown|TypeScript|Python|DeFoG|MMELON)\b/u.test(
+      trimmed,
+    )
+  );
+}
+
+function hasAnswerDocumentShape(lines: string[]): boolean {
+  const numberedRows = lines.filter((line) => /^\s*\d{1,2}[.)、:：]\s+\S/u.test(line)).length;
+  const proseRows = lines.filter((line) => {
+    const trimmed = line.trim();
+    return trimmed.length >= 24 && !isOptionSyntaxLine(trimmed) && !isInteractionHintLine(trimmed);
+  }).length;
+  return numberedRows >= 2 && proseRows >= 2;
 }
 
 /**
