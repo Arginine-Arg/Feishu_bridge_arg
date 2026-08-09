@@ -47,10 +47,10 @@ describe('profile-aware secrets commands', () => {
     await setSecret(fallback, 'from-alpha', resolveAppPaths({ rootDir: root, profile: 'alpha' }));
     const warnings: string[] = [];
 
-    await expect(resolveSecretAcrossProfiles(duplicate, root, (msg) => warnings.push(msg))).resolves.toBe(
+    await expect(resolveSecretAcrossProfiles(duplicate, root, (msg) => warnings.push(msg), '')).resolves.toBe(
       'from-active',
     );
-    await expect(resolveSecretAcrossProfiles(fallback, root, (msg) => warnings.push(msg))).resolves.toBe(
+    await expect(resolveSecretAcrossProfiles(fallback, root, (msg) => warnings.push(msg), '')).resolves.toBe(
       'from-alpha',
     );
 
