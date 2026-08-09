@@ -711,7 +711,12 @@ describe('liveInteractionCard', () => {
           ].join('\n'),
         },
         { type: 'tool_use', id: 'tool-1', name: 'bash', input: { command: 'secret' } },
-        { type: 'tool_result', id: 'tool-1', output: 'tool output must stay out of final card' },
+        {
+          type: 'tool_result',
+          id: 'tool-1',
+          output: 'tool output must stay out of final card',
+          isError: false,
+        },
         { type: 'done', terminationReason: 'normal' },
       ]),
     );
