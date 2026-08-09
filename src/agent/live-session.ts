@@ -1604,9 +1604,22 @@ export function parseLiveControlSequence(input: string): string[] | null {
   const tokens = input.trim().split(/\s+/u).filter(Boolean);
   if (tokens.length === 0) return null;
   const keys: string[] = [];
-  for (const token of tokens) {
+  for (const [index, token] of tokens.entries()) {
     const key = CONTROL_KEYS[token.toLowerCase()] ?? CONTROL_KEYS[token];
-    if (key === undefined) return null;
+    if (key === undefined) {
+      // Permission pickers print a literal option (for example `1` or `y`)
+      // and require a separate Enter. Keep a bare literal out of this parser
+      // so native model/reasoning menus can still expose an explicit Enter
+      // button, but accept the unambiguous `literal enter` form emitted by
+      // approval cards.
+      const isFinalEnter =
+        index === tokens.length - 2 &&
+        tokens.length === 2 &&
+        (CONTROL_KEYS[tokens[1]!.toLowerCase()] ?? CONTROL_KEYS[tokens[1]!]) === '\r';
+      if (!isFinalEnter || !/^(?:\d{1,2}|[a-z]|yes|no)$/iu.test(token)) return null;
+      keys.push(token);
+      continue;
+    }
     keys.push(key);
   }
   return keys;

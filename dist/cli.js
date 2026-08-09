@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.0.0",
+  version: "1.0.1",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -8498,9 +8498,14 @@ function parseLiveControlSequence(input) {
   const tokens = input.trim().split(/\s+/u).filter(Boolean);
   if (tokens.length === 0) return null;
   const keys = [];
-  for (const token of tokens) {
+  for (const [index, token] of tokens.entries()) {
     const key = CONTROL_KEYS[token.toLowerCase()] ?? CONTROL_KEYS[token];
-    if (key === void 0) return null;
+    if (key === void 0) {
+      const isFinalEnter = index === tokens.length - 2 && tokens.length === 2 && (CONTROL_KEYS[tokens[1].toLowerCase()] ?? CONTROL_KEYS[tokens[1]]) === "\r";
+      if (!isFinalEnter || !/^(?:\d{1,2}|[a-z]|yes|no)$/iu.test(token)) return null;
+      keys.push(token);
+      continue;
+    }
     keys.push(key);
   }
   return keys;
@@ -20254,6 +20259,10 @@ async function runAgentBatch(deps) {
     liveInteractionByScope.set(scope, { picker: true, updatedAt: Date.now() });
     if (!wasActive) log.info("agent-live", "picker-enter", { scope, input: nativeCommand });
   }
+  if (useLiveSession && nativeCommand && !nativeCommand.trimStart().startsWith("/")) {
+    const previousSignature = liveInteractionByScope.get(scope)?.signature;
+    if (previousSignature) sentInteractionSignatures.add(previousSignature);
+  }
   const observeLiveEvent = (evt, opts = {}) => {
     const isStartupInteraction = evt.type === "interactive" && evt.phase === "startup";
     if (evt.type !== "text" && evt.type !== "interactive") return;
@@ -20433,6 +20442,10 @@ ${delta}`.slice(-64e3);
         observeLiveEvent
       );
       if (handle.detached) return;
+      if (liveInputMode === "control" && isControlFooterOnly(completeReplyText(finalState))) {
+        log.info("agent-live", "control-footer-only-suppressed", { scope, input: nativeCommand });
+        return;
+      }
       await sendFinalReply({
         channel,
         chatId,
@@ -20936,7 +20949,11 @@ async function sendFinalReply(input) {
     return;
   }
   if (input.replyMode === "card") {
-    if (isSkippedLiveInteractionForText(body, input.skipLiveInteractionSignatures)) {
+    if (isSkippedLiveInteractionForText(
+      body,
+      input.skipLiveInteractionSignatures,
+      input.liveInteractionInputRoute ?? "live"
+    )) {
       log.info("outbound", "skipped", outboundLogFields(input, "live-interaction-duplicate", body));
       return;
     }
@@ -21374,7 +21391,7 @@ function liveInputModeForBatch(batch, nativeCommand) {
 function looksLikeAgentPicker(text, allowBareConfirmation = false) {
   return isStructuredLiveInteraction(text) || allowBareConfirmation && isBareAgentConfirmation(text);
 }
-function detectLiveInteraction(text, allowBareConfirmation = false) {
+function detectLiveInteraction(text, allowBareConfirmation = false, autoConfirmApproval = true) {
   const surface = liveInteractionSurface(text);
   if (!surface && !(allowBareConfirmation && isBareAgentConfirmation(text))) return void 0;
   const prompt = surface ?? recentLiveInteractionPrompt(text);
@@ -21382,10 +21399,12 @@ function detectLiveInteraction(text, allowBareConfirmation = false) {
   const displayPrompt = formatLiveInteractionPrompt(prompt, choices);
   const buttons = [];
   const seenInputs = /* @__PURE__ */ new Set();
+  const permissionApproval = autoConfirmApproval && isPermissionApprovalPrompt(prompt);
   const add = (label, input) => {
-    if (seenInputs.has(input)) return;
-    seenInputs.add(input);
-    buttons.push({ label, input });
+    const effectiveInput = permissionApproval && /^(?:\d{1,2}|[a-z]|yes|no)$/iu.test(input) ? `${input} enter` : input;
+    if (seenInputs.has(effectiveInput)) return;
+    seenInputs.add(effectiveInput);
+    buttons.push({ label, input: effectiveInput });
   };
   const arrowNumberedPrompt = isClaudeBypassPermissionsPrompt(prompt) || isClaudeModelPicker(prompt) || isCodexUpdatePrompt(prompt);
   const arrowNavigationPrompt = /(?:arrow keys?|use\s+(?:the\s+)?(?:up|down|left|right)\s+keys?|↑\s*\/\s*↓|up\s*\/\s*down|navigate\s+with)/iu.test(
@@ -21456,6 +21475,13 @@ function isReadyToPublishLiveInteraction(prompt) {
   return /(?:press\s+)?enter\s+to\s+(?:confirm|continue).*esc(?:ape)?\s+to\s+(?:go\s+back|cancel)/iu.test(
     prompt
   );
+}
+function isPermissionApprovalPrompt(text) {
+  return isActionableBinaryConfirmation(text) || /\b(?:command|action|operation)\s+requires?\s+(?:approval|confirmation)\b/iu.test(text) || /\b(?:would\s+you\s+like|do\s+you\s+want)\s+to\s+(?:run|allow|approve|proceed|continue)\b/iu.test(text);
+}
+function isControlFooterOnly(text) {
+  const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);
+  return lines.length > 0 && lines.some((line) => isLiveInputPromptLine(line)) && lines.every((line) => isLiveInputPromptLine(line) || /^(?:›|❯|>)?\s*$/u.test(line));
 }
 function recentLiveInteractionPrompt(text) {
   const surface = liveInteractionSurface(text);
@@ -21595,7 +21621,7 @@ function liveInteractionCardForText(text, signCallback, inputRoute = "live", ski
   if (!signCallback) return void 0;
   const allowBareConfirmation = inputRoute === "agent";
   if (!looksLikeAgentPicker(text, allowBareConfirmation)) return void 0;
-  const interaction = detectLiveInteraction(text, allowBareConfirmation);
+  const interaction = detectLiveInteraction(text, allowBareConfirmation, inputRoute === "live");
   if (!interaction || skipSignatures?.has(interaction.signature)) return void 0;
   return liveInteractionCard(interaction, signCallback, inputRoute);
 }
@@ -21628,7 +21654,7 @@ function renderLiveAwareReplyCard(state, cardRenderOptions = {}, inputRoute = "l
 function isLiveInteractionCardForText(text, inputRoute, skipSignatures) {
   const allowBareConfirmation = inputRoute === "agent";
   if (!looksLikeAgentPicker(text, allowBareConfirmation)) return false;
-  const interaction = detectLiveInteraction(text, allowBareConfirmation);
+  const interaction = detectLiveInteraction(text, allowBareConfirmation, inputRoute === "live");
   return Boolean(interaction && !skipSignatures?.has(interaction.signature));
 }
 function completeReplyText(state) {
@@ -21696,9 +21722,10 @@ ${chunk}` : chunk;
     bytes: Buffer.byteLength(input.text, "utf8")
   });
 }
-function isSkippedLiveInteractionForText(text, skipSignatures) {
-  if (!skipSignatures || !looksLikeAgentPicker(text)) return false;
-  const interaction = detectLiveInteraction(text);
+function isSkippedLiveInteractionForText(text, skipSignatures, inputRoute = "live") {
+  const allowBareConfirmation = inputRoute === "agent";
+  if (!skipSignatures || !looksLikeAgentPicker(text, allowBareConfirmation)) return false;
+  const interaction = detectLiveInteraction(text, allowBareConfirmation, inputRoute === "live");
   return Boolean(interaction && skipSignatures.has(interaction.signature));
 }
 function escapeFence2(value) {
@@ -21706,7 +21733,7 @@ function escapeFence2(value) {
 }
 function closesLivePicker(input) {
   const trimmed = input.trim();
-  return /\b(?:enter|return|esc|escape)\b/iu.test(trimmed) || /(?:确认|回车|取消|返回)/u.test(trimmed) || /^[0-9]{1,2}$/u.test(trimmed);
+  return /\b(?:enter|return|esc|escape)\b/iu.test(trimmed) || /(?:确认|回车|取消|返回)/u.test(trimmed) || /^(?:[0-9]{1,2}|[a-z]|yes|no)(?:\s+enter)?$/iu.test(trimmed);
 }
 function opensLivePicker(input) {
   return /^\/(?:model|skills|permissions|resume)(?:\s|$)/iu.test(input.trim());

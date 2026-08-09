@@ -42,6 +42,12 @@ describe('parseLiveControlSequence', () => {
     expect(parseLiveControlSequence('上 回车')).toEqual(['\x1B[A', '\r']);
     expect(parseLiveControlSequence('ctrl+c')).toEqual(['\x03']);
     expect(parseLiveControlSequence('ctrl+o ctrl+t ctrl+e')).toEqual(['\x0F', '\x14', '\x05']);
+    // Approval cards can submit a literal option and its required confirmation
+    // in one control turn. A bare numeric literal remains intentionally null so
+    // model/reasoning pickers do not skip their nested menu.
+    expect(parseLiveControlSequence('1 enter')).toEqual(['1', '\r']);
+    expect(parseLiveControlSequence('yes enter')).toEqual(['yes', '\r']);
+    expect(parseLiveControlSequence('1')).toBeNull();
   });
 
   it('returns null for ordinary text (not a pure control sequence)', () => {
@@ -2982,6 +2988,78 @@ setInterval(() => {}, 1000);
 
     expect(textOf(selected)).toContain('• Approval accepted.');
     expect(textOf(selected)).not.toContain('unexpected-enter');
+  }, 20_000);
+
+  tmuxIt('submits a numeric approval choice and Enter as one control turn', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-numeric-approval-test-'));
+    const bin = join(dir, 'fake-tmux-numeric-approval-agent.mjs');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+let draft = '';
+let state = 'idle';
+function screen(lines) {
+  process.stdout.write('\\x1b[2J\\x1b[H' + lines.join('\\n') + '\\n');
+}
+process.stdin.on('data', (chunk) => {
+  for (const char of chunk) {
+    if (state === 'approval') {
+      if (char === '1') {
+        state = 'selected';
+        screen(['› 1. Yes, proceed (y)', '2. No, cancel (n)', 'Press enter to confirm or esc to cancel']);
+      }
+      continue;
+    }
+    if (state === 'selected') {
+      if (char === '\\r' || char === '\\n') {
+        state = 'accepted';
+        screen(['• Approval accepted.']);
+      }
+      continue;
+    }
+    if (char !== '\\r' && char !== '\\n') {
+      draft += char;
+      continue;
+    }
+    if (state === 'idle' && draft === 'run numeric approval task') {
+      state = 'approval';
+      draft = '';
+      screen(['Would you like to run the following command?', '› 1. Yes, proceed (y)', '2. No, cancel (n)', 'Press enter to confirm or esc to cancel']);
+    }
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-numeric-approval-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-numeric-approval',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 250,
+      outputFlushMs: 30,
+      startupTimeoutMs: 6_000,
+    });
+
+    const approval = await collect(
+      session.run('tmux-numeric-approval-run', 'run numeric approval task', dir).events,
+    );
+    expect(textOf(approval)).toContain('Would you like to run');
+
+    const selected = await collect(
+      session.run('tmux-numeric-approval-choice', '1 enter', dir, 'control').events,
+    );
+    await pool.closeAll();
+
+    expect(textOf(selected)).toContain('• Approval accepted.');
   }, 20_000);
 
   tmuxIt('keeps a short reply after a prior pane snapshot', async () => {

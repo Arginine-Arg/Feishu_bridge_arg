@@ -908,6 +908,52 @@ describe('markdown stream startup failures', () => {
     expect(buttonLabels(content?.card)).toEqual(['yes', 'no']);
   });
 
+  it('does not publish a completed footer-only card after a native control turn', async () => {
+    const h = await createHarness({
+      stream: async () => {
+        throw new Error('native live approval prompts should not use stream');
+      },
+    });
+    h.profileConfig.preferences = {
+      ...(h.profileConfig.preferences ?? {}),
+      messageReply: 'markdown',
+    };
+    h.agent.setEvents([
+      [
+        {
+          type: 'text',
+          delta: [
+            'Would you like to run the following command?',
+            'Environment: local',
+            '› 1. Yes, proceed (y)',
+            '2. No, cancel (n)',
+            'Press enter to confirm or esc to cancel',
+          ].join('\n'),
+        },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+      [
+        {
+          type: 'text',
+          delta: 'Press enter to confirm or esc to cancel',
+        },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+    ]);
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_approval_footer', '/codex /permissions'));
+    await waitFor(() => h.channel.sent.length === 1);
+    await h.channel.handlers.message?.(message('om_approval_footer_choice', '/codex 1'));
+    await waitFor(() => h.agent.runOptions.length === 2);
+    await settle();
+
+    expect(h.agent.runOptions.map((opts) => opts.prompt)).toEqual(['/permissions', '1']);
+    expect(h.agent.runOptions.map((opts) => opts.liveInputMode)).toEqual(['command', 'control']);
+    expect(h.channel.sent).toHaveLength(1);
+    expect(JSON.stringify(h.channel.sent[0]?.content)).toContain('Would you like to run');
+  });
+
   it('does not merge rapid native live commands into an ordinary prompt', async () => {
     const h = await createHarness({
       stream: async () => {

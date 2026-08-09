@@ -655,7 +655,7 @@ describe('liveInteractionCard', () => {
 
     expect(card).toBeDefined();
     const values = buttonValues(card);
-    expect(values.map((value) => value.input)).toEqual(['1', '2', '3', 'enter', 'esc']);
+    expect(values.map((value) => value.input)).toEqual(['1 enter', '2 enter', '3 enter', 'enter', 'esc']);
     expect(values.map((value) => value.bridge_token)).toEqual([
       'permission-token-0',
       'permission-token-1',
