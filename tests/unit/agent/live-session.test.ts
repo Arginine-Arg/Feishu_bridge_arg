@@ -3244,6 +3244,66 @@ setInterval(() => {}, 1000);
     expect(textOf(events)).toBe('• first stream update\n• second stream update\n');
   }, 20_000);
 
+  tmuxIt('forwards scrollback changes even when the visible terminal footer is unchanged', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-history-fingerprint-test-'));
+    const bin = join(dir, 'fake-tmux-history-fingerprint-agent.mjs');
+    const prompt = 'history fingerprint check';
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+let input = '';
+const stable = Array.from({ length: 46 }, (_, index) => 'stable-screen-' + index);
+function drawStableScreen() {
+  process.stdout.write('\\x1b[2J\\x1b[H' + stable.join('\\n') + '\\n› \\n');
+}
+drawStableScreen();
+process.stdin.on('data', (chunk) => {
+  input += chunk;
+  const index = input.search(/[\\r\\n]/);
+  if (index < 0) return;
+  const line = input.slice(0, index).trim();
+  input = input.slice(index + 1);
+  if (line !== ${JSON.stringify(prompt)}) return;
+  process.stdout.write('› ${prompt}\\n');
+  drawStableScreen();
+  setTimeout(() => {
+    // Add a line to tmux scrollback, then redraw the exact same viewport.
+    // The helper must emit this frame based on history, not only snapshot.
+    process.stdout.write('\\x1b[1;1H• DELAYED_SCROLLBACK_UPDATE\\n');
+    drawStableScreen();
+    setTimeout(() => process.stdout.write('• FINAL_AFTER_HISTORY_ONLY\\n'), 220);
+  }, 300);
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-history-fingerprint-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-history-fingerprint',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 1_200,
+      outputFlushMs: 40,
+      startupTimeoutMs: 5_000,
+    });
+
+    const events = await collect(
+      session.run('tmux-history-fingerprint-run', prompt, dir).events,
+    );
+    await pool.closeAll();
+
+    const output = textOf(events);
+    expect(output).toContain('DELAYED_SCROLLBACK_UPDATE');
+    expect(output).toContain('FINAL_AFTER_HISTORY_ONLY');
+  }, 20_000);
+
   tmuxIt('keeps a model change confirmation after a prior pane snapshot', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-model-change-test-'));
     const bin = join(dir, 'fake-tmux-model-change-agent.mjs');

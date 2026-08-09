@@ -58,4 +58,43 @@ describe('rolling reply stream', () => {
 
     expect(fallback).toHaveBeenCalledWith(finalState);
   });
+
+  it('does not publish a footer-only continuation when no new text arrives', async () => {
+    vi.useFakeTimers();
+    try {
+      let resolveRender!: (state: RunState) => void;
+      const renderDone = new Promise<RunState>((resolve) => {
+        resolveRender = resolve;
+      });
+      const waitingSegment = new Promise<void>(() => {});
+      const opened: number[] = [];
+      const fallback = vi.fn(async () => {});
+      const running = runRollingReplyStream({
+        mode: 'markdown',
+        renderDone,
+        rolloverMs: 1_000,
+        startSegment: async (segmentDone, markProducerStarted, segment) => {
+          if (segment > 1) await waitingSegment;
+          opened.push(segment);
+          markProducerStarted();
+          await segmentDone;
+        },
+        fallback,
+      });
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      // The rollover asks for a continuation, but the producer is still
+      // waiting for a real text delta, so no second Feishu stream is opened.
+      expect(opened).toEqual([1]);
+
+      const finalState = reduce(initialState, { type: 'done', terminationReason: 'normal' });
+      resolveRender(finalState);
+      await running;
+
+      expect(opened).toEqual([1]);
+      expect(fallback).toHaveBeenCalledWith(finalState);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

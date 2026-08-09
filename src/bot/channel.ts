@@ -1743,6 +1743,30 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       // prior card's mutable document.  Keep a per-segment output cursor so
       // the new message contains only text produced after that cursor.
       let segmentBaseText = '';
+      // A continuation card is useful only after the previous segment has
+      // produced new text.  Starting one on the eight-minute timer alone
+      // creates a stream of cards containing only the running footer while a
+      // long tool call is still quiet.
+      let resolveSegmentText: (() => void) | undefined;
+      let segmentTextReady: Promise<void> = Promise.resolve();
+      let segmentTextReadyFlag = true;
+      const armSegmentTextWait = (): void => {
+        segmentTextReadyFlag = false;
+        segmentTextReady = new Promise<void>((resolve) => {
+          resolveSegmentText = resolve;
+        });
+      };
+      const signalSegmentText = (state: RunState): void => {
+        if (
+          resolveSegmentText &&
+          runStateTextCursor(prepareStateForReply(state)) !== segmentBaseText
+        ) {
+          const resolve = resolveSegmentText;
+          resolveSegmentText = undefined;
+          segmentTextReadyFlag = true;
+          resolve();
+        }
+      };
       const stateForSegment = (state: RunState): RunState =>
         projectRunStateFromCursor(prepareStateForReply(state), segmentBaseText);
       const stateForDelivery = (state: RunState): RunState =>
@@ -1813,6 +1837,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         recordSession,
         async (state) => {
           latestState = state;
+          signalSegmentText(state);
           const deliveryMode = currentOutputMode();
           if (deliveryMode === 'off' || (deliveryMode === 'final' && state.terminal === 'running')) {
             return;
@@ -1882,10 +1907,22 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         renderDone,
         startSegment: (segmentDone, markProducerStarted, segment) => {
           segmentBaseText = segment === 1 ? '' : runStateTextCursor(prepareStateForReply(latestState));
+          if (segment > 1) {
+            armSegmentTextWait();
+          }
           lastSentCardSerialized = undefined;
-          const currentSegmentState = stateForDelivery(latestState);
+          const waitForNewText = segment > 1
+            ? Promise.race([
+                segmentTextReady.then(() => true),
+                renderDone.then(() => false),
+              ])
+            : Promise.resolve(true);
           return (
-          channel.stream(
+          waitForNewText.then((hasNewText) => {
+            if (segment > 1 && !hasNewText) return;
+            if (segment > 1 && !segmentTextReadyFlag) return;
+            const currentSegmentState = stateForDelivery(latestState);
+            return channel.stream(
             chatId,
             {
               card: {
@@ -1925,7 +1962,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
               },
             },
             sendOpts,
-          )
+            );
+          })
           );
         },
         fallback: postFreshFinal,
@@ -1937,6 +1975,29 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     } else if (replyMode === 'markdown') {
       let latestState: RunState = initialState;
       let segmentBaseText = '';
+      // Do not create a continuation message merely because the platform's
+      // stream lifetime expired.  Wait for a genuinely new text delta; this
+      // keeps long quiet tasks from emitting footer-only messages forever.
+      let resolveSegmentText: (() => void) | undefined;
+      let segmentTextReady: Promise<void> = Promise.resolve();
+      let segmentTextReadyFlag = true;
+      const armSegmentTextWait = (): void => {
+        segmentTextReadyFlag = false;
+        segmentTextReady = new Promise<void>((resolve) => {
+          resolveSegmentText = resolve;
+        });
+      };
+      const signalSegmentText = (state: RunState): void => {
+        if (
+          resolveSegmentText &&
+          runStateTextCursor(prepareStateForReply(state)) !== segmentBaseText
+        ) {
+          const resolve = resolveSegmentText;
+          resolveSegmentText = undefined;
+          segmentTextReadyFlag = true;
+          resolve();
+        }
+      };
       const stateForSegment = (state: RunState): RunState =>
         projectRunStateFromCursor(prepareStateForReply(state), segmentBaseText);
       const stateForDelivery = (state: RunState): RunState =>
@@ -1997,6 +2058,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         recordSession,
         async (state) => {
           latestState = state;
+          signalSegmentText(state);
           const deliveryMode = currentOutputMode();
           if (deliveryMode === 'off' || (deliveryMode === 'final' && state.terminal === 'running')) {
             return;
@@ -2058,10 +2120,22 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         renderDone,
         startSegment: (segmentDone, markProducerStarted, segment) => {
           segmentBaseText = segment === 1 ? '' : runStateTextCursor(prepareStateForReply(latestState));
+          if (segment > 1) {
+            armSegmentTextWait();
+          }
           lastSentMarkdownText = undefined;
-          const currentSegmentState = stateForDelivery(latestState);
+          const waitForNewText = segment > 1
+            ? Promise.race([
+                segmentTextReady.then(() => true),
+                renderDone.then(() => false),
+              ])
+            : Promise.resolve(true);
           return (
-          channel.stream(
+          waitForNewText.then((hasNewText) => {
+            if (segment > 1 && !hasNewText) return;
+            if (segment > 1 && !segmentTextReadyFlag) return;
+            const currentSegmentState = stateForDelivery(latestState);
+            return channel.stream(
             chatId,
             {
               markdown: async (ctrl) => {
@@ -2088,7 +2162,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
               },
             },
             sendOpts,
-          )
+            );
+          })
           );
         },
         fallback: postFreshFinal,
@@ -2696,6 +2771,13 @@ export async function runRollingReplyStream(input: {
     if (renderSettled) {
       const rendered = await renderResult;
       if (!rendered.ok) throw rendered.err;
+      // A continuation may have been waiting for its first new text delta
+      // when the agent finished.  No producer means no Feishu message was
+      // opened for that segment, so use the normal fresh-final fallback to
+      // deliver the terminal state instead of silently returning.
+      if (!producerStarted) {
+        await runFallbackReply(input.mode, rendered.state, input.fallback);
+      }
       return;
     }
 

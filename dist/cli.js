@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.0.2",
+  version: "1.0.3",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -7998,6 +7998,7 @@ let closed = false;
 let lastSnapshot = '';
 let lastHistoryPane = '';
 let lastHistoryEnd = -1;
+let lastHistoryFingerprint = '';
 let inputBuffer = '';
 
 process.on('uncaughtException', (error) => {
@@ -8186,6 +8187,7 @@ function createAgentWindow(initial) {
   lastSnapshot = '';
   lastHistoryPane = '';
   lastHistoryEnd = -1;
+  lastHistoryFingerprint = '';
   setManagedActiveTarget();
   return true;
 }
@@ -8221,6 +8223,7 @@ function resetCaptureState() {
   lastSnapshot = '';
   lastHistoryPane = '';
   lastHistoryEnd = -1;
+  lastHistoryFingerprint = '';
 }
 
 function selectedPaneIsAgent(pane) {
@@ -8406,17 +8409,26 @@ function capture() {
     snapshot = capturedLines.slice(-visibleRows).join('\n').replace(/\s+$/u, '');
   }
   const history = captured.replace(/\s+$/u, '');
-  if (snapshot && snapshot !== lastSnapshot) {
+  const lineCount = history ? history.split('\n').length : 0;
+  const historyStartLine = historySize + actualStart;
+  const historyEndLine = historyStartLine + lineCount;
+  // A TUI can keep its visible footer stable while new assistant output is
+  // appended to scrollback.  Compare a bounded history fingerprint as well
+  // as the visible snapshot so those late lines still reach TurnOutputBuffer.
+  const historyFingerprint =
+    historyIdentity + '|' + historyStartLine + '|' + historyEndLine + '|' +
+    history.slice(0, 512) + '|' + history.slice(-4096);
+  if (snapshot && (snapshot !== lastSnapshot || historyFingerprint !== lastHistoryFingerprint)) {
     lastSnapshot = snapshot;
-    const lineCount = history ? history.split('\n').length : 0;
     const historyFramePayload = JSON.stringify({
       paneId: historyIdentity,
-      startLine: historySize + actualStart,
-      endLine: historySize + actualStart + lineCount,
+      startLine: historyStartLine,
+      endLine: historyEndLine,
       text: history,
     });
     lastHistoryPane = historyIdentity;
-    lastHistoryEnd = historySize + actualStart + lineCount;
+    lastHistoryEnd = historyEndLine;
+    lastHistoryFingerprint = historyFingerprint;
     const historyFrame = '\x1b]777;arg-bridge-history=' + Buffer.from(historyFramePayload, 'utf8').toString('base64') + '\x07';
     process.stdout.write(historyFrame + '\x1b[2J\x1b[H' + snapshot);
   }
@@ -20614,6 +20626,23 @@ ${delta}`.slice(-64e3);
     if (replyMode === "card") {
       let latestState = initialState;
       let segmentBaseText = "";
+      let resolveSegmentText;
+      let segmentTextReady = Promise.resolve();
+      let segmentTextReadyFlag = true;
+      const armSegmentTextWait = () => {
+        segmentTextReadyFlag = false;
+        segmentTextReady = new Promise((resolve5) => {
+          resolveSegmentText = resolve5;
+        });
+      };
+      const signalSegmentText = (state) => {
+        if (resolveSegmentText && runStateTextCursor(prepareStateForReply(state)) !== segmentBaseText) {
+          const resolve5 = resolveSegmentText;
+          resolveSegmentText = void 0;
+          segmentTextReadyFlag = true;
+          resolve5();
+        }
+      };
       const stateForSegment = (state) => projectRunStateFromCursor(prepareStateForReply(state), segmentBaseText);
       const stateForDelivery = (state) => currentOutputMode() === "final" ? finalAnswerOnlyState(prepareStateForReply(state)) : stateForSegment(state);
       let streamDegraded = false;
@@ -20665,6 +20694,7 @@ ${delta}`.slice(-64e3);
         recordSession,
         async (state) => {
           latestState = state;
+          signalSegmentText(state);
           const deliveryMode = currentOutputMode();
           if (deliveryMode === "off" || deliveryMode === "final" && state.terminal === "running") {
             return;
@@ -20724,49 +20754,60 @@ ${delta}`.slice(-64e3);
         renderDone,
         startSegment: (segmentDone, markProducerStarted, segment) => {
           segmentBaseText = segment === 1 ? "" : runStateTextCursor(prepareStateForReply(latestState));
+          if (segment > 1) {
+            armSegmentTextWait();
+          }
           lastSentCardSerialized = void 0;
-          const currentSegmentState = stateForDelivery(latestState);
-          return channel.stream(
-            chatId,
-            {
-              card: {
-                initial: renderLiveAwareReplyCard(
-                  currentSegmentState,
-                  cardRenderOptions,
-                  useLiveSession ? "live" : "agent"
-                ),
-                producer: async (ctrl) => {
-                  markProducerStarted();
-                  streamDegraded = false;
-                  cardCtrl = ctrl;
-                  try {
-                    await ctrl.update(
-                      renderLiveAwareReplyCard(
-                        stateForDelivery(latestState),
-                        cardRenderOptions,
-                        useLiveSession ? "live" : "agent"
-                      )
-                    );
-                  } catch (err) {
-                    streamDegraded = true;
-                    cardCtrl = void 0;
-                    log.warn("stream", "patch-degraded", {
-                      scope,
-                      mode: replyMode,
-                      step: "initial",
-                      err: err instanceof Error ? err.message : String(err)
-                    });
-                  }
-                  try {
-                    await segmentDone;
-                  } finally {
-                    if (cardCtrl === ctrl) cardCtrl = void 0;
+          const waitForNewText = segment > 1 ? Promise.race([
+            segmentTextReady.then(() => true),
+            renderDone.then(() => false)
+          ]) : Promise.resolve(true);
+          return waitForNewText.then((hasNewText) => {
+            if (segment > 1 && !hasNewText) return;
+            if (segment > 1 && !segmentTextReadyFlag) return;
+            const currentSegmentState = stateForDelivery(latestState);
+            return channel.stream(
+              chatId,
+              {
+                card: {
+                  initial: renderLiveAwareReplyCard(
+                    currentSegmentState,
+                    cardRenderOptions,
+                    useLiveSession ? "live" : "agent"
+                  ),
+                  producer: async (ctrl) => {
+                    markProducerStarted();
+                    streamDegraded = false;
+                    cardCtrl = ctrl;
+                    try {
+                      await ctrl.update(
+                        renderLiveAwareReplyCard(
+                          stateForDelivery(latestState),
+                          cardRenderOptions,
+                          useLiveSession ? "live" : "agent"
+                        )
+                      );
+                    } catch (err) {
+                      streamDegraded = true;
+                      cardCtrl = void 0;
+                      log.warn("stream", "patch-degraded", {
+                        scope,
+                        mode: replyMode,
+                        step: "initial",
+                        err: err instanceof Error ? err.message : String(err)
+                      });
+                    }
+                    try {
+                      await segmentDone;
+                    } finally {
+                      if (cardCtrl === ctrl) cardCtrl = void 0;
+                    }
                   }
                 }
-              }
-            },
-            sendOpts
-          );
+              },
+              sendOpts
+            );
+          });
         },
         fallback: postFreshFinal
       });
@@ -20777,6 +20818,23 @@ ${delta}`.slice(-64e3);
     } else if (replyMode === "markdown") {
       let latestState = initialState;
       let segmentBaseText = "";
+      let resolveSegmentText;
+      let segmentTextReady = Promise.resolve();
+      let segmentTextReadyFlag = true;
+      const armSegmentTextWait = () => {
+        segmentTextReadyFlag = false;
+        segmentTextReady = new Promise((resolve5) => {
+          resolveSegmentText = resolve5;
+        });
+      };
+      const signalSegmentText = (state) => {
+        if (resolveSegmentText && runStateTextCursor(prepareStateForReply(state)) !== segmentBaseText) {
+          const resolve5 = resolveSegmentText;
+          resolveSegmentText = void 0;
+          segmentTextReadyFlag = true;
+          resolve5();
+        }
+      };
       const stateForSegment = (state) => projectRunStateFromCursor(prepareStateForReply(state), segmentBaseText);
       const stateForDelivery = (state) => currentOutputMode() === "final" ? finalAnswerOnlyState(prepareStateForReply(state)) : stateForSegment(state);
       let streamDegraded = false;
@@ -20825,6 +20883,7 @@ ${delta}`.slice(-64e3);
         recordSession,
         async (state) => {
           latestState = state;
+          signalSegmentText(state);
           const deliveryMode = currentOutputMode();
           if (deliveryMode === "off" || deliveryMode === "final" && state.terminal === "running") {
             return;
@@ -20876,36 +20935,47 @@ ${delta}`.slice(-64e3);
         renderDone,
         startSegment: (segmentDone, markProducerStarted, segment) => {
           segmentBaseText = segment === 1 ? "" : runStateTextCursor(prepareStateForReply(latestState));
+          if (segment > 1) {
+            armSegmentTextWait();
+          }
           lastSentMarkdownText = void 0;
-          const currentSegmentState = stateForDelivery(latestState);
-          return channel.stream(
-            chatId,
-            {
-              markdown: async (ctrl) => {
-                markProducerStarted();
-                streamDegraded = false;
-                markdownCtrl = ctrl;
-                try {
-                  await ctrl.setContent(renderText(currentSegmentState, { activityMode: "summary" }));
-                } catch (err) {
-                  streamDegraded = true;
-                  markdownCtrl = void 0;
-                  log.warn("stream", "patch-degraded", {
-                    scope,
-                    mode: replyMode,
-                    step: "initial",
-                    err: err instanceof Error ? err.message : String(err)
-                  });
+          const waitForNewText = segment > 1 ? Promise.race([
+            segmentTextReady.then(() => true),
+            renderDone.then(() => false)
+          ]) : Promise.resolve(true);
+          return waitForNewText.then((hasNewText) => {
+            if (segment > 1 && !hasNewText) return;
+            if (segment > 1 && !segmentTextReadyFlag) return;
+            const currentSegmentState = stateForDelivery(latestState);
+            return channel.stream(
+              chatId,
+              {
+                markdown: async (ctrl) => {
+                  markProducerStarted();
+                  streamDegraded = false;
+                  markdownCtrl = ctrl;
+                  try {
+                    await ctrl.setContent(renderText(currentSegmentState, { activityMode: "summary" }));
+                  } catch (err) {
+                    streamDegraded = true;
+                    markdownCtrl = void 0;
+                    log.warn("stream", "patch-degraded", {
+                      scope,
+                      mode: replyMode,
+                      step: "initial",
+                      err: err instanceof Error ? err.message : String(err)
+                    });
+                  }
+                  try {
+                    await segmentDone;
+                  } finally {
+                    if (markdownCtrl === ctrl) markdownCtrl = void 0;
+                  }
                 }
-                try {
-                  await segmentDone;
-                } finally {
-                  if (markdownCtrl === ctrl) markdownCtrl = void 0;
-                }
-              }
-            },
-            sendOpts
-          );
+              },
+              sendOpts
+            );
+          });
         },
         fallback: postFreshFinal
       });
@@ -21357,6 +21427,9 @@ async function runRollingReplyStream(input) {
     if (renderSettled) {
       const rendered = await renderResult;
       if (!rendered.ok) throw rendered.err;
+      if (!producerStarted) {
+        await runFallbackReply(input.mode, rendered.state, input.fallback);
+      }
       return;
     }
     log.info("stream", "rollover", {

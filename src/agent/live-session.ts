@@ -1116,6 +1116,7 @@ let closed = false;
 let lastSnapshot = '';
 let lastHistoryPane = '';
 let lastHistoryEnd = -1;
+let lastHistoryFingerprint = '';
 let inputBuffer = '';
 
 process.on('uncaughtException', (error) => {
@@ -1304,6 +1305,7 @@ function createAgentWindow(initial) {
   lastSnapshot = '';
   lastHistoryPane = '';
   lastHistoryEnd = -1;
+  lastHistoryFingerprint = '';
   setManagedActiveTarget();
   return true;
 }
@@ -1339,6 +1341,7 @@ function resetCaptureState() {
   lastSnapshot = '';
   lastHistoryPane = '';
   lastHistoryEnd = -1;
+  lastHistoryFingerprint = '';
 }
 
 function selectedPaneIsAgent(pane) {
@@ -1524,17 +1527,26 @@ function capture() {
     snapshot = capturedLines.slice(-visibleRows).join('\n').replace(/\s+$/u, '');
   }
   const history = captured.replace(/\s+$/u, '');
-  if (snapshot && snapshot !== lastSnapshot) {
+  const lineCount = history ? history.split('\n').length : 0;
+  const historyStartLine = historySize + actualStart;
+  const historyEndLine = historyStartLine + lineCount;
+  // A TUI can keep its visible footer stable while new assistant output is
+  // appended to scrollback.  Compare a bounded history fingerprint as well
+  // as the visible snapshot so those late lines still reach TurnOutputBuffer.
+  const historyFingerprint =
+    historyIdentity + '|' + historyStartLine + '|' + historyEndLine + '|' +
+    history.slice(0, 512) + '|' + history.slice(-4096);
+  if (snapshot && (snapshot !== lastSnapshot || historyFingerprint !== lastHistoryFingerprint)) {
     lastSnapshot = snapshot;
-    const lineCount = history ? history.split('\n').length : 0;
     const historyFramePayload = JSON.stringify({
       paneId: historyIdentity,
-      startLine: historySize + actualStart,
-      endLine: historySize + actualStart + lineCount,
+      startLine: historyStartLine,
+      endLine: historyEndLine,
       text: history,
     });
     lastHistoryPane = historyIdentity;
-    lastHistoryEnd = historySize + actualStart + lineCount;
+    lastHistoryEnd = historyEndLine;
+    lastHistoryFingerprint = historyFingerprint;
     const historyFrame = '\x1b]777;arg-bridge-history=' + Buffer.from(historyFramePayload, 'utf8').toString('base64') + '\x07';
     process.stdout.write(historyFrame + '\x1b[2J\x1b[H' + snapshot);
   }
