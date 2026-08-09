@@ -74,6 +74,30 @@ describe('completed answer presentation', () => {
     expect(serialized).toContain('      |');
   });
 
+  it('does not misclassify terminal listings and source output as a diagram', () => {
+    const terminalOutput = [
+      '### summary.json',
+      '└ ps -p 3831686 -o pid,etime,stat,%cpu,%mem',
+      '0, 45, 2378',
+      '1, 48, 2378',
+      '2>/dev/null | sort | tail -20',
+    ].join('\n');
+    const blocks = parseAnswerBlocks(terminalOutput);
+
+    expect(blocks).toEqual([{ kind: 'markdown', content: terminalOutput }]);
+  });
+
+  it('recognizes an ASCII box diagram while keeping its spacing intact', () => {
+    const diagram = [
+      '+---------+      +----------+',
+      '| Bio     | ---> | Chemical |',
+      '+---------+      +----------+',
+    ].join('\n');
+    const blocks = parseAnswerBlocks(diagram);
+
+    expect(blocks).toEqual([{ kind: 'layout', layoutKind: 'diagram', content: diagram }]);
+  });
+
   it('splits oversized code only at complete line boundaries', () => {
     const lines = Array.from({ length: 220 }, (_, index) => `    emit(${index});`);
     const source = `前言\n\n\`\`\`ts\n${lines.join('\n')}\n\`\`\`\n\n结论`;

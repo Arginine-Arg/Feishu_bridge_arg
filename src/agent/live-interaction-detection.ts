@@ -307,17 +307,43 @@ function fallbackInteractionCandidate(lines: string[]): string[] {
     // generic numbered prose must continue through the stricter path below.
     const recoveredModelFrame = recoverNativeModelPickerFrame(lines, numericBlock);
     if (recoveredModelFrame) return recoveredModelFrame;
+    const currentOptions = parseLiveInteractionOptions(
+      lines.slice(numericBlock.start, numericBlock.end + 1).join('\n'),
+    );
+    // If the bounded tail contains repeated model labels under different
+    // numeric keys, retain enough history for the structural rejection path to
+    // see the conflict instead of publishing the last source-diff block as a
+    // fresh picker.
+    if (isNativeModelOptionSet(currentOptions) && hasConflictingNativeModelKeys(lines)) {
+      return lines.slice(-MAX_INTERACTION_LINES);
+    }
     // Preserve the question for untitled, vendor-neutral pickers, but never
     // reach farther into scrollback. A previous composer draft such as
     // `› /mod` must not be carried into the card merely because the menu
     // header has scrolled out of the captured viewport.
-    const previous = lines[numericBlock.start - 1]?.trim() ?? '';
-    const includePrevious =
-      /[?？]\s*$/u.test(previous) || isExplicitPickerHeading(previous);
-    return lines.slice(
-      includePrevious ? numericBlock.start - 1 : numericBlock.start,
-      numericBlock.end + 1,
-    );
+    let contextStart = numericBlock.start;
+    for (let index = numericBlock.start - 1; index >= Math.max(0, numericBlock.start - 16); index -= 1) {
+      const previous = lines[index]?.trim() ?? '';
+      if (!previous) continue;
+      if (
+        /[?？]\s*$/u.test(previous) ||
+        isExplicitPickerHeading(previous) ||
+        /^(?:would you like|do you want to|which|what|choose|select|pick)\b/iu.test(previous)
+      ) {
+        contextStart = index;
+        break;
+      }
+    }
+    let end = numericBlock.end + 1;
+    while (end < lines.length && end <= numericBlock.end + 4) {
+      if (KEY_HINT_RE.test(lines[end] ?? '')) {
+        end += 1;
+        break;
+      }
+      if ((lines[end] ?? '').trim()) break;
+      end += 1;
+    }
+    return lines.slice(contextStart, end);
   }
 
   let controlIndex = -1;
@@ -707,6 +733,7 @@ function isStructuredInteraction(lines: string[], requireCompletePickerFrame: bo
   const hasSelectedNumberedChoice = options.some(
     (option) => option.selected && Boolean(option.key && /^\d+$/u.test(option.key)),
   );
+  const hasNativeModelOptionSet = isNativeModelOptionSet(options);
   const toolTraceRows = lines.filter(isToolTraceLine).length;
   const strongToolTraceRows = lines.filter((line) => {
     const trimmed = line.trim().replace(/^(?:[•◦⏺●]\s*)/u, '');
@@ -762,10 +789,15 @@ function isStructuredInteraction(lines: string[], requireCompletePickerFrame: bo
       tailIsControl &&
       !hasCodeLikeNoise &&
       (hasPromptTitle || hasQuestionBeforeOptions || hasCleanNumericOptionBlock)) ||
-    // A native picker may retain only its numbered viewport rows. A selected
-    // numeric row is the TUI's direct evidence that this is an active menu;
-    // do not infer that state from arbitrary numbered prose.
-    (hasCleanNumericOptionBlock && hasSelectedNumberedChoice) ||
+    // A native model picker may retain only its numbered viewport rows after a
+    // redraw. Keep this narrow: generic selected numbered prose (for example a
+    // numbered implementation plan copied from a source diff) is not enough
+    // to create an interactive card. Model labels plus a native heading, an
+    // input legend, or a highlighted row are the required anchors.
+    (hasCleanNumericOptionBlock &&
+      hasNativeModelOptionSet &&
+      !hasDocumentEvidence &&
+      (hasExplicitPickerHeading || hasKeyHint || hasSelectedNumberedChoice)) ||
     (hasBinaryControl && /(?:approval|confirmation|allow|proceed|continue|确认|允许|继续)/iu.test(text)) ||
     // Vendor-neutral menus may have no title or Enter/Esc legend. Requiring
     // multiple option rows plus a nearby input prompt/marker prevents normal

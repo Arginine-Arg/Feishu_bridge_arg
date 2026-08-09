@@ -1744,7 +1744,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           !looksLikeAgentPicker(complete, useLiveSession ? false : true)
         ) {
           longReplyText = complete;
-          await channel.send(chatId, { card: longReplyNoticeCard(complete) }, sendOpts);
+          // The rolling stream already communicates that this answer is being
+          // split. Sending a second standalone notice card here only leaves a
+          // redundant "正文较长" message above the complete chunks.
           await deliverLongReply();
           return;
         }
@@ -2815,6 +2817,11 @@ function detectLiveInteraction(
     /(?:arrow keys?|use\s+(?:the\s+)?(?:up|down|left|right)\s+keys?|↑\s*\/\s*↓|up\s*\/\s*down|navigate\s+with)/iu.test(
       prompt,
     );
+  const nativeModelNavigationPrompt =
+    arrowNavigationPrompt &&
+    (isClaudeModelPicker(prompt) ||
+      isCodexModelPickerPrompt(prompt) ||
+      isCodexReasoningPickerPrompt(prompt));
   const selectedChoice = choices.findIndex((choice) => choice.selected);
   // Explicit keys (numbers/letters) can be typed directly. Rows represented
   // only by bullets, radios, or checkboxes are reached through the same
@@ -2824,7 +2831,16 @@ function detectLiveInteraction(
     const needsNavigation = arrowNumberedPrompt || arrowNavigationPrompt || choice.navigationOnly;
     const distance = index - (selectedChoice >= 0 ? selectedChoice : 0);
     const navigation = distance < 0 ? 'up '.repeat(-distance) : 'down '.repeat(distance);
-    const input = needsNavigation ? `${navigation}enter`.trim() : choice.input;
+    // Native model/reasoning menus are multi-level: selecting a row can open a
+    // nested effort picker (for example "More reasoning…"). Send only the
+    // cursor movement for non-current rows and leave confirmation to the
+    // dedicated Enter button. Appending Enter here skips that intermediate
+    // screen and can silently land on its default/max option.
+    const input = needsNavigation
+      ? nativeModelNavigationPrompt
+        ? (navigation.trim() || 'enter')
+        : `${navigation}enter`.trim()
+      : choice.input;
     const label = choice.key ?? truncateInteractionButtonLabel(choice.label);
     add(label, input);
   }
@@ -3023,6 +3039,13 @@ function isCodexModelPickerPrompt(prompt: string): boolean {
   return /\bselect\s+(?:a\s+)?model\b/i.test(prompt) && /\bgpt-[a-z0-9]/i.test(prompt);
 }
 
+function isCodexReasoningPickerPrompt(prompt: string): boolean {
+  return (
+    /\bselect\s+reasoning\s+(?:effort|level)\b/iu.test(prompt) &&
+    /\b(?:low|medium|high|extra\s+high|more\s+reasoning|max)\b/iu.test(prompt)
+  );
+}
+
 function truncateInteractionButtonLabel(label: string): string {
   const compact = label.replace(/\s+/gu, ' ').trim();
   return compact.length > 48 ? `${compact.slice(0, 45)}...` : compact;
@@ -3122,21 +3145,29 @@ export function renderLiveAwareReplyCard(
     const base = renderCard(state, cardRenderOptions) as {
       body?: { elements?: unknown[] };
     };
-    const preserved = (base.body?.elements ?? []).filter((element) => {
+    const activityPanels = (base.body?.elements ?? []).filter((element) => {
       if (!element || typeof element !== 'object') return false;
-      const candidate = element as { tag?: unknown; text_size?: unknown };
+      const candidate = element as {
+        tag?: unknown;
+        header?: { title?: { content?: unknown } };
+      };
       return (
-        candidate.tag === 'collapsible_panel' ||
-        candidate.tag === 'button' ||
-        (candidate.tag === 'markdown' && candidate.text_size === 'notation')
+        candidate.tag === 'collapsible_panel' &&
+        typeof candidate.header?.title?.content === 'string' &&
+        candidate.header.title.content.includes('执行活动')
       );
     });
     const answer = answerCard(parseAnswerBlocks(answerBody)) as {
       body: { elements: object[] };
     };
+    // The completed answer is already projected from text-only blocks. Do not
+    // prepend the original run card's tool/activity panels here: doing so
+    // duplicates terminal output and can make a source listing appear both as
+    // a normal paragraph and as a structured answer panel. Running updates
+    // still use renderCard(), where the activity panel remains collapsed.
     return {
       ...answer,
-      body: { elements: [...preserved, ...answer.body.elements] },
+      body: { elements: [...(activityPanels as object[]), ...answer.body.elements] },
     };
   }
   return renderCard(state, cardRenderOptions);

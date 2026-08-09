@@ -104,13 +104,25 @@ function splitTerminalActivity(input: string): TextSegment[] {
   };
 
   for (const line of normalizeActivityBoundaries(input).replace(/\r\n?/g, '\n').split('\n')) {
-    if (activity.length > 0 && isActivityContinuation(line)) {
+    if (activity.length > 0 && isTerminalTraceContinuation(line)) {
       activity.push(line);
       continue;
     }
     if (isActivityStart(line)) {
       flushProse();
       flushActivity();
+      activity.push(line);
+      entries = 1;
+      activityHasBlankLine = false;
+      continue;
+    }
+    // Terminal redraws can split a single tool frame across RunState text
+    // blocks. When the next delta starts with a known continuation marker,
+    // recover it as activity even though its `• Ran`/`• Explored` header was
+    // in the preceding block. This prevents source listings and summary.json
+    // output from leaking into the final answer as ordinary Markdown.
+    if (activity.length === 0 && isOrphanTerminalActivityStart(line)) {
+      flushProse();
       activity.push(line);
       entries = 1;
       activityHasBlankLine = false;
@@ -156,7 +168,7 @@ function splitTerminalActivity(input: string): TextSegment[] {
  */
 function normalizeActivityBoundaries(input: string): string {
   return input.replace(
-    /([^\n])([•◦・]\s*(?:ran|running|explored|exploring|viewed(?:\s+\w+)?|read|searched|search|listed|list|edited|wrote|applied|patched|checked|inspected|worked(?:\s+for)?|planning|analyzing|investigating)\b)/giu,
+    /([^\n])([•◦・]\s*(?:ran|running|explored|exploring|viewed(?:\s+\w+)?|read|searched|search|listed|list|edited|added|created|removed|wrote|applied|patched|checked|inspected|worked(?:\s+for)?|waiting|waited|planning|analyzing|investigating)\b)/giu,
     '$1\n$2',
   );
 }
@@ -203,10 +215,10 @@ function isLikelyPlainProse(line: string): boolean {
 
 function isCodexActivityLine(line: string): boolean {
   return (
-    /^[•◦・]\s*(?:ran|running|explored|exploring|viewed(?:\s+\w+)?|read|searched|search|listed|list|edited|wrote|applied|patched|checked|inspected|worked(?:\s+for)?|planning|analyzing|investigating)\b/iu.test(
+    /^[•◦・]\s*(?:ran|running|explored|exploring|viewed(?:\s+\w+)?|read|searched|search|listed|list|edited|added|created|removed|wrote|applied|patched|checked|inspected|worked(?:\s+for)?|waiting|waited|planning|analyzing|investigating)\b/iu.test(
       line,
     ) ||
-    /^(?:ran|running|explored|exploring|edited|wrote|applied|patched|checked|inspected)\b/iu.test(line)
+    /^(?:ran|running|explored|exploring|edited|added|created|removed|wrote|applied|patched|checked|inspected|waiting|waited)\b/iu.test(line)
   );
 }
 
@@ -237,6 +249,32 @@ function isTerminalChromeActivity(line: string): boolean {
 function isActivityContinuation(line: string): boolean {
   return /(?:esc to interrupt|background terminal running|\/ps to view|\/stop to close)/iu.test(
     line.trim(),
+  );
+}
+
+function isTerminalTraceContinuation(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) return false;
+  return (
+    isActivityContinuation(line) ||
+    /^(?:[└├│╰╭])\s*/u.test(trimmed) ||
+    /^…\s*\+\d+\s+lines?\b/iu.test(trimmed) ||
+    /^\d+\s*[+-]\s*\S/u.test(trimmed) ||
+    /^(?:2>\/dev\/null\s*\|?|\|\s*(?:sort|tail|rg|sed|awk)\b)/iu.test(trimmed) ||
+    /^###\s+summary\.json\b/iu.test(trimmed)
+  );
+}
+
+function isOrphanTerminalActivityStart(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) return false;
+  return (
+    /^(?:[└├╰])\s*(?:search|read|list|listed|ran|run|edited|added|created|removed|wrote|applied|patched|checked|inspected)\b/iu.test(
+      trimmed,
+    ) ||
+    /^(?:search|searched|read|list|listed|ran|run)\s+(?:[./~$]|[A-Za-z0-9_-]+\b)/iu.test(trimmed) ||
+    /^###\s+summary\.json\b/iu.test(trimmed) ||
+    /^…\s*\+\d+\s+lines?\s*(?:\(ctrl\s*\+\s*t\b)?/iu.test(trimmed)
   );
 }
 

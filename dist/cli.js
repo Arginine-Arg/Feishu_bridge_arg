@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.77",
+  version: "0.6.78",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -6156,12 +6156,31 @@ function fallbackInteractionCandidate(lines) {
   if (numericBlock) {
     const recoveredModelFrame = recoverNativeModelPickerFrame(lines, numericBlock);
     if (recoveredModelFrame) return recoveredModelFrame;
-    const previous = lines[numericBlock.start - 1]?.trim() ?? "";
-    const includePrevious = /[?？]\s*$/u.test(previous) || isExplicitPickerHeading(previous);
-    return lines.slice(
-      includePrevious ? numericBlock.start - 1 : numericBlock.start,
-      numericBlock.end + 1
+    const currentOptions = parseLiveInteractionOptions(
+      lines.slice(numericBlock.start, numericBlock.end + 1).join("\n")
     );
+    if (isNativeModelOptionSet(currentOptions) && hasConflictingNativeModelKeys(lines)) {
+      return lines.slice(-MAX_INTERACTION_LINES);
+    }
+    let contextStart2 = numericBlock.start;
+    for (let index = numericBlock.start - 1; index >= Math.max(0, numericBlock.start - 16); index -= 1) {
+      const previous = lines[index]?.trim() ?? "";
+      if (!previous) continue;
+      if (/[?？]\s*$/u.test(previous) || isExplicitPickerHeading(previous) || /^(?:would you like|do you want to|which|what|choose|select|pick)\b/iu.test(previous)) {
+        contextStart2 = index;
+        break;
+      }
+    }
+    let end2 = numericBlock.end + 1;
+    while (end2 < lines.length && end2 <= numericBlock.end + 4) {
+      if (KEY_HINT_RE.test(lines[end2] ?? "")) {
+        end2 += 1;
+        break;
+      }
+      if ((lines[end2] ?? "").trim()) break;
+      end2 += 1;
+    }
+    return lines.slice(contextStart2, end2);
   }
   let controlIndex = -1;
   for (let index = lines.length - 1; index >= 0; index -= 1) {
@@ -6420,6 +6439,7 @@ function isStructuredInteraction(lines, requireCompletePickerFrame) {
   const hasSelectedNumberedChoice = options.some(
     (option) => option.selected && Boolean(option.key && /^\d+$/u.test(option.key))
   );
+  const hasNativeModelOptionSet = isNativeModelOptionSet(options);
   const toolTraceRows = lines.filter(isToolTraceLine).length;
   const strongToolTraceRows = lines.filter((line) => {
     const trimmed = line.trim().replace(/^(?:[•◦⏺●]\s*)/u, "");
@@ -6432,10 +6452,12 @@ function isStructuredInteraction(lines, requireCompletePickerFrame) {
   const activityOnlySurface = hasToolTraceEvidence && !hasExplicitPickerHeading && !hasConfirmationQuestion && !hasBinaryControl && !codexResume && !codexUpdate;
   const documentOnlySurface = hasDocumentEvidence && !hasExplicitPickerHeading && !hasConfirmationQuestion && !codexResume && !codexUpdate && !selectedNavigationMenu;
   const genericInputEvidence = hasInputPrompt || hasPromptMarker || selectedNavigationMenu || hasQuestionBeforeOptions && hasStrongOptionRows;
-  return !hasCodeLikeNoise && !hasRepeatedKeyedOptionLabels && !activityOnlySurface && !documentOnlySurface && (claudeBypass || codexUpdate || codexResume || hasPromptTitle && tailIsControl && ((requireCompletePickerFrame ? completeNumberedPicker : hasNumberedChoice) || hasBinaryControl || hasKeyHint && tailIsControl) || hasConfirmationQuestion && (hasNumberedChoice || hasBinaryControl) || (requireCompletePickerFrame ? completeNumberedPicker : hasNumberedChoice) && hasKeyHint && tailIsControl && !hasCodeLikeNoise && (hasPromptTitle || hasQuestionBeforeOptions || hasCleanNumericOptionBlock) || // A native picker may retain only its numbered viewport rows. A selected
-  // numeric row is the TUI's direct evidence that this is an active menu;
-  // do not infer that state from arbitrary numbered prose.
-  hasCleanNumericOptionBlock && hasSelectedNumberedChoice || hasBinaryControl && /(?:approval|confirmation|allow|proceed|continue|确认|允许|继续)/iu.test(text) || // Vendor-neutral menus may have no title or Enter/Esc legend. Requiring
+  return !hasCodeLikeNoise && !hasRepeatedKeyedOptionLabels && !activityOnlySurface && !documentOnlySurface && (claudeBypass || codexUpdate || codexResume || hasPromptTitle && tailIsControl && ((requireCompletePickerFrame ? completeNumberedPicker : hasNumberedChoice) || hasBinaryControl || hasKeyHint && tailIsControl) || hasConfirmationQuestion && (hasNumberedChoice || hasBinaryControl) || (requireCompletePickerFrame ? completeNumberedPicker : hasNumberedChoice) && hasKeyHint && tailIsControl && !hasCodeLikeNoise && (hasPromptTitle || hasQuestionBeforeOptions || hasCleanNumericOptionBlock) || // A native model picker may retain only its numbered viewport rows after a
+  // redraw. Keep this narrow: generic selected numbered prose (for example a
+  // numbered implementation plan copied from a source diff) is not enough
+  // to create an interactive card. Model labels plus a native heading, an
+  // input legend, or a highlighted row are the required anchors.
+  hasCleanNumericOptionBlock && hasNativeModelOptionSet && !hasDocumentEvidence && (hasExplicitPickerHeading || hasKeyHint || hasSelectedNumberedChoice) || hasBinaryControl && /(?:approval|confirmation|allow|proceed|continue|确认|允许|继续)/iu.test(text) || // Vendor-neutral menus may have no title or Enter/Esc legend. Requiring
   // multiple option rows plus a nearby input prompt/marker prevents normal
   // bullet lists from being promoted to interactive cards. A question mark
   // immediately before the option block is equivalent prompt evidence for
@@ -12220,13 +12242,20 @@ function splitTerminalActivity(input) {
     activityHasBlankLine = false;
   };
   for (const line of normalizeActivityBoundaries(input).replace(/\r\n?/g, "\n").split("\n")) {
-    if (activity.length > 0 && isActivityContinuation(line)) {
+    if (activity.length > 0 && isTerminalTraceContinuation(line)) {
       activity.push(line);
       continue;
     }
     if (isActivityStart(line)) {
       flushProse();
       flushActivity();
+      activity.push(line);
+      entries = 1;
+      activityHasBlankLine = false;
+      continue;
+    }
+    if (activity.length === 0 && isOrphanTerminalActivityStart(line)) {
+      flushProse();
       activity.push(line);
       entries = 1;
       activityHasBlankLine = false;
@@ -12261,7 +12290,7 @@ function splitTerminalActivity(input) {
 }
 function normalizeActivityBoundaries(input) {
   return input.replace(
-    /([^\n])([•◦・]\s*(?:ran|running|explored|exploring|viewed(?:\s+\w+)?|read|searched|search|listed|list|edited|wrote|applied|patched|checked|inspected|worked(?:\s+for)?|planning|analyzing|investigating)\b)/giu,
+    /([^\n])([•◦・]\s*(?:ran|running|explored|exploring|viewed(?:\s+\w+)?|read|searched|search|listed|list|edited|added|created|removed|wrote|applied|patched|checked|inspected|worked(?:\s+for)?|waiting|waited|planning|analyzing|investigating)\b)/giu,
     "$1\n$2"
   );
 }
@@ -12286,9 +12315,9 @@ function isLikelyPlainProse(line) {
   return trimmed.length >= 8 || /[\u3400-\u9fff]/u.test(trimmed);
 }
 function isCodexActivityLine(line) {
-  return /^[•◦・]\s*(?:ran|running|explored|exploring|viewed(?:\s+\w+)?|read|searched|search|listed|list|edited|wrote|applied|patched|checked|inspected|worked(?:\s+for)?|planning|analyzing|investigating)\b/iu.test(
+  return /^[•◦・]\s*(?:ran|running|explored|exploring|viewed(?:\s+\w+)?|read|searched|search|listed|list|edited|added|created|removed|wrote|applied|patched|checked|inspected|worked(?:\s+for)?|waiting|waited|planning|analyzing|investigating)\b/iu.test(
     line
-  ) || /^(?:ran|running|explored|exploring|edited|wrote|applied|patched|checked|inspected)\b/iu.test(line);
+  ) || /^(?:ran|running|explored|exploring|edited|added|created|removed|wrote|applied|patched|checked|inspected|waiting|waited)\b/iu.test(line);
 }
 function isRawCommandActivity(line) {
   return /^[›❯>]\s*\/[\w-]+\b/u.test(line) || /^(?:ran|run|running)\s+(?:\/[\w-]+|(?:pnpm|npm|npx|node|git|rg|grep|find|sed|awk|curl|wget|tmux|python(?:3)?|bash|sh|zsh|fish|ls|cat|cd|docker|kubectl|pytest|vitest|make)\b)/iu.test(
@@ -12307,6 +12336,18 @@ function isActivityContinuation(line) {
   return /(?:esc to interrupt|background terminal running|\/ps to view|\/stop to close)/iu.test(
     line.trim()
   );
+}
+function isTerminalTraceContinuation(line) {
+  const trimmed = line.trim();
+  if (!trimmed) return false;
+  return isActivityContinuation(line) || /^(?:[└├│╰╭])\s*/u.test(trimmed) || /^…\s*\+\d+\s+lines?\b/iu.test(trimmed) || /^\d+\s*[+-]\s*\S/u.test(trimmed) || /^(?:2>\/dev\/null\s*\|?|\|\s*(?:sort|tail|rg|sed|awk)\b)/iu.test(trimmed) || /^###\s+summary\.json\b/iu.test(trimmed);
+}
+function isOrphanTerminalActivityStart(line) {
+  const trimmed = line.trim();
+  if (!trimmed) return false;
+  return /^(?:[└├╰])\s*(?:search|read|list|listed|ran|run|edited|added|created|removed|wrote|applied|patched|checked|inspected)\b/iu.test(
+    trimmed
+  ) || /^(?:search|searched|read|list|listed|ran|run)\s+(?:[./~$]|[A-Za-z0-9_-]+\b)/iu.test(trimmed) || /^###\s+summary\.json\b/iu.test(trimmed) || /^…\s*\+\d+\s+lines?\s*(?:\(ctrl\s*\+\s*t\b)?/iu.test(trimmed);
 }
 function preserveTerminalAlignedTables(input) {
   if (!input || !/[━─═╌╍┄┅]/u.test(input)) return input;
@@ -16412,11 +16453,16 @@ function readDiagram(lines, start) {
     index += 1;
   }
   if (candidate.length < MIN_LAYOUT_LINES) return void 0;
+  if (candidate.some(isTerminalOrSourceNoiseLine)) return void 0;
   const score = candidate.reduce((total, line) => total + diagramLineScore(line), 0);
   const specialLines = candidate.filter(
-    (line) => /[│└├┌┐┘┤┬┴─═]/u.test(line) || /(?:-{2,}|={2,})\s*[>↓←↑]/u.test(line) || /(?:^|\s)[|v^<>](?:\s|$)/u.test(line)
+    (line) => /[│└├┌┐┘┤┬┴─═]/u.test(line) || /\+[-=]{2,}\+/u.test(line) || /(?:-{2,}|={2,})\s*[>↓←↑]/u.test(line) || /(?:^|\s)[|v^<>](?:\s|$)/u.test(line)
   ).length;
-  if (score < 2 || specialLines < 2) {
+  const hasFlowArrow = candidate.some((line) => /(?:->|<-|=>|→|←|↓|↑)/u.test(line));
+  const hasDirectionalGlyph = candidate.some((line) => /(?:^|\s)[|v^<>](?:\s|$)/u.test(line));
+  const hasBoxDrawing = candidate.some((line) => /[┌┐└┘├┤┬┴┼│─]/u.test(line));
+  const hasAsciiBox = candidate.some((line) => /\+[-=]{2,}\+/u.test(line));
+  if (score < 2 || specialLines < 2 || !hasFlowArrow && !hasDirectionalGlyph && !hasBoxDrawing && !hasAsciiBox) {
     return void 0;
   }
   return { content: candidate.join("\n"), nextIndex: index };
@@ -16424,10 +16470,23 @@ function readDiagram(lines, start) {
 function diagramLineScore(line) {
   let score = 0;
   if (/[│└├┌┐┘┤┬┴─═]/u.test(line)) score += 2;
+  if (/\+[-=]{2,}\+/u.test(line)) score += 2;
   if (/(?:^|\s)[|v^<>](?:\s|$)/u.test(line)) score += 1;
   if (/(?:-{2,}|={2,})\s*[>↓←↑]/u.test(line)) score += 2;
   if (/\[[^\]]+\]/u.test(line) && /(?:->|→|↓|\|)/u.test(line)) score += 1;
   return score;
+}
+function isTerminalOrSourceNoiseLine(line) {
+  const trimmed = line.trim();
+  return /^(?:[•◦・]\s*)?(?:ran|running|explored|exploring|read|search(?:ed)?|list(?:ed)?|edited|added|created|removed|wrote|applied|patched|checked|inspected|waiting|waited)\b/iu.test(
+    trimmed
+  ) || /^(?:[└├╰])\s*(?:search|read|list|listed|ran|run|edited|added|created|removed|wrote|applied|patched|checked|inspected)\b/iu.test(
+    trimmed
+  ) || /^###\s+summary\.json\b/iu.test(trimmed) || /^…\s*\+\d+\s+lines?\b/iu.test(trimmed) || /^\d+\s*[+-]\s*\S/u.test(trimmed) || /^(?:2>\/dev\/null|(?:ps|nvidia-smi|torchrun|find|rg|grep|sed|awk|cat|git)\s+-)/iu.test(
+    trimmed
+  ) || /\bsummary\.json\b.*\b(?:pid|nvidia-smi|torchrun|find|rg|grep|sed|awk)\b/iu.test(trimmed) || /^(?:from\s+__future__\s+import|import\s+\S|export\s+(?:default|const|function|class)|(?:def|class|function|const|let|var)\s+\w+)/iu.test(
+    trimmed
+  );
 }
 function trimBlockEnd(value) {
   return value.replace(/\n+$/u, "");
@@ -20441,7 +20500,6 @@ ${delta}`.slice(-64e3);
         const complete = completeReplyText(replyState);
         if (isLongReplyText(complete) && !looksLikeAgentPicker(complete, useLiveSession ? false : true)) {
           longReplyText = complete;
-          await channel.send(chatId, { card: longReplyNoticeCard(complete) }, sendOpts);
           await deliverLongReply();
           return;
         }
@@ -21248,12 +21306,13 @@ function detectLiveInteraction(text, allowBareConfirmation = false) {
   const arrowNavigationPrompt = /(?:arrow keys?|use\s+(?:the\s+)?(?:up|down|left|right)\s+keys?|↑\s*\/\s*↓|up\s*\/\s*down|navigate\s+with)/iu.test(
     prompt
   );
+  const nativeModelNavigationPrompt = arrowNavigationPrompt && (isClaudeModelPicker(prompt) || isCodexModelPickerPrompt(prompt) || isCodexReasoningPickerPrompt(prompt));
   const selectedChoice = choices.findIndex((choice) => choice.selected);
   for (const [index, choice] of choices.entries()) {
     const needsNavigation = arrowNumberedPrompt || arrowNavigationPrompt || choice.navigationOnly;
     const distance = index - (selectedChoice >= 0 ? selectedChoice : 0);
     const navigation = distance < 0 ? "up ".repeat(-distance) : "down ".repeat(distance);
-    const input = needsNavigation ? `${navigation}enter`.trim() : choice.input;
+    const input = needsNavigation ? nativeModelNavigationPrompt ? navigation.trim() || "enter" : `${navigation}enter`.trim() : choice.input;
     const label = choice.key ?? truncateInteractionButtonLabel(choice.label);
     add(label, input);
   }
@@ -21394,6 +21453,9 @@ function formatLiveInteractionPrompt(prompt, choices) {
 function isCodexModelPickerPrompt(prompt) {
   return /\bselect\s+(?:a\s+)?model\b/i.test(prompt) && /\bgpt-[a-z0-9]/i.test(prompt);
 }
+function isCodexReasoningPickerPrompt(prompt) {
+  return /\bselect\s+reasoning\s+(?:effort|level)\b/iu.test(prompt) && /\b(?:low|medium|high|extra\s+high|more\s+reasoning|max)\b/iu.test(prompt);
+}
 function truncateInteractionButtonLabel(label) {
   const compact = label.replace(/\s+/gu, " ").trim();
   return compact.length > 48 ? `${compact.slice(0, 45)}...` : compact;
@@ -21465,15 +21527,15 @@ function renderLiveAwareReplyCard(state, cardRenderOptions = {}, inputRoute = "l
   const answerBody = renderText(answerState, { activityMode: "none" });
   if (state.terminal !== "running" && answerHasStructuredBlocks(answerBody)) {
     const base = renderCard(state, cardRenderOptions);
-    const preserved = (base.body?.elements ?? []).filter((element) => {
+    const activityPanels = (base.body?.elements ?? []).filter((element) => {
       if (!element || typeof element !== "object") return false;
       const candidate = element;
-      return candidate.tag === "collapsible_panel" || candidate.tag === "button" || candidate.tag === "markdown" && candidate.text_size === "notation";
+      return candidate.tag === "collapsible_panel" && typeof candidate.header?.title?.content === "string" && candidate.header.title.content.includes("\u6267\u884C\u6D3B\u52A8");
     });
     const answer = answerCard(parseAnswerBlocks(answerBody));
     return {
       ...answer,
-      body: { elements: [...preserved, ...answer.body.elements] }
+      body: { elements: [...activityPanels, ...answer.body.elements] }
     };
   }
   return renderCard(state, cardRenderOptions);

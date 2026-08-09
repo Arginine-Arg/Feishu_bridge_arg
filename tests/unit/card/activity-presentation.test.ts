@@ -172,6 +172,39 @@ describe('terminal activity presentation', () => {
     expect(final).toContain('最终结论：正文应完整保留。');
   });
 
+  it('folds orphaned terminal redraw output when a stream delta starts mid-frame', () => {
+    const presentation = presentBlocks([
+      { kind: 'text', content: '• Explored\n', streaming: false },
+      {
+        kind: 'text',
+        content: [
+          '└ Search shards.*rank|train_rank_00',
+          'List DeFoG_external',
+          '### summary.json',
+          '6 +"""',
+          '… +57 lines (ctrl + t to view transcript)',
+        ].join('\n'),
+        streaming: false,
+      },
+      {
+        kind: 'text',
+        content: '\n\n关键结论：正式训练已经启动，等待首个验证结果。',
+        streaming: false,
+      },
+    ]);
+
+    expect(presentation.activity?.content).toContain('Search shards');
+    expect(presentation.activity?.content).toContain('summary.json');
+    expect(presentation.activity?.content).toContain('+57 lines');
+    expect(presentation.blocks.map((block) => block.kind)).toEqual(['text']);
+    const textBlock = presentation.blocks[0];
+    expect(textBlock?.kind).toBe('text');
+    if (textBlock?.kind === 'text') {
+      expect(textBlock.content).toContain('关键结论：正式训练已经启动');
+      expect(textBlock.content).not.toContain('summary.json');
+    }
+  });
+
   it('removes tool frames from a repeated long final answer', () => {
     const answer = [
       '• Explored',

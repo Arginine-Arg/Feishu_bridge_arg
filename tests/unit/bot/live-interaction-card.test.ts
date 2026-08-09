@@ -166,6 +166,20 @@ describe('liveInteractionCard', () => {
     expect(JSON.stringify(card)).toContain('Press enter to confirm or esc to go back');
   });
 
+  it('does not auto-confirm a native Codex model navigation step', () => {
+    const text = [
+      'Select Model and Effort',
+      '› 1. gpt-5.6-sol (current)',
+      '2. gpt-5.6-terra',
+      '3. gpt-5.6-luna',
+      'Use arrow keys to navigate, then press Enter to choose',
+    ].join('\n');
+    const card = liveInteractionCardForText(text, () => 'native-model-navigation-token');
+
+    expect(card).toBeDefined();
+    expect(buttonValues(card).map((value) => value.input)).toEqual(['enter', 'down', 'down down', 'esc']);
+  });
+
   it('recovers a choice that scrolled out during a same-menu redraw', () => {
     const text = [
       'Select Model',
@@ -678,6 +692,34 @@ describe('liveInteractionCard', () => {
     expect(serialized).toContain('Python 代码');
     expect(serialized).toContain('print(\\"ok\\")');
     expect(serialized).toContain('"expanded":false');
+  });
+
+  it('keeps only one folded activity summary beside structured final blocks', () => {
+    const card = renderLiveAwareReplyCard(
+      stateFrom([
+        {
+          type: 'text',
+          delta: [
+            '• Ran pnpm test',
+            '└ 803 tests passed',
+            '',
+            '最终结论：实现已完成。',
+            '',
+            '```ts',
+            'export const ready = true;',
+            '```',
+          ].join('\n'),
+        },
+        { type: 'tool_use', id: 'tool-1', name: 'bash', input: { command: 'secret' } },
+        { type: 'tool_result', id: 'tool-1', output: 'tool output must stay out of final card' },
+        { type: 'done', terminationReason: 'normal' },
+      ]),
+    );
+    const serialized = JSON.stringify(card);
+
+    expect(serialized.match(/执行活动/g)).toHaveLength(1);
+    expect(serialized.match(/export const ready = true;/g)).toHaveLength(1);
+    expect(serialized).not.toContain('tool output must stay out of final card');
   });
 
   it('renders non-live prompts as signed agent input controls', () => {

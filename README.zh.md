@@ -20,6 +20,7 @@
 - **图片 / 文件**：直接发给 bot，bridge 下载到本地后交给本机 agent 处理。
 - **卡片按钮**：`/help`、`/ws list`、`/status` 返回可点击的交互卡片。
 - **交互提问桥接**：agent 的 `AskUserQuestion` / `ExitPlanMode` 会自动渲染成带按钮的飞书卡片，点击即可回答并续上会话。
+- **长答复可读性**：终端执行活动压缩到折叠摘要；完成答复中的代码和 diff 使用可展开面板，表格、架构图和 ASCII 字符图在分段消息中保持等宽对齐。
 - **长对话稳定性**：长流会在飞书自动关闭前续接到新卡片；卡片被撤回/失效时自动补发最终消息，忙时回执按时间限频而不是整轮静默。
 
 ## 前置条件
@@ -43,7 +44,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 0.6.77
+sh /tmp/install-arg-bridge.sh --version 0.6.78
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -87,10 +88,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.77"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.78"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.77`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v0.6.78`。
 
 ### 4. Node 或 npm 全局目录错误
 

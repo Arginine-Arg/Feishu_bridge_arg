@@ -380,11 +380,25 @@ function readDiagram(lines: string[], start: number): { content: string; nextInd
     index += 1;
   }
   if (candidate.length < MIN_LAYOUT_LINES) return undefined;
+  // A terminal trace can contain box-drawing characters, pipes and numeric
+  // rows as part of command output. Do not turn those leftovers into a
+  // misleading "结构图" panel; activity-presentation should have removed
+  // them, but this guard also protects final-answer parsing when a provider
+  // splits a frame across deltas.
+  if (candidate.some(isTerminalOrSourceNoiseLine)) return undefined;
   const score = candidate.reduce((total, line) => total + diagramLineScore(line), 0);
   const specialLines = candidate.filter(
-    (line) => /[│└├┌┐┘┤┬┴─═]/u.test(line) || /(?:-{2,}|={2,})\s*[>↓←↑]/u.test(line) || /(?:^|\s)[|v^<>](?:\s|$)/u.test(line),
+    (line) =>
+      /[│└├┌┐┘┤┬┴─═]/u.test(line) ||
+      /\+[-=]{2,}\+/u.test(line) ||
+      /(?:-{2,}|={2,})\s*[>↓←↑]/u.test(line) ||
+      /(?:^|\s)[|v^<>](?:\s|$)/u.test(line),
   ).length;
-  if (score < 2 || specialLines < 2) {
+  const hasFlowArrow = candidate.some((line) => /(?:->|<-|=>|→|←|↓|↑)/u.test(line));
+  const hasDirectionalGlyph = candidate.some((line) => /(?:^|\s)[|v^<>](?:\s|$)/u.test(line));
+  const hasBoxDrawing = candidate.some((line) => /[┌┐└┘├┤┬┴┼│─]/u.test(line));
+  const hasAsciiBox = candidate.some((line) => /\+[-=]{2,}\+/u.test(line));
+  if (score < 2 || specialLines < 2 || (!hasFlowArrow && !hasDirectionalGlyph && !hasBoxDrawing && !hasAsciiBox)) {
     return undefined;
   }
   return { content: candidate.join('\n'), nextIndex: index };
@@ -393,10 +407,33 @@ function readDiagram(lines: string[], start: number): { content: string; nextInd
 function diagramLineScore(line: string): number {
   let score = 0;
   if (/[│└├┌┐┘┤┬┴─═]/u.test(line)) score += 2;
+  if (/\+[-=]{2,}\+/u.test(line)) score += 2;
   if (/(?:^|\s)[|v^<>](?:\s|$)/u.test(line)) score += 1;
   if (/(?:-{2,}|={2,})\s*[>↓←↑]/u.test(line)) score += 2;
   if (/\[[^\]]+\]/u.test(line) && /(?:->|→|↓|\|)/u.test(line)) score += 1;
   return score;
+}
+
+function isTerminalOrSourceNoiseLine(line: string): boolean {
+  const trimmed = line.trim();
+  return (
+    /^(?:[•◦・]\s*)?(?:ran|running|explored|exploring|read|search(?:ed)?|list(?:ed)?|edited|added|created|removed|wrote|applied|patched|checked|inspected|waiting|waited)\b/iu.test(
+      trimmed,
+    ) ||
+    /^(?:[└├╰])\s*(?:search|read|list|listed|ran|run|edited|added|created|removed|wrote|applied|patched|checked|inspected)\b/iu.test(
+      trimmed,
+    ) ||
+    /^###\s+summary\.json\b/iu.test(trimmed) ||
+    /^…\s*\+\d+\s+lines?\b/iu.test(trimmed) ||
+    /^\d+\s*[+-]\s*\S/u.test(trimmed) ||
+    /^(?:2>\/dev\/null|(?:ps|nvidia-smi|torchrun|find|rg|grep|sed|awk|cat|git)\s+-)/iu.test(
+      trimmed,
+    ) ||
+    /\bsummary\.json\b.*\b(?:pid|nvidia-smi|torchrun|find|rg|grep|sed|awk)\b/iu.test(trimmed) ||
+    /^(?:from\s+__future__\s+import|import\s+\S|export\s+(?:default|const|function|class)|(?:def|class|function|const|let|var)\s+\w+)/iu.test(
+      trimmed,
+    )
+  );
 }
 
 function trimBlockEnd(value: string): string {
