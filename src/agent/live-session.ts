@@ -2999,6 +2999,7 @@ function snapshotInformationScore(input: string): number {
 function isTerminalChromeLine(trimmed: string): boolean {
   return (
     /^Tip:/i.test(trimmed) ||
+    /^\s*[•◦]\s+Running\b.*$/iu.test(trimmed) ||
     /^[•◦]\s+(?:Working|Waiting\s+for\s+background\s+terminal)\s+\((?:\d+h\s+)?(?:\d+m\s+)?\d+s\b.*\)(?:\s+·\s+.*)?$/i.test(trimmed) ||
     /^tab to queue message\b.*context left$/i.test(trimmed) ||
     /^\d+%\s+context left$/i.test(trimmed) ||
@@ -3017,7 +3018,7 @@ function isTerminalSuggestionLine(trimmed: string): boolean {
 
 export function isLiveTerminalBusy(input: string): boolean {
   const recent = cleanTerminalOutput(input).split('\n').slice(-12).join('\n');
-  return /(?:tab\s+to\s+queue\s+message|(?:working|waiting\s+for\s+background\s+terminal)\s*\([^)]*(?:esc|escape)\s+to\s+interrupt|esc(?:ape)?\s+to\s+interrupt|compacting(?:\s+context)?)/iu.test(
+  return /(?:tab\s+to\s+queue\s+message|(?:working|waiting\s+for\s+background\s+terminal)\s*\([^)]*(?:esc|escape)\s+to\s+interrupt|esc(?:ape)?\s+to\s+interrupt|compacting(?:\s+context)?|^\s*[•◦]\s+running\b)/imu.test(
     recent,
   );
 }

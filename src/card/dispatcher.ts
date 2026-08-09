@@ -1,4 +1,9 @@
-import type { CardActionEvent, LarkChannel, NormalizedMessage } from '@larksuite/channel';
+import type {
+  CardActionEvent,
+  CardActionResponse,
+  LarkChannel,
+  NormalizedMessage,
+} from '@larksuite/channel';
 import type { AgentAdapter } from '../agent/types';
 import type { ActiveRuns } from '../bot/active-runs';
 import type { ChatModeCache } from '../bot/chat-mode-cache';
@@ -28,6 +33,13 @@ const LEGACY_CLAUDE_CALLBACK_MARKER = '__claude_cb';
 export const LIVE_INPUT_CALLBACK_ACTION = 'live_input';
 export const AGENT_INPUT_CALLBACK_ACTION = 'agent_input';
 
+const staleInteractionResponse = (): CardActionResponse => ({
+  toast: {
+    type: 'error',
+    content: '此交互已失效，请重新发送或等待最新卡片',
+  },
+});
+
 export interface CardDispatchDeps {
   channel: LarkChannel;
   evt: CardActionEvent;
@@ -46,7 +58,7 @@ export interface CardDispatchDeps {
   callbackPolicyFingerprintForScope?: (scope: string) => string | undefined;
 }
 
-export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
+export async function handleCardAction(deps: CardDispatchDeps): Promise<CardActionResponse | undefined> {
   const value = deps.evt.action.value;
   if (!value || typeof value !== 'object') return;
   const payload = value as Record<string, unknown>;
@@ -89,14 +101,16 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
   const cmd = typeof payload.cmd === 'string' ? payload.cmd : '';
   if (cmd) {
     if (cmd === 'live.input') {
-      if (!verifyDeferredLiveInputToken(deps, payload, scope, operatorId)) return;
-      forwardLiveInput(deps, payload, scope, threadId, mode);
-      return;
+      if (!verifyDeferredLiveInputToken(deps, payload, scope, operatorId)) {
+        return staleInteractionResponse();
+      }
+      return forwardLiveInput(deps, payload, scope, threadId, mode);
     }
     if (cmd === 'agent.input') {
-      if (!verifyDeferredAgentInputToken(deps, payload, scope, operatorId)) return;
-      forwardAgentInput(deps, payload, scope, threadId, mode);
-      return;
+      if (!verifyDeferredAgentInputToken(deps, payload, scope, operatorId)) {
+        return staleInteractionResponse();
+      }
+      return forwardAgentInput(deps, payload, scope, threadId, mode);
     }
     if (isSignedBridgeCallback(payload) && !verifyBridgeToken(deps, payload, scope, cmd)) {
       return;
@@ -148,8 +162,7 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
   // answer so the session resumes as a follow-up turn.
   if (BRIDGE_PROMPT_CALLBACK_MARKER in payload) {
     if (!verifyPromptToken(deps, payload, scope, operatorId)) return;
-    forwardToAgent(deps, payload, formValue, scope, threadId, mode);
-    return;
+    return forwardToAgent(deps, payload, formValue, scope, threadId, mode);
   }
 
   // Agent-driven callback: the button was rendered by an agent via lark-cli,
@@ -158,8 +171,7 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<void> {
   // as a follow-up message, with full context of what it sent.
   if (BRIDGE_CALLBACK_MARKER in payload) {
     if (!verifyBridgeToken(deps, payload, scope, 'agent_callback')) return;
-    forwardToAgent(deps, payload, formValue, scope, threadId, mode);
-    return;
+    return forwardToAgent(deps, payload, formValue, scope, threadId, mode);
   }
 
   return;
@@ -223,7 +235,7 @@ function forwardLiveInput(
   scope: string,
   threadId: string | undefined,
   mode: 'p2p' | 'group' | 'topic',
-): void {
+): CardActionResponse | undefined {
   const input = typeof payload.input === 'string' ? payload.input.trim() : '';
   if (!input) return;
   log.info('cardAction', 'live-input', { scope, input });
@@ -245,7 +257,16 @@ function forwardLiveInput(
     },
     'control',
   );
-  deps.pending.pushFront(scope, synthetic);
+  // A card click is already a complete control action. Let the queue hand it
+  // off on the next event-loop turn instead of waiting for the chat debounce.
+  // A currently-running scope remains blocked and will release it normally.
+  deps.pending.pushFront(scope, synthetic, { immediate: true });
+  return {
+    toast: {
+      type: 'success',
+      content: '已提交，正在等待终端响应',
+    },
+  };
 }
 
 function forwardAgentInput(
@@ -254,7 +275,7 @@ function forwardAgentInput(
   scope: string,
   threadId: string | undefined,
   mode: 'p2p' | 'group' | 'topic',
-): void {
+): CardActionResponse | undefined {
   const input = typeof payload.input === 'string' ? payload.input.trim() : '';
   if (!input) return;
   log.info('cardAction', 'agent-input', { scope, input });
@@ -274,6 +295,12 @@ function forwardAgentInput(
     createTime: Date.now(),
   };
   deps.pending.push(scope, synthetic);
+  return {
+    toast: {
+      type: 'success',
+      content: '已提交，正在继续任务',
+    },
+  };
 }
 
 async function resolveScope(
@@ -302,7 +329,7 @@ function forwardToAgent(
   scope: string,
   threadId: string | undefined,
   mode: 'p2p' | 'group' | 'topic',
-): void {
+): CardActionResponse | undefined {
   // Strip the markers/token so the agent only sees the meaningful fields it set.
   const {
     [BRIDGE_CALLBACK_MARKER]: _marker,
@@ -331,6 +358,12 @@ function forwardToAgent(
     createTime: Date.now(),
   };
   deps.pending.push(scope, synthetic);
+  return {
+    toast: {
+      type: 'success',
+      content: '已提交，正在继续任务',
+    },
+  };
 }
 
 function verifyBridgeToken(

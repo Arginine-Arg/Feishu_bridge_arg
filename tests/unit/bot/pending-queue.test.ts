@@ -95,6 +95,24 @@ describe('PendingQueue busy-ack', () => {
     }
   });
 
+  it('flushes an idle interactive control on the next tick', () => {
+    vi.useFakeTimers();
+    try {
+      const flushed: string[][] = [];
+      const queue = new PendingQueue(10_000, (_scope, batch) => {
+        flushed.push(batch.map((message) => message.content));
+      });
+
+      queue.push(SCOPE, { content: 'ordinary task', chatId: SCOPE } as never);
+      queue.pushFront(SCOPE, { content: '1 enter', chatId: SCOPE } as never, { immediate: true });
+
+      vi.advanceTimersByTime(0);
+      expect(flushed).toEqual([['1 enter', 'ordinary task']]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps startup work gated until a priority control releases it', () => {
     vi.useFakeTimers();
     try {

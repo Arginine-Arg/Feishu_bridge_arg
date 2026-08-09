@@ -62,8 +62,19 @@ export class PendingQueue {
     return 1;
   }
 
-  /** Put a TUI callback ahead of work already queued for the scope. */
-  pushFront(scope: string, messages: NormalizedMessage | readonly NormalizedMessage[]): number {
+  /**
+   * Put a TUI callback ahead of work already queued for the scope.
+   *
+   * Interactive controls are already a complete user action. Callers can ask
+   * for an immediate next-tick flush so they do not wait through the ordinary
+   * conversational debounce window; blocked scopes still hold the control
+   * until the current turn hands ownership back.
+   */
+  pushFront(
+    scope: string,
+    messages: NormalizedMessage | readonly NormalizedMessage[],
+    options: { immediate?: boolean } = {},
+  ): number {
     const priority = Array.isArray(messages) ? [...messages] : [messages];
     const deferred = this.deferredUntilFront.get(scope) ?? [];
     const incoming = [...priority, ...deferred];
@@ -78,12 +89,16 @@ export class PendingQueue {
     if (existing) {
       if (existing.timer) clearTimeout(existing.timer);
       existing.messages.unshift(...incoming);
-      existing.timer = this.blocked.has(scope) ? undefined : this.armTimer(scope);
+      existing.timer = this.blocked.has(scope)
+        ? undefined
+        : this.armTimer(scope, options.immediate ? 0 : undefined);
       return existing.messages.length;
     }
     this.map.set(scope, {
       messages: incoming,
-      timer: this.blocked.has(scope) ? undefined : this.armTimer(scope),
+      timer: this.blocked.has(scope)
+        ? undefined
+        : this.armTimer(scope, options.immediate ? 0 : undefined),
     });
     return incoming.length;
   }
@@ -169,8 +184,8 @@ export class PendingQueue {
     entry.timer = this.armTimer(scope);
   }
 
-  private armTimer(scope: string): NodeJS.Timeout {
-    return setTimeout(() => this.flush(scope), this.delayMs);
+  private armTimer(scope: string, delayMs = this.delayMs): NodeJS.Timeout {
+    return setTimeout(() => this.flush(scope), delayMs);
   }
 
   private flush(scope: string): void {

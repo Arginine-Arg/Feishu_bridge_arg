@@ -138,11 +138,15 @@ describe('signed card callback dispatch', () => {
   it('turns live.input button clicks into live control input', async () => {
     const h = await createHarness();
 
-    await h.dispatch({
+    const response = await h.dispatch({
       cmd: 'live.input',
       input: 'yes',
       __bridge_cb: true,
       bridge_token: h.token('live_input', { nonce: 'nonce-live-input' }),
+    });
+
+    expect(response).toEqual({
+      toast: { type: 'success', content: '已提交，正在等待终端响应' },
     });
 
     const queued = h.pending.cancel('oc_group');
@@ -173,11 +177,15 @@ describe('signed card callback dispatch', () => {
   it('turns agent.input button clicks into ordinary follow-up input', async () => {
     const h = await createHarness();
 
-    await h.dispatch({
+    const response = await h.dispatch({
       cmd: 'agent.input',
       input: 'yes',
       __bridge_cb: true,
       bridge_token: h.token('agent_input', { nonce: 'nonce-agent-input' }),
+    });
+
+    expect(response).toEqual({
+      toast: { type: 'success', content: '已提交，正在继续任务' },
     });
 
     const queued = h.pending.cancel('oc_group');
@@ -191,11 +199,14 @@ describe('signed card callback dispatch', () => {
   it('rejects unsigned live.input button clicks', async () => {
     const h = await createHarness();
 
-    await h.dispatch({
+    const response = await h.dispatch({
       cmd: 'live.input',
       input: 'yes',
     });
 
+    expect(response).toEqual({
+      toast: { type: 'error', content: '此交互已失效，请重新发送或等待最新卡片' },
+    });
     expect(h.pending.cancel('oc_group')).toHaveLength(0);
   });
 
@@ -225,7 +236,7 @@ type Harness = {
   controls: Controls;
   pending: PendingQueue;
   auth: CallbackAuth;
-  dispatch(value: Record<string, unknown>, formValue?: Record<string, unknown>): Promise<void>;
+  dispatch(value: Record<string, unknown>, formValue?: Record<string, unknown>): Promise<unknown>;
   token(
     action: string,
     overrides?: { operatorOpenId?: string; nonce?: string; scope?: string },

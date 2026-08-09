@@ -475,8 +475,8 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
       log.info('intake', 'reject', { chatId: evt.chatId, reason: evt.reason });
     },
     cardAction: async (evt) => {
-      await withTrace({ chatId: evt.chatId, msgId: evt.messageId }, async () => {
-        await handleCardAction({
+      return withTrace({ chatId: evt.chatId, msgId: evt.messageId }, async () => {
+        return handleCardAction({
           channel,
           evt,
           sessions,
@@ -492,7 +492,15 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           callbackAuth,
           callbackPolicyFingerprintForScope: (scope) => activePolicyFingerprints.get(scope),
         });
-      }).catch((err) => log.fail('cardAction', err));
+      }).catch((err) => {
+        log.fail('cardAction', err);
+        return {
+          toast: {
+            type: 'error',
+            content: '处理点击失败，请稍后重试',
+          },
+        };
+      });
     },
     comment: async (evt) => {
       await withTrace({ chatId: 'comment' }, async () => {
@@ -895,7 +903,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     liveInputModeForMessage(agentMsg) === 'control' &&
     (isLiveInterruptInput(agentMsg.content) || pickerActive);
   const size = priorityLiveControl
-    ? pending.pushFront(scope, agentMsg)
+    ? pending.pushFront(scope, agentMsg, { immediate: true })
     : pending.push(scope, agentMsg);
   log.info('intake', 'queued', { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
 
@@ -1312,6 +1320,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   let interactionTextBuffer = '';
   let startupInteractionDeferred = false;
   let pickerObservedAfterInput = false;
+  let controlFooterOnly = false;
+  const previousControlInteractionSignature =
+    useLiveSession && nativeCommand && !nativeCommand.trimStart().startsWith('/')
+      ? liveInteractionByScope.get(scope)?.signature
+      : undefined;
   if (useLiveSession && nativeCommand && opensLivePicker(nativeCommand)) {
     const wasActive = liveInteractionByScope.has(scope);
     liveInteractionByScope.set(scope, { picker: true, updatedAt: Date.now() });
@@ -1322,8 +1335,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   // cursor moved; treat it as already delivered so the click does not create a
   // duplicate card before a genuinely new picker/result appears.
   if (useLiveSession && nativeCommand && !nativeCommand.trimStart().startsWith('/')) {
-    const previousSignature = liveInteractionByScope.get(scope)?.signature;
-    if (previousSignature) sentInteractionSignatures.add(previousSignature);
+    if (previousControlInteractionSignature) {
+      sentInteractionSignatures.add(previousControlInteractionSignature);
+    }
   }
   const observeLiveEvent = (evt: AgentEvent, opts: { sendInteractionCard?: boolean } = {}): void => {
     const isStartupInteraction = evt.type === 'interactive' && evt.phase === 'startup';
@@ -1356,6 +1370,18 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     const pickerLike = isStartupInteraction || Boolean(interaction);
     if (!isStartupInteraction && (interaction || pickerLike)) {
       pickerObservedAfterInput = true;
+    }
+    if (
+      liveInputMode === 'control' &&
+      previousControlInteractionSignature &&
+      !isControlFooterOnly(delta) &&
+      (!interaction || interaction.signature !== previousControlInteractionSignature)
+    ) {
+      // The first redraw after a click can be the old picker footer. Suppress
+      // only that frame; once the terminal shows any real progress/result,
+      // allow an identical menu to be published again (a repeated command can
+      // legitimately ask the same approval question twice).
+      sentInteractionSignatures.delete(previousControlInteractionSignature);
     }
     if (useLiveSession && (interaction || pickerLike)) {
       const wasActive = liveInteractionByScope.has(scope);
@@ -1584,7 +1610,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       // confirmation legend. That is an intermediate surface, not a final
       // answer; publishing it as a completed card leaves the user with a
       // stale-looking footer and hides whether the selection was accepted.
-      if (liveInputMode === 'control' && isControlFooterOnly(completeReplyText(finalState))) {
+      controlFooterOnly =
+        liveInputMode === 'control' && isControlFooterOnly(completeReplyText(finalState));
+      if (controlFooterOnly) {
         log.info('agent-live', 'control-footer-only-suppressed', { scope, input: nativeCommand });
         return;
       }
@@ -2138,7 +2166,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       const opensPicker = opensLivePicker(nativeCommand);
       const closesPicker = closesLivePicker(nativeCommand);
       if ((opensPicker || closesPicker) && !pickerObservedAfterInput) {
-        if (liveInteractionByScope.delete(scope)) {
+        if (!controlFooterOnly && liveInteractionByScope.delete(scope)) {
           log.info('agent-live', 'picker-exit', { scope, input: nativeCommand });
         }
       } else if (closesPicker && pickerObservedAfterInput) {

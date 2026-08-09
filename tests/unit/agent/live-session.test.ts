@@ -513,7 +513,9 @@ describe('tmux input framing and snapshots', () => {
     const waiting = '• Waiting for background terminal (3m 34s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close';
     expect(isLiveTerminalBusy(waiting)).toBe(true);
     expect(sanitizeLiveTurnOutput(`${waiting}\n• 已完成核心检查。`)).toBe('• 已完成核心检查。');
+    expect(sanitizeLiveTurnOutput('• Running find . -maxdepth 2 -type f\n• 已完成核心检查。')).toBe('• 已完成核心检查。');
     expect(isLiveTerminalBusy('tab to queue message 99% context left')).toBe(true);
+    expect(isLiveTerminalBusy('• Running find . -maxdepth 2 -type f')).toBe(true);
     expect(isLiveTerminalBusy('› ready for the next task')).toBe(false);
   });
 
@@ -3060,6 +3062,95 @@ setInterval(() => {}, 1000);
     await pool.closeAll();
 
     expect(textOf(selected)).toContain('• Approval accepted.');
+  }, 20_000);
+
+  tmuxIt('keeps observing after an approval starts a long command before the next picker', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-approval-followup-test-'));
+    const bin = join(dir, 'fake-tmux-approval-followup-agent.mjs');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+let draft = '';
+let state = 'idle';
+function screen(lines) {
+  process.stdout.write('\\x1b[2J\\x1b[H' + lines.join('\\n') + '\\n');
+}
+process.stdin.on('data', (chunk) => {
+  for (const char of chunk) {
+    if (state === 'approval') {
+      if (char === '1') {
+        state = 'selected';
+        screen(['› 1. Yes, proceed (y)', '2. No, cancel (n)', 'Press enter to confirm or esc to cancel']);
+      }
+      continue;
+    }
+    if (state === 'selected') {
+      if (char === '\\r' || char === '\\n') {
+        state = 'running';
+        // This is the compact progress form shown by Codex in some terminal
+        // widths. It has no Working footer or context hint, so the bridge must
+        // not infer that the command has finished from the old approval footer.
+        screen(['• Running find . -maxdepth 2 -type f']);
+        setTimeout(() => {
+          state = 'approval-followup';
+          screen([
+            'Command requires approval',
+            'Would you like to run the following command?',
+            '› 1. Yes, proceed (y)',
+            '2. No, cancel (n)',
+            '[y/n]',
+          ]);
+        }, 800);
+      }
+      continue;
+    }
+    if (char !== '\\r' && char !== '\\n') draft += char;
+    else if (state === 'idle' && draft === 'run approval follow-up task') {
+      state = 'approval';
+      draft = '';
+      screen([
+        'Command requires approval',
+        'Would you like to run the following command?',
+        '› 1. Yes, proceed (y)',
+        '2. No, cancel (n)',
+        '[y/n]',
+      ]);
+    }
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-approval-followup-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-approval-followup',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 250,
+      outputFlushMs: 30,
+      startupTimeoutMs: 2_000,
+    });
+
+    const approval = await collect(
+      session.run('tmux-approval-followup-run', 'run approval follow-up task', dir).events,
+    );
+    expect(textOf(approval)).toContain('Command requires approval');
+
+    const selected = await collect(
+      session.run('tmux-approval-followup-choice', '1 enter', dir, 'control').events,
+    );
+    await pool.closeAll();
+
+    expect(textOf(selected)).toContain('Would you like to run the following command?');
+    expect(textOf(selected)).toContain('[y/n]');
   }, 20_000);
 
   tmuxIt('keeps a short reply after a prior pane snapshot', async () => {

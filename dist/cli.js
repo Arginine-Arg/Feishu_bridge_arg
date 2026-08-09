@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.0.1",
+  version: "1.0.2",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -9549,7 +9549,7 @@ function snapshotInformationScore(input) {
   return input.split("\n").map((line) => line.trim()).filter(Boolean).filter((line) => !/^[╭╰╮╯─│\s]+$/u.test(line)).join("\n").length;
 }
 function isTerminalChromeLine(trimmed) {
-  return /^Tip:/i.test(trimmed) || /^[•◦]\s+(?:Working|Waiting\s+for\s+background\s+terminal)\s+\((?:\d+h\s+)?(?:\d+m\s+)?\d+s\b.*\)(?:\s+·\s+.*)?$/i.test(trimmed) || /^tab to queue message\b.*context left$/i.test(trimmed) || /^\d+%\s+context left$/i.test(trimmed) || /^[╭╰╮╯─│\s]+$/u.test(trimmed) || /^[›❯]\s*$/.test(trimmed) || isTerminalSuggestionLine(trimmed) || /^[A-Za-z0-9_.-]+(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?\s+·\s+.+$/.test(trimmed);
+  return /^Tip:/i.test(trimmed) || /^\s*[•◦]\s+Running\b.*$/iu.test(trimmed) || /^[•◦]\s+(?:Working|Waiting\s+for\s+background\s+terminal)\s+\((?:\d+h\s+)?(?:\d+m\s+)?\d+s\b.*\)(?:\s+·\s+.*)?$/i.test(trimmed) || /^tab to queue message\b.*context left$/i.test(trimmed) || /^\d+%\s+context left$/i.test(trimmed) || /^[╭╰╮╯─│\s]+$/u.test(trimmed) || /^[›❯]\s*$/.test(trimmed) || isTerminalSuggestionLine(trimmed) || /^[A-Za-z0-9_.-]+(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?\s+·\s+.+$/.test(trimmed);
 }
 function isTerminalSuggestionLine(trimmed) {
   return /^›\s*(?:Use\s+\/[a-z][\w-]*(?:\s+.*)?|Implement \{feature\}|Summarize recent commits|Find and fix a bug in @filename|Improve documentation in @filename|Explain this codebase|Write tests for @filename|Run \/review on my current changes)\s*$/i.test(
@@ -9558,7 +9558,7 @@ function isTerminalSuggestionLine(trimmed) {
 }
 function isLiveTerminalBusy(input) {
   const recent = cleanTerminalOutput(input).split("\n").slice(-12).join("\n");
-  return /(?:tab\s+to\s+queue\s+message|(?:working|waiting\s+for\s+background\s+terminal)\s*\([^)]*(?:esc|escape)\s+to\s+interrupt|esc(?:ape)?\s+to\s+interrupt|compacting(?:\s+context)?)/iu.test(
+  return /(?:tab\s+to\s+queue\s+message|(?:working|waiting\s+for\s+background\s+terminal)\s*\([^)]*(?:esc|escape)\s+to\s+interrupt|esc(?:ape)?\s+to\s+interrupt|compacting(?:\s+context)?|^\s*[•◦]\s+running\b)/imu.test(
     recent
   );
 }
@@ -15794,6 +15794,12 @@ var BRIDGE_CALLBACK_MARKER = "__bridge_cb";
 var LEGACY_CLAUDE_CALLBACK_MARKER = "__claude_cb";
 var LIVE_INPUT_CALLBACK_ACTION = "live_input";
 var AGENT_INPUT_CALLBACK_ACTION = "agent_input";
+var staleInteractionResponse = () => ({
+  toast: {
+    type: "error",
+    content: "\u6B64\u4EA4\u4E92\u5DF2\u5931\u6548\uFF0C\u8BF7\u91CD\u65B0\u53D1\u9001\u6216\u7B49\u5F85\u6700\u65B0\u5361\u7247"
+  }
+});
 async function handleCardAction(deps) {
   const value = deps.evt.action.value;
   if (!value || typeof value !== "object") return;
@@ -15818,14 +15824,16 @@ async function handleCardAction(deps) {
   const cmd = typeof payload.cmd === "string" ? payload.cmd : "";
   if (cmd) {
     if (cmd === "live.input") {
-      if (!verifyDeferredLiveInputToken(deps, payload, scope, operatorId)) return;
-      forwardLiveInput(deps, payload, scope, threadId, mode);
-      return;
+      if (!verifyDeferredLiveInputToken(deps, payload, scope, operatorId)) {
+        return staleInteractionResponse();
+      }
+      return forwardLiveInput(deps, payload, scope, threadId, mode);
     }
     if (cmd === "agent.input") {
-      if (!verifyDeferredAgentInputToken(deps, payload, scope, operatorId)) return;
-      forwardAgentInput(deps, payload, scope, threadId, mode);
-      return;
+      if (!verifyDeferredAgentInputToken(deps, payload, scope, operatorId)) {
+        return staleInteractionResponse();
+      }
+      return forwardAgentInput(deps, payload, scope, threadId, mode);
     }
     if (isSignedBridgeCallback(payload) && !verifyBridgeToken(deps, payload, scope, cmd)) {
       return;
@@ -15869,13 +15877,11 @@ async function handleCardAction(deps) {
   }
   if (BRIDGE_PROMPT_CALLBACK_MARKER in payload) {
     if (!verifyPromptToken(deps, payload, scope, operatorId)) return;
-    forwardToAgent(deps, payload, formValue, scope, threadId, mode);
-    return;
+    return forwardToAgent(deps, payload, formValue, scope, threadId, mode);
   }
   if (BRIDGE_CALLBACK_MARKER in payload) {
     if (!verifyBridgeToken(deps, payload, scope, "agent_callback")) return;
-    forwardToAgent(deps, payload, formValue, scope, threadId, mode);
-    return;
+    return forwardToAgent(deps, payload, formValue, scope, threadId, mode);
   }
   return;
 }
@@ -15934,7 +15940,13 @@ function forwardLiveInput(deps, payload, scope, threadId, mode) {
     },
     "control"
   );
-  deps.pending.pushFront(scope, synthetic);
+  deps.pending.pushFront(scope, synthetic, { immediate: true });
+  return {
+    toast: {
+      type: "success",
+      content: "\u5DF2\u63D0\u4EA4\uFF0C\u6B63\u5728\u7B49\u5F85\u7EC8\u7AEF\u54CD\u5E94"
+    }
+  };
 }
 function forwardAgentInput(deps, payload, scope, threadId, mode) {
   const input = typeof payload.input === "string" ? payload.input.trim() : "";
@@ -15956,6 +15968,12 @@ function forwardAgentInput(deps, payload, scope, threadId, mode) {
     createTime: Date.now()
   };
   deps.pending.push(scope, synthetic);
+  return {
+    toast: {
+      type: "success",
+      content: "\u5DF2\u63D0\u4EA4\uFF0C\u6B63\u5728\u7EE7\u7EED\u4EFB\u52A1"
+    }
+  };
 }
 async function resolveScope(deps) {
   const chatId = deps.evt.chatId;
@@ -15997,6 +16015,12 @@ function forwardToAgent(deps, payload, formValue, scope, threadId, mode) {
     createTime: Date.now()
   };
   deps.pending.push(scope, synthetic);
+  return {
+    toast: {
+      type: "success",
+      content: "\u5DF2\u63D0\u4EA4\uFF0C\u6B63\u5728\u7EE7\u7EED\u4EFB\u52A1"
+    }
+  };
 }
 function verifyBridgeToken(deps, payload, scope, action) {
   const token = typeof payload.bridge_token === "string" ? payload.bridge_token : "";
@@ -18355,8 +18379,15 @@ var PendingQueue = class {
     });
     return 1;
   }
-  /** Put a TUI callback ahead of work already queued for the scope. */
-  pushFront(scope, messages) {
+  /**
+   * Put a TUI callback ahead of work already queued for the scope.
+   *
+   * Interactive controls are already a complete user action. Callers can ask
+   * for an immediate next-tick flush so they do not wait through the ordinary
+   * conversational debounce window; blocked scopes still hold the control
+   * until the current turn hands ownership back.
+   */
+  pushFront(scope, messages, options = {}) {
     const priority = Array.isArray(messages) ? [...messages] : [messages];
     const deferred = this.deferredUntilFront.get(scope) ?? [];
     const incoming = [...priority, ...deferred];
@@ -18371,12 +18402,12 @@ var PendingQueue = class {
     if (existing) {
       if (existing.timer) clearTimeout(existing.timer);
       existing.messages.unshift(...incoming);
-      existing.timer = this.blocked.has(scope) ? void 0 : this.armTimer(scope);
+      existing.timer = this.blocked.has(scope) ? void 0 : this.armTimer(scope, options.immediate ? 0 : void 0);
       return existing.messages.length;
     }
     this.map.set(scope, {
       messages: incoming,
-      timer: this.blocked.has(scope) ? void 0 : this.armTimer(scope)
+      timer: this.blocked.has(scope) ? void 0 : this.armTimer(scope, options.immediate ? 0 : void 0)
     });
     return incoming.length;
   }
@@ -18454,8 +18485,8 @@ var PendingQueue = class {
     if (entry.timer) clearTimeout(entry.timer);
     entry.timer = this.armTimer(scope);
   }
-  armTimer(scope) {
-    return setTimeout(() => this.flush(scope), this.delayMs);
+  armTimer(scope, delayMs = this.delayMs) {
+    return setTimeout(() => this.flush(scope), delayMs);
   }
   flush(scope) {
     const entry = this.map.get(scope);
@@ -19661,8 +19692,8 @@ async function startChannel(deps) {
       log.info("intake", "reject", { chatId: evt.chatId, reason: evt.reason });
     },
     cardAction: async (evt) => {
-      await withTrace({ chatId: evt.chatId, msgId: evt.messageId }, async () => {
-        await handleCardAction({
+      return withTrace({ chatId: evt.chatId, msgId: evt.messageId }, async () => {
+        return handleCardAction({
           channel,
           evt,
           sessions,
@@ -19678,7 +19709,15 @@ async function startChannel(deps) {
           callbackAuth,
           callbackPolicyFingerprintForScope: (scope) => activePolicyFingerprints.get(scope)
         });
-      }).catch((err) => log.fail("cardAction", err));
+      }).catch((err) => {
+        log.fail("cardAction", err);
+        return {
+          toast: {
+            type: "error",
+            content: "\u5904\u7406\u70B9\u51FB\u5931\u8D25\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5"
+          }
+        };
+      });
     },
     comment: async (evt) => {
       await withTrace({ chatId: "comment" }, async () => {
@@ -19956,7 +19995,7 @@ async function intakeMessage(deps) {
     routedMsg.content.trimStart().startsWith("/") ? "command" : pickerActive ? "control" : void 0
   ) : routedMsg;
   const priorityLiveControl = liveInputModeForMessage(agentMsg) === "control" && (isLiveInterruptInput(agentMsg.content) || pickerActive);
-  const size = priorityLiveControl ? pending.pushFront(scope, agentMsg) : pending.push(scope, agentMsg);
+  const size = priorityLiveControl ? pending.pushFront(scope, agentMsg, { immediate: true }) : pending.push(scope, agentMsg);
   log.info("intake", "queued", { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
   if (pending.shouldAckBusy(scope)) {
     void channel.send(
@@ -20254,14 +20293,17 @@ async function runAgentBatch(deps) {
   let interactionTextBuffer = "";
   let startupInteractionDeferred = false;
   let pickerObservedAfterInput = false;
+  let controlFooterOnly = false;
+  const previousControlInteractionSignature = useLiveSession && nativeCommand && !nativeCommand.trimStart().startsWith("/") ? liveInteractionByScope.get(scope)?.signature : void 0;
   if (useLiveSession && nativeCommand && opensLivePicker(nativeCommand)) {
     const wasActive = liveInteractionByScope.has(scope);
     liveInteractionByScope.set(scope, { picker: true, updatedAt: Date.now() });
     if (!wasActive) log.info("agent-live", "picker-enter", { scope, input: nativeCommand });
   }
   if (useLiveSession && nativeCommand && !nativeCommand.trimStart().startsWith("/")) {
-    const previousSignature = liveInteractionByScope.get(scope)?.signature;
-    if (previousSignature) sentInteractionSignatures.add(previousSignature);
+    if (previousControlInteractionSignature) {
+      sentInteractionSignatures.add(previousControlInteractionSignature);
+    }
   }
   const observeLiveEvent = (evt, opts = {}) => {
     const isStartupInteraction = evt.type === "interactive" && evt.phase === "startup";
@@ -20288,6 +20330,9 @@ ${delta}`.slice(-64e3);
     const pickerLike = isStartupInteraction || Boolean(interaction);
     if (!isStartupInteraction && (interaction || pickerLike)) {
       pickerObservedAfterInput = true;
+    }
+    if (liveInputMode === "control" && previousControlInteractionSignature && !isControlFooterOnly(delta) && (!interaction || interaction.signature !== previousControlInteractionSignature)) {
+      sentInteractionSignatures.delete(previousControlInteractionSignature);
     }
     if (useLiveSession && (interaction || pickerLike)) {
       const wasActive = liveInteractionByScope.has(scope);
@@ -20442,7 +20487,8 @@ ${delta}`.slice(-64e3);
         observeLiveEvent
       );
       if (handle.detached) return;
-      if (liveInputMode === "control" && isControlFooterOnly(completeReplyText(finalState))) {
+      controlFooterOnly = liveInputMode === "control" && isControlFooterOnly(completeReplyText(finalState));
+      if (controlFooterOnly) {
         log.info("agent-live", "control-footer-only-suppressed", { scope, input: nativeCommand });
         return;
       }
@@ -20923,7 +20969,7 @@ ${delta}`.slice(-64e3);
       const opensPicker = opensLivePicker(nativeCommand);
       const closesPicker = closesLivePicker(nativeCommand);
       if ((opensPicker || closesPicker) && !pickerObservedAfterInput) {
-        if (liveInteractionByScope.delete(scope)) {
+        if (!controlFooterOnly && liveInteractionByScope.delete(scope)) {
           log.info("agent-live", "picker-exit", { scope, input: nativeCommand });
         }
       } else if (closesPicker && pickerObservedAfterInput) {
