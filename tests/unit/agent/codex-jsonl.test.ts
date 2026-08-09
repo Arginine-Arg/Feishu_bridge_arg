@@ -45,7 +45,7 @@ describe('Codex JSONL translator', () => {
       },
     ]);
     expect(t.translate({ type: 'agent_message', message: 'hello' })).toEqual([
-      { type: 'text', delta: 'hello' },
+      { type: 'text', delta: 'hello', source: 'agent' },
     ]);
     expect(
       t.translate({
@@ -90,7 +90,7 @@ describe('Codex JSONL translator', () => {
           text: 'hello from item',
         },
       }),
-    ).toEqual([{ type: 'text', delta: 'hello from item' }]);
+    ).toEqual([{ type: 'text', delta: 'hello from item', source: 'agent' }]);
   });
 
   it('treats missing command exit codes as successful command results', () => {
@@ -148,7 +148,7 @@ describe('Codex JSONL translator', () => {
     ).toEqual([]);
     expect(t.terminalEmitted()).toBe(false);
     expect(t.translate({ type: 'agent_message', message: 'after retry' })).toEqual([
-      { type: 'text', delta: 'after retry' },
+      { type: 'text', delta: 'after retry', source: 'agent' },
     ]);
     expect(t.translate({ type: 'turn.completed' })).toEqual([
       { type: 'done', threadId: 'thread-retry', terminationReason: 'normal' },

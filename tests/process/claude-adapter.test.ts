@@ -135,7 +135,7 @@ describe('ClaudeAdapter process contract', () => {
     });
 
     expect(await collect(run.events)).toEqual([
-      { type: 'text', delta: 'before failure' },
+      { type: 'text', delta: 'before failure', source: 'agent' },
       {
         type: 'error',
         message: 'claude exited with code 42: boom',

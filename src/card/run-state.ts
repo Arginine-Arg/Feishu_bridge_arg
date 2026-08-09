@@ -11,7 +11,13 @@ export interface ToolEntry {
 }
 
 export type Block =
-  | { kind: 'text'; content: string; streaming: boolean }
+  | {
+      kind: 'text';
+      content: string;
+      streaming: boolean;
+      /** Local provenance used by the presentation layer; never sent to the agent. */
+      origin?: 'agent' | 'terminal';
+    }
   | { kind: 'tool'; tool: ToolEntry };
 
 export type FooterStatus = 'thinking' | 'tool_running' | 'streaming' | null;
@@ -84,7 +90,18 @@ export function reduce(state: RunState, evt: AgentEvent): RunState {
   switch (evt.type) {
     case 'text': {
       const last = state.blocks[state.blocks.length - 1];
-      if (last && last.kind === 'text' && last.streaming) {
+      const origin =
+        evt.source === 'live-terminal'
+          ? 'terminal'
+          : evt.source === 'agent'
+            ? 'agent'
+            : undefined;
+      if (
+        last &&
+        last.kind === 'text' &&
+        last.streaming &&
+        (last.origin ?? undefined) === origin
+      ) {
         const next: Block = { ...last, content: last.content + evt.delta };
         return withLiveness(
           {
@@ -99,7 +116,15 @@ export function reduce(state: RunState, evt: AgentEvent): RunState {
       return withLiveness(
         {
           ...state,
-          blocks: [...state.blocks, { kind: 'text', content: evt.delta, streaming: true }],
+          blocks: [
+            ...state.blocks,
+            {
+              kind: 'text',
+              content: evt.delta,
+              streaming: true,
+              ...(origin ? { origin } : {}),
+            },
+          ],
           reasoning: { ...state.reasoning, active: false },
           footer: 'streaming',
         },

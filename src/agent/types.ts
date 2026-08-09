@@ -11,7 +11,7 @@ export type AgentEvent =
       type: 'text';
       delta: string;
       /** Present only for screen-derived native terminal output. */
-      source?: 'live-terminal';
+      source?: 'live-terminal' | 'agent';
       /** Monotonic within one live terminal turn. */
       sequence?: number;
     }

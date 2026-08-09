@@ -8,7 +8,7 @@ type AgentEvent = {
     type: 'text';
     delta: string;
     /** Present only for screen-derived native terminal output. */
-    source?: 'live-terminal';
+    source?: 'live-terminal' | 'agent';
     /** Monotonic within one live terminal turn. */
     sequence?: number;
 } | {
@@ -58,6 +58,8 @@ type Block = {
     kind: 'text';
     content: string;
     streaming: boolean;
+    /** Local provenance used by the presentation layer; never sent to the agent. */
+    origin?: 'agent' | 'terminal';
 } | {
     kind: 'tool';
     tool: ToolEntry;

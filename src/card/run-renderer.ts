@@ -1,6 +1,11 @@
 import type { Block, FooterStatus, RunState, ToolEntry } from './run-state';
 import { toolBodyMd, toolHeaderText } from './tool-render';
-import { activityCardBody, presentBlocks, type ActivityTranscript } from './activity-presentation';
+import {
+  activityCardBody,
+  activitySummaryLabel,
+  presentBlocks,
+  type ActivityTranscript,
+} from './activity-presentation';
 
 const REASONING_MAX = 1500;
 const COLLAPSE_TOOL_THRESHOLD = 3;
@@ -306,8 +311,9 @@ function toolPanel(tool: ToolEntry, expanded: boolean): object {
 
 function activityPanel(activity: ActivityTranscript, maxBodyBytes?: number): object {
   const body = activityCardBody(activity, maxBodyBytes);
+  const label = activitySummaryLabel(activity.summary);
   return collapsiblePanel({
-    title: `▸ 执行活动 · ${activity.entries} 项`,
+    title: `▸ 执行活动 · ${activity.entries} 项${label ? ` · ${label}` : ''}`,
     expanded: false,
     border: 'grey',
     body: `\`\`\`text\n${escapeFence(body)}\n\`\`\``,

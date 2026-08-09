@@ -35,7 +35,7 @@ describe('Claude stream-json translator', () => {
         },
       }),
     ]).toEqual([
-      { type: 'text', delta: 'hello' },
+      { type: 'text', delta: 'hello', source: 'agent' },
       { type: 'thinking', delta: 'checking' },
       { type: 'tool_use', id: 'tool-1', name: 'Bash', input: { command: 'pwd' } },
     ]);
@@ -177,7 +177,7 @@ describe('Claude stream-json reader behavior', () => {
     const events = await collect(run.events);
 
     expect(events).toEqual([
-      { type: 'text', delta: 'kept' },
+      { type: 'text', delta: 'kept', source: 'agent' },
       {
         type: 'error',
         message: `claude exited with code 7: ${stderr}`,

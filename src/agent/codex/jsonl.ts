@@ -109,7 +109,7 @@ export class CodexJsonlTranslator {
     if (!item) return [];
     if (item.type === 'agent_message') {
       const message = stringValue(item.text ?? item.message);
-      return message ? [{ type: 'text', delta: message }] : [];
+      return message ? [{ type: 'text', delta: message, source: 'agent' }] : [];
     }
     if (item.type !== 'command_execution') return [];
     const id = stringValue(item.id);
@@ -135,7 +135,7 @@ export class CodexJsonlTranslator {
   private translateAgentMessage(raw: Record<string, unknown>): AgentEvent[] {
     const message = stringValue(raw.message ?? raw.text);
     if (!message) return [];
-    return [{ type: 'text', delta: message }];
+    return [{ type: 'text', delta: message, source: 'agent' }];
   }
 
   private translateTurnCompleted(raw: Record<string, unknown>): AgentEvent[] {

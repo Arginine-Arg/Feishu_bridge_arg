@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "0.6.80",
+  version: "1.0.0",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -9697,7 +9697,7 @@ function* translateEvent(raw) {
   if (evt.type === "assistant" && evt.message?.content) {
     for (const block of evt.message.content) {
       if (block.type === "text" && typeof block.text === "string" && block.text) {
-        yield { type: "text", delta: block.text };
+        yield { type: "text", delta: block.text, source: "agent" };
       } else if (block.type === "thinking" && typeof block.thinking === "string" && block.thinking) {
         yield { type: "thinking", delta: block.thinking };
       } else if (block.type === "tool_use" && block.id && block.name) {
@@ -10252,7 +10252,7 @@ var CodexJsonlTranslator = class {
     if (!item) return [];
     if (item.type === "agent_message") {
       const message = stringValue(item.text ?? item.message);
-      return message ? [{ type: "text", delta: message }] : [];
+      return message ? [{ type: "text", delta: message, source: "agent" }] : [];
     }
     if (item.type !== "command_execution") return [];
     const id = stringValue(item.id);
@@ -10277,7 +10277,7 @@ var CodexJsonlTranslator = class {
   translateAgentMessage(raw) {
     const message = stringValue(raw.message ?? raw.text);
     if (!message) return [];
-    return [{ type: "text", delta: message }];
+    return [{ type: "text", delta: message, source: "agent" }];
   }
   translateTurnCompleted(raw) {
     this.terminal = true;
@@ -12191,7 +12191,7 @@ function presentBlocks(blocks) {
       presented.push(block);
       continue;
     }
-    for (const segment of splitTerminalActivity(block.content)) {
+    for (const segment of splitTerminalActivity(block.content, block.origin)) {
       if (segment.kind === "activity") {
         activity.push(segment.content);
         entries += segment.entries;
@@ -12207,14 +12207,83 @@ function presentBlocks(blocks) {
   const content = activity.join("\n\n").trim();
   return {
     blocks: presented,
-    ...content ? { activity: { content, entries } } : {}
+    ...content ? {
+      activity: {
+        content,
+        entries,
+        summary: summarizeActivity(content)
+      }
+    } : {}
   };
 }
 function activityCardBody(activity, maxBytes = ACTIVITY_CARD_BODY_MAX_BYTES) {
-  return foldActivityContent(activity.content, maxBytes);
+  return foldActivityContent(compactActivityContent(activity.content, maxBytes), maxBytes);
 }
 function activityTextBody(activity, maxBytes = ACTIVITY_TEXT_BODY_MAX_BYTES) {
-  return foldActivityContent(activity.content, maxBytes);
+  return foldActivityContent(compactActivityContent(activity.content, maxBytes), maxBytes);
+}
+function activitySummaryLabel(summary) {
+  const parts = [];
+  if (summary.commands > 0) parts.push(`\u547D\u4EE4 ${summary.commands}`);
+  if (summary.reads > 0) parts.push(`\u8BFB\u53D6 ${summary.reads}`);
+  if (summary.searches > 0) parts.push(`\u641C\u7D22 ${summary.searches}`);
+  if (summary.changes > 0) parts.push(`\u4FEE\u6539 ${summary.changes}`);
+  if (summary.tests > 0) parts.push(`\u6D4B\u8BD5 ${summary.tests}`);
+  if (summary.errors > 0) parts.push(`\u9519\u8BEF ${summary.errors}`);
+  return parts.slice(0, 3).join(" \xB7 ");
+}
+function summarizeActivity(content) {
+  const summary = {
+    commands: 0,
+    reads: 0,
+    searches: 0,
+    changes: 0,
+    tests: 0,
+    errors: 0
+  };
+  for (const entry of content.split(/\n{2,}/u)) {
+    const firstLine = entry.split("\n").find((line) => line.trim())?.trim() ?? "";
+    const normalized = firstLine.replace(/^(?:[•◦・⏺●]\s*)/u, "");
+    if (/^(?:ran|run|running)\b/iu.test(normalized)) summary.commands += 1;
+    if (/^(?:read|viewed|explored)\b/iu.test(normalized)) summary.reads += 1;
+    if (/^(?:search|searched|grep|glob|find|list|listed)\b/iu.test(normalized)) summary.searches += 1;
+    if (/^(?:edit|edited|add|added|create|created|remove|removed|write|wrote|apply|applied|patch|patched|delete|deleted)\b/iu.test(normalized)) {
+      summary.changes += 1;
+    }
+    if (/\b(?:test|tests|vitest|pytest|jest|npm\s+test|pnpm\s+test|cargo\s+test|go\s+test)\b/iu.test(entry)) {
+      summary.tests += 1;
+    }
+    if (/^(?:⚠|✖|error:|fatal:)\b/iu.test(normalized) || /\b(?:failed|failure|error)\b/iu.test(entry)) {
+      summary.errors += 1;
+    }
+  }
+  return summary;
+}
+function compactActivityContent(content, maxBytes) {
+  if (!Number.isFinite(maxBytes)) return content;
+  const entries = content.split(/\n{2,}/u).filter((entry) => entry.trim());
+  if (entries.length < 2) return content;
+  const compacted = [];
+  let previous;
+  let repeats = 0;
+  const flushRepeats = () => {
+    if (repeats > 0) {
+      compacted.push(`_\xD7${repeats + 1} \u6B21\u76F8\u540C\u6267\u884C\u5E27\u5DF2\u5408\u5E76_`);
+      repeats = 0;
+    }
+  };
+  for (const entry of entries) {
+    const key = entry.replace(/\x1b\[[0-?]*[ -/]*[@-~]/gu, "").replace(/\s+/gu, " ").trim();
+    if (previous !== void 0 && key === previous) {
+      repeats += 1;
+      continue;
+    }
+    flushRepeats();
+    compacted.push(entry);
+    previous = key;
+  }
+  flushRepeats();
+  return compacted.join("\n\n");
 }
 function appendTextBlock(blocks, content, streaming) {
   if (!content) return;
@@ -12225,7 +12294,10 @@ function appendTextBlock(blocks, content, streaming) {
   }
   blocks.push({ kind: "text", content, streaming });
 }
-function splitTerminalActivity(input) {
+function splitTerminalActivity(input, origin) {
+  if (origin === "agent") {
+    return [{ kind: "text", content: input }];
+  }
   if (liveInteractionSurface(input)) return [{ kind: "text", content: input }];
   const segments = [];
   const prose = [];
@@ -12694,8 +12766,9 @@ function toolPanel(tool, expanded) {
 }
 function activityPanel(activity, maxBodyBytes) {
   const body = activityCardBody(activity, maxBodyBytes);
+  const label = activitySummaryLabel(activity.summary);
   return collapsiblePanel({
-    title: `\u25B8 \u6267\u884C\u6D3B\u52A8 \xB7 ${activity.entries} \u9879`,
+    title: `\u25B8 \u6267\u884C\u6D3B\u52A8 \xB7 ${activity.entries} \u9879${label ? ` \xB7 ${label}` : ""}`,
     expanded: false,
     border: "grey",
     body: `\`\`\`text
@@ -12816,7 +12889,8 @@ function reduce(state, evt) {
   switch (evt.type) {
     case "text": {
       const last = state.blocks[state.blocks.length - 1];
-      if (last && last.kind === "text" && last.streaming) {
+      const origin = evt.source === "live-terminal" ? "terminal" : evt.source === "agent" ? "agent" : void 0;
+      if (last && last.kind === "text" && last.streaming && (last.origin ?? void 0) === origin) {
         const next = { ...last, content: last.content + evt.delta };
         return withLiveness(
           {
@@ -12831,7 +12905,15 @@ function reduce(state, evt) {
       return withLiveness(
         {
           ...state,
-          blocks: [...state.blocks, { kind: "text", content: evt.delta, streaming: true }],
+          blocks: [
+            ...state.blocks,
+            {
+              kind: "text",
+              content: evt.delta,
+              streaming: true,
+              ...origin ? { origin } : {}
+            }
+          ],
           reasoning: { ...state.reasoning, active: false },
           footer: "streaming"
         },

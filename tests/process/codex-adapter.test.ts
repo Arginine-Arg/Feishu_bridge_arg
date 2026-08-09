@@ -61,7 +61,7 @@ describe('CodexAdapter process contract', () => {
     expect(run.runId).toBe('run-fresh');
     expect(await collect(run.events)).toEqual([
       { type: 'system', threadId: 'thread-fresh' },
-      { type: 'text', delta: 'hello user' },
+      { type: 'text', delta: 'hello user', source: 'agent' },
       { type: 'done', threadId: 'thread-fresh', terminationReason: 'normal' },
     ]);
     const record = await readRecord(fake.recordPath);
@@ -345,7 +345,7 @@ describe('CodexAdapter process contract', () => {
     });
 
     expect(await collect(run.events)).toEqual([
-      { type: 'text', delta: 'before failure' },
+      { type: 'text', delta: 'before failure', source: 'agent' },
       {
         type: 'error',
         message: 'codex exited with code 42: boom',
@@ -376,7 +376,7 @@ describe('CodexAdapter process contract', () => {
 
     expect(await collect(run.events)).toEqual([
       { type: 'system', threadId: 'thread-retry' },
-      { type: 'text', delta: 'after retry' },
+      { type: 'text', delta: 'after retry', source: 'agent' },
       { type: 'done', threadId: 'thread-retry', terminationReason: 'normal' },
     ]);
   });

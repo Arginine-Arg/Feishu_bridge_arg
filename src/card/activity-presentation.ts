@@ -7,6 +7,17 @@ const ACTIVITY_TEXT_BODY_MAX_BYTES = 3_600;
 export interface ActivityTranscript {
   content: string;
   entries: number;
+  /** Deterministic local summary of the already-emitted terminal activity. */
+  summary: ActivitySummary;
+}
+
+export interface ActivitySummary {
+  commands: number;
+  reads: number;
+  searches: number;
+  changes: number;
+  tests: number;
+  errors: number;
 }
 
 export interface PresentedBlocks {
@@ -34,7 +45,7 @@ export function presentBlocks(blocks: Block[]): PresentedBlocks {
       presented.push(block);
       continue;
     }
-    for (const segment of splitTerminalActivity(block.content)) {
+    for (const segment of splitTerminalActivity(block.content, block.origin)) {
       if (segment.kind === 'activity') {
         activity.push(segment.content);
         entries += segment.entries;
@@ -51,7 +62,15 @@ export function presentBlocks(blocks: Block[]): PresentedBlocks {
   const content = activity.join('\n\n').trim();
   return {
     blocks: presented,
-    ...(content ? { activity: { content, entries } } : {}),
+    ...(content
+      ? {
+          activity: {
+            content,
+            entries,
+            summary: summarizeActivity(content),
+          },
+        }
+      : {}),
   };
 }
 
@@ -59,14 +78,87 @@ export function activityCardBody(
   activity: ActivityTranscript,
   maxBytes = ACTIVITY_CARD_BODY_MAX_BYTES,
 ): string {
-  return foldActivityContent(activity.content, maxBytes);
+  return foldActivityContent(compactActivityContent(activity.content, maxBytes), maxBytes);
 }
 
 export function activityTextBody(
   activity: ActivityTranscript,
   maxBytes = ACTIVITY_TEXT_BODY_MAX_BYTES,
 ): string {
-  return foldActivityContent(activity.content, maxBytes);
+  return foldActivityContent(compactActivityContent(activity.content, maxBytes), maxBytes);
+}
+
+/** Render a short deterministic label without asking the agent to summarize. */
+export function activitySummaryLabel(summary: ActivitySummary): string {
+  const parts: string[] = [];
+  if (summary.commands > 0) parts.push(`命令 ${summary.commands}`);
+  if (summary.reads > 0) parts.push(`读取 ${summary.reads}`);
+  if (summary.searches > 0) parts.push(`搜索 ${summary.searches}`);
+  if (summary.changes > 0) parts.push(`修改 ${summary.changes}`);
+  if (summary.tests > 0) parts.push(`测试 ${summary.tests}`);
+  if (summary.errors > 0) parts.push(`错误 ${summary.errors}`);
+  return parts.slice(0, 3).join(' · ');
+}
+
+function summarizeActivity(content: string): ActivitySummary {
+  const summary: ActivitySummary = {
+    commands: 0,
+    reads: 0,
+    searches: 0,
+    changes: 0,
+    tests: 0,
+    errors: 0,
+  };
+  for (const entry of content.split(/\n{2,}/u)) {
+    const firstLine = entry.split('\n').find((line) => line.trim())?.trim() ?? '';
+    const normalized = firstLine.replace(/^(?:[•◦・⏺●]\s*)/u, '');
+    if (/^(?:ran|run|running)\b/iu.test(normalized)) summary.commands += 1;
+    if (/^(?:read|viewed|explored)\b/iu.test(normalized)) summary.reads += 1;
+    if (/^(?:search|searched|grep|glob|find|list|listed)\b/iu.test(normalized)) summary.searches += 1;
+    if (/^(?:edit|edited|add|added|create|created|remove|removed|write|wrote|apply|applied|patch|patched|delete|deleted)\b/iu.test(normalized)) {
+      summary.changes += 1;
+    }
+    if (/\b(?:test|tests|vitest|pytest|jest|npm\s+test|pnpm\s+test|cargo\s+test|go\s+test)\b/iu.test(entry)) {
+      summary.tests += 1;
+    }
+    if (/^(?:⚠|✖|error:|fatal:)\b/iu.test(normalized) || /\b(?:failed|failure|error)\b/iu.test(entry)) {
+      summary.errors += 1;
+    }
+  }
+  return summary;
+}
+
+/**
+ * Collapse only byte-identical consecutive terminal frames. The raw activity
+ * remains in RunState and diagnostics; this projection removes redraw noise
+ * without guessing whether two different commands are equivalent.
+ */
+function compactActivityContent(content: string, maxBytes: number): string {
+  if (!Number.isFinite(maxBytes)) return content;
+  const entries = content.split(/\n{2,}/u).filter((entry) => entry.trim());
+  if (entries.length < 2) return content;
+
+  const compacted: string[] = [];
+  let previous: string | undefined;
+  let repeats = 0;
+  const flushRepeats = (): void => {
+    if (repeats > 0) {
+      compacted.push(`_×${repeats + 1} 次相同执行帧已合并_`);
+      repeats = 0;
+    }
+  };
+  for (const entry of entries) {
+    const key = entry.replace(/\x1b\[[0-?]*[ -/]*[@-~]/gu, '').replace(/\s+/gu, ' ').trim();
+    if (previous !== undefined && key === previous) {
+      repeats += 1;
+      continue;
+    }
+    flushRepeats();
+    compacted.push(entry);
+    previous = key;
+  }
+  flushRepeats();
+  return compacted.join('\n\n');
 }
 
 function appendTextBlock(blocks: Block[], content: string, streaming: boolean): void {
@@ -79,7 +171,15 @@ function appendTextBlock(blocks: Block[], content: string, streaming: boolean): 
   blocks.push({ kind: 'text', content, streaming });
 }
 
-function splitTerminalActivity(input: string): TextSegment[] {
+function splitTerminalActivity(input: string, origin?: 'agent' | 'terminal'): TextSegment[] {
+  // Structured adapters already separate tool events from assistant text.
+  // Treat their text as prose even when it happens to contain words such as
+  // `Ran` or `Read`; only live terminal-origin text needs chrome parsing.
+  // Blocks without provenance retain the legacy parser for replay fixtures and
+  // older persisted state.
+  if (origin === 'agent') {
+    return [{ kind: 'text', content: input }];
+  }
   // A picker must remain verbatim: its content is parsed again at delivery
   // time to build signed Feishu controls. Never hide command/menu rows here.
   if (liveInteractionSurface(input)) return [{ kind: 'text', content: input }];

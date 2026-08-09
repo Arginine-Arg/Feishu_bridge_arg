@@ -172,6 +172,64 @@ describe('terminal activity presentation', () => {
     expect(final).toContain('最终结论：正文应完整保留。');
   });
 
+  it('adds a local activity summary without changing the answer text', () => {
+    const state = stateFromText([
+      '• Ran pnpm test --run tests/unit',
+      '└ 525 tests passed',
+      '• Read src/bot/channel.ts',
+      '• Edited src/card/run-renderer.ts',
+      '',
+      '最终结论：展示投影已完成。',
+    ].join('\n'));
+
+    const panel = activityPanel(state);
+    expect(panel?.header?.title?.content).toContain('命令 1');
+    expect(panel?.header?.title?.content).toContain('读取 1');
+    expect(panel?.header?.title?.content).toContain('修改 1');
+    expect(renderText(state, { activityMode: 'none', maxBytes: Number.POSITIVE_INFINITY })).toBe(
+      '最终结论：展示投影已完成。',
+    );
+  });
+
+  it('keeps structured agent prose out of terminal activity parsing', () => {
+    const content = [
+      '正文说明：Ran 和 Read 只是代码示例中的普通单词。',
+      '',
+      '```diff',
+      '+ Read src/card/run-renderer.ts',
+      '- Ran pnpm test --run tests/unit',
+      '```',
+      '',
+      '1. 先解析完整答复',
+      '2. 再按语义块发送',
+    ].join('\n');
+    const presentation = presentBlocks([
+      { kind: 'text', content, streaming: false, origin: 'agent' },
+    ]);
+
+    expect(presentation.activity).toBeUndefined();
+    expect(presentation.blocks).toEqual([{ kind: 'text', content, streaming: false }]);
+  });
+
+  it('merges only identical consecutive activity frames in bounded projections', () => {
+    const state = stateFromText([
+      '• Ran pnpm test --run tests/unit',
+      '└ 525 tests passed',
+      '',
+      '• Ran pnpm test --run tests/unit',
+      '└ 525 tests passed',
+      '',
+      '最终结论：重复帧已压缩。',
+    ].join('\n'));
+
+    const panel = activityPanel(state);
+    const panelBody = panel?.elements?.[0]?.content ?? '';
+    expect(panelBody).toContain('×2 次相同执行帧已合并');
+    expect(renderText(state, { activityMode: 'full', maxBytes: Number.POSITIVE_INFINITY })).toContain(
+      'pnpm test --run tests/unit',
+    );
+  });
+
   it('folds orphaned terminal redraw output when a stream delta starts mid-frame', () => {
     const presentation = presentBlocks([
       { kind: 'text', content: '• Explored\n', streaming: false },
