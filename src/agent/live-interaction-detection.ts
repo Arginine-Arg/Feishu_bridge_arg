@@ -684,6 +684,14 @@ function isStructuredInteraction(lines: string[], requireCompletePickerFrame: bo
   });
   const numberedChoiceCount = options.filter((option) => option.key && /^\d+$/u.test(option.key)).length;
   const hasNumberedChoice = numberedChoiceCount > 0;
+  // Terminal/source listings commonly use four-digit line numbers (`1000 |`
+  // or `1000.`). They are syntactically indistinguishable from a numbered
+  // menu row, but no supported picker has a thousand choices. Never promote a
+  // surface containing such a key to an interactive card.
+  const hasLargeNumberedOption = options.some(
+    (option) =>
+      Boolean(option.key && /^\d+$/u.test(option.key)) && Number(option.key) >= 1_000,
+  );
   const hasOptions = options.length > 0;
   const hasBinaryControl = BINARY_CONTROL_RE.test(text);
   const hasKeyHint = KEY_HINT_RE.test(text);
@@ -772,6 +780,7 @@ function isStructuredInteraction(lines: string[], requireCompletePickerFrame: bo
 
   return (
     !hasCodeLikeNoise &&
+    !hasLargeNumberedOption &&
     !hasRepeatedKeyedOptionLabels &&
     !activityOnlySurface &&
     !documentOnlySurface &&

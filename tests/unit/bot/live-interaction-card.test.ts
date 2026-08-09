@@ -254,6 +254,34 @@ describe('liveInteractionCard', () => {
     expect(liveInteractionCardForText(text, () => 'long-source-code-token')).toBeUndefined();
   });
 
+  it('does not turn four-digit source line numbers into picker buttons', () => {
+    const source = [
+      'Source listing from worker output:',
+      '1000 | const first = await loadConfig();',
+      '1001 | const second = await loadProfile();',
+      '1002 | return second;',
+      '1003 | // continue processing below',
+    ].join('\n');
+
+    expect(isStructuredLiveInteraction(source)).toBe(false);
+    expect(liveInteractionSurface(source)).toBeUndefined();
+    expect(liveInteractionCardForText(source, () => 'line-number-token')).toBeUndefined();
+  });
+
+  it('does not promote dotted four-digit source line numbers with an Enter word', () => {
+    const source = [
+      'Implementation details:',
+      '1000. const first = await loadConfig();',
+      '1001. const second = await loadProfile();',
+      '1002. return second;',
+      'Press enter to continue reading the output.',
+    ].join('\n');
+
+    expect(isStructuredLiveInteraction(source)).toBe(false);
+    expect(liveInteractionSurface(source)).toBeUndefined();
+    expect(liveInteractionCardForText(source, () => 'dotted-line-number-token')).toBeUndefined();
+  });
+
   it('rejects repeated source rows even when the diff line is outside the tail window', () => {
     const text = [
       "171 +      'Select Model',",

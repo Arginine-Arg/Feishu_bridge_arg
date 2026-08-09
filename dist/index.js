@@ -538,6 +538,9 @@ function isStructuredInteraction(lines, requireCompletePickerFrame) {
   });
   const numberedChoiceCount = options.filter((option) => option.key && /^\d+$/u.test(option.key)).length;
   const hasNumberedChoice = numberedChoiceCount > 0;
+  const hasLargeNumberedOption = options.some(
+    (option) => Boolean(option.key && /^\d+$/u.test(option.key)) && Number(option.key) >= 1e3
+  );
   const hasOptions = options.length > 0;
   const hasBinaryControl = BINARY_CONTROL_RE.test(text);
   const hasKeyHint = KEY_HINT_RE.test(text);
@@ -578,7 +581,7 @@ function isStructuredInteraction(lines, requireCompletePickerFrame) {
   const activityOnlySurface = hasToolTraceEvidence && !hasExplicitPickerHeading && !hasConfirmationQuestion && !hasBinaryControl && !codexResume && !codexUpdate;
   const documentOnlySurface = hasDocumentEvidence && !hasExplicitPickerHeading && !hasConfirmationQuestion && !codexResume && !codexUpdate && !selectedNavigationMenu;
   const genericInputEvidence = hasInputPrompt || hasPromptMarker || selectedNavigationMenu || hasQuestionBeforeOptions && hasStrongOptionRows;
-  return !hasCodeLikeNoise && !hasRepeatedKeyedOptionLabels && !activityOnlySurface && !documentOnlySurface && (claudeBypass || codexUpdate || codexResume || hasPromptTitle && tailIsControl && ((requireCompletePickerFrame ? completeNumberedPicker : hasNumberedChoice) || hasBinaryControl || hasKeyHint && tailIsControl) || hasConfirmationQuestion && (hasNumberedChoice || hasBinaryControl) || (requireCompletePickerFrame ? completeNumberedPicker : hasNumberedChoice) && hasKeyHint && tailIsControl && !hasCodeLikeNoise && (hasPromptTitle || hasQuestionBeforeOptions || hasCleanNumericOptionBlock) || // A native model picker may retain only its numbered viewport rows after a
+  return !hasCodeLikeNoise && !hasLargeNumberedOption && !hasRepeatedKeyedOptionLabels && !activityOnlySurface && !documentOnlySurface && (claudeBypass || codexUpdate || codexResume || hasPromptTitle && tailIsControl && ((requireCompletePickerFrame ? completeNumberedPicker : hasNumberedChoice) || hasBinaryControl || hasKeyHint && tailIsControl) || hasConfirmationQuestion && (hasNumberedChoice || hasBinaryControl) || (requireCompletePickerFrame ? completeNumberedPicker : hasNumberedChoice) && hasKeyHint && tailIsControl && !hasCodeLikeNoise && (hasPromptTitle || hasQuestionBeforeOptions || hasCleanNumericOptionBlock) || // A native model picker may retain only its numbered viewport rows after a
   // redraw. Keep this narrow: generic selected numbered prose (for example a
   // numbered implementation plan copied from a source diff) is not enough
   // to create an interactive card. Model labels plus a native heading, an
