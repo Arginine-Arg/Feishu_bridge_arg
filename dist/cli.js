@@ -5108,12 +5108,20 @@ ${MANUAL_INSTALL_HINT}
   p2.outro("Done");
 }
 async function bindLarkCliWithCompatibility(profileArgs, larkChannelEnv, appPaths2, privateBinding, identityPreset) {
-  const directResult = await runCapture(
+  let directResult = await runCapture(
     "lark-cli",
     [...profileArgs, "config", "bind", "--source", "lark-channel", "--identity", identityPreset],
     BIND_TIMEOUT_MS,
     larkChannelEnv
   );
+  if (!directResult.success && /does not match detected Agent environment/i.test(directResult.output)) {
+    directResult = await runCapture(
+      "lark-cli",
+      [...profileArgs, "config", "bind", "--identity", identityPreset],
+      BIND_TIMEOUT_MS,
+      larkChannelEnv
+    );
+  }
   if (directResult.success) return directResult;
   if (privateBinding && appPaths2 && shouldUseLegacyLarkChannelSourceOverlay(directResult.output, appPaths2)) {
     return withLegacyLarkCliSourceOverlay(
