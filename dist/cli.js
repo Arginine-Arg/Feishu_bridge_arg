@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.0.3",
+  version: "1.0.4",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -8418,7 +8418,11 @@ function capture() {
   const historyFingerprint =
     historyIdentity + '|' + historyStartLine + '|' + historyEndLine + '|' +
     history.slice(0, 512) + '|' + history.slice(-4096);
-  if (snapshot && (snapshot !== lastSnapshot || historyFingerprint !== lastHistoryFingerprint)) {
+  // The viewport can be blank after a full-screen redraw while the final
+  // answer is already present in tmux scrollback.  History is still a valid
+  // delivery frame in that state; gating on snapshot silently drops the
+  // tail of the turn.
+  if ((snapshot || history) && (snapshot !== lastSnapshot || historyFingerprint !== lastHistoryFingerprint)) {
     lastSnapshot = snapshot;
     const historyFramePayload = JSON.stringify({
       paneId: historyIdentity,

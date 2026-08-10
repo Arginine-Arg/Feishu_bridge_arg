@@ -3304,6 +3304,57 @@ setInterval(() => {}, 1000);
     expect(output).toContain('FINAL_AFTER_HISTORY_ONLY');
   }, 20_000);
 
+  tmuxIt('forwards final scrollback when the visible terminal is blank', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-blank-footer-test-'));
+    const bin = join(dir, 'fake-tmux-blank-footer-agent.mjs');
+    const prompt = 'blank footer history check';
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+let input = '';
+process.stdout.write('ready-screen\\n› \\n');
+process.stdin.on('data', (chunk) => {
+  input += chunk;
+  const index = input.search(/[\\r\\n]/);
+  if (index < 0) return;
+  const line = input.slice(0, index).trim();
+  input = input.slice(index + 1);
+  if (line !== ${JSON.stringify(prompt)}) return;
+  setTimeout(() => {
+    // Leave the answer in scrollback, then clear the visible viewport.  The
+    // helper must forward the history even though its snapshot is blank.
+    process.stdout.write('• FINAL_SCROLLBACK_ONLY\\n\\x1b[2J\\x1b[H');
+    setTimeout(() => process.stdout.write('• FINAL_TAIL_AFTER_BLANK\\n'), 180);
+  }, 220);
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-blank-footer-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-blank-footer',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 1_200,
+      outputFlushMs: 40,
+      startupTimeoutMs: 5_000,
+    });
+
+    const events = await collect(session.run('tmux-blank-footer-run', prompt, dir).events);
+    await pool.closeAll();
+
+    const output = textOf(events);
+    expect(output).toContain('FINAL_SCROLLBACK_ONLY');
+    expect(output).toContain('FINAL_TAIL_AFTER_BLANK');
+  }, 20_000);
+
   tmuxIt('keeps a model change confirmation after a prior pane snapshot', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-model-change-test-'));
     const bin = join(dir, 'fake-tmux-model-change-agent.mjs');

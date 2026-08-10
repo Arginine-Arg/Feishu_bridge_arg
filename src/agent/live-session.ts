@@ -1536,7 +1536,11 @@ function capture() {
   const historyFingerprint =
     historyIdentity + '|' + historyStartLine + '|' + historyEndLine + '|' +
     history.slice(0, 512) + '|' + history.slice(-4096);
-  if (snapshot && (snapshot !== lastSnapshot || historyFingerprint !== lastHistoryFingerprint)) {
+  // The viewport can be blank after a full-screen redraw while the final
+  // answer is already present in tmux scrollback.  History is still a valid
+  // delivery frame in that state; gating on snapshot silently drops the
+  // tail of the turn.
+  if ((snapshot || history) && (snapshot !== lastSnapshot || historyFingerprint !== lastHistoryFingerprint)) {
     lastSnapshot = snapshot;
     const historyFramePayload = JSON.stringify({
       paneId: historyIdentity,
