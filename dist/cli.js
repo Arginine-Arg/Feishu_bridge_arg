@@ -12896,7 +12896,7 @@ function panelHeader(titleMd) {
   };
 }
 function sanitizeMarkdownLocalImages(text) {
-  return text.replace(
+  let result = text.replace(
     /!\[([^\]]*)\]\((?!https?:\/\/)([^)]+)\)/gu,
     (_match, alt, fullPath) => {
       const fileName = fullPath.trim().split(/[/\\]/).pop() || fullPath;
@@ -12904,6 +12904,21 @@ function sanitizeMarkdownLocalImages(text) {
       return `\u{1F5BC}\uFE0F **[\u672C\u5730\u56FE\u7247: ${label}]** *(\u8BF7\u7528 \`arg-bridge sendfile "${fileName}"\` \u8F6C\u6362\u4E3A\u98DE\u4E66\u9644\u4EF6\u53D1\u9001)*`;
     }
   );
+  result = result.replace(
+    /!\[([^\]]*)\]\((?!https?:\/\/)([^)]*)$/gu,
+    (_match, alt, partialPath) => {
+      const fileName = partialPath.trim().split(/[/\\]/).pop() || partialPath || "\u56FE\u7247\u5904\u7406\u4E2D";
+      const label = alt.trim() || fileName;
+      return `\u{1F5BC}\uFE0F **[\u672C\u5730\u56FE\u7247: ${label}...]**`;
+    }
+  );
+  result = result.replace(
+    /!\[([^\]]*)$/gu,
+    (_match, alt) => {
+      return `\u{1F5BC}\uFE0F **[\u56FE\u7247: ${alt.trim()}...]**`;
+    }
+  );
+  return result;
 }
 function markdown(content) {
   return { tag: "markdown", content: sanitizeMarkdownLocalImages(content) };
