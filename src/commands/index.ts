@@ -3,7 +3,7 @@ import { lstat, readFile, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, relative, sep } from 'node:path';
 import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
-import { claudeCapability, codexCapability } from '../agent/capability';
+import { claudeCapability, codexCapability, agyCapability } from '../agent/capability';
 import { DEFAULT_MODEL, normalizeModelSelection, supportedModels } from '../agent/models';
 import type { AgentAdapter } from '../agent/types';
 import { tmuxTargetKey, type TmuxBindingStatus, type TmuxPaneTarget } from '../agent/tmux-control';
@@ -160,7 +160,7 @@ type Handler = (args: string, ctx: CommandContext) => Promise<void>;
 
 interface ResumeCandidate {
   scopeId: string;
-  agentId: 'claude' | 'codex';
+  agentId: 'claude' | 'codex' | 'agy';
   cwdRealpath: string;
   policyFingerprint: string;
   sessionId?: string;
@@ -1571,7 +1571,9 @@ async function handleDoctor(args: string, ctx: CommandContext): Promise<void> {
   const capability =
     ctx.controls.profileConfig.agentKind === 'codex'
       ? codexCapability(ctx.controls.profileConfig)
-      : claudeCapability(ctx.controls.profileConfig);
+      : ctx.controls.profileConfig.agentKind === 'agy'
+        ? agyCapability(ctx.controls.profileConfig)
+        : claudeCapability(ctx.controls.profileConfig);
   const policy = evaluateRunPolicy({
     scope: {
       source: 'im',

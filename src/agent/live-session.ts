@@ -75,7 +75,7 @@ export interface LiveSessionCommand {
   tmuxSessionName?: string;
   tmuxProfile?: string;
   tmuxScopeId?: string;
-  tmuxAgentKind?: 'codex' | 'claude';
+  tmuxAgentKind?: 'codex' | 'claude' | 'agy';
   tmuxManagedTerminal?: ManagedTmuxTerminal;
   tmuxTarget?: TmuxPaneTarget;
   onTerminal?: (terminal: LiveTerminalInfo) => void | Promise<void>;

@@ -327,7 +327,7 @@ function getAgentPreflightDiagnostic(err) {
 function isAgentPreflightDiagnostic(input) {
   if (!input || typeof input !== "object") return false;
   const raw = input;
-  return typeof raw.code === "string" && raw.code.startsWith("agent-") && (raw.agentId === "claude" || raw.agentId === "codex") && typeof raw.agentName === "string" && typeof raw.command === "string";
+  return typeof raw.code === "string" && raw.code.startsWith("agent-") && (raw.agentId === "claude" || raw.agentId === "codex" || raw.agentId === "agy") && typeof raw.agentName === "string" && typeof raw.command === "string";
 }
 function codeForSpawnError(err) {
   if (err.code === "ENOENT") return "agent-binary-not-found";
@@ -554,8 +554,8 @@ function normalizeProfileConfig(input) {
   if (raw.schemaVersion !== 2) {
     throw new Error("profile schemaVersion must be 2");
   }
-  if (raw.agentKind !== "claude" && raw.agentKind !== "codex") {
-    throw new Error("agentKind must be claude or codex");
+  if (raw.agentKind !== "claude" && raw.agentKind !== "codex" && raw.agentKind !== "agy") {
+    throw new Error("agentKind must be claude, codex, or agy");
   }
   const accounts = normalizeAccounts(raw.accounts);
   if (raw.agentKind === "codex" && !raw.codex) {
@@ -805,7 +805,8 @@ function pathExts() {
 async function detectInstalledAgents() {
   const candidates = [
     { kind: "claude", command: process.env.LARK_CHANNEL_CLAUDE_BIN ?? "claude" },
-    { kind: "codex", command: process.env.LARK_CHANNEL_CODEX_BIN ?? "codex" }
+    { kind: "codex", command: process.env.LARK_CHANNEL_CODEX_BIN ?? "codex" },
+    { kind: "agy", command: process.env.LARK_CHANNEL_AGY_BIN ?? "agy" }
   ];
   const detected = [];
   for (const candidate of candidates) {
@@ -1213,7 +1214,7 @@ async function acquireRuntimeLock(meta) {
 function isRuntimeLockMeta(value) {
   if (!value || typeof value !== "object") return false;
   const meta = value;
-  return (meta.kind === "profile" || meta.kind === "app") && typeof meta.target === "string" && typeof meta.profile === "string" && (meta.agentKind === "claude" || meta.agentKind === "codex") && typeof meta.pid === "number" && typeof meta.startedAt === "string" && (meta.appId === void 0 || typeof meta.appId === "string");
+  return (meta.kind === "profile" || meta.kind === "app") && typeof meta.target === "string" && typeof meta.profile === "string" && (meta.agentKind === "claude" || meta.agentKind === "codex" || meta.agentKind === "agy") && typeof meta.pid === "number" && typeof meta.startedAt === "string" && (meta.appId === void 0 || typeof meta.appId === "string");
 }
 
 // src/runtime/registry.ts
@@ -1221,7 +1222,7 @@ var EMPTY = { entries: [] };
 function isValidEntry(e) {
   if (!e || typeof e !== "object") return false;
   const x = e;
-  return typeof x.id === "string" && typeof x.pid === "number" && typeof x.appId === "string" && (x.tenant === "feishu" || x.tenant === "lark") && typeof x.profileName === "string" && (x.agentKind === "claude" || x.agentKind === "codex") && typeof x.configPath === "string" && typeof x.startedAt === "string" && typeof x.version === "string";
+  return typeof x.id === "string" && typeof x.pid === "number" && typeof x.appId === "string" && (x.tenant === "feishu" || x.tenant === "lark") && typeof x.profileName === "string" && (x.agentKind === "claude" || x.agentKind === "codex" || x.agentKind === "agy") && typeof x.configPath === "string" && typeof x.startedAt === "string" && typeof x.version === "string";
 }
 function isAlive(pid) {
   try {
@@ -1799,7 +1800,7 @@ async function pathExists(path) {
   }
 }
 function agentKindFromString(value) {
-  if (value === "claude" || value === "codex") return value;
+  if (value === "claude" || value === "codex" || value === "agy") return value;
   if (value === void 0) return void 0;
   throw new Error(`unsupported agent: ${value}`);
 }
@@ -3614,7 +3615,7 @@ async function resolveProfileRuntime(opts) {
   if (!profile2 && opts.allowBootstrap) {
     const detected = await detectInstalledAgents();
     if (detected.length === 0) {
-      throw new Error("no supported local agent found; install claude or codex first");
+      throw new Error("no supported local agent found; install claude, codex, or agy first");
     }
     if (detected.length > 1) {
       const selected = await selectDetectedAgent(detected, opts.selectAgent);
@@ -4010,7 +4011,9 @@ var UserCancelledError = class extends Error {
   }
 };
 function displayAgentKind(kind) {
-  return kind === "claude" ? "Claude Code" : "Codex CLI";
+  if (kind === "claude") return "Claude Code";
+  if (kind === "codex") return "Codex CLI";
+  return "Antigravity CLI";
 }
 async function maybeMigrateRootPlaintextSecret(rootConfig, profile2, appPaths2, configPath) {
   const cfg = runtimeProfileConfig(rootConfig, profile2);
@@ -5748,7 +5751,7 @@ function agentDisplay(agentKind) {
 // src/cli/commands/start.ts
 import dns from "dns";
 import os from "os";
-import { createInterface as createInterface7 } from "readline";
+import { createInterface as createInterface8 } from "readline";
 
 // src/agent/claude/adapter.ts
 import { tmpdir as tmpdir2 } from "os";
@@ -10434,11 +10437,382 @@ function isWindowsCommandNotFoundLine2(line) {
   return process.platform === "win32" && /is not recognized as an internal or external command|operable program or batch file/i.test(line);
 }
 
+// src/agent/agy/adapter.ts
+import { tmpdir as tmpdir3 } from "os";
+import { join as join21 } from "path";
+import { createInterface as createInterface5 } from "readline";
+
+// src/agent/agy/stream-json.ts
+function* translateEvent2(raw) {
+  if (!raw || typeof raw !== "object") return;
+  const evt = raw;
+  if (evt.type === "system" && evt.subtype === "init") {
+    yield {
+      type: "system",
+      sessionId: evt.session_id,
+      cwd: evt.cwd,
+      model: evt.model
+    };
+    return;
+  }
+  if (evt.type === "assistant" && evt.message?.content) {
+    for (const block of evt.message.content) {
+      if (block.type === "text" && typeof block.text === "string" && block.text) {
+        yield { type: "text", delta: block.text };
+      } else if (block.type === "thinking" && typeof block.thinking === "string" && block.thinking) {
+        yield { type: "thinking", delta: block.thinking };
+      } else if (block.type === "tool_use" && block.id && block.name) {
+        yield { type: "tool_use", id: block.id, name: block.name, input: block.input };
+      }
+    }
+    return;
+  }
+  if (evt.type === "user" && evt.message?.content) {
+    for (const block of evt.message.content) {
+      if (block.type === "tool_result" && block.tool_use_id) {
+        const output = typeof block.content === "string" ? block.content : JSON.stringify(block.content);
+        yield {
+          type: "tool_result",
+          id: block.tool_use_id,
+          output,
+          isError: block.is_error === true
+        };
+      }
+    }
+    return;
+  }
+  if (evt.type === "result") {
+    if (evt.usage) {
+      yield {
+        type: "usage",
+        inputTokens: evt.usage.input_tokens,
+        outputTokens: evt.usage.output_tokens,
+        cachedInputTokens: evt.usage.cache_read_input_tokens,
+        costUsd: evt.total_cost_usd
+      };
+    }
+    yield { type: "done", sessionId: evt.session_id, terminationReason: "normal" };
+  }
+}
+
+// src/agent/agy/adapter.ts
+var AgyAdapter = class {
+  id = "agy";
+  displayName = "Antigravity CLI";
+  tmux;
+  binary;
+  larkChannel;
+  sessionMode;
+  liveUsePty;
+  liveTerminalBackend;
+  liveIdleMs;
+  liveSessions = new LiveSessionPool();
+  tmuxBindings;
+  constructor(opts = {}) {
+    this.binary = opts.binary ?? process.env.LARK_CHANNEL_AGY_BIN ?? "agy";
+    this.larkChannel = opts.larkChannel;
+    this.sessionMode = opts.sessionMode ?? "turn";
+    this.liveUsePty = opts.liveUsePty;
+    this.liveTerminalBackend = opts.liveTerminalBackend;
+    this.liveIdleMs = opts.liveIdleMs;
+    const profileStateDir = opts.profileStateDir ?? join21(tmpdir3(), `arg-bridge-${process.pid}-agy`);
+    this.tmuxBindings = new TmuxBindingController(
+      profileStateDir,
+      opts.larkChannel?.profile ?? "agy",
+      "agy"
+    );
+    this.tmux = {
+      list: (socket) => this.tmuxBindings.list(socket),
+      bind: async (scopeId, selector) => {
+        const target = await this.tmuxBindings.bind(scopeId, selector);
+        await this.liveSessions.close(scopeId, "tmux-bind");
+        return target;
+      },
+      unbind: async (scopeId) => {
+        const removed = await this.tmuxBindings.unbind(scopeId);
+        if (removed) await this.liveSessions.close(scopeId, "tmux-unbind");
+        return removed;
+      },
+      status: (scopeId, cwd) => this.tmuxStatus(scopeId, cwd),
+      tail: async (scopeId, lineCount, cwd) => {
+        const terminal = tmuxTerminalForStatus3(await this.tmuxStatus(scopeId, cwd));
+        return captureTmuxPaneTail(terminal, lineCount);
+      },
+      restoreArtifactDelivery: (scopeId, artifact) => this.tmuxBindings.restoreManagedArtifactDelivery(scopeId, artifact)
+    };
+  }
+  setBotIdentity(_identity) {
+  }
+  async tmuxStatus(scopeId, cwd) {
+    const binding = await this.tmuxBindings.status(scopeId);
+    if (binding.state !== "none") return binding;
+    const terminal = this.liveSessions.terminalInfo(scopeId);
+    if (terminal?.attachCommand && terminal.socketPath && terminal.target) {
+      return {
+        state: terminal.ownership === "external" ? "external" : "managed",
+        terminal: {
+          socketPath: terminal.socketPath,
+          target: terminal.target,
+          attachCommand: terminal.attachCommand,
+          ownership: terminal.ownership ?? "managed"
+        }
+      };
+    }
+    return this.tmuxBindings.managedStatus(scopeId, cwd);
+  }
+  async isAvailable() {
+    return (await this.checkAvailability()).ok;
+  }
+  async checkAvailability() {
+    return checkAgentAvailability({
+      agentId: "agy",
+      agentName: "Antigravity CLI",
+      command: this.binary,
+      binaryPath: this.binary
+    });
+  }
+  run(opts) {
+    if (!opts.cwd) {
+      throw new Error("cwd is required for AgyAdapter.run");
+    }
+    const sessionMode = opts.sessionMode ?? this.sessionMode;
+    if (sessionMode === "live") {
+      return this.runLive(opts);
+    }
+    const args = [
+      "-p",
+      "--output-format",
+      "stream-json",
+      "--dangerously-skip-permissions"
+    ];
+    if (opts.sessionId) args.push("--conversation", opts.sessionId);
+    if (opts.model) args.push("--model", opts.model);
+    if (opts.reasoningEffort) args.push("--effort", opts.reasoningEffort);
+    const child = spawnProcess(this.binary, args, {
+      cwd: opts.cwd,
+      env: mergeProcessEnv(
+        process.env,
+        withArtifactDeliveryEnv(buildLarkChannelEnv(this.larkChannel), opts.artifactDelivery)
+      ),
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    log.info("agent", "spawn", {
+      pid: child.pid ?? null,
+      cwd: opts.cwd ?? process.cwd(),
+      hasSession: Boolean(opts.sessionId),
+      promptChars: opts.prompt.length,
+      model: opts.model
+    });
+    const stderrChunks = [];
+    let runtimeError = null;
+    let stderrBuffer = "";
+    child.stderr.on("data", (chunk) => {
+      stderrChunks.push(chunk);
+      stderrBuffer += chunk.toString("utf8");
+      let nl = stderrBuffer.indexOf("\n");
+      while (nl !== -1) {
+        const line = stderrBuffer.slice(0, nl);
+        stderrBuffer = stderrBuffer.slice(nl + 1);
+        if (line.trim()) log.warn("agent", "stderr", { line });
+        if (isWindowsCommandNotFoundLine3(line)) {
+          runtimeError = new Error(`failed to spawn agy: ${line.trim()}`);
+          child.stdout.destroy();
+          child.kill();
+        }
+        nl = stderrBuffer.indexOf("\n");
+      }
+    });
+    child.on("error", (err) => {
+      runtimeError = err;
+    });
+    child.on("exit", (code, signal) => {
+      log.info("agent", "exit", { pid: child.pid ?? null, code, signal });
+    });
+    child.stdin.on("error", (err) => {
+      log.warn("agent", "stdin-error", { message: err.message });
+    });
+    const events = createEventStream3(child, stderrChunks, () => runtimeError);
+    child.stdin.end(opts.prompt, "utf8");
+    const stopGraceMs = opts.stopGraceMs ?? 5e3;
+    return {
+      runId: opts.runId,
+      events,
+      async stop() {
+        if (child.exitCode !== null || child.signalCode !== null) return;
+        log.info("agent", "stop-sigterm", { pid: child.pid ?? null, graceMs: stopGraceMs });
+        child.kill("SIGTERM");
+        await new Promise((resolve5) => {
+          const timer = setTimeout(() => {
+            if (child.exitCode === null && child.signalCode === null) {
+              log.warn("agent", "stop-sigkill", {
+                pid: child.pid ?? null,
+                graceMs: stopGraceMs,
+                reason: "grace-period-expired"
+              });
+              child.kill("SIGKILL");
+            }
+            resolve5();
+          }, stopGraceMs);
+          child.once("exit", () => {
+            clearTimeout(timer);
+            resolve5();
+          });
+        });
+      },
+      waitForExit(timeoutMs) {
+        if (child.exitCode !== null || child.signalCode !== null) {
+          return Promise.resolve(true);
+        }
+        return new Promise((resolve5) => {
+          const onExit = () => {
+            clearTimeout(timer);
+            resolve5(true);
+          };
+          const timer = setTimeout(() => {
+            child.removeListener("exit", onExit);
+            resolve5(false);
+          }, timeoutMs);
+          child.once("exit", onExit);
+        });
+      }
+    };
+  }
+  async shutdown() {
+    await this.liveSessions.detachAll();
+  }
+  runLive(opts) {
+    if (!opts.cwd) {
+      throw new Error("cwd is required for AgyAdapter.run");
+    }
+    const args = ["--dangerously-skip-permissions"];
+    if (opts.model) args.push("--model", opts.model);
+    if (opts.reasoningEffort) args.push("--effort", opts.reasoningEffort);
+    const signature = JSON.stringify({
+      cwd: opts.cwd,
+      model: opts.model ?? null,
+      effort: opts.reasoningEffort ?? null
+    });
+    const scopeKey = opts.scopeId ?? opts.cwd;
+    const tmuxTarget = this.tmuxBindings.bindingFor(scopeKey, opts.cwd);
+    const liveSignature = `${signature}:${tmuxTarget ? `${tmuxTarget.socketPath}:${tmuxTarget.paneId}` : "managed"}`;
+    const managedTerminal = tmuxTarget ? void 0 : this.tmuxBindings.managedTerminalFor(scopeKey, opts.cwd, liveSignature);
+    const session = this.liveSessions.getOrCreate(scopeKey, {
+      command: this.binary,
+      args,
+      cwd: opts.cwd,
+      env: withArtifactDeliveryEnv(buildLarkChannelEnv(this.larkChannel), opts.artifactDelivery),
+      signature: liveSignature,
+      usePty: this.liveUsePty,
+      backend: this.liveTerminalBackend ?? "tmux",
+      idleMs: this.liveIdleMs,
+      tmuxSessionName: this.tmuxBindings.managedSessionName(scopeKey),
+      tmuxProfile: this.larkChannel?.profile ?? "agy",
+      tmuxScopeId: scopeKey,
+      tmuxAgentKind: "agy",
+      tmuxManagedTerminal: managedTerminal,
+      tmuxTarget,
+      onTerminal: async (terminal) => {
+        if (tmuxTarget || terminal.backend !== "tmux" || terminal.ownership !== "managed" || !terminal.socketPath || !terminal.sessionName || !terminal.attachCommand)
+          return;
+        await this.tmuxBindings.rememberManaged(scopeKey, opts.cwd, liveSignature, {
+          socketPath: terminal.socketPath,
+          sessionName: terminal.sessionName,
+          attachCommand: terminal.attachCommand
+        });
+      }
+    });
+    return session.run(opts.runId, opts.prompt, opts.cwd, opts.liveInputMode);
+  }
+};
+function tmuxTerminalForStatus3(status) {
+  if (status.state === "invalid") {
+    throw new Error(status.message ?? "\u5F53\u524D tmux \u7ED1\u5B9A\u5DF2\u5931\u6548");
+  }
+  if (status.terminal) return status.terminal;
+  if (status.target) {
+    return {
+      socketPath: status.target.socketPath,
+      target: status.target.paneId,
+      attachCommand: status.target.attachCommand,
+      ownership: status.target.ownership
+    };
+  }
+  throw new Error("\u5F53\u524D scope \u5C1A\u672A\u521B\u5EFA\u6216\u7ED1\u5B9A tmux terminal");
+}
+function createEventStream3(child, stderrChunks, getError) {
+  const events = new AsyncEventQueue();
+  if (!child.pid) {
+    const err = getError();
+    queueMicrotask(() => {
+      events.push({
+        type: "error",
+        message: err ? `failed to spawn agy: ${err.message}` : "spawn returned no pid",
+        terminationReason: "failed"
+      });
+      events.close();
+    });
+    return events;
+  }
+  const rl = createInterface5({ input: child.stdout, crlfDelay: Infinity });
+  let outputClosed = false;
+  let exitCode = null;
+  let exited = false;
+  let finalized = false;
+  const finalize = () => {
+    if (finalized || !outputClosed || !exited) return;
+    finalized = true;
+    const runtimeError = getError();
+    if (exitCode !== 0 && exitCode !== null) {
+      const stderr = Buffer.concat(stderrChunks).toString("utf8").trim();
+      const detail = stderr ? `: ${stderr.slice(0, 500)}` : "";
+      events.push({
+        type: "error",
+        message: `agy exited with code ${exitCode}${detail}`,
+        terminationReason: "failed"
+      });
+    } else if (runtimeError) {
+      events.push({
+        type: "error",
+        message: `agy runtime error: ${runtimeError.message}`,
+        terminationReason: "failed"
+      });
+    }
+    events.close();
+  };
+  rl.on("line", (line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
+    try {
+      for (const event of translateEvent2(JSON.parse(trimmed))) events.push(event);
+    } catch {
+    }
+  });
+  rl.once("close", () => {
+    outputClosed = true;
+    finalize();
+  });
+  child.once("exit", (code) => {
+    exitCode = code;
+    exited = true;
+    finalize();
+  });
+  child.once("error", () => {
+    if (child.stdout.readableEnded) {
+      outputClosed = true;
+      finalize();
+    }
+  });
+  return events;
+}
+function isWindowsCommandNotFoundLine3(line) {
+  return process.platform === "win32" && /is not recognized as an internal or external command|operable program or batch file/i.test(line);
+}
+
 // src/bot/channel.ts
 import { createLarkChannel } from "@larksuite/channel";
 import { createHash as createHash8 } from "crypto";
 import { homedir as homedir8 } from "os";
-import { dirname as dirname20, join as join24 } from "path";
+import { dirname as dirname20, join as join25 } from "path";
 
 // src/agent/bridge-system-prompt.ts
 var BRIDGE_SYSTEM_PROMPT = `# arg-bridge \u8FD0\u884C\u7EA6\u5B9A
@@ -10632,6 +11006,23 @@ function codexCapability(profile2) {
     }
   };
 }
+function agyCapability(profile2) {
+  const maxAccess = profile2?.permissions.maxAccess ?? "full";
+  return {
+    agentId: "agy",
+    sessionKind: "agy-session",
+    promptInjection: "append-system-prompt",
+    systemPrompt: BRIDGE_SYSTEM_PROMPT,
+    supportsNativeHistory: true,
+    callback: {
+      marker: "__bridge_cb",
+      legacyMarkers: ["__agy_cb"]
+    },
+    permissions: {
+      maxAccess
+    }
+  };
+}
 
 // src/bridge-agent/router.ts
 import { createHash as createHash3 } from "crypto";
@@ -10748,6 +11139,12 @@ var CODEX_MODELS = [
   { value: "gpt-5", label: "GPT-5" },
   { value: "o3", label: "o3" }
 ];
+var AGY_MODELS = [
+  { value: DEFAULT_MODEL, label: "\u8DDF\u968F\u9ED8\u8BA4\uFF08\u4E0D\u6307\u5B9A\uFF09" },
+  { value: "gemini-3.6-flash", label: "Gemini 3.6 Flash" },
+  { value: "gemini-3.6-pro", label: "Gemini 3.6 Pro" },
+  { value: "claude-3-7-sonnet", label: "Claude 3.7 Sonnet" }
+];
 var CODEX_MODEL_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/iu;
 function isCodexModelId(value) {
   return Boolean(
@@ -10755,7 +11152,9 @@ function isCodexModelId(value) {
   );
 }
 function supportedModels(agentKind) {
-  return agentKind === "codex" ? CODEX_MODELS : CLAUDE_MODELS;
+  if (agentKind === "codex") return CODEX_MODELS;
+  if (agentKind === "agy") return AGY_MODELS;
+  return CLAUDE_MODELS;
 }
 function isDefaultModel(value) {
   return !value || value === DEFAULT_MODEL;
@@ -12661,8 +13060,8 @@ function finalizeIfRunning(state) {
 import { createReadStream } from "fs";
 import { readdir as readdir4, stat as stat6 } from "fs/promises";
 import { homedir as homedir6 } from "os";
-import { join as join21 } from "path";
-import { createInterface as createInterface5 } from "readline";
+import { join as join22 } from "path";
+import { createInterface as createInterface6 } from "readline";
 
 // src/session/preview.ts
 var DEFAULT_PREVIEW_MAX_CHARS = 80;
@@ -12700,7 +13099,7 @@ function encodeCwd(cwd) {
   return cwd.replace(/[^A-Za-z0-9]/g, "-");
 }
 function claudeProjectDir(cwd) {
-  return join21(homedir6(), ".claude", "projects", encodeCwd(cwd));
+  return join22(homedir6(), ".claude", "projects", encodeCwd(cwd));
 }
 async function listRecentSessions(cwd, limit = 5) {
   const dir = claudeProjectDir(cwd);
@@ -12714,7 +13113,7 @@ async function listRecentSessions(cwd, limit = 5) {
   const jsonls = files.filter((f) => f.endsWith(".jsonl"));
   const withStats = await Promise.all(
     jsonls.map(async (f) => {
-      const path = join21(dir, f);
+      const path = join22(dir, f);
       try {
         const st = await stat6(path);
         return { file: f, path, mtime: st.mtimeMs };
@@ -12734,7 +13133,7 @@ async function listRecentSessions(cwd, limit = 5) {
 }
 async function summarize(path) {
   const stream2 = createReadStream(path, { encoding: "utf8" });
-  const rl = createInterface5({ input: stream2 });
+  const rl = createInterface6({ input: stream2 });
   let preview2 = "";
   let lineCount = 0;
   try {
@@ -12784,8 +13183,8 @@ function formatRelTime(mtime) {
 }
 
 // src/session/codex-history.ts
-import { createInterface as createInterface6 } from "readline";
-import { join as join22 } from "path";
+import { createInterface as createInterface7 } from "readline";
+import { join as join23 } from "path";
 var CodexHistoryError = class extends Error {
   code;
   constructor(code, message, options) {
@@ -12808,7 +13207,7 @@ async function listCodexThreadHistory(options) {
   const stderrChunks = [];
   let settled = false;
   const result = await new Promise((resolve5, reject4) => {
-    const rl = createInterface6({ input: child.stdout, crlfDelay: Infinity });
+    const rl = createInterface7({ input: child.stdout, crlfDelay: Infinity });
     let timer;
     const fail = (err) => {
       if (settled) return;
@@ -12900,7 +13299,7 @@ function spawnCodexAppServer(options) {
   if (options.codexHome) {
     envOverrides.CODEX_HOME = options.codexHome;
   } else if (options.inheritCodexHome === false) {
-    envOverrides.CODEX_HOME = join22(options.profileStateDir, "codex-home");
+    envOverrides.CODEX_HOME = join23(options.profileStateDir, "codex-home");
   }
   return spawnProcess(options.binary, ["app-server", "--listen", "stdio://"], {
     env: mergeProcessEnv(process.env, envOverrides),
@@ -14272,7 +14671,7 @@ async function handleDoctor(args, ctx) {
     return;
   }
   doctorLastByOperator.set(rateKey, now);
-  const capability = ctx.controls.profileConfig.agentKind === "codex" ? codexCapability(ctx.controls.profileConfig) : claudeCapability(ctx.controls.profileConfig);
+  const capability = ctx.controls.profileConfig.agentKind === "codex" ? codexCapability(ctx.controls.profileConfig) : ctx.controls.profileConfig.agentKind === "agy" ? agyCapability(ctx.controls.profileConfig) : claudeCapability(ctx.controls.profileConfig);
   const policy = evaluateRunPolicy({
     scope: {
       source: "im",
@@ -15175,7 +15574,7 @@ async function commandSessionCatalogIdentity(input) {
   if (!requestedCwd) return void 0;
   const workspace = await resolveWorkingDirectory(requestedCwd);
   if (!workspace.ok) return void 0;
-  const capability = input.controls.profileConfig.agentKind === "codex" ? codexCapability(input.controls.profileConfig) : claudeCapability(input.controls.profileConfig);
+  const capability = input.controls.profileConfig.agentKind === "codex" ? codexCapability(input.controls.profileConfig) : input.controls.profileConfig.agentKind === "agy" ? agyCapability(input.controls.profileConfig) : claudeCapability(input.controls.profileConfig);
   const policy = evaluateRunPolicy({
     scope: {
       source: "im",
@@ -15923,7 +16322,7 @@ function footerLine(status) {
 import { createHash as createHash5 } from "crypto";
 import { createReadStream as createReadStream2 } from "fs";
 import { mkdir as mkdir14, readdir as readdir5, rename as rename4, rm as rm11, stat as stat7 } from "fs/promises";
-import { join as join23 } from "path";
+import { join as join24 } from "path";
 
 // src/media/attachment.ts
 var DEFAULT_POLICY = {
@@ -16059,7 +16458,7 @@ var MediaCache = class {
       return null;
     }
     const kind = r.type;
-    const tmpPath = join23(
+    const tmpPath = join24(
       this.rootDir,
       `.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`
     );
@@ -16073,7 +16472,7 @@ var MediaCache = class {
     const hash = await hashFile(tmpPath);
     const mime = contentType ?? defaultMime(kind);
     const ext = safeExtensionForMime(mime);
-    const absPath = join23(this.rootDir, `${hash}.${ext}`);
+    const absPath = join24(this.rootDir, `${hash}.${ext}`);
     try {
       await stat7(absPath);
       await rm11(tmpPath, { force: true });
@@ -16136,7 +16535,7 @@ async function listFiles(root) {
   const out = [];
   const entries = await readdir5(root, { withFileTypes: true }).catch(() => []);
   for (const entry of entries) {
-    const full = join23(root, entry.name);
+    const full = join24(root, entry.name);
     if (entry.isDirectory()) {
       out.push(...await listFiles(full));
     } else if (entry.isFile()) {
@@ -16791,7 +17190,7 @@ async function startRunFlow(input) {
         resumeFrom = threadId;
       }
     }
-    if (!resumeFrom && input.capability.agentId === "claude") {
+    if (!resumeFrom && (input.capability.agentId === "claude" || input.capability.agentId === "agy")) {
       resumeFrom = input.sessions.resumeFor(input.scopeId, workspace.cwdRealpath);
       sessionId = resumeFrom;
       const stale = input.sessions.getRaw(input.scopeId);
@@ -16845,12 +17244,12 @@ function resolveCodexReasoningEffort(value) {
 }
 function recordRunSessionEvent(input) {
   if (input.event.type !== "system") return;
-  if (input.capability.agentId === "claude" && input.event.sessionId) {
+  if ((input.capability.agentId === "claude" || input.capability.agentId === "agy") && input.event.sessionId) {
     const cwdRealpath = input.event.cwd ?? input.policy.cwdRealpath;
     input.sessions.set(input.scopeId, input.event.sessionId, cwdRealpath);
     input.sessionCatalog?.upsertActive({
       scopeId: input.scopeId,
-      agentId: "claude",
+      agentId: input.capability.agentId,
       cwdRealpath,
       policyFingerprint: input.policy.policyFingerprint,
       sessionId: input.event.sessionId
@@ -18632,7 +19031,7 @@ function stringifyArgs(args) {
 }
 function expandHomeDirectory(path) {
   if (path === "~") return homedir8();
-  return path.startsWith("~/") ? join24(homedir8(), path.slice(2)) : path;
+  return path.startsWith("~/") ? join25(homedir8(), path.slice(2)) : path;
 }
 async function startChannel(deps) {
   const { cfg, agent, sessions, sessionCatalog, workspaces, controls } = deps;
@@ -18642,10 +19041,10 @@ async function startChannel(deps) {
   const pool = new ProcessPool(() => getMaxConcurrentRuns(controls.cfg));
   const executor = new RunExecutor({ agent, pool, activeRuns });
   const appSecret = await resolveAppSecret(cfg, deps.appPaths);
-  const callbackNonceStore = deps.appPaths?.mediaDir ? new CallbackNonceStore(join24(dirname20(deps.appPaths.mediaDir), "callback-nonces.json")) : void 0;
+  const callbackNonceStore = deps.appPaths?.mediaDir ? new CallbackNonceStore(join25(dirname20(deps.appPaths.mediaDir), "callback-nonces.json")) : void 0;
   await callbackNonceStore?.load();
   const inboundMessages = new InboundMessageLedger(
-    deps.appPaths?.mediaDir ? join24(dirname20(deps.appPaths.mediaDir), "inbound-message-ledger.json") : void 0
+    deps.appPaths?.mediaDir ? join25(dirname20(deps.appPaths.mediaDir), "inbound-message-ledger.json") : void 0
   );
   await inboundMessages.load();
   const callbackAuth = callbackNonceStore ? new CallbackAuth({
@@ -18732,10 +19131,10 @@ async function startChannel(deps) {
   const media = new MediaCache(channel, deps.appPaths?.mediaDir);
   const artifactStateDir = deps.appPaths?.mediaDir ? dirname20(deps.appPaths.mediaDir) : void 0;
   const artifactBroker = new ArtifactBroker(
-    join24(artifactStateDir ?? join24(process.cwd(), ".arg-bridge-media"), "artifact-broker.sock"),
+    join25(artifactStateDir ?? join25(process.cwd(), ".arg-bridge-media"), "artifact-broker.sock"),
     channel,
     allowLocalFileRoot,
-    artifactStateDir ? join24(artifactStateDir, "artifact-grants.json") : void 0
+    artifactStateDir ? join25(artifactStateDir, "artifact-grants.json") : void 0
   );
   await artifactBroker.start();
   if (agent.tmux?.restoreArtifactDelivery) {
@@ -19157,7 +19556,7 @@ function rewriteAgentCommandMessage(msg, agentKind) {
   if (!match) return { msg, forceNative: false };
   const target = match[1]?.toLowerCase();
   const rest = match[2] ?? "";
-  const aliases = agentKind === "claude" ? /* @__PURE__ */ new Set(["claude", "claude-code", "claudecode"]) : /* @__PURE__ */ new Set(["codex", "codex-cli", "codexcli"]);
+  const aliases = agentKind === "claude" ? /* @__PURE__ */ new Set(["claude", "claude-code", "claudecode"]) : agentKind === "agy" ? /* @__PURE__ */ new Set(["agy", "antigravity", "antigravity-cli"]) : /* @__PURE__ */ new Set(["codex", "codex-cli", "codexcli"]);
   if (!target || !aliases.has(target)) return { msg, forceNative: false };
   const normalized = normalizeAgentPrefixedNativeInput(rest.trim() ? rest : "/status");
   return {
@@ -19346,7 +19745,7 @@ async function runAgentBatch(deps) {
     actorId: firstMsg.senderId,
     ...threadId ? { threadId } : {}
   };
-  const capability = controls.profileConfig.agentKind === "codex" ? codexCapability(controls.profileConfig) : claudeCapability(controls.profileConfig);
+  const capability = controls.profileConfig.agentKind === "codex" ? codexCapability(controls.profileConfig) : controls.profileConfig.agentKind === "agy" ? agyCapability(controls.profileConfig) : claudeCapability(controls.profileConfig);
   const artifactGrant = artifactBroker.issue({
     scope,
     chatId,
@@ -21498,6 +21897,15 @@ function createRuntimeAgent(profileConfig, appPaths2) {
       liveTerminalBackend: "tmux"
     });
   }
+  if (profileConfig.agentKind === "agy") {
+    return new AgyAdapter({
+      binary: process.env.LARK_CHANNEL_AGY_BIN ?? "agy",
+      profileStateDir: appPaths2.profileDir,
+      larkChannel,
+      sessionMode: profileConfig.preferences?.agentSessionMode === "turn" ? "turn" : "live",
+      liveTerminalBackend: "tmux"
+    });
+  }
   return new ClaudeAdapter({
     profileStateDir: appPaths2.profileDir,
     larkChannel,
@@ -21521,7 +21929,7 @@ async function resolveConflict(conflicts) {
     );
     return false;
   }
-  const rl = createInterface7({ input: process.stdin, output: process.stdout });
+  const rl = createInterface8({ input: process.stdin, output: process.stdout });
   const ask = (q) => new Promise((resolve5) => rl.question(q, resolve5));
   try {
     const verb = conflicts.length > 1 ? "\u5B83\u4EEC" : "\u90A3\u4E2A";
@@ -21574,7 +21982,7 @@ async function confirmStopRuntimeLockProcess2(err) {
       `\u5F53\u524D ${err.kind === "profile" ? "profile" : "app"} \u5DF2\u6709 bridge \u8FDB\u7A0B\u5360\u7528\uFF1B\u975E\u4EA4\u4E92\u6A21\u5F0F\u65E0\u6CD5\u786E\u8BA4\u505C\u6B62\uFF0C\u8BF7\u5148\u7528 \`arg-bridge ps\` \u67E5\u770B\u5E76\u7528 \`arg-bridge kill <bot id>\` \u505C\u6B62\u540E\u91CD\u8BD5`
     );
   }
-  const rl = createInterface7({ input: process.stdin, output: process.stdout });
+  const rl = createInterface8({ input: process.stdin, output: process.stdout });
   try {
     const answer = (await new Promise(
       (resolve5) => rl.question("\u662F\u5426\u505C\u6B62\u65E7\u8FDB\u7A0B\u5E76\u91CD\u65B0\u542F\u52A8? [y/N]: ", resolve5)
@@ -21665,17 +22073,17 @@ function readTmuxSessionEnvironment(name, env) {
 // src/cli/index.ts
 var program = new Command();
 program.name("arg-bridge").description("Bridge Feishu/Lark messenger with local CLI coding agents").version(package_default.version, "-v, --version");
-program.command("run").description("Run the bridge in the foreground (was `start` in older versions)").option("-c, --config <path>", "path to config file").option("--profile <name>", "profile name to run").option("--agent <kind>", "agent kind for a new profile (claude or codex)").option("--workspace <path>", "initial working directory for first-run profile bootstrap").option("--app-id <id>", "use an existing Lark/Feishu app instead of QR app creation").option("--app-secret <secret>", "App Secret for --app-id; prefer interactive input on shared machines").option("--tenant <tenant>", "tenant for --app-id (feishu or lark; default feishu)").option("--skip-check-lark-cli", "skip lark-cli pre-flight check (auto-install + bind)").action(async (opts) => {
+program.command("run").description("Run the bridge in the foreground (was `start` in older versions)").option("-c, --config <path>", "path to config file").option("--profile <name>", "profile name to run").option("--agent <kind>", "agent kind for a new profile (claude, codex, or agy)").option("--workspace <path>", "initial working directory for first-run profile bootstrap").option("--app-id <id>", "use an existing Lark/Feishu app instead of QR app creation").option("--app-secret <secret>", "App Secret for --app-id; prefer interactive input on shared machines").option("--tenant <tenant>", "tenant for --app-id (feishu or lark; default feishu)").option("--skip-check-lark-cli", "skip lark-cli pre-flight check (auto-install + bind)").action(async (opts) => {
   await runStart(opts);
 });
-program.command("migrate").description("Migrate legacy bridge config/state into the current profile layout").option("-c, --config <path>", "path to config file").option("--profile <name>", "target profile name for legacy v1 config migration").option("--agent <kind>", "agent kind for legacy v1 profile migration (claude or codex)").action(async (opts) => {
+program.command("migrate").description("Migrate legacy bridge config/state into the current profile layout").option("-c, --config <path>", "path to config file").option("--profile <name>", "target profile name for legacy v1 config migration").option("--agent <kind>", "agent kind for legacy v1 profile migration (claude, codex, or agy)").action(async (opts) => {
   await runMigrate(opts);
 });
 var profile = program.command("profile").description("Manage local bridge profiles");
 profile.command("list").description("List configured profiles").action(async () => {
   await runProfileList();
 });
-profile.command("create <name>").description("Create a profile from QR registration or existing app credentials").option("--agent <kind>", "agent kind (claude or codex)").option("--workspace <path>", "initial working directory for this profile").option("--app-id <id>", "use an existing Lark/Feishu app instead of QR app creation").option("--app-secret <secret>", "App Secret for --app-id; prefer interactive input on shared machines").option("--tenant <tenant>", "tenant for --app-id (feishu or lark; default feishu)").action(async (name, opts) => {
+profile.command("create <name>").description("Create a profile from QR registration or existing app credentials").option("--agent <kind>", "agent kind (claude, codex, or agy)").option("--workspace <path>", "initial working directory for this profile").option("--app-id <id>", "use an existing Lark/Feishu app instead of QR app creation").option("--app-secret <secret>", "App Secret for --app-id; prefer interactive input on shared machines").option("--tenant <tenant>", "tenant for --app-id (feishu or lark; default feishu)").action(async (name, opts) => {
   await runProfileCreate(name, opts);
 });
 profile.command("use <name>").description("Set the active profile").action(async (name) => {
@@ -21701,7 +22109,7 @@ program.command("kill <target>").description("Kill a running bridge process by s
 program.command("sendfile <path>").description("Ask the active bridge run to send one workspace-relative file").option("--caption <text>", "optional delivery note").action(async (path, opts) => {
   await runAgentSendFile(path, opts.caption);
 });
-program.command("start").description("Install (if needed) and start the bridge as an OS-managed daemon").option("--profile <name>", "profile name (defaults to active profile)").option("--agent <kind>", "agent kind for first-run profile bootstrap (claude or codex)").option("--workspace <path>", "initial working directory for first-run profile bootstrap").option("--app-id <id>", "use an existing Lark/Feishu app instead of QR app creation").option("--app-secret <secret>", "App Secret for --app-id; prefer interactive input on shared machines").option("--tenant <tenant>", "tenant for --app-id (feishu or lark; default feishu)").option("--skip-check-lark-cli", "skip lark-cli pre-flight check (auto-install + bind)").action(async (opts) => {
+program.command("start").description("Install (if needed) and start the bridge as an OS-managed daemon").option("--profile <name>", "profile name (defaults to active profile)").option("--agent <kind>", "agent kind for first-run profile bootstrap (claude, codex, or agy)").option("--workspace <path>", "initial working directory for first-run profile bootstrap").option("--app-id <id>", "use an existing Lark/Feishu app instead of QR app creation").option("--app-secret <secret>", "App Secret for --app-id; prefer interactive input on shared machines").option("--tenant <tenant>", "tenant for --app-id (feishu or lark; default feishu)").option("--skip-check-lark-cli", "skip lark-cli pre-flight check (auto-install + bind)").action(async (opts) => {
   await runServiceStart(opts);
 });
 program.command("stop").description("Stop the OS-managed daemon (unload from launchd; plist stays)").option("--profile <name>", "profile name (defaults to active profile)").action(async (opts) => {
