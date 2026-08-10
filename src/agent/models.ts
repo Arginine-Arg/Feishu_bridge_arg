@@ -44,6 +44,14 @@ const CODEX_MODELS: ModelOption[] = [
   { value: 'o3', label: 'o3' },
 ];
 
+/** Antigravity CLI models. Forwarded to `agy --model`. */
+const AGY_MODELS: ModelOption[] = [
+  { value: DEFAULT_MODEL, label: '跟随默认（不指定）' },
+  { value: 'gemini-3.6-flash', label: 'Gemini 3.6 Flash' },
+  { value: 'gemini-3.6-pro', label: 'Gemini 3.6 Pro' },
+  { value: 'claude-3-7-sonnet', label: 'Claude 3.7 Sonnet' },
+];
+
 const CODEX_MODEL_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/iu;
 
 export function isCodexModelId(value: string | undefined): value is string {
@@ -57,7 +65,9 @@ export function isCodexModelId(value: string | undefined): value is string {
 
 /** The model picker options for a profile's agent kind. */
 export function supportedModels(agentKind: AgentKind): ModelOption[] {
-  return agentKind === 'codex' ? CODEX_MODELS : CLAUDE_MODELS;
+  if (agentKind === 'codex') return CODEX_MODELS;
+  if (agentKind === 'agy') return AGY_MODELS;
+  return CLAUDE_MODELS;
 }
 
 /** True when the selection means "use the agent default" (no `--model`). */

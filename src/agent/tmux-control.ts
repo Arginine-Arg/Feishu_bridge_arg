@@ -11,7 +11,7 @@ import { spawnProcessSync } from '../platform/spawn';
 import { resolveWorkingDirectory } from '../policy/workspace';
 import type { ArtifactDeliveryEnv } from './lark-channel-env';
 
-export type TmuxAgentKind = 'codex' | 'claude';
+export type TmuxAgentKind = 'codex' | 'claude' | 'agy';
 export type TmuxOwnership = 'managed' | 'external';
 
 export interface TmuxPaneTarget {

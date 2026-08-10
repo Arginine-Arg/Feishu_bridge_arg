@@ -7,7 +7,7 @@ import { createLarkChannel } from '@larksuite/channel';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { claudeCapability, codexCapability } from '../agent/capability';
+import { claudeCapability, codexCapability, agyCapability } from '../agent/capability';
 import { BridgeAgent, createBridgeAgentFromEnvironment } from '../bridge-agent';
 import {
   isCodexModelId,
@@ -394,7 +394,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         // preserving their FIFO order.
         const runBatches = splitNativeLiveBatches(
           batch,
-          getAgentSessionMode(controls.cfg) === 'live',
+          getAgentSessionMode(controls.cfg, controls.profileConfig.agentKind) === 'live',
         );
         if (runBatches.length > 1) {
           log.info('flush', 'split-native-live-batch', {
@@ -846,7 +846,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   // be inside a picker. Ordinary chat stays on turn-mode runs instead of being
   // typed into a TUI.
   const nativeInputActive =
-    pickerActive || getAgentSessionMode(controls.cfg) === 'live';
+    pickerActive || getAgentSessionMode(controls.cfg, controls.profileConfig.agentKind) === 'live';
   // Native controls are a separate control plane.  They must never pass
   // through prompt batching just because an earlier picker card expired or a
   // bridge restart lost its in-memory picker flag.
@@ -922,7 +922,7 @@ export function commandPreservesPendingMessages(content: string): boolean {
 
 export function rewriteAgentCommandMessage(
   msg: NormalizedMessage,
-  agentKind: 'claude' | 'codex',
+  agentKind: 'claude' | 'codex' | 'agy',
 ): AgentCommandRoute {
   const trimmed = msg.content.trimStart();
   const match = /^\/([A-Za-z][A-Za-z0-9_-]*)(?:\s+([\s\S]+))?$/.exec(trimmed);
@@ -932,7 +932,9 @@ export function rewriteAgentCommandMessage(
   const aliases =
     agentKind === 'claude'
       ? new Set(['claude', 'claude-code', 'claudecode'])
-      : new Set(['codex', 'codex-cli', 'codexcli']);
+      : agentKind === 'agy'
+        ? new Set(['agy', 'antigravity', 'antigravity-cli'])
+        : new Set(['codex', 'codex-cli', 'codexcli']);
   if (!target || !aliases.has(target)) return { msg, forceNative: false };
   const normalized = normalizeAgentPrefixedNativeInput(rest.trim() ? rest : '/status');
   return {
@@ -1139,7 +1141,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
 
   const nativeCommand = nativeAgentCommandForBatch(batch);
   const forceLiveSession = batch.some(isForceLiveAgentCommandMessage);
-  const useLiveSession = forceLiveSession || getAgentSessionMode(controls.cfg) === 'live';
+  const useLiveSession = forceLiveSession || getAgentSessionMode(controls.cfg, controls.profileConfig.agentKind) === 'live';
   if (useLiveSession && !nativeCommand && liveInteractionByScope.delete(scope)) {
     // A normal user task supersedes an abandoned native picker. The live
     // terminal will press Escape before typing this task; clear the bridge's
@@ -1201,7 +1203,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const capability =
     controls.profileConfig.agentKind === 'codex'
       ? codexCapability(controls.profileConfig)
-      : claudeCapability(controls.profileConfig);
+      : controls.profileConfig.agentKind === 'agy'
+        ? agyCapability(controls.profileConfig)
+        : claudeCapability(controls.profileConfig);
   // Allocate a token before spawning so it can be injected into the agent
   // process. It is activated with the verified workspace root immediately
   // after run-policy resolution succeeds.

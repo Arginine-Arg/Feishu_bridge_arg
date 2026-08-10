@@ -244,9 +244,10 @@ export function getMessageReplyMode(cfg: AppConfig): MessageReplyMode {
   return 'markdown';
 }
 
-export function getAgentSessionMode(cfg: AppConfig): AgentSessionMode {
+export function getAgentSessionMode(cfg: AppConfig, agentKind?: string): AgentSessionMode {
   const raw = cfg.preferences?.agentSessionMode;
-  return raw === 'turn' ? 'turn' : 'live';
+  if (raw) return raw;
+  return agentKind === 'codex' ? 'live' : 'turn';
 }
 
 /** Resolve the show-tool-calls preference with default fallback. */

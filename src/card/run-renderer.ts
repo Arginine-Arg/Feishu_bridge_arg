@@ -374,8 +374,40 @@ function panelHeader(titleMd: string): object {
   };
 }
 
+function sanitizeMarkdownLocalImages(text: string): string {
+  // 1. Handle complete non-http(s) image markdown: ![alt](path)
+  let result = text.replace(
+    /!\[([^\]]*)\]\((?!https?:\/\/)([^)]+)\)/gu,
+    (_match, alt, fullPath) => {
+      const fileName = fullPath.trim().split(/[/\\]/).pop() || fullPath;
+      const label = alt.trim() || fileName;
+      return `🖼️ **[本地图片: ${label}]** *(请用 \`arg-bridge sendfile "${fileName}"\` 转换为飞书附件发送)*`;
+    },
+  );
+
+  // 2. Handle trailing incomplete image markdown during streaming: ![alt](...
+  result = result.replace(
+    /!\[([^\]]*)\]\((?!https?:\/\/)([^)]*)$/gu,
+    (_match, alt, partialPath) => {
+      const fileName = partialPath.trim().split(/[/\\]/).pop() || partialPath || '图片处理中';
+      const label = alt.trim() || fileName;
+      return `🖼️ **[本地图片: ${label}...]**`;
+    },
+  );
+
+  // 3. Handle trailing bare unclosed image tag during streaming: ![alt...
+  result = result.replace(
+    /!\[([^\]]*)$/gu,
+    (_match, alt) => {
+      return `🖼️ **[图片: ${alt.trim()}...]**`;
+    },
+  );
+
+  return result;
+}
+
 function markdown(content: string): object {
-  return { tag: 'markdown', content };
+  return { tag: 'markdown', content: sanitizeMarkdownLocalImages(content) };
 }
 
 function noteMd(content: string): object {

@@ -4,6 +4,7 @@ import { createInterface } from 'node:readline';
 import pkg from '../../../package.json';
 import { ClaudeAdapter } from '../../agent/claude/adapter';
 import { CodexAdapter } from '../../agent/codex/adapter';
+import { AgyAdapter } from '../../agent/agy/adapter';
 import {
   AgentPreflightError,
   formatAgentPreflightDiagnostic,
@@ -446,10 +447,19 @@ export function createRuntimeAgent(
       liveTerminalBackend: 'tmux',
     });
   }
+  if (profileConfig.agentKind === 'agy') {
+    return new AgyAdapter({
+      binary: process.env.LARK_CHANNEL_AGY_BIN ?? 'agy',
+      profileStateDir: appPaths.profileDir,
+      larkChannel,
+      sessionMode: profileConfig.preferences?.agentSessionMode === 'live' ? 'live' : 'turn',
+      liveTerminalBackend: 'tmux',
+    });
+  }
   return new ClaudeAdapter({
     profileStateDir: appPaths.profileDir,
     larkChannel,
-    sessionMode: profileConfig.preferences?.agentSessionMode === 'turn' ? 'turn' : 'live',
+    sessionMode: profileConfig.preferences?.agentSessionMode === 'live' ? 'live' : 'turn',
     liveTerminalBackend: 'tmux',
   });
 }
