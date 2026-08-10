@@ -21549,7 +21549,7 @@ var SessionCatalog = class {
 function normalizeEntry(input) {
   if (!input || typeof input !== "object") return void 0;
   const raw = input;
-  if (typeof raw.key !== "string" || typeof raw.scopeId !== "string" || raw.agentId !== "claude" && raw.agentId !== "codex" || typeof raw.cwdRealpath !== "string" || typeof raw.policyFingerprint !== "string" || raw.status !== "active" && raw.status !== "archived" || typeof raw.updatedAt !== "number") {
+  if (typeof raw.key !== "string" || typeof raw.scopeId !== "string" || raw.agentId !== "claude" && raw.agentId !== "codex" && raw.agentId !== "agy" || typeof raw.cwdRealpath !== "string" || typeof raw.policyFingerprint !== "string" || raw.status !== "active" && raw.status !== "archived" || typeof raw.updatedAt !== "number") {
     return void 0;
   }
   return {
@@ -21569,13 +21569,13 @@ function matchesIdentity(entry, input) {
   return entry.scopeId === input.scopeId && entry.agentId === input.agentId && entry.cwdRealpath === input.cwdRealpath && entry.policyFingerprint === input.policyFingerprint && entry.key === sessionCatalogKey(input);
 }
 function isValidAgentEntry(entry) {
-  if (entry.agentId === "claude") return Boolean(entry.sessionId) && !entry.threadId;
+  if (entry.agentId === "claude" || entry.agentId === "agy") return Boolean(entry.sessionId) && !entry.threadId;
   return Boolean(entry.threadId) && !entry.sessionId;
 }
 function assertAgentIdentity(input) {
-  if (input.agentId === "claude") {
+  if (input.agentId === "claude" || input.agentId === "agy") {
     if (!input.sessionId || input.threadId) {
-      throw new Error("Claude catalog entries require sessionId and must not include threadId");
+      throw new Error("Claude and Agy catalog entries require sessionId and must not include threadId");
     }
     return;
   }
