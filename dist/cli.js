@@ -10644,6 +10644,7 @@ var AgyAdapter = class {
     }
     const args = [
       "-p",
+      opts.prompt,
       "--output-format",
       "stream-json",
       "--dangerously-skip-permissions"

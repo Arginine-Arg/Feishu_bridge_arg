@@ -136,6 +136,7 @@ export class AgyAdapter implements AgentAdapter {
 
     const args = [
       '-p',
+      opts.prompt,
       '--output-format',
       'stream-json',
       '--dangerously-skip-permissions',
