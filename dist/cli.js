@@ -10454,6 +10454,69 @@ import { createInterface as createInterface5 } from "readline";
 function* translateEvent2(raw) {
   if (!raw || typeof raw !== "object") return;
   const evt = raw;
+  if (evt.event === "init") {
+    yield {
+      type: "system",
+      sessionId: evt.conversation_id || evt.init?.conversation_id,
+      cwd: evt.init?.cwd,
+      model: evt.init?.model
+    };
+    return;
+  }
+  if (evt.event === "step_update" && evt.step_update) {
+    const su = evt.step_update;
+    if (su.step_type === "agent_response") {
+      if (typeof su.text_delta === "string" && su.text_delta) {
+        yield { type: "text", delta: su.text_delta };
+      }
+      const thinking = su.thinking_delta ?? su.thinking;
+      if (typeof thinking === "string" && thinking) {
+        yield { type: "thinking", delta: thinking };
+      }
+    } else if (su.step_type === "tool") {
+      const toolId = String(su.step_index ?? "tool");
+      const toolName = su.tool_name || su.tool_info?.name || "tool";
+      if (su.state === "ACTIVE") {
+        yield {
+          type: "tool_use",
+          id: toolId,
+          name: toolName,
+          input: su.tool_info?.parameters
+        };
+      } else if (su.state === "DONE" && su.tool_info?.output !== void 0) {
+        const output = typeof su.tool_info.output === "string" ? su.tool_info.output : JSON.stringify(su.tool_info.output);
+        yield {
+          type: "tool_result",
+          id: toolId,
+          output,
+          isError: false
+        };
+      }
+    } else if (su.step_type === "thinking") {
+      const thinking = su.thinking_delta ?? su.thinking;
+      if (typeof thinking === "string" && thinking) {
+        yield { type: "thinking", delta: thinking };
+      }
+    }
+    return;
+  }
+  if (evt.event === "result" && evt.result) {
+    const res = evt.result;
+    if (res.usage) {
+      yield {
+        type: "usage",
+        inputTokens: res.usage.input_tokens,
+        outputTokens: res.usage.output_tokens,
+        cachedInputTokens: res.usage.cache_read_tokens
+      };
+    }
+    yield {
+      type: "done",
+      sessionId: res.conversation_id || evt.conversation_id,
+      terminationReason: "normal"
+    };
+    return;
+  }
   if (evt.type === "system" && evt.subtype === "init") {
     yield {
       type: "system",
@@ -10490,15 +10553,6 @@ function* translateEvent2(raw) {
     return;
   }
   if (evt.type === "result") {
-    if (evt.usage) {
-      yield {
-        type: "usage",
-        inputTokens: evt.usage.input_tokens,
-        outputTokens: evt.usage.output_tokens,
-        cachedInputTokens: evt.usage.cache_read_input_tokens,
-        costUsd: evt.total_cost_usd
-      };
-    }
     yield { type: "done", sessionId: evt.session_id, terminationReason: "normal" };
   }
 }
