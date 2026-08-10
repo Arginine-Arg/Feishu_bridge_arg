@@ -452,14 +452,14 @@ export function createRuntimeAgent(
       binary: process.env.LARK_CHANNEL_AGY_BIN ?? 'agy',
       profileStateDir: appPaths.profileDir,
       larkChannel,
-      sessionMode: profileConfig.preferences?.agentSessionMode === 'turn' ? 'turn' : 'live',
+      sessionMode: profileConfig.preferences?.agentSessionMode === 'live' ? 'live' : 'turn',
       liveTerminalBackend: 'tmux',
     });
   }
   return new ClaudeAdapter({
     profileStateDir: appPaths.profileDir,
     larkChannel,
-    sessionMode: profileConfig.preferences?.agentSessionMode === 'turn' ? 'turn' : 'live',
+    sessionMode: profileConfig.preferences?.agentSessionMode === 'live' ? 'live' : 'turn',
     liveTerminalBackend: 'tmux',
   });
 }

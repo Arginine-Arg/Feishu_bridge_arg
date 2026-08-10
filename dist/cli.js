@@ -2050,9 +2050,10 @@ function getMessageReplyMode(cfg) {
   if (raw === "card" || raw === "markdown" || raw === "text") return raw;
   return "markdown";
 }
-function getAgentSessionMode(cfg) {
+function getAgentSessionMode(cfg, agentKind) {
   const raw = cfg.preferences?.agentSessionMode;
-  return raw === "turn" ? "turn" : "live";
+  if (raw) return raw;
+  return agentKind === "codex" ? "live" : "turn";
 }
 function getShowToolCalls(cfg) {
   return cfg.preferences?.showToolCalls !== false;
@@ -19234,7 +19235,7 @@ async function startChannel(deps) {
         }
         const runBatches = splitNativeLiveBatches(
           batch,
-          getAgentSessionMode(controls.cfg) === "live"
+          getAgentSessionMode(controls.cfg, controls.profileConfig.agentKind) === "live"
         );
         if (runBatches.length > 1) {
           log.info("flush", "split-native-live-batch", {
@@ -19585,7 +19586,7 @@ async function intakeMessage(deps) {
       return;
     }
   }
-  const nativeInputActive = pickerActive || getAgentSessionMode(controls.cfg) === "live";
+  const nativeInputActive = pickerActive || getAgentSessionMode(controls.cfg, controls.profileConfig.agentKind) === "live";
   const explicitLiveControl = nativeInputActive && isLiveControlInput(routedMsg.content);
   const forceNative = route.forceNative || nativeModelCommand || Boolean(pickerFollowup) || explicitLiveControl;
   const agentMsg = forceNative ? markNativeAgentCommand(
@@ -19765,7 +19766,7 @@ async function runAgentBatch(deps) {
   );
   const nativeCommand = nativeAgentCommandForBatch(batch);
   const forceLiveSession = batch.some(isForceLiveAgentCommandMessage);
-  const useLiveSession = forceLiveSession || getAgentSessionMode(controls.cfg) === "live";
+  const useLiveSession = forceLiveSession || getAgentSessionMode(controls.cfg, controls.profileConfig.agentKind) === "live";
   if (useLiveSession && !nativeCommand && liveInteractionByScope.delete(scope)) {
     log.info("agent-live", "picker-dismissed-for-task", { scope });
   }
@@ -21964,14 +21965,14 @@ function createRuntimeAgent(profileConfig, appPaths2) {
       binary: process.env.LARK_CHANNEL_AGY_BIN ?? "agy",
       profileStateDir: appPaths2.profileDir,
       larkChannel,
-      sessionMode: profileConfig.preferences?.agentSessionMode === "turn" ? "turn" : "live",
+      sessionMode: profileConfig.preferences?.agentSessionMode === "live" ? "live" : "turn",
       liveTerminalBackend: "tmux"
     });
   }
   return new ClaudeAdapter({
     profileStateDir: appPaths2.profileDir,
     larkChannel,
-    sessionMode: profileConfig.preferences?.agentSessionMode === "turn" ? "turn" : "live",
+    sessionMode: profileConfig.preferences?.agentSessionMode === "live" ? "live" : "turn",
     liveTerminalBackend: "tmux"
   });
 }

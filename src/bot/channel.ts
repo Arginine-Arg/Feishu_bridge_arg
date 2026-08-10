@@ -394,7 +394,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         // preserving their FIFO order.
         const runBatches = splitNativeLiveBatches(
           batch,
-          getAgentSessionMode(controls.cfg) === 'live',
+          getAgentSessionMode(controls.cfg, controls.profileConfig.agentKind) === 'live',
         );
         if (runBatches.length > 1) {
           log.info('flush', 'split-native-live-batch', {
@@ -846,7 +846,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   // be inside a picker. Ordinary chat stays on turn-mode runs instead of being
   // typed into a TUI.
   const nativeInputActive =
-    pickerActive || getAgentSessionMode(controls.cfg) === 'live';
+    pickerActive || getAgentSessionMode(controls.cfg, controls.profileConfig.agentKind) === 'live';
   // Native controls are a separate control plane.  They must never pass
   // through prompt batching just because an earlier picker card expired or a
   // bridge restart lost its in-memory picker flag.
@@ -1141,7 +1141,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
 
   const nativeCommand = nativeAgentCommandForBatch(batch);
   const forceLiveSession = batch.some(isForceLiveAgentCommandMessage);
-  const useLiveSession = forceLiveSession || getAgentSessionMode(controls.cfg) === 'live';
+  const useLiveSession = forceLiveSession || getAgentSessionMode(controls.cfg, controls.profileConfig.agentKind) === 'live';
   if (useLiveSession && !nativeCommand && liveInteractionByScope.delete(scope)) {
     // A normal user task supersedes an abandoned native picker. The live
     // terminal will press Escape before typing this task; clear the bridge's
