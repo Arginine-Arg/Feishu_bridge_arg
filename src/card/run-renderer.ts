@@ -374,8 +374,19 @@ function panelHeader(titleMd: string): object {
   };
 }
 
+function sanitizeMarkdownLocalImages(text: string): string {
+  return text.replace(
+    /!\[([^\]]*)\]\((?!https?:\/\/)([^)]+)\)/gu,
+    (_match, alt, fullPath) => {
+      const fileName = fullPath.trim().split(/[/\\]/).pop() || fullPath;
+      const label = alt.trim() || fileName;
+      return `🖼️ **[本地图片: ${label}]** *(请用 \`arg-bridge sendfile "${fileName}"\` 转换为飞书附件发送)*`;
+    },
+  );
+}
+
 function markdown(content: string): object {
-  return { tag: 'markdown', content };
+  return { tag: 'markdown', content: sanitizeMarkdownLocalImages(content) };
 }
 
 function noteMd(content: string): object {
