@@ -337,6 +337,8 @@ function createEventStream(
   let exitCode: number | null = null;
   let exited = false;
   let finalized = false;
+  let sawDoneEvent = false;
+  let lastSessionId: string | undefined;
 
   const finalize = (): void => {
     if (finalized || !outputClosed || !exited) return;
@@ -356,6 +358,12 @@ function createEventStream(
         message: `agy runtime error: ${runtimeError.message}`,
         terminationReason: 'failed',
       });
+    } else if (!sawDoneEvent) {
+      events.push({
+        type: 'done',
+        sessionId: lastSessionId,
+        terminationReason: 'normal',
+      });
     }
     events.close();
   };
@@ -364,7 +372,14 @@ function createEventStream(
     const trimmed = line.trim();
     if (!trimmed) return;
     try {
-      for (const event of translateEvent(JSON.parse(trimmed))) events.push(event);
+      for (const event of translateEvent(JSON.parse(trimmed))) {
+        if (event.type === 'system' && event.sessionId) lastSessionId = event.sessionId;
+        if (event.type === 'done') {
+          sawDoneEvent = true;
+          if (event.sessionId) lastSessionId = event.sessionId;
+        }
+        events.push(event);
+      }
     } catch {
       // agy can emit terminal noise around stream-json output.
     }

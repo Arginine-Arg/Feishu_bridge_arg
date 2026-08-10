@@ -10821,6 +10821,8 @@ function createEventStream3(child, stderrChunks, getError) {
   let exitCode = null;
   let exited = false;
   let finalized = false;
+  let sawDoneEvent = false;
+  let lastSessionId;
   const finalize = () => {
     if (finalized || !outputClosed || !exited) return;
     finalized = true;
@@ -10839,6 +10841,12 @@ function createEventStream3(child, stderrChunks, getError) {
         message: `agy runtime error: ${runtimeError.message}`,
         terminationReason: "failed"
       });
+    } else if (!sawDoneEvent) {
+      events.push({
+        type: "done",
+        sessionId: lastSessionId,
+        terminationReason: "normal"
+      });
     }
     events.close();
   };
@@ -10846,7 +10854,14 @@ function createEventStream3(child, stderrChunks, getError) {
     const trimmed = line.trim();
     if (!trimmed) return;
     try {
-      for (const event of translateEvent2(JSON.parse(trimmed))) events.push(event);
+      for (const event of translateEvent2(JSON.parse(trimmed))) {
+        if (event.type === "system" && event.sessionId) lastSessionId = event.sessionId;
+        if (event.type === "done") {
+          sawDoneEvent = true;
+          if (event.sessionId) lastSessionId = event.sessionId;
+        }
+        events.push(event);
+      }
     } catch {
     }
   });
