@@ -10696,7 +10696,7 @@ var AgyAdapter = class {
       log.warn("agent", "stdin-error", { message: err.message });
     });
     const events = createEventStream3(child, stderrChunks, () => runtimeError);
-    child.stdin.end(opts.prompt, "utf8");
+    child.stdin.end();
     const stopGraceMs = opts.stopGraceMs ?? 5e3;
     return {
       runId: opts.runId,

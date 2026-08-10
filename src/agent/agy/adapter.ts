@@ -192,7 +192,7 @@ export class AgyAdapter implements AgentAdapter {
       log.warn('agent', 'stdin-error', { message: err.message });
     });
     const events = createEventStream(child, stderrChunks, () => runtimeError);
-    child.stdin.end(opts.prompt, 'utf8');
+    child.stdin.end();
 
     const stopGraceMs = opts.stopGraceMs ?? 5000;
 
