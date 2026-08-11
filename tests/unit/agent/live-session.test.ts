@@ -12,6 +12,7 @@ import {
   LiveTerminalSession,
   isLiveTerminalBusy,
   isLiveTerminalInteraction,
+  isPendingLivePromptDraft,
   isPendingLiveCommandDraft,
   parseLiveControlSequence,
   encodeTmuxInputFrame,
@@ -69,6 +70,26 @@ describe('parseLiveControlSequence', () => {
     ).toBe(false);
     expect(isPendingLiveCommandDraft('› /model\n• Working (1s · esc to interrupt)', '/model')).toBe(false);
     expect(isPendingLiveCommandDraft('› /model\n›', '/model')).toBe(false);
+  });
+
+  it('keeps an ordinary draft pending when stale activity appears around it', () => {
+    const prompt = '帮我检查这个 bridge 的提交问题';
+    expect(
+      isPendingLivePromptDraft(
+        [
+          '• Working (8s • esc to interrupt)',
+          '› ' + prompt,
+          'tab to queue message 99% context left',
+        ].join('\n'),
+        prompt,
+      ),
+    ).toBe(true);
+    expect(
+      isPendingLivePromptDraft(
+        ['› ' + prompt, '• 已经开始检查。', '›'].join('\n'),
+        prompt,
+      ),
+    ).toBe(false);
   });
 });
 
@@ -2716,6 +2737,66 @@ setInterval(() => {}, 1000);
     });
 
     const events = await collect(session.run('tmux-normal-submit-retry-run', prompt, dir).events);
+    await pool.closeAll();
+
+    expect(textOf(events)).toBe('• ordinary-submit-confirmed\n');
+  }, 15_000);
+
+  tmuxIt('does not cancel ordinary submit retry on stale busy chrome beside the draft', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-normal-submit-stale-busy-test-'));
+    const bin = join(dir, 'fake-tmux-normal-submit-stale-busy-agent.mjs');
+    const prompt = '请检查普通消息为什么没有真正发送';
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+const expected = ${JSON.stringify(prompt)};
+let draft = '';
+let submits = 0;
+function screen(lines) {
+  process.stdout.write('\\x1b[2J\\x1b[H' + lines.join('\\n') + '\\n');
+}
+process.stdin.on('data', (chunk) => {
+  for (const char of chunk) {
+    if (char !== '\\r' && char !== '\\n') {
+      draft += char;
+      continue;
+    }
+    submits += 1;
+    if (submits === 1) {
+      // Old task chrome is visible while the new message is still an editor draft.
+      screen([
+        '• Working (8s • esc to interrupt)',
+        '› ' + draft,
+        'tab to queue message 99% context left',
+      ]);
+      continue;
+    }
+    if (draft === expected) screen(['› ' + expected, '• ordinary-submit-confirmed', '›']);
+    else screen(['unexpected:' + JSON.stringify(draft)]);
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-normal-submit-stale-busy-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-normal-submit-stale-busy',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 250,
+      outputFlushMs: 30,
+      startupTimeoutMs: 6_000,
+    });
+
+    const events = await collect(session.run('tmux-normal-submit-stale-busy-run', prompt, dir).events);
     await pool.closeAll();
 
     expect(textOf(events)).toBe('• ordinary-submit-confirmed\n');

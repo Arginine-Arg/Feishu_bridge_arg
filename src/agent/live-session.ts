@@ -619,12 +619,22 @@ export class LiveTerminalSession {
       // adapters can legitimately print words such as "Working" as ordinary
       // task output and must retain the normal idle completion behavior.
       const terminalState = event.terminalText;
+      const normalPromptDraftPending =
+        !commandMode &&
+        inputMode !== 'control' &&
+        Boolean(terminalState) &&
+        isPendingLivePromptDraft(terminalState ?? '', prompt);
       if (commandMode && terminalState) {
         latestCommandTerminalText = terminalState;
         if (!isPendingLiveCommandDraft(terminalState, prompt)) cancelSlashCommandConfirm();
       }
       const terminalBusy = terminalState ? isLiveTerminalBusy(terminalState) : false;
-      if (terminalBusy || (terminalState && isLiveTerminalInteraction(terminalState))) {
+      // A TUI can redraw old activity or assistant text while the newly typed
+      // message is still sitting in the editor. That is not submit progress:
+      // keep the retry armed until the exact current draft disappears.
+      if (normalPromptDraftPending) {
+        suspendIdle();
+      } else if (terminalBusy || (terminalState && isLiveTerminalInteraction(terminalState))) {
         markNormalSubmitProgress();
       }
       if (terminalBusy) {
@@ -673,7 +683,7 @@ export class LiveTerminalSession {
         });
       }
       if (accepted) {
-        markNormalSubmitProgress();
+        if (!normalPromptDraftPending) markNormalSubmitProgress();
         const resultOutput = isLiveCommandResultOutput(text, prompt);
         if (controlLiteralConfirmTimer) {
           clearTimeout(controlLiteralConfirmTimer);
@@ -686,7 +696,7 @@ export class LiveTerminalSession {
           cancelSlashCommandConfirm();
         }
         scheduleOutputFlush();
-        if (!terminalWasBusy) arm(idleMs);
+        if (!terminalWasBusy && !normalPromptDraftPending) arm(idleMs);
         if (commandMode && !resultOutput) scheduleSlashCommandConfirm();
       } else if (commandMode) {
         scheduleSlashCommandConfirm();
@@ -1673,6 +1683,52 @@ export function isPendingLiveCommandDraft(input: string, prompt: string): boolea
     .split('\n')
     .slice(-12)
     .some((line) => draft.test(line.trim()));
+}
+
+/**
+ * True only while the exact ordinary message is still the active TUI draft.
+ * Historical prompt echoes are followed by result/status rows and therefore
+ * do not count. Keeping this separate from command-draft detection matters:
+ * ordinary turns must tolerate stale `Working`/assistant rows without
+ * cancelling their one-shot submit retry.
+ */
+export function isPendingLivePromptDraft(input: string, prompt: string): boolean {
+  const echo = prompt.trim();
+  if (!echo || !input.trim()) return false;
+  const cleaned = cleanTerminalOutput(input);
+  const lines = cleaned.split('\n');
+  const promptLines = echo.split('\n').map((line) => line.trim());
+  const firstLine = promptLines[0] ?? '';
+  if (!firstLine) return false;
+  const first = new RegExp(`^[›❯>]\\s*${escapeRegExp(firstLine)}\\s*$`, 'u');
+
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (!first.test(lines[index]?.trim() ?? '')) continue;
+    let cursor = index + 1;
+    let matches = true;
+    for (const continuation of promptLines.slice(1)) {
+      if ((lines[cursor]?.trim() ?? '') !== continuation) {
+        matches = false;
+        break;
+      }
+      cursor += 1;
+    }
+    if (!matches) continue;
+
+    // Only the editor footer may follow an active draft. A response bullet,
+    // busy marker, picker, or a fresh empty prompt proves the draft is an old
+    // echo and lets normal submit progress be acknowledged.
+    const trailing = lines.slice(cursor).map((line) => line.trim()).filter(Boolean);
+    if (trailing.every(isLivePromptDraftFooterLine)) return true;
+  }
+  return false;
+}
+
+function isLivePromptDraftFooterLine(line: string): boolean {
+  return (
+    /^tab to queue message\b.*context left$/iu.test(line) ||
+    /^\d+% context left$/iu.test(line)
+  );
 }
 
 function shouldDeferControlLiteralSubmit(input: string): boolean {

@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.0.4",
+  version: "1.0.5",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -7610,12 +7610,15 @@ var LiveTerminalSession = class {
         return;
       }
       const terminalState = event.terminalText;
+      const normalPromptDraftPending = !commandMode && inputMode !== "control" && Boolean(terminalState) && isPendingLivePromptDraft(terminalState ?? "", prompt);
       if (commandMode && terminalState) {
         latestCommandTerminalText = terminalState;
         if (!isPendingLiveCommandDraft(terminalState, prompt)) cancelSlashCommandConfirm();
       }
       const terminalBusy = terminalState ? isLiveTerminalBusy(terminalState) : false;
-      if (terminalBusy || terminalState && isLiveTerminalInteraction(terminalState)) {
+      if (normalPromptDraftPending) {
+        suspendIdle();
+      } else if (terminalBusy || terminalState && isLiveTerminalInteraction(terminalState)) {
         markNormalSubmitProgress();
       }
       if (terminalBusy) {
@@ -7651,7 +7654,7 @@ var LiveTerminalSession = class {
         });
       }
       if (accepted) {
-        markNormalSubmitProgress();
+        if (!normalPromptDraftPending) markNormalSubmitProgress();
         const resultOutput = isLiveCommandResultOutput(text, prompt);
         if (controlLiteralConfirmTimer) {
           clearTimeout(controlLiteralConfirmTimer);
@@ -7664,7 +7667,7 @@ var LiveTerminalSession = class {
           cancelSlashCommandConfirm();
         }
         scheduleOutputFlush();
-        if (!terminalWasBusy) arm(idleMs);
+        if (!terminalWasBusy && !normalPromptDraftPending) arm(idleMs);
         if (commandMode && !resultOutput) scheduleSlashCommandConfirm();
       } else if (commandMode) {
         scheduleSlashCommandConfirm();
@@ -8542,6 +8545,35 @@ function isPendingLiveCommandDraft(input, prompt) {
   }
   const draft = new RegExp(`^[\u203A\u276F>]\\s*${escapeRegExp(command)}\\s*$`, "iu");
   return cleaned.split("\n").slice(-12).some((line) => draft.test(line.trim()));
+}
+function isPendingLivePromptDraft(input, prompt) {
+  const echo = prompt.trim();
+  if (!echo || !input.trim()) return false;
+  const cleaned = cleanTerminalOutput(input);
+  const lines = cleaned.split("\n");
+  const promptLines = echo.split("\n").map((line) => line.trim());
+  const firstLine = promptLines[0] ?? "";
+  if (!firstLine) return false;
+  const first = new RegExp(`^[\u203A\u276F>]\\s*${escapeRegExp(firstLine)}\\s*$`, "u");
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (!first.test(lines[index]?.trim() ?? "")) continue;
+    let cursor = index + 1;
+    let matches = true;
+    for (const continuation of promptLines.slice(1)) {
+      if ((lines[cursor]?.trim() ?? "") !== continuation) {
+        matches = false;
+        break;
+      }
+      cursor += 1;
+    }
+    if (!matches) continue;
+    const trailing = lines.slice(cursor).map((line) => line.trim()).filter(Boolean);
+    if (trailing.every(isLivePromptDraftFooterLine)) return true;
+  }
+  return false;
+}
+function isLivePromptDraftFooterLine(line) {
+  return /^tab to queue message\b.*context left$/iu.test(line) || /^\d+% context left$/iu.test(line);
 }
 function shouldDeferControlLiteralSubmit(input) {
   const trimmed = input.trim();
