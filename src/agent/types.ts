@@ -41,7 +41,7 @@ export interface AgentRunOptions {
   runId: string;
   scopeId?: string;
   sessionMode?: 'turn' | 'live';
-  liveInputMode?: 'command' | 'control';
+  liveInputMode?: 'command' | 'control' | 'side';
   prompt: string;
   cwd?: string;
   sessionId?: string;

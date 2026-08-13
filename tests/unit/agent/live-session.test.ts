@@ -11,6 +11,7 @@ import {
   LiveSessionPool,
   LiveTerminalSession,
   isLiveTerminalBusy,
+  isLiveSideConversation,
   isLiveTerminalInteraction,
   isPendingLivePromptDraft,
   isPendingLiveCommandDraft,
@@ -535,9 +536,12 @@ describe('tmux input framing and snapshots', () => {
     expect(isLiveTerminalBusy(waiting)).toBe(true);
     expect(sanitizeLiveTurnOutput(`${waiting}\n• 已完成核心检查。`)).toBe('• 已完成核心检查。');
     expect(sanitizeLiveTurnOutput('• Running find . -maxdepth 2 -type f\n• 已完成核心检查。')).toBe('• 已完成核心检查。');
-    expect(isLiveTerminalBusy('tab to queue message 99% context left')).toBe(true);
+    expect(isLiveTerminalBusy('tab to queue message 99% context left')).toBe(false);
     expect(isLiveTerminalBusy('• Running find . -maxdepth 2 -type f')).toBe(true);
     expect(isLiveTerminalBusy('› ready for the next task')).toBe(false);
+    expect(isLiveTerminalBusy('› How many files have been modified?\ntab to queue message 99% context left')).toBe(false);
+    expect(isLiveSideConversation('gpt-5.6-terra xhigh · /workspace · Side from main thread')).toBe(true);
+    expect(isLiveSideConversation('Tip: Use /side to start a side conversation')).toBe(false);
   });
 
   it('recognizes terminal-owned API failures without mistaking assistant prose for one', () => {
@@ -3143,6 +3147,134 @@ setInterval(() => {}, 1000);
     await pool.closeAll();
 
     expect(textOf(selected)).toContain('• Approval accepted.');
+  }, 20_000);
+
+  tmuxIt('submits /btw in two phases and leaves the body in the side conversation', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-btw-test-'));
+    const bin = join(dir, 'fake-tmux-btw-agent.mjs');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+let draft = '';
+let side = false;
+function screen(lines) {
+  process.stdout.write('\\x1b[2J\\x1b[H' + lines.join('\\n') + '\\n');
+}
+function draw() {
+  screen([side ? 'gpt-5.6-terra xhigh · /tmp · Side from main thread' : 'gpt-5.6-terra xhigh · /tmp', '›']);
+}
+draw();
+process.stdin.on('data', (chunk) => {
+  for (const char of chunk) {
+    if (char === '\\x03') {
+      side = false;
+      draft = '';
+      draw();
+      continue;
+    }
+    if (char !== '\\r' && char !== '\\n') {
+      draft += char;
+      continue;
+    }
+    const line = draft;
+    draft = '';
+    if (line === '/btw') {
+      side = true;
+      draw();
+    } else if (side && line) {
+      screen(['side-answer: ' + line, 'gpt-5.6-terra xhigh · /tmp · Side from main thread', '›']);
+    } else if (line) {
+      screen(['main-answer: ' + line, 'gpt-5.6-terra xhigh · /tmp', '›']);
+    }
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-btw-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-btw',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 180,
+      outputFlushMs: 20,
+      startupTimeoutMs: 4_000,
+    });
+
+    const first = await collect(session.run('btw-1', '/btw summarize the diff', dir, 'side').events);
+    const second = await collect(session.run('btw-2', '/btw check the tests', dir, 'side').events);
+    await pool.closeAll();
+
+    expect(textOf(first)).toContain('side-answer: summarize the diff');
+    expect(textOf(first)).not.toContain('side unavailable');
+    expect(textOf(second)).toContain('side-answer: check the tests');
+    expect(textOf(second)).not.toContain('side unavailable');
+  }, 20_000);
+
+  tmuxIt('does not send /btw body when Codex never enters a side conversation', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-btw-unavailable-test-'));
+    const bin = join(dir, 'fake-tmux-btw-unavailable-agent.mjs');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+let draft = '';
+function screen(lines) {
+  process.stdout.write('\x1b[2J\x1b[H' + lines.join('\\n') + '\\n');
+}
+screen(['gpt-5.6-terra xhigh · /tmp', '›']);
+process.stdin.on('data', (chunk) => {
+  for (const char of chunk) {
+    if (char !== '\\r' && char !== '\\n') {
+      draft += char;
+      continue;
+    }
+    const line = draft;
+    draft = '';
+    // This fake CLI intentionally leaves the terminal in the main thread.
+    // Any body sent after the failed switch would be an unsafe main-thread
+    // submission and is surfaced as a test failure.
+    if (line === '/btw') continue;
+    if (line) screen(['main-answer: ' + line, 'gpt-5.6-terra xhigh · /tmp', '›']);
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-btw-unavailable-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-btw-unavailable',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 180,
+      outputFlushMs: 20,
+      startupTimeoutMs: 4_000,
+    });
+
+    const events = await collect(session.run('btw-unavailable', '/btw inspect the main thread', dir, 'side').events);
+    await pool.closeAll();
+
+    expect(events).toContainEqual({
+      type: 'error',
+      message: '未确认 Codex 已进入 side conversation，/btw 正文未发送。请先回到主线程后重试。',
+      terminationReason: 'failed',
+    });
+    expect(textOf(events)).not.toContain('main-answer: inspect the main thread');
   }, 20_000);
 
   tmuxIt('keeps observing after an approval starts a long command before the next picker', async () => {

@@ -27,7 +27,7 @@ export interface StartRunFlowInput {
   scope: ScopeContext;
   prompt: string;
   sessionMode?: 'turn' | 'live';
-  liveInputMode?: 'command' | 'control';
+  liveInputMode?: 'command' | 'control' | 'side';
   attachments: AgentAttachment[];
   access: AccessDecision;
   capability: AgentCapability;

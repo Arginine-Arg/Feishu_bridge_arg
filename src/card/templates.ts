@@ -192,6 +192,7 @@ export function helpCard(agentName = 'Agent'): object {
         '- `/account` — 查看当前应用；`/account change` 换 appId/secret 并重连',
         '- `/config` — 调整偏好、访问控制和 lark-cli 身份策略',
         '- `/model` — 选择模型；Codex 使用 CLI 原生模型和 reasoning 选项并同步到 profile',
+        '- `/btw <内容>` — Codex 中开启 side conversation 后提交内容；`/codex /btw <内容>` 等价',
         '- `/status` — 当前状态',
         '- `/session` — 查看或切换后台 agent session 模式',
         '- `/tmux list|bind <编号或 pane id>|status|tail [N]|unbind` — 管理员管理 tmux；`tail` 默认显示当前 pane 末尾 27 行',

@@ -210,14 +210,14 @@ type BridgePresentation = 'markdown' | 'card';
 type BridgeOutputKind = 'picker' | 'code' | 'execution-log' | 'final';
 interface BridgeRouteInput {
     userInput: string;
-    inputMode?: 'command' | 'control';
+    inputMode?: 'command' | 'control' | 'side';
 }
 interface BridgeRoute {
     stdin: string;
     kind: BridgeInputKind;
     presentation: BridgePresentation;
     inputSha256: string;
-    inputMode?: 'command' | 'control';
+    inputMode?: 'command' | 'control' | 'side';
 }
 interface BridgeAgentDecision {
     input_sha256?: unknown;

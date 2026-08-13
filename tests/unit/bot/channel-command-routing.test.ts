@@ -72,6 +72,23 @@ describe('agent command routing aliases', () => {
     });
   });
 
+  it('routes Codex /btw text as a dedicated side-conversation input', () => {
+    expect(rewriteAgentCommandMessage(message('/btw inspect the current diff'), 'codex')).toMatchObject({
+      msg: { content: '/btw inspect the current diff' },
+      forceNative: true,
+      nativeMode: 'side',
+    });
+    expect(rewriteAgentCommandMessage(message('/codex /btw inspect the current diff'), 'codex')).toMatchObject({
+      msg: { content: '/btw inspect the current diff' },
+      forceNative: true,
+      nativeMode: 'side',
+    });
+    expect(rewriteAgentCommandMessage(message('/btw inspect the current diff'), 'claude')).toMatchObject({
+      msg: { content: '/btw inspect the current diff' },
+      forceNative: false,
+    });
+  });
+
   it('leaves non-matching agent aliases untouched', () => {
     expect(rewriteAgentCommandMessage(message('/claude /resume'), 'codex')).toMatchObject({
       msg: { content: '/claude /resume' },

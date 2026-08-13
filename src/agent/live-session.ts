@@ -28,7 +28,7 @@ import {
   type TmuxPaneTarget,
 } from './tmux-control';
 
-export type LiveTerminalInputMode = 'command' | 'control';
+export type LiveTerminalInputMode = 'command' | 'control' | 'side';
 
 type LiveChild = SpawnedProcessByStdio<Writable, Readable, Readable>;
 interface LiveHistorySnapshot {
@@ -91,6 +91,8 @@ const PIPE_STARTUP_OUTPUT_GRACE_MS = 2_500;
 const COMMAND_FRESH_SESSION_GRACE_MS = 1200;
 const FRESH_TERMINAL_GRACE_MS = 2500;
 const CONTROL_KEY_GAP_MS = 40;
+const SIDE_COMMAND_SETTLE_MS = 450;
+const SIDE_SWITCH_TIMEOUT_MS = 3_000;
 const COMMAND_ESCAPE_SETTLE_MS = 250;
 const COMMAND_CLEAR_SETTLE_MS = 500;
 const COMMAND_STARTUP_TIMEOUT_MS = 25_000;
@@ -401,7 +403,14 @@ export class LiveTerminalSession {
     yield { type: 'system', cwd };
     await this.start();
 
-    const commandMode = inputMode === 'command';
+    const commandMode = inputMode === 'command' || inputMode === 'side';
+    const sideMode = inputMode === 'side';
+    const sidePrompt = sideMode ? parseSidePrompt(prompt) : undefined;
+    if (sideMode && sidePrompt === undefined) {
+      yield { type: 'error', message: '缺少 /btw 的正文。', terminationReason: 'failed' };
+      return;
+    }
+    const turnPrompt = sideMode ? sidePrompt! : prompt;
     const idleMs =
       commandMode
         ? Math.max(this.opts.idleMs ?? DEFAULT_IDLE_MS, COMMAND_IDLE_MS)
@@ -411,7 +420,7 @@ export class LiveTerminalSession {
       commandMode
         ? Math.max(this.opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS, COMMAND_STARTUP_TIMEOUT_MS)
         : (this.opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS);
-    const output = new TurnOutputBuffer(MAX_TURN_OUTPUT_CHARS, prompt, commandMode || inputMode === 'control');
+    const output = new TurnOutputBuffer(MAX_TURN_OUTPUT_CHARS, turnPrompt, commandMode || inputMode === 'control');
     const queue: AgentEvent[] = [];
     let done = false;
     let wake: (() => void) | undefined;
@@ -437,7 +446,7 @@ export class LiveTerminalSession {
 
     if (commandMode) {
       log.info('agent-live', 'command-start', {
-        commandText: prompt,
+        commandText: turnPrompt,
         idleMs,
         startupTimeoutMs,
         outputFlushMs,
@@ -496,7 +505,7 @@ export class LiveTerminalSession {
       if (controlLiteralConfirmTimer) clearTimeout(controlLiteralConfirmTimer);
       cancelNormalSubmitRetry();
       flushOutput();
-      if (commandMode && isStatusLiveCommand(prompt)) {
+      if (commandMode && isStatusLiveCommand(turnPrompt)) {
         push({
           type: 'text',
           delta: deliveredText
@@ -546,36 +555,40 @@ export class LiveTerminalSession {
     };
     const scheduleSlashCommandConfirm = (): void => {
       if (!commandMode || slashConfirmRetried || slashConfirmTimer || sawCommandResultOutput) return;
-      if (!prompt.trim().startsWith('/')) return;
-      if (!isPendingLiveCommandDraft(latestCommandTerminalText, prompt)) return;
+      if (!turnPrompt.trim().startsWith('/')) return;
+      if (!isPendingLiveCommandDraft(latestCommandTerminalText, turnPrompt)) return;
       slashConfirmTimer = setTimeout(() => {
         slashConfirmTimer = undefined;
         if (
           done ||
           sawCommandResultOutput ||
           slashConfirmRetried ||
-          !isPendingLiveCommandDraft(latestCommandTerminalText, prompt)
+          !isPendingLiveCommandDraft(latestCommandTerminalText, turnPrompt)
         ) {
           return;
         }
         slashConfirmRetried = true;
-        log.info('agent-live', 'command-confirm-draft', { commandText: prompt });
+        log.info('agent-live', 'command-confirm-draft', { commandText: turnPrompt });
         this.write('\r');
-        if (isStatusLiveCommand(prompt)) arm(idleMs);
+        if (isStatusLiveCommand(turnPrompt)) arm(idleMs);
       }, COMMAND_DRAFT_CONFIRM_DELAY_MS);
     };
     const scheduleNormalSubmitRetry = (): void => {
-      if (commandMode || inputMode === 'control' || normalSubmitRetried || normalSubmitRetryTimer) return;
+      if ((commandMode && !sideMode) || inputMode === 'control' || normalSubmitRetried || normalSubmitRetryTimer) return;
       normalSubmitRetryTimer = setTimeout(() => {
         normalSubmitRetryTimer = undefined;
         if (done || sawNormalSubmitProgress || normalSubmitRetried) return;
+        if (sideMode) {
+          const terminal = `${this.lastTerminalSnapshot}\n${this.lastTerminalHistory?.text ?? ''}`;
+          if (!isPendingLivePromptDraft(terminal, turnPrompt)) return;
+        }
         normalSubmitRetried = true;
         // Codex can occasionally leave a plain pasted message in its editor
         // without accepting the first submit key. Keep the existing draft and
         // send only the missing submit key; re-pasting can turn text into a
         // multiline draft again.
         void (async () => {
-          log.warn('agent-live', 'normal-submit-retry', { promptPreview: previewLiveText(prompt) });
+          log.warn('agent-live', 'normal-submit-retry', { promptPreview: previewLiveText(turnPrompt) });
           this.write('\r');
         })().catch((err) => {
           log.warn('agent-live', 'normal-submit-retry-failed', {
@@ -623,10 +636,10 @@ export class LiveTerminalSession {
         !commandMode &&
         inputMode !== 'control' &&
         Boolean(terminalState) &&
-        isPendingLivePromptDraft(terminalState ?? '', prompt);
+        isPendingLivePromptDraft(terminalState ?? '', turnPrompt);
       if (commandMode && terminalState) {
         latestCommandTerminalText = terminalState;
-        if (!isPendingLiveCommandDraft(terminalState, prompt)) cancelSlashCommandConfirm();
+        if (!isPendingLiveCommandDraft(terminalState, turnPrompt)) cancelSlashCommandConfirm();
       }
       const terminalBusy = terminalState ? isLiveTerminalBusy(terminalState) : false;
       // A TUI can redraw old activity or assistant text while the newly typed
@@ -658,16 +671,16 @@ export class LiveTerminalSession {
       // scoped through their rolling baseline and can be sanitized eagerly.
       const text = useHistory
         ? event.history!.text
-        : sanitizeLiveTurnOutput(event.text, prompt);
+        : sanitizeLiveTurnOutput(event.text, turnPrompt);
       const beforeAppendFrame = commandMode && diagFrames < LIVE_DIAG_MAX_FRAMES;
       if (beforeAppendFrame) diagFrames += 1;
       if (!text) {
         if (terminalWasBusy) return;
         if (commandMode) {
           scheduleSlashCommandConfirm();
-          arm(isStatusLiveCommand(prompt) || sawAcceptedOutput || isKnownSilentLiveCommand(prompt)
+          arm(isStatusLiveCommand(turnPrompt) || sawAcceptedOutput || isKnownSilentLiveCommand(turnPrompt)
             ? idleMs
-            : noOutputIdleMs(prompt, idleMs));
+            : noOutputIdleMs(turnPrompt, idleMs));
         }
         return;
       }
@@ -684,11 +697,11 @@ export class LiveTerminalSession {
       }
       if (accepted) {
         if (!normalPromptDraftPending) markNormalSubmitProgress();
-        const resultOutput = isLiveCommandResultOutput(text, prompt);
+        const resultOutput = isLiveCommandResultOutput(text, turnPrompt);
         if (controlLiteralConfirmTimer) {
           clearTimeout(controlLiteralConfirmTimer);
           controlLiteralConfirmTimer = undefined;
-          log.info('agent-live', 'control-literal-output-before-enter', { input: prompt });
+          log.info('agent-live', 'control-literal-output-before-enter', { input: turnPrompt });
         }
         sawAcceptedOutput = true;
         if (resultOutput) {
@@ -701,7 +714,7 @@ export class LiveTerminalSession {
       } else if (commandMode) {
         scheduleSlashCommandConfirm();
         if (!terminalWasBusy) {
-          arm(sawAcceptedOutput ? idleMs : noOutputIdleMs(prompt, idleMs));
+          arm(sawAcceptedOutput ? idleMs : noOutputIdleMs(turnPrompt, idleMs));
         }
       }
       // Native live sessions keep the Codex process alive after an API
@@ -767,7 +780,7 @@ export class LiveTerminalSession {
       if (interruption.requested) cancelCurrentTurn();
       await this.waitForInputReady(
         inputGraceMs,
-        !commandMode && inputMode !== 'control' && !prompt.trim().startsWith('/'),
+        !commandMode && inputMode !== 'control' && !turnPrompt.trim().startsWith('/'),
       );
       if (!done) {
         if (startupInteractionText && inputMode !== 'control') {
@@ -791,43 +804,55 @@ export class LiveTerminalSession {
           }
         }
         acceptingOutput = true;
-        const controlKeys = inputMode === 'control' ? parseLiveControlSequence(prompt) : null;
-        if (controlKeys) {
+        if (sideMode) {
+          const enteredSideConversation = await this.enterSideConversation();
+          if (!enteredSideConversation) {
+            finish('未确认 Codex 已进入 side conversation，/btw 正文未发送。请先回到主线程后重试。');
+          } else if (turnPrompt) {
+            this.write(`${turnPrompt}\r`);
+            scheduleNormalSubmitRetry();
+          } else {
+            finish();
+          }
+        } else {
+          const controlKeys = inputMode === 'control' ? parseLiveControlSequence(turnPrompt) : null;
+          if (controlKeys) {
           // Send each key as its own write so the tmux backend (which matches a
           // single key per stdin chunk) sees them individually; a small gap keeps
           // the writes from coalescing into one unrecognized chunk.
-          for (let i = 0; i < controlKeys.length; i++) {
-            if (i > 0) await delay(CONTROL_KEY_GAP_MS);
-            this.write(controlKeys[i]!);
-          }
-        } else {
-          if (commandMode) log.info('agent-live', 'command-submit', { commandText: prompt });
-          if (inputMode === 'control' && isNumericControlLiteral(prompt)) {
+            for (let i = 0; i < controlKeys.length; i++) {
+              if (i > 0) await delay(CONTROL_KEY_GAP_MS);
+              this.write(controlKeys[i]!);
+            }
+          } else {
+            if (commandMode) log.info('agent-live', 'command-submit', { commandText: turnPrompt });
+            if (inputMode === 'control' && isNumericControlLiteral(turnPrompt)) {
             // A numeric picker choice can open a nested menu (Codex's
             // "More reasoning…" is one example). Never synthesize Enter after
             // the literal: the user can press the explicit card Enter button
             // when this menu is meant to be confirmed. This prevents a delayed
             // fallback key from selecting the nested menu's default option.
-            log.info('agent-live', 'control-literal-type', { input: prompt });
-            this.write(prompt);
-          } else if (inputMode === 'control' && shouldDeferControlLiteralSubmit(prompt)) {
-            log.info('agent-live', 'control-literal-type', { input: prompt });
-            this.write(prompt);
-            controlLiteralConfirmTimer = setTimeout(() => {
-              controlLiteralConfirmTimer = undefined;
-              if (done || sawAcceptedOutput) return;
-              log.info('agent-live', 'control-literal-confirm', { input: prompt });
-              this.write('\r');
-            }, CONTROL_LITERAL_CONFIRM_DELAY_MS);
-          } else {
-            this.write(`${prompt}\r`);
-            scheduleNormalSubmitRetry();
+              log.info('agent-live', 'control-literal-type', { input: turnPrompt });
+              this.write(turnPrompt);
+            } else if (inputMode === 'control' && shouldDeferControlLiteralSubmit(turnPrompt)) {
+              log.info('agent-live', 'control-literal-type', { input: turnPrompt });
+              this.write(turnPrompt);
+              controlLiteralConfirmTimer = setTimeout(() => {
+                controlLiteralConfirmTimer = undefined;
+                if (done || sawAcceptedOutput) return;
+                log.info('agent-live', 'control-literal-confirm', { input: turnPrompt });
+                this.write('\r');
+              }, CONTROL_LITERAL_CONFIRM_DELAY_MS);
+            } else {
+              this.write(`${turnPrompt}\r`);
+              scheduleNormalSubmitRetry();
+            }
           }
         }
-        if (commandMode && isStatusLiveCommand(prompt)) arm(idleMs);
-        else if (commandMode && isKnownSilentLiveCommand(prompt)) arm(idleMs);
-        else if (commandMode && isSlowSilentLiveCommand(prompt)) {
-          arm(noOutputIdleMs(prompt, idleMs));
+        if (commandMode && isStatusLiveCommand(turnPrompt)) arm(idleMs);
+        else if (commandMode && isKnownSilentLiveCommand(turnPrompt)) arm(idleMs);
+        else if (commandMode && isSlowSilentLiveCommand(turnPrompt)) {
+          arm(noOutputIdleMs(turnPrompt, idleMs));
         } else arm(startupTimeoutMs);
       }
 
@@ -854,6 +879,46 @@ export class LiveTerminalSession {
     await delay(CONTROL_KEY_GAP_MS);
     this.write('\x0B');
     await delay(COMMAND_CLEAR_SETTLE_MS);
+  }
+
+  private async enterSideConversation(): Promise<boolean> {
+    const terminal = this.lastTerminalSnapshot;
+    if (isLiveSideConversation(terminal)) {
+      // Codex closes a side conversation with Ctrl-C and returns to the main
+      // thread. Only do this when the terminal explicitly identifies a side
+      // conversation; never interrupt a main-thread task speculatively.
+      this.write('\x03');
+      const returnedToMain = await this.waitForTerminalSnapshot(
+        (text) => !isLiveSideConversation(text),
+        SIDE_SWITCH_TIMEOUT_MS,
+        terminal,
+      );
+      if (!returnedToMain) return false;
+    }
+    const beforeSide = this.lastTerminalSnapshot;
+    this.write('/btw\r');
+    const enteredSide = await this.waitForTerminalSnapshot(
+      isLiveSideConversation,
+      SIDE_SWITCH_TIMEOUT_MS,
+      beforeSide,
+    );
+    if (!enteredSide) return false;
+    await delay(SIDE_COMMAND_SETTLE_MS);
+    return true;
+  }
+
+  private async waitForTerminalSnapshot(
+    predicate: (input: string) => boolean,
+    timeoutMs: number,
+    previousSnapshot = '',
+  ): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const text = this.lastTerminalSnapshot;
+      if (text !== previousSnapshot && predicate(text)) return true;
+      await delay(80);
+    }
+    return false;
   }
 
   private inputGraceMs(commandMode: boolean): number {
@@ -3090,9 +3155,24 @@ function isTerminalSuggestionLine(trimmed: string): boolean {
 
 export function isLiveTerminalBusy(input: string): boolean {
   const recent = cleanTerminalOutput(input).split('\n').slice(-12).join('\n');
-  return /(?:tab\s+to\s+queue\s+message|(?:working|waiting\s+for\s+background\s+terminal)\s*\([^)]*(?:esc|escape)\s+to\s+interrupt|esc(?:ape)?\s+to\s+interrupt|compacting(?:\s+context)?|^\s*[•◦]\s+running\b)/imu.test(
+  return /(?:(?:working|waiting\s+for\s+background\s+terminal)\s*\([^)]*(?:esc|escape)\s+to\s+interrupt|esc(?:ape)?\s+to\s+interrupt|compacting(?:\s+context)?|^\s*[•◦]\s+running\b)/imu.test(
     recent,
   );
+}
+
+/** The native Codex footer identifies a side conversation without using a
+ * task-progress marker. It is used only to return to the main thread before
+ * starting a new `/btw` side conversation. */
+export function isLiveSideConversation(input: string): boolean {
+  const recent = cleanTerminalOutput(input).split('\n').slice(-20).join('\n');
+  return /\bside\s+from\s+main\s+thread\b/iu.test(recent);
+}
+
+function parseSidePrompt(input: string): string | undefined {
+  const match = /^\/btw(?:\s+([\s\S]+))?$/iu.exec(input.trim());
+  if (!match) return undefined;
+  const body = match[1]?.trim();
+  return body || undefined;
 }
 
 /**

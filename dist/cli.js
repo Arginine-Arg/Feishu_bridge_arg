@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.0.5",
+  version: "1.0.6",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -7159,6 +7159,8 @@ var PIPE_STARTUP_OUTPUT_GRACE_MS = 2500;
 var COMMAND_FRESH_SESSION_GRACE_MS = 1200;
 var FRESH_TERMINAL_GRACE_MS = 2500;
 var CONTROL_KEY_GAP_MS = 40;
+var SIDE_COMMAND_SETTLE_MS = 450;
+var SIDE_SWITCH_TIMEOUT_MS = 3e3;
 var COMMAND_ESCAPE_SETTLE_MS = 250;
 var COMMAND_CLEAR_SETTLE_MS = 500;
 var COMMAND_STARTUP_TIMEOUT_MS = 25e3;
@@ -7425,11 +7427,18 @@ var LiveTerminalSession = class {
   async *turnEvents(prompt, cwd, inputMode, interruption = { requested: false }) {
     yield { type: "system", cwd };
     await this.start();
-    const commandMode = inputMode === "command";
+    const commandMode = inputMode === "command" || inputMode === "side";
+    const sideMode = inputMode === "side";
+    const sidePrompt = sideMode ? parseSidePrompt(prompt) : void 0;
+    if (sideMode && sidePrompt === void 0) {
+      yield { type: "error", message: "\u7F3A\u5C11 /btw \u7684\u6B63\u6587\u3002", terminationReason: "failed" };
+      return;
+    }
+    const turnPrompt = sideMode ? sidePrompt : prompt;
     const idleMs = commandMode ? Math.max(this.opts.idleMs ?? DEFAULT_IDLE_MS, COMMAND_IDLE_MS) : this.opts.idleMs ?? DEFAULT_IDLE_MS;
     const outputFlushMs = this.opts.outputFlushMs ?? DEFAULT_OUTPUT_FLUSH_MS;
     const startupTimeoutMs = commandMode ? Math.max(this.opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS, COMMAND_STARTUP_TIMEOUT_MS) : this.opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
-    const output = new TurnOutputBuffer(MAX_TURN_OUTPUT_CHARS, prompt, commandMode || inputMode === "control");
+    const output = new TurnOutputBuffer(MAX_TURN_OUTPUT_CHARS, turnPrompt, commandMode || inputMode === "control");
     const queue = [];
     let done = false;
     let wake;
@@ -7454,7 +7463,7 @@ var LiveTerminalSession = class {
     const inputGraceMs = this.inputGraceMs(commandMode);
     if (commandMode) {
       log.info("agent-live", "command-start", {
-        commandText: prompt,
+        commandText: turnPrompt,
         idleMs,
         startupTimeoutMs,
         outputFlushMs
@@ -7512,7 +7521,7 @@ var LiveTerminalSession = class {
       if (controlLiteralConfirmTimer) clearTimeout(controlLiteralConfirmTimer);
       cancelNormalSubmitRetry();
       flushOutput();
-      if (commandMode && isStatusLiveCommand(prompt)) {
+      if (commandMode && isStatusLiveCommand(turnPrompt)) {
         push({
           type: "text",
           delta: deliveredText ? buildLiveTerminalFooter(this.terminalInfo) : buildLiveStatusFallback(this.opts, cwd, this.terminalInfo),
@@ -7554,27 +7563,32 @@ var LiveTerminalSession = class {
     };
     const scheduleSlashCommandConfirm = () => {
       if (!commandMode || slashConfirmRetried || slashConfirmTimer || sawCommandResultOutput) return;
-      if (!prompt.trim().startsWith("/")) return;
-      if (!isPendingLiveCommandDraft(latestCommandTerminalText, prompt)) return;
+      if (!turnPrompt.trim().startsWith("/")) return;
+      if (!isPendingLiveCommandDraft(latestCommandTerminalText, turnPrompt)) return;
       slashConfirmTimer = setTimeout(() => {
         slashConfirmTimer = void 0;
-        if (done || sawCommandResultOutput || slashConfirmRetried || !isPendingLiveCommandDraft(latestCommandTerminalText, prompt)) {
+        if (done || sawCommandResultOutput || slashConfirmRetried || !isPendingLiveCommandDraft(latestCommandTerminalText, turnPrompt)) {
           return;
         }
         slashConfirmRetried = true;
-        log.info("agent-live", "command-confirm-draft", { commandText: prompt });
+        log.info("agent-live", "command-confirm-draft", { commandText: turnPrompt });
         this.write("\r");
-        if (isStatusLiveCommand(prompt)) arm(idleMs);
+        if (isStatusLiveCommand(turnPrompt)) arm(idleMs);
       }, COMMAND_DRAFT_CONFIRM_DELAY_MS);
     };
     const scheduleNormalSubmitRetry = () => {
-      if (commandMode || inputMode === "control" || normalSubmitRetried || normalSubmitRetryTimer) return;
+      if (commandMode && !sideMode || inputMode === "control" || normalSubmitRetried || normalSubmitRetryTimer) return;
       normalSubmitRetryTimer = setTimeout(() => {
         normalSubmitRetryTimer = void 0;
         if (done || sawNormalSubmitProgress || normalSubmitRetried) return;
+        if (sideMode) {
+          const terminal = `${this.lastTerminalSnapshot}
+${this.lastTerminalHistory?.text ?? ""}`;
+          if (!isPendingLivePromptDraft(terminal, turnPrompt)) return;
+        }
         normalSubmitRetried = true;
         void (async () => {
-          log.warn("agent-live", "normal-submit-retry", { promptPreview: previewLiveText(prompt) });
+          log.warn("agent-live", "normal-submit-retry", { promptPreview: previewLiveText(turnPrompt) });
           this.write("\r");
         })().catch((err) => {
           log.warn("agent-live", "normal-submit-retry-failed", {
@@ -7610,10 +7624,10 @@ var LiveTerminalSession = class {
         return;
       }
       const terminalState = event.terminalText;
-      const normalPromptDraftPending = !commandMode && inputMode !== "control" && Boolean(terminalState) && isPendingLivePromptDraft(terminalState ?? "", prompt);
+      const normalPromptDraftPending = !commandMode && inputMode !== "control" && Boolean(terminalState) && isPendingLivePromptDraft(terminalState ?? "", turnPrompt);
       if (commandMode && terminalState) {
         latestCommandTerminalText = terminalState;
-        if (!isPendingLiveCommandDraft(terminalState, prompt)) cancelSlashCommandConfirm();
+        if (!isPendingLiveCommandDraft(terminalState, turnPrompt)) cancelSlashCommandConfirm();
       }
       const terminalBusy = terminalState ? isLiveTerminalBusy(terminalState) : false;
       if (normalPromptDraftPending) {
@@ -7633,14 +7647,14 @@ var LiveTerminalSession = class {
         }
       }
       const useHistory = Boolean(event.history?.text);
-      const text = useHistory ? event.history.text : sanitizeLiveTurnOutput(event.text, prompt);
+      const text = useHistory ? event.history.text : sanitizeLiveTurnOutput(event.text, turnPrompt);
       const beforeAppendFrame = commandMode && diagFrames < LIVE_DIAG_MAX_FRAMES;
       if (beforeAppendFrame) diagFrames += 1;
       if (!text) {
         if (terminalWasBusy) return;
         if (commandMode) {
           scheduleSlashCommandConfirm();
-          arm(isStatusLiveCommand(prompt) || sawAcceptedOutput || isKnownSilentLiveCommand(prompt) ? idleMs : noOutputIdleMs(prompt, idleMs));
+          arm(isStatusLiveCommand(turnPrompt) || sawAcceptedOutput || isKnownSilentLiveCommand(turnPrompt) ? idleMs : noOutputIdleMs(turnPrompt, idleMs));
         }
         return;
       }
@@ -7655,11 +7669,11 @@ var LiveTerminalSession = class {
       }
       if (accepted) {
         if (!normalPromptDraftPending) markNormalSubmitProgress();
-        const resultOutput = isLiveCommandResultOutput(text, prompt);
+        const resultOutput = isLiveCommandResultOutput(text, turnPrompt);
         if (controlLiteralConfirmTimer) {
           clearTimeout(controlLiteralConfirmTimer);
           controlLiteralConfirmTimer = void 0;
-          log.info("agent-live", "control-literal-output-before-enter", { input: prompt });
+          log.info("agent-live", "control-literal-output-before-enter", { input: turnPrompt });
         }
         sawAcceptedOutput = true;
         if (resultOutput) {
@@ -7672,7 +7686,7 @@ var LiveTerminalSession = class {
       } else if (commandMode) {
         scheduleSlashCommandConfirm();
         if (!terminalWasBusy) {
-          arm(sawAcceptedOutput ? idleMs : noOutputIdleMs(prompt, idleMs));
+          arm(sawAcceptedOutput ? idleMs : noOutputIdleMs(turnPrompt, idleMs));
         }
       }
       const terminalFailure = accepted ? detectLiveTerminalFailure(output.lastAcceptedText()) : void 0;
@@ -7727,7 +7741,7 @@ var LiveTerminalSession = class {
       if (interruption.requested) cancelCurrentTurn();
       await this.waitForInputReady(
         inputGraceMs,
-        !commandMode && inputMode !== "control" && !prompt.trim().startsWith("/")
+        !commandMode && inputMode !== "control" && !turnPrompt.trim().startsWith("/")
       );
       if (!done) {
         if (startupInteractionText && inputMode !== "control") {
@@ -7751,35 +7765,47 @@ var LiveTerminalSession = class {
           }
         }
         acceptingOutput = true;
-        const controlKeys = inputMode === "control" ? parseLiveControlSequence(prompt) : null;
-        if (controlKeys) {
-          for (let i = 0; i < controlKeys.length; i++) {
-            if (i > 0) await delay(CONTROL_KEY_GAP_MS);
-            this.write(controlKeys[i]);
+        if (sideMode) {
+          const enteredSideConversation = await this.enterSideConversation();
+          if (!enteredSideConversation) {
+            finish("\u672A\u786E\u8BA4 Codex \u5DF2\u8FDB\u5165 side conversation\uFF0C/btw \u6B63\u6587\u672A\u53D1\u9001\u3002\u8BF7\u5148\u56DE\u5230\u4E3B\u7EBF\u7A0B\u540E\u91CD\u8BD5\u3002");
+          } else if (turnPrompt) {
+            this.write(`${turnPrompt}\r`);
+            scheduleNormalSubmitRetry();
+          } else {
+            finish();
           }
         } else {
-          if (commandMode) log.info("agent-live", "command-submit", { commandText: prompt });
-          if (inputMode === "control" && isNumericControlLiteral(prompt)) {
-            log.info("agent-live", "control-literal-type", { input: prompt });
-            this.write(prompt);
-          } else if (inputMode === "control" && shouldDeferControlLiteralSubmit(prompt)) {
-            log.info("agent-live", "control-literal-type", { input: prompt });
-            this.write(prompt);
-            controlLiteralConfirmTimer = setTimeout(() => {
-              controlLiteralConfirmTimer = void 0;
-              if (done || sawAcceptedOutput) return;
-              log.info("agent-live", "control-literal-confirm", { input: prompt });
-              this.write("\r");
-            }, CONTROL_LITERAL_CONFIRM_DELAY_MS);
+          const controlKeys = inputMode === "control" ? parseLiveControlSequence(turnPrompt) : null;
+          if (controlKeys) {
+            for (let i = 0; i < controlKeys.length; i++) {
+              if (i > 0) await delay(CONTROL_KEY_GAP_MS);
+              this.write(controlKeys[i]);
+            }
           } else {
-            this.write(`${prompt}\r`);
-            scheduleNormalSubmitRetry();
+            if (commandMode) log.info("agent-live", "command-submit", { commandText: turnPrompt });
+            if (inputMode === "control" && isNumericControlLiteral(turnPrompt)) {
+              log.info("agent-live", "control-literal-type", { input: turnPrompt });
+              this.write(turnPrompt);
+            } else if (inputMode === "control" && shouldDeferControlLiteralSubmit(turnPrompt)) {
+              log.info("agent-live", "control-literal-type", { input: turnPrompt });
+              this.write(turnPrompt);
+              controlLiteralConfirmTimer = setTimeout(() => {
+                controlLiteralConfirmTimer = void 0;
+                if (done || sawAcceptedOutput) return;
+                log.info("agent-live", "control-literal-confirm", { input: turnPrompt });
+                this.write("\r");
+              }, CONTROL_LITERAL_CONFIRM_DELAY_MS);
+            } else {
+              this.write(`${turnPrompt}\r`);
+              scheduleNormalSubmitRetry();
+            }
           }
         }
-        if (commandMode && isStatusLiveCommand(prompt)) arm(idleMs);
-        else if (commandMode && isKnownSilentLiveCommand(prompt)) arm(idleMs);
-        else if (commandMode && isSlowSilentLiveCommand(prompt)) {
-          arm(noOutputIdleMs(prompt, idleMs));
+        if (commandMode && isStatusLiveCommand(turnPrompt)) arm(idleMs);
+        else if (commandMode && isKnownSilentLiveCommand(turnPrompt)) arm(idleMs);
+        else if (commandMode && isSlowSilentLiveCommand(turnPrompt)) {
+          arm(noOutputIdleMs(turnPrompt, idleMs));
         } else arm(startupTimeoutMs);
       }
       while (!done || queue.length > 0) {
@@ -7804,6 +7830,37 @@ var LiveTerminalSession = class {
     await delay(CONTROL_KEY_GAP_MS);
     this.write("\v");
     await delay(COMMAND_CLEAR_SETTLE_MS);
+  }
+  async enterSideConversation() {
+    const terminal = this.lastTerminalSnapshot;
+    if (isLiveSideConversation(terminal)) {
+      this.write("");
+      const returnedToMain = await this.waitForTerminalSnapshot(
+        (text) => !isLiveSideConversation(text),
+        SIDE_SWITCH_TIMEOUT_MS,
+        terminal
+      );
+      if (!returnedToMain) return false;
+    }
+    const beforeSide = this.lastTerminalSnapshot;
+    this.write("/btw\r");
+    const enteredSide = await this.waitForTerminalSnapshot(
+      isLiveSideConversation,
+      SIDE_SWITCH_TIMEOUT_MS,
+      beforeSide
+    );
+    if (!enteredSide) return false;
+    await delay(SIDE_COMMAND_SETTLE_MS);
+    return true;
+  }
+  async waitForTerminalSnapshot(predicate, timeoutMs, previousSnapshot = "") {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const text = this.lastTerminalSnapshot;
+      if (text !== previousSnapshot && predicate(text)) return true;
+      await delay(80);
+    }
+    return false;
   }
   inputGraceMs(commandMode) {
     if (!this.startedAt) return STARTUP_INPUT_GRACE_MS;
@@ -9606,9 +9663,19 @@ function isTerminalSuggestionLine(trimmed) {
 }
 function isLiveTerminalBusy(input) {
   const recent = cleanTerminalOutput(input).split("\n").slice(-12).join("\n");
-  return /(?:tab\s+to\s+queue\s+message|(?:working|waiting\s+for\s+background\s+terminal)\s*\([^)]*(?:esc|escape)\s+to\s+interrupt|esc(?:ape)?\s+to\s+interrupt|compacting(?:\s+context)?|^\s*[•◦]\s+running\b)/imu.test(
+  return /(?:(?:working|waiting\s+for\s+background\s+terminal)\s*\([^)]*(?:esc|escape)\s+to\s+interrupt|esc(?:ape)?\s+to\s+interrupt|compacting(?:\s+context)?|^\s*[•◦]\s+running\b)/imu.test(
     recent
   );
+}
+function isLiveSideConversation(input) {
+  const recent = cleanTerminalOutput(input).split("\n").slice(-20).join("\n");
+  return /\bside\s+from\s+main\s+thread\b/iu.test(recent);
+}
+function parseSidePrompt(input) {
+  const match = /^\/btw(?:\s+([\s\S]+))?$/iu.exec(input.trim());
+  if (!match) return void 0;
+  const body = match[1]?.trim();
+  return body || void 0;
 }
 function detectLiveTerminalFailure(input) {
   const lines = cleanTerminalOutput(input).split("\n").map((line) => line.trim()).filter(Boolean).slice(-24);
@@ -11038,7 +11105,7 @@ function createBridgeAgentFromEnvironment(environment = process.env) {
 function deterministicRoute(input) {
   const inputSha256 = sha256(input.userInput);
   const trimmed = input.userInput.trim();
-  const kind = input.inputMode === "control" ? "terminal-control" : input.inputMode === "command" || trimmed.startsWith("/") ? "native-command" : "task";
+  const kind = input.inputMode === "control" ? "terminal-control" : input.inputMode === "command" || input.inputMode === "side" || trimmed.startsWith("/") ? "native-command" : "task";
   return {
     stdin: input.userInput,
     kind,
@@ -11982,6 +12049,7 @@ function helpCard(agentName = "Agent") {
         "- `/account` \u2014 \u67E5\u770B\u5F53\u524D\u5E94\u7528\uFF1B`/account change` \u6362 appId/secret \u5E76\u91CD\u8FDE",
         "- `/config` \u2014 \u8C03\u6574\u504F\u597D\u3001\u8BBF\u95EE\u63A7\u5236\u548C lark-cli \u8EAB\u4EFD\u7B56\u7565",
         "- `/model` \u2014 \u9009\u62E9\u6A21\u578B\uFF1BCodex \u4F7F\u7528 CLI \u539F\u751F\u6A21\u578B\u548C reasoning \u9009\u9879\u5E76\u540C\u6B65\u5230 profile",
+        "- `/btw <\u5185\u5BB9>` \u2014 Codex \u4E2D\u5F00\u542F side conversation \u540E\u63D0\u4EA4\u5185\u5BB9\uFF1B`/codex /btw <\u5185\u5BB9>` \u7B49\u4EF7",
         "- `/status` \u2014 \u5F53\u524D\u72B6\u6001",
         "- `/session` \u2014 \u67E5\u770B\u6216\u5207\u6362\u540E\u53F0 agent session \u6A21\u5F0F",
         "- `/tmux list|bind <\u7F16\u53F7\u6216 pane id>|status|tail [N]|unbind` \u2014 \u7BA1\u7406\u5458\u7BA1\u7406 tmux\uFF1B`tail` \u9ED8\u8BA4\u663E\u793A\u5F53\u524D pane \u672B\u5C3E 27 \u884C",
@@ -15624,7 +15692,7 @@ function isForceLiveAgentCommandMessage(msg) {
 function liveInputModeForMessage(msg) {
   if (!msg.raw || typeof msg.raw !== "object" || Array.isArray(msg.raw)) return void 0;
   const mode = msg.raw[LIVE_INPUT_MODE_RAW_KEY];
-  return mode === "command" || mode === "control" ? mode : void 0;
+  return mode === "command" || mode === "control" || mode === "side" ? mode : void 0;
 }
 
 // src/bot/session-catalog-identity.ts
@@ -20061,6 +20129,13 @@ function commandPreservesPendingMessages(content) {
 }
 function rewriteAgentCommandMessage(msg, agentKind) {
   const trimmed = msg.content.trimStart();
+  if (agentKind === "codex" && /^\/btw(?:\s|$)/iu.test(trimmed)) {
+    return {
+      msg: { ...msg, content: trimmed },
+      forceNative: true,
+      nativeMode: "side"
+    };
+  }
   const match = /^\/([A-Za-z][A-Za-z0-9_-]*)(?:\s+([\s\S]+))?$/.exec(trimmed);
   if (!match) return { msg, forceNative: false };
   const target = match[1]?.toLowerCase();
@@ -20081,6 +20156,9 @@ function normalizeAgentPrefixedNativeInput(input) {
   const trimmed = input.trim();
   if (/^model$/iu.test(trimmed)) {
     return { text: "/model", forceNative: true, nativeMode: "command" };
+  }
+  if (/^\/btw(?:\s|$)/iu.test(trimmed)) {
+    return { text: input, forceNative: true, nativeMode: "side" };
   }
   const slashless = /^\/([A-Za-z0-9_-]+)$/u.exec(trimmed)?.[1];
   const controlText = slashless && isLivePickerInput(slashless) ? slashless : trimmed;
@@ -20213,6 +20291,10 @@ async function runAgentBatch(deps) {
   const nativeCommand = nativeAgentCommandForBatch(batch);
   const forceLiveSession = batch.some(isForceLiveAgentCommandMessage);
   const useLiveSession = forceLiveSession || getAgentSessionMode(controls.cfg) === "live";
+  const nativeInputMode = nativeCommand ? liveInputModeForBatch(batch, nativeCommand) : void 0;
+  if (useLiveSession && nativeInputMode === "side" && liveInteractionByScope.delete(scope)) {
+    log.info("agent-live", "picker-dismissed-for-side-conversation", { scope });
+  }
   if (useLiveSession && !nativeCommand && liveInteractionByScope.delete(scope)) {
     log.info("agent-live", "picker-dismissed-for-task", { scope });
   }
@@ -20224,7 +20306,7 @@ async function runAgentBatch(deps) {
   );
   const bridgeRoute = useLiveSession ? await bridgeAgent.route({
     userInput: nativeCommand ?? structuredPrompt,
-    ...nativeCommand ? { inputMode: liveInputModeForBatch(batch, nativeCommand) } : {}
+    ...nativeCommand && nativeInputMode ? { inputMode: nativeInputMode } : {}
   }) : void 0;
   const liveInputMode = bridgeRoute?.inputMode;
   const prompt = bridgeRoute?.stdin ?? structuredPrompt;

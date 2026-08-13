@@ -945,6 +945,13 @@ export function rewriteAgentCommandMessage(
   agentKind: 'claude' | 'codex',
 ): AgentCommandRoute {
   const trimmed = msg.content.trimStart();
+  if (agentKind === 'codex' && /^\/btw(?:\s|$)/iu.test(trimmed)) {
+    return {
+      msg: { ...msg, content: trimmed },
+      forceNative: true,
+      nativeMode: 'side',
+    };
+  }
   const match = /^\/([A-Za-z][A-Za-z0-9_-]*)(?:\s+([\s\S]+))?$/.exec(trimmed);
   if (!match) return { msg, forceNative: false };
   const target = match[1]?.toLowerCase();
@@ -975,6 +982,9 @@ function normalizeAgentPrefixedNativeInput(input: string): {
   // Treat it as the native picker command rather than ordinary conversation.
   if (/^model$/iu.test(trimmed)) {
     return { text: '/model', forceNative: true, nativeMode: 'command' };
+  }
+  if (/^\/btw(?:\s|$)/iu.test(trimmed)) {
+    return { text: input, forceNative: true, nativeMode: 'side' };
   }
   const slashless = /^\/([A-Za-z0-9_-]+)$/u.exec(trimmed)?.[1];
   const controlText = slashless && isLivePickerInput(slashless) ? slashless : trimmed;
@@ -1160,6 +1170,12 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const nativeCommand = nativeAgentCommandForBatch(batch);
   const forceLiveSession = batch.some(isForceLiveAgentCommandMessage);
   const useLiveSession = forceLiveSession || getAgentSessionMode(controls.cfg) === 'live';
+  const nativeInputMode = nativeCommand
+    ? liveInputModeForBatch(batch, nativeCommand)
+    : undefined;
+  if (useLiveSession && nativeInputMode === 'side' && liveInteractionByScope.delete(scope)) {
+    log.info('agent-live', 'picker-dismissed-for-side-conversation', { scope });
+  }
   if (useLiveSession && !nativeCommand && liveInteractionByScope.delete(scope)) {
     // A normal user task supersedes an abandoned native picker. The live
     // terminal will press Escape before typing this task; clear the bridge's
@@ -1179,7 +1195,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const bridgeRoute = useLiveSession
     ? await bridgeAgent.route({
         userInput: nativeCommand ?? structuredPrompt,
-        ...(nativeCommand ? { inputMode: liveInputModeForBatch(batch, nativeCommand) } : {}),
+        ...(nativeCommand && nativeInputMode ? { inputMode: nativeInputMode } : {}),
       })
     : undefined;
   const liveInputMode = bridgeRoute?.inputMode;
