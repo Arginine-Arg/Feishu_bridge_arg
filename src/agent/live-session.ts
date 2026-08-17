@@ -490,7 +490,10 @@ export class LiveTerminalSession {
     const markNormalSubmitProgress = (): void => {
       if (commandMode || inputMode === 'control') return;
       sawNormalSubmitProgress = true;
-      cancelNormalSubmitRetry();
+      // A tmux redraw can still be stale activity from the previous turn. Its
+      // retry therefore waits for positive evidence that the exact current
+      // draft is in the editor instead of trusting this progress marker.
+      if (this.terminalInfo?.backend !== 'tmux') cancelNormalSubmitRetry();
     };
     const finish = (failureMessage?: string): void => {
       if (done) return;
@@ -577,8 +580,13 @@ export class LiveTerminalSession {
       if ((commandMode && !sideMode) || inputMode === 'control' || normalSubmitRetried || normalSubmitRetryTimer) return;
       normalSubmitRetryTimer = setTimeout(() => {
         normalSubmitRetryTimer = undefined;
-        if (done || sawNormalSubmitProgress || normalSubmitRetried) return;
-        if (sideMode) {
+        if (done || normalSubmitRetried || (sawNormalSubmitProgress && this.terminalInfo?.backend !== 'tmux')) {
+          return;
+        }
+        // /btw has always required proof that its body is still in the
+        // editor. Ordinary tmux turns need that same proof because a redraw
+        // can otherwise show stale activity from the previous turn.
+        if (sideMode || this.terminalInfo?.backend === 'tmux') {
           const terminal = `${this.lastTerminalSnapshot}\n${this.lastTerminalHistory?.text ?? ''}`;
           if (!isPendingLivePromptDraft(terminal, turnPrompt)) return;
         }
@@ -1784,15 +1792,35 @@ export function isPendingLivePromptDraft(input: string, prompt: string): boolean
     // busy marker, picker, or a fresh empty prompt proves the draft is an old
     // echo and lets normal submit progress be acknowledged.
     const trailing = lines.slice(cursor).map((line) => line.trim()).filter(Boolean);
-    if (trailing.every(isLivePromptDraftFooterLine)) return true;
+    if (isLivePromptDraftFooter(trailing)) return true;
   }
   return false;
+}
+
+function isLivePromptDraftFooter(lines: string[]): boolean {
+  return lines.length === 0 ||
+    lines.every(isLivePromptDraftFooterLine) ||
+    isLiveSideConversationFooter(lines);
 }
 
 function isLivePromptDraftFooterLine(line: string): boolean {
   return (
     /^tab to queue message\b.*context left$/iu.test(line) ||
     /^\d+% context left$/iu.test(line)
+  );
+}
+
+/**
+ * Codex's side-conversation footer can wrap in a narrow tmux pane. Keep this
+ * deliberately narrower than `isLiveSideConversation()`: it is an
+ * editor-state proof, so ordinary assistant prose that happens to mention a
+ * side conversation must never authorize a synthetic Enter.
+ */
+function isLiveSideConversationFooter(lines: string[]): boolean {
+  const footer = lines.join(' ').replace(/\s+/gu, ' ').trim();
+  return (
+    /^(?:gpt|codex|claude)[\w.-]*\b/iu.test(footer) &&
+    /\bside\s+from\s+main\s+thread\s*·\s*ctrl\s*\+\s*\/\s+to\s+switch\s*·\s*ctrl\s*\+\s*c\s+to\s+close\s*$/iu.test(footer)
   );
 }
 

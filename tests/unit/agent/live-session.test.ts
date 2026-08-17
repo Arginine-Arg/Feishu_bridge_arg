@@ -92,6 +92,36 @@ describe('parseLiveControlSequence', () => {
       ),
     ).toBe(false);
   });
+
+  it('recognizes an ordinary draft in a Codex side conversation', () => {
+    const prompt = 'How many files have been modified?';
+    const sideDraft = [
+      `› ${prompt}`,
+      'gpt-5.6-terra xhigh · /workspace · Side from main thread · ctrl + / to switch · ctrl + c to close',
+    ].join('\n');
+
+    expect(isPendingLivePromptDraft(sideDraft, prompt)).toBe(true);
+    expect(isPendingLivePromptDraft(sideDraft, 'How many sessions are active?')).toBe(false);
+    expect(isPendingLivePromptDraft(`${sideDraft}\n• side answer`, prompt)).toBe(false);
+    expect(isPendingLivePromptDraft(`${sideDraft}\nSelect Model and Effort`, prompt)).toBe(false);
+    expect(isPendingLivePromptDraft(`${sideDraft}\n›`, prompt)).toBe(false);
+    expect(
+      isPendingLivePromptDraft(
+        [
+          `› ${prompt}`,
+          'gpt-5.6-terra xhigh · /workspace ·',
+          'Side from main thread · ctrl + / to switch · ctrl + c to close',
+        ].join('\n'),
+        prompt,
+      ),
+    ).toBe(true);
+    expect(
+      isPendingLivePromptDraft(
+        [`› ${prompt}`, 'Side from main thread · ctrl + / to switch · ctrl + c to close'].join('\n'),
+        prompt,
+      ),
+    ).toBe(false);
+  });
 });
 
 describe('LiveTerminalSession prime slot', () => {
@@ -2806,6 +2836,74 @@ setInterval(() => {}, 1000);
     expect(textOf(events)).toBe('• ordinary-submit-confirmed\n');
   }, 15_000);
 
+  tmuxIt('retries a side-conversation draft after stale busy terminal chrome', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-side-draft-retry-test-'));
+    const bin = join(dir, 'fake-tmux-side-draft-retry-agent.mjs');
+    const prompt = 'How many files have been modified?';
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+const expected = ${JSON.stringify(prompt)};
+let draft = '';
+let submits = 0;
+function screen(lines) {
+  process.stdout.write('\\x1b[2J\\x1b[H' + lines.join('\\n') + '\\n');
+}
+screen(['• Working (8s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close']);
+process.stdin.on('data', (chunk) => {
+  for (const char of chunk) {
+    if (char !== '\\r' && char !== '\\n') {
+      draft += char;
+      continue;
+    }
+    submits += 1;
+    if (submits === 1) {
+      // Simulate the stale previous-task frame that used to cancel the retry.
+      screen(['• Working (9s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close']);
+      setTimeout(() => screen([
+        '› ' + draft,
+        'gpt-5.6-terra xhigh · /tmp · Side from main thread · ctrl + / to switch · ctrl + c to close',
+      ]), 80);
+      continue;
+    }
+    if (draft === expected) {
+      screen([
+        '• side-draft-submit-confirmed',
+        'gpt-5.6-terra xhigh · /tmp · Side from main thread · ctrl + / to switch · ctrl + c to close',
+        '›',
+      ]);
+    } else {
+      screen(['unexpected:' + JSON.stringify(draft)]);
+    }
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-side-draft-retry-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-side-draft-retry',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 300,
+      outputFlushMs: 30,
+      startupTimeoutMs: 6_000,
+    });
+
+    const events = await collect(session.run('tmux-side-draft-retry-run', prompt, dir).events);
+    await pool.closeAll();
+
+    expect(textOf(events)).toContain('• side-draft-submit-confirmed\n');
+  }, 15_000);
+
   tmuxIt('keeps a busy terminal turn open across an incomplete tmux redraw and streams its final result', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-busy-redraw-test-'));
     const bin = join(dir, 'fake-tmux-busy-redraw-agent.mjs');
@@ -3217,6 +3315,84 @@ setInterval(() => {}, 1000);
     expect(textOf(first)).not.toContain('side unavailable');
     expect(textOf(second)).toContain('side-answer: check the tests');
     expect(textOf(second)).not.toContain('side unavailable');
+  }, 20_000);
+
+  tmuxIt('retries a dropped /btw body only after seeing the matching side draft', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-btw-draft-retry-test-'));
+    const bin = join(dir, 'fake-tmux-btw-draft-retry-agent.mjs');
+    const body = 'summarize the pending change';
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+let draft = '';
+let side = false;
+let bodySubmits = 0;
+function screen(lines) {
+  process.stdout.write('\\x1b[2J\\x1b[H' + lines.join('\\n') + '\\n');
+}
+function footer() {
+  return 'gpt-5.6-terra xhigh · /tmp · Side from main thread · ctrl + / to switch · ctrl + c to close';
+}
+screen(['gpt-5.6-terra xhigh · /tmp', '›']);
+process.stdin.on('data', (chunk) => {
+  for (const char of chunk) {
+    if (char === '\\x03') {
+      side = false;
+      draft = '';
+      screen(['gpt-5.6-terra xhigh · /tmp', '›']);
+      continue;
+    }
+    if (char !== '\\r' && char !== '\\n') {
+      draft += char;
+      continue;
+    }
+    if (draft === '/btw') {
+      draft = '';
+      side = true;
+      screen([footer(), '›']);
+      continue;
+    }
+    if (!side || !draft) continue;
+    bodySubmits += 1;
+    if (bodySubmits === 1) {
+      // The first Enter was dropped: Codex leaves the exact body in its editor.
+      screen(['› ' + draft, footer()]);
+      continue;
+    }
+    if (draft === ${JSON.stringify(body)}) {
+      screen(['• side-body-retry-confirmed', footer(), '›']);
+    } else {
+      screen(['unexpected:' + JSON.stringify(draft)]);
+    }
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-btw-draft-retry-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-btw-draft-retry',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 180,
+      outputFlushMs: 20,
+      startupTimeoutMs: 4_000,
+    });
+
+    const events = await collect(
+      session.run('tmux-btw-draft-retry-run', `/btw ${body}`, dir, 'side').events,
+    );
+    await pool.closeAll();
+
+    expect(textOf(events)).toContain('• side-body-retry-confirmed\n');
   }, 20_000);
 
   tmuxIt('does not send /btw body when Codex never enters a side conversation', async () => {

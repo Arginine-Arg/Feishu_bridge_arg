@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.0.6",
+  version: "1.0.7",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -7506,7 +7506,7 @@ var LiveTerminalSession = class {
     const markNormalSubmitProgress = () => {
       if (commandMode || inputMode === "control") return;
       sawNormalSubmitProgress = true;
-      cancelNormalSubmitRetry();
+      if (this.terminalInfo?.backend !== "tmux") cancelNormalSubmitRetry();
     };
     const finish = (failureMessage) => {
       if (done) return;
@@ -7580,8 +7580,10 @@ var LiveTerminalSession = class {
       if (commandMode && !sideMode || inputMode === "control" || normalSubmitRetried || normalSubmitRetryTimer) return;
       normalSubmitRetryTimer = setTimeout(() => {
         normalSubmitRetryTimer = void 0;
-        if (done || sawNormalSubmitProgress || normalSubmitRetried) return;
-        if (sideMode) {
+        if (done || normalSubmitRetried || sawNormalSubmitProgress && this.terminalInfo?.backend !== "tmux") {
+          return;
+        }
+        if (sideMode || this.terminalInfo?.backend === "tmux") {
           const terminal = `${this.lastTerminalSnapshot}
 ${this.lastTerminalHistory?.text ?? ""}`;
           if (!isPendingLivePromptDraft(terminal, turnPrompt)) return;
@@ -8625,12 +8627,19 @@ function isPendingLivePromptDraft(input, prompt) {
     }
     if (!matches) continue;
     const trailing = lines.slice(cursor).map((line) => line.trim()).filter(Boolean);
-    if (trailing.every(isLivePromptDraftFooterLine)) return true;
+    if (isLivePromptDraftFooter(trailing)) return true;
   }
   return false;
 }
+function isLivePromptDraftFooter(lines) {
+  return lines.length === 0 || lines.every(isLivePromptDraftFooterLine) || isLiveSideConversationFooter(lines);
+}
 function isLivePromptDraftFooterLine(line) {
   return /^tab to queue message\b.*context left$/iu.test(line) || /^\d+% context left$/iu.test(line);
+}
+function isLiveSideConversationFooter(lines) {
+  const footer = lines.join(" ").replace(/\s+/gu, " ").trim();
+  return /^(?:gpt|codex|claude)[\w.-]*\b/iu.test(footer) && /\bside\s+from\s+main\s+thread\s*·\s*ctrl\s*\+\s*\/\s+to\s+switch\s*·\s*ctrl\s*\+\s*c\s+to\s+close\s*$/iu.test(footer);
 }
 function shouldDeferControlLiteralSubmit(input) {
   const trimmed = input.trim();
