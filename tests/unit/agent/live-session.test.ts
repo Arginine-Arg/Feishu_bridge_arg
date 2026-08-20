@@ -3363,6 +3363,73 @@ setInterval(() => {}, 1000);
     expect(textOf(second)).not.toContain('side unavailable');
   }, 20_000);
 
+  tmuxIt('reuses a paused Goal side conversation instead of sending /btw inside it', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-btw-goal-side-test-'));
+    const bin = join(dir, 'fake-tmux-btw-goal-side-agent.mjs');
+    const body = '目前有什么新的结果吗？';
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+let draft = '';
+let btwCommands = 0;
+function screen(lines) {
+  process.stdout.write('\\x1b[2J\\x1b[H' + lines.join('\\n') + '\\n');
+}
+function footer() {
+  return 'gpt-5.6-terra xhigh · /tmp · Side from main thread · ctrl + / to switch · ctrl + c to close';
+}
+screen(['Goal paused (/goal resume)', '›', footer()]);
+process.stdin.on('data', (chunk) => {
+  for (const char of chunk) {
+    if (char === '\\x03') continue;
+    if (char !== '\\r' && char !== '\\n') {
+      draft += char;
+      continue;
+    }
+    const line = draft;
+    draft = '';
+    if (line === '/btw') {
+      btwCommands += 1;
+      screen(["'/btw' is unavailable in side conversations. Press Ctrl+C to return to the main thread first.", '› /btw', footer()]);
+      continue;
+    }
+    if (line === ${JSON.stringify(body)}) {
+      screen(['• side-body-confirmed', footer(), '›']);
+      continue;
+    }
+    if (line) screen(['unexpected:' + JSON.stringify(line), footer(), '›']);
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-btw-goal-side-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-btw-goal-side',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 180,
+      outputFlushMs: 20,
+      startupTimeoutMs: 4_000,
+    });
+
+    const events = await collect(
+      session.run('btw-goal-side-run', `/btw ${body}`, dir, 'side').events,
+    );
+    await pool.closeAll();
+
+    expect(textOf(events)).toContain('• side-body-confirmed\n');
+    expect(textOf(events)).not.toContain('unavailable in side conversations');
+  }, 20_000);
+
   tmuxIt('retries a dropped /btw body only after seeing the matching side draft', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-btw-draft-retry-test-'));
     const bin = join(dir, 'fake-tmux-btw-draft-retry-agent.mjs');

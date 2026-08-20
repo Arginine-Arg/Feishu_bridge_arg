@@ -44,7 +44,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.1.0
+sh /tmp/install-arg-bridge.sh --version 1.1.1
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -88,10 +88,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.1.0"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.1.1"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.1.0`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.1.1`。
 
 ### 4. Node 或 npm 全局目录错误
 
@@ -244,7 +244,7 @@ arg-bridge profile export <name> --include-secrets --yes
 | `/sendfile <绝对路径>` | 仅管理员：直接回复发送当前工作目录、bridge 媒体缓存或显式允许目录内的普通文件，不调用 agent |
 | `/config` | 调整展示偏好、访问控制和 lark-cli 身份策略 |
 | `/model` | 选择模型；Codex 直接使用 CLI 原生模型/reasoning 选项，并把结果同步到当前 profile。`/codex model` 等价于 `/codex /model`。 |
-| `/btw <内容>` | 仅 Codex：先开启 side conversation，再把内容作为独立正文提交。`/codex /btw <内容>` 等价。 |
+| `/btw <内容>` | 仅 Codex：开启或复用 side conversation，再把内容作为独立正文提交。`/codex /btw <内容>` 等价。 |
 | `/session [status\|live\|turn]` | 查看终端执行状态。tmux/live 为默认模式；`turn` 仅作为兼容回退 |
 | `/tmux tail [N]` | 仅管理员：显示当前 scope tmux pane 的末尾 `N` 行（默认 27，最大 200） |
 | `/tmux attach` | 仅管理员：返回当前 live 会话可直接执行的只读 tmux 接入命令 |

@@ -1004,16 +1004,13 @@ export class LiveTerminalSession {
   private async enterSideConversation(): Promise<boolean> {
     const terminal = this.lastTerminalSnapshot;
     if (isLiveSideConversation(terminal)) {
-      // Codex closes a side conversation with Ctrl-C and returns to the main
-      // thread. Only do this when the terminal explicitly identifies a side
-      // conversation; never interrupt a main-thread task speculatively.
-      this.write('\x03');
-      const returnedToMain = await this.waitForTerminalSnapshot(
-        (text) => !isLiveSideConversation(text),
-        SIDE_SWITCH_TIMEOUT_MS,
-        terminal,
-      );
-      if (!returnedToMain) return false;
+      // `/btw` is unavailable once Codex is already inside a side
+      // conversation. Reusing the confirmed side is both safer and more
+      // useful than closing it and trying to open another one: the latter
+      // races the Goal/side redraw and leaves the literal `/btw` in the side
+      // editor. The caller clears a stale editor draft before reaching here.
+      log.info('agent-live', 'side-conversation-reuse');
+      return true;
     }
     const beforeSide = this.lastTerminalSnapshot;
     this.write('/btw\r');

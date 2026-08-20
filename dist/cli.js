@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.1.0",
+  version: "1.1.1",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -7917,13 +7917,8 @@ ${this.lastTerminalHistory?.text ?? ""}`;
   async enterSideConversation() {
     const terminal = this.lastTerminalSnapshot;
     if (isLiveSideConversation(terminal)) {
-      this.write("");
-      const returnedToMain = await this.waitForTerminalSnapshot(
-        (text) => !isLiveSideConversation(text),
-        SIDE_SWITCH_TIMEOUT_MS,
-        terminal
-      );
-      if (!returnedToMain) return false;
+      log.info("agent-live", "side-conversation-reuse");
+      return true;
     }
     const beforeSide = this.lastTerminalSnapshot;
     this.write("/btw\r");
