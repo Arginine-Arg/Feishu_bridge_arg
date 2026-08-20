@@ -673,27 +673,50 @@ export class LiveTerminalSession {
           suspendIdle();
         }
       }
-      const useHistory = Boolean(event.history?.text);
-      // Tmux history must retain prompt echoes until TurnOutputBuffer scopes
-      // the capture to the latest turn. Current-pane snapshots are already
-      // scoped through their rolling baseline and can be sanitized eagerly.
-      const text = useHistory
-        ? event.history!.text
-        : sanitizeLiveTurnOutput(event.text, turnPrompt);
+      const terminalSnapshot = event.terminalText ?? event.text;
+      const historySnapshot = event.history?.text ?? '';
+      const terminalSurface =
+        commandMode && terminalSnapshot.trim() && hasKnownLiveCommandSurface(terminalSnapshot, turnPrompt)
+          ? scopeLiveSnapshotToPrompt(terminalSnapshot, turnPrompt)
+          : '';
+      const historySurface =
+        commandMode && historySnapshot.trim() && hasKnownLiveCommandSurface(historySnapshot, turnPrompt)
+          ? scopeLiveSnapshotToPrompt(historySnapshot, turnPrompt)
+          : '';
+      const terminalHasCommandSurface =
+        Boolean(terminalSurface.trim());
+      const useRicherHistorySurface =
+        terminalHasCommandSurface &&
+        Boolean(historySurface.trim()) &&
+        snapshotInformationScore(historySurface) > snapshotInformationScore(terminalSurface) * 1.1;
+      const useHistory = Boolean(historySnapshot.trim()) && (!terminalHasCommandSurface || useRicherHistorySurface);
+      const text = terminalHasCommandSurface
+        ? useHistory
+          ? historySnapshot
+          : terminalSnapshot
+        : useHistory
+          ? historySnapshot
+          : sanitizeLiveTurnOutput(event.text, turnPrompt);
       const beforeAppendFrame = commandMode && diagFrames < LIVE_DIAG_MAX_FRAMES;
       if (beforeAppendFrame) diagFrames += 1;
       if (!text) {
         if (terminalWasBusy) return;
         if (commandMode) {
           scheduleSlashCommandConfirm();
-          arm(isStatusLiveCommand(turnPrompt) || sawAcceptedOutput || isKnownSilentLiveCommand(turnPrompt)
-            ? idleMs
-            : noOutputIdleMs(turnPrompt, idleMs));
+          const waitingForStatusSurface =
+            isStatusLiveCommand(turnPrompt) && this.terminalInfo?.backend === 'tmux' && !sawCommandResultOutput;
+          arm(
+            waitingForStatusSurface
+              ? noOutputIdleMs(turnPrompt, idleMs)
+              : sawAcceptedOutput || isKnownSilentLiveCommand(turnPrompt)
+                ? idleMs
+                : noOutputIdleMs(turnPrompt, idleMs),
+          );
         }
         return;
       }
       const accepted = event.mode === 'snapshot'
-        ? output.replace(text, useHistory, event.history)
+        ? output.replace(text, useHistory, useHistory ? event.history : undefined)
         : output.append(text);
       if (beforeAppendFrame) {
         log.info('agent-live', 'command-output', {
@@ -706,19 +729,30 @@ export class LiveTerminalSession {
       if (accepted) {
         if (!normalPromptDraftPending) markNormalSubmitProgress();
         const resultOutput = isLiveCommandResultOutput(text, turnPrompt);
+        const statusSurfaceOutput =
+          !isStatusLiveCommand(turnPrompt) ||
+          this.terminalInfo?.backend !== 'tmux' ||
+          isLiveStatusPanelOutput(output.lastAcceptedText());
+        const meaningfulCommandResult = resultOutput && statusSurfaceOutput;
         if (controlLiteralConfirmTimer) {
           clearTimeout(controlLiteralConfirmTimer);
           controlLiteralConfirmTimer = undefined;
           log.info('agent-live', 'control-literal-output-before-enter', { input: turnPrompt });
         }
         sawAcceptedOutput = true;
-        if (resultOutput) {
+        if (meaningfulCommandResult) {
           sawCommandResultOutput = true;
           cancelSlashCommandConfirm();
         }
         scheduleOutputFlush();
-        if (!terminalWasBusy && !normalPromptDraftPending) arm(idleMs);
-        if (commandMode && !resultOutput) scheduleSlashCommandConfirm();
+        if (!terminalWasBusy && !normalPromptDraftPending) {
+          arm(
+            commandMode && isStatusLiveCommand(turnPrompt) && !meaningfulCommandResult
+              ? noOutputIdleMs(turnPrompt, idleMs)
+              : idleMs,
+          );
+        }
+        if (commandMode && !meaningfulCommandResult) scheduleSlashCommandConfirm();
       } else if (commandMode) {
         scheduleSlashCommandConfirm();
         if (!terminalWasBusy) {
@@ -857,7 +891,13 @@ export class LiveTerminalSession {
             }
           }
         }
-        if (commandMode && isStatusLiveCommand(turnPrompt)) arm(idleMs);
+        if (commandMode && isStatusLiveCommand(turnPrompt)) {
+          arm(
+            this.terminalInfo?.backend === 'tmux'
+              ? noOutputIdleMs(turnPrompt, idleMs)
+              : idleMs,
+          );
+        }
         else if (commandMode && isKnownSilentLiveCommand(turnPrompt)) arm(idleMs);
         else if (commandMode && isSlowSilentLiveCommand(turnPrompt)) {
           arm(noOutputIdleMs(turnPrompt, idleMs));
@@ -2307,16 +2347,19 @@ class TurnOutputBuffer {
     this.lastAccepted = '';
     const hasPromptAnchor = preferPromptAnchor && snapshotHasPromptAnchor(raw, this.promptEcho);
     const previousBaseline = preferPromptAnchor ? this.historyBaseline : this.snapshotBaseline;
-    const positionedDelta =
-      preferPromptAnchor && !hasPromptAnchor && historyPosition && this.historyPositionBaseline
-        ? positionedHistoryDelta(this.historyPositionBaseline, historyPosition)
-        : undefined;
-    const scoped = positionedDelta ?? scopeLiveSnapshotToPrompt(
+    const semanticSnapshot = scopeLiveSnapshotToPrompt(
       raw,
       this.promptEcho,
       previousBaseline,
       preferPromptAnchor,
     );
+    const positionedDelta =
+      preferPromptAnchor && !hasPromptAnchor && historyPosition && this.historyPositionBaseline
+        ? positionedHistoryDelta(this.historyPositionBaseline, historyPosition)
+        : undefined;
+    const scoped = hasKnownLiveCommandSurface(raw, this.promptEcho)
+      ? semanticSnapshot
+      : positionedDelta ?? semanticSnapshot;
     if (preferPromptAnchor) {
       this.historyBaseline = raw;
       this.historyPositionBaseline = historyPosition;
@@ -2406,6 +2449,35 @@ class TurnOutputBuffer {
     const marker = `[live output segment truncated to ${this.maxChars} chars; latest output retained]\n`;
     this.pending = `${marker}${trimTail(this.pending, Math.max(0, this.maxChars - marker.length))}`;
   }
+}
+
+function hasKnownLiveCommandSurface(input: string, prompt: string): boolean {
+  const trimmedPrompt = prompt.trim();
+  if (
+    !trimmedPrompt.startsWith('/') &&
+    !isLiveControlInput(trimmedPrompt) &&
+    !shouldDeferControlLiteralSubmit(trimmedPrompt)
+  ) {
+    return false;
+  }
+  const lines = input.split('\n');
+  return (
+    scopeKnownLiveCommandResultSnapshot(lines, trimmedPrompt) !== undefined ||
+    scopeKnownLiveControlResultSnapshot(lines, trimmedPrompt) !== undefined ||
+    scopeExpectedLivePickerSnapshot(lines, trimmedPrompt) !== undefined ||
+    scopeControlLiteralPickerSnapshot(lines, trimmedPrompt) !== undefined
+  );
+}
+
+function isLiveStatusPanelOutput(input: string): boolean {
+  const compact = compactForNoiseMatch(input);
+  return (
+    (
+      compact.includes('openaicodex') &&
+      compact.includes('tokenusage:') &&
+      (compact.includes('model:') || compact.includes('modelprovider:'))
+    ) || compact.includes('codexnativestatuspanel')
+  );
 }
 
 function positionedHistoryDelta(
@@ -2771,6 +2843,9 @@ function scopeKnownLiveCommandResultSnapshot(lines: string[], prompt: string): s
     start = findLastLine(lines, (line) => /^•\s+Context compacted$/i.test(line.trim()));
   } else if (/^\/(?:status|usage|limits)(?:\s|$)/u.test(command)) {
     start = findLastCodexStatusPanel(lines);
+    if (start < 0) {
+      start = findLastLine(lines, (line) => /\bcodex\b.*\bstatus\s+panel\b/iu.test(line.trim()));
+    }
   }
 
   return start >= 0 ? lines.slice(start).join('\n') : undefined;

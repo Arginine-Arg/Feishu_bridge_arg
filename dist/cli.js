@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.0.7",
+  version: "1.0.8",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -7648,19 +7648,28 @@ ${this.lastTerminalHistory?.text ?? ""}`;
           suspendIdle();
         }
       }
-      const useHistory = Boolean(event.history?.text);
-      const text = useHistory ? event.history.text : sanitizeLiveTurnOutput(event.text, turnPrompt);
+      const terminalSnapshot = event.terminalText ?? event.text;
+      const historySnapshot = event.history?.text ?? "";
+      const terminalSurface = commandMode && terminalSnapshot.trim() && hasKnownLiveCommandSurface(terminalSnapshot, turnPrompt) ? scopeLiveSnapshotToPrompt(terminalSnapshot, turnPrompt) : "";
+      const historySurface = commandMode && historySnapshot.trim() && hasKnownLiveCommandSurface(historySnapshot, turnPrompt) ? scopeLiveSnapshotToPrompt(historySnapshot, turnPrompt) : "";
+      const terminalHasCommandSurface = Boolean(terminalSurface.trim());
+      const useRicherHistorySurface = terminalHasCommandSurface && Boolean(historySurface.trim()) && snapshotInformationScore(historySurface) > snapshotInformationScore(terminalSurface) * 1.1;
+      const useHistory = Boolean(historySnapshot.trim()) && (!terminalHasCommandSurface || useRicherHistorySurface);
+      const text = terminalHasCommandSurface ? useHistory ? historySnapshot : terminalSnapshot : useHistory ? historySnapshot : sanitizeLiveTurnOutput(event.text, turnPrompt);
       const beforeAppendFrame = commandMode && diagFrames < LIVE_DIAG_MAX_FRAMES;
       if (beforeAppendFrame) diagFrames += 1;
       if (!text) {
         if (terminalWasBusy) return;
         if (commandMode) {
           scheduleSlashCommandConfirm();
-          arm(isStatusLiveCommand(turnPrompt) || sawAcceptedOutput || isKnownSilentLiveCommand(turnPrompt) ? idleMs : noOutputIdleMs(turnPrompt, idleMs));
+          const waitingForStatusSurface = isStatusLiveCommand(turnPrompt) && this.terminalInfo?.backend === "tmux" && !sawCommandResultOutput;
+          arm(
+            waitingForStatusSurface ? noOutputIdleMs(turnPrompt, idleMs) : sawAcceptedOutput || isKnownSilentLiveCommand(turnPrompt) ? idleMs : noOutputIdleMs(turnPrompt, idleMs)
+          );
         }
         return;
       }
-      const accepted = event.mode === "snapshot" ? output.replace(text, useHistory, event.history) : output.append(text);
+      const accepted = event.mode === "snapshot" ? output.replace(text, useHistory, useHistory ? event.history : void 0) : output.append(text);
       if (beforeAppendFrame) {
         log.info("agent-live", "command-output", {
           mode: event.mode,
@@ -7672,19 +7681,25 @@ ${this.lastTerminalHistory?.text ?? ""}`;
       if (accepted) {
         if (!normalPromptDraftPending) markNormalSubmitProgress();
         const resultOutput = isLiveCommandResultOutput(text, turnPrompt);
+        const statusSurfaceOutput = !isStatusLiveCommand(turnPrompt) || this.terminalInfo?.backend !== "tmux" || isLiveStatusPanelOutput(output.lastAcceptedText());
+        const meaningfulCommandResult = resultOutput && statusSurfaceOutput;
         if (controlLiteralConfirmTimer) {
           clearTimeout(controlLiteralConfirmTimer);
           controlLiteralConfirmTimer = void 0;
           log.info("agent-live", "control-literal-output-before-enter", { input: turnPrompt });
         }
         sawAcceptedOutput = true;
-        if (resultOutput) {
+        if (meaningfulCommandResult) {
           sawCommandResultOutput = true;
           cancelSlashCommandConfirm();
         }
         scheduleOutputFlush();
-        if (!terminalWasBusy && !normalPromptDraftPending) arm(idleMs);
-        if (commandMode && !resultOutput) scheduleSlashCommandConfirm();
+        if (!terminalWasBusy && !normalPromptDraftPending) {
+          arm(
+            commandMode && isStatusLiveCommand(turnPrompt) && !meaningfulCommandResult ? noOutputIdleMs(turnPrompt, idleMs) : idleMs
+          );
+        }
+        if (commandMode && !meaningfulCommandResult) scheduleSlashCommandConfirm();
       } else if (commandMode) {
         scheduleSlashCommandConfirm();
         if (!terminalWasBusy) {
@@ -7804,8 +7819,11 @@ ${this.lastTerminalHistory?.text ?? ""}`;
             }
           }
         }
-        if (commandMode && isStatusLiveCommand(turnPrompt)) arm(idleMs);
-        else if (commandMode && isKnownSilentLiveCommand(turnPrompt)) arm(idleMs);
+        if (commandMode && isStatusLiveCommand(turnPrompt)) {
+          arm(
+            this.terminalInfo?.backend === "tmux" ? noOutputIdleMs(turnPrompt, idleMs) : idleMs
+          );
+        } else if (commandMode && isKnownSilentLiveCommand(turnPrompt)) arm(idleMs);
         else if (commandMode && isSlowSilentLiveCommand(turnPrompt)) {
           arm(noOutputIdleMs(turnPrompt, idleMs));
         } else arm(startupTimeoutMs);
@@ -9031,13 +9049,14 @@ var TurnOutputBuffer = class {
     this.lastAccepted = "";
     const hasPromptAnchor = preferPromptAnchor && snapshotHasPromptAnchor(raw, this.promptEcho);
     const previousBaseline = preferPromptAnchor ? this.historyBaseline : this.snapshotBaseline;
-    const positionedDelta = preferPromptAnchor && !hasPromptAnchor && historyPosition && this.historyPositionBaseline ? positionedHistoryDelta(this.historyPositionBaseline, historyPosition) : void 0;
-    const scoped = positionedDelta ?? scopeLiveSnapshotToPrompt(
+    const semanticSnapshot = scopeLiveSnapshotToPrompt(
       raw,
       this.promptEcho,
       previousBaseline,
       preferPromptAnchor
     );
+    const positionedDelta = preferPromptAnchor && !hasPromptAnchor && historyPosition && this.historyPositionBaseline ? positionedHistoryDelta(this.historyPositionBaseline, historyPosition) : void 0;
+    const scoped = hasKnownLiveCommandSurface(raw, this.promptEcho) ? semanticSnapshot : positionedDelta ?? semanticSnapshot;
     if (preferPromptAnchor) {
       this.historyBaseline = raw;
       this.historyPositionBaseline = historyPosition;
@@ -9124,6 +9143,18 @@ var TurnOutputBuffer = class {
     this.pending = `${marker}${trimTail(this.pending, Math.max(0, this.maxChars - marker.length))}`;
   }
 };
+function hasKnownLiveCommandSurface(input, prompt) {
+  const trimmedPrompt = prompt.trim();
+  if (!trimmedPrompt.startsWith("/") && !isLiveControlInput(trimmedPrompt) && !shouldDeferControlLiteralSubmit(trimmedPrompt)) {
+    return false;
+  }
+  const lines = input.split("\n");
+  return scopeKnownLiveCommandResultSnapshot(lines, trimmedPrompt) !== void 0 || scopeKnownLiveControlResultSnapshot(lines, trimmedPrompt) !== void 0 || scopeExpectedLivePickerSnapshot(lines, trimmedPrompt) !== void 0 || scopeControlLiteralPickerSnapshot(lines, trimmedPrompt) !== void 0;
+}
+function isLiveStatusPanelOutput(input) {
+  const compact = compactForNoiseMatch(input);
+  return compact.includes("openaicodex") && compact.includes("tokenusage:") && (compact.includes("model:") || compact.includes("modelprovider:")) || compact.includes("codexnativestatuspanel");
+}
 function positionedHistoryDelta(previous, current) {
   if (!previous.paneId || previous.paneId !== current.paneId) return void 0;
   if (current.endLine > previous.endLine) {
@@ -9401,6 +9432,9 @@ function scopeKnownLiveCommandResultSnapshot(lines, prompt) {
     start = findLastLine(lines, (line) => /^•\s+Context compacted$/i.test(line.trim()));
   } else if (/^\/(?:status|usage|limits)(?:\s|$)/u.test(command)) {
     start = findLastCodexStatusPanel(lines);
+    if (start < 0) {
+      start = findLastLine(lines, (line) => /\bcodex\b.*\bstatus\s+panel\b/iu.test(line.trim()));
+    }
   }
   return start >= 0 ? lines.slice(start).join("\n") : void 0;
 }
@@ -20572,6 +20606,10 @@ ${delta}`.slice(-64e3);
         ]
       };
     }
+    if (opensLivePicker(nativeCommand ?? "") && !currentText.trim() && !observedSurface) {
+      log.info("agent-live", "picker-empty-final-suppressed", { scope, input: nativeCommand });
+      return { ...state, blocks: [] };
+    }
     return {
       ...state,
       blocks: [
@@ -20631,11 +20669,21 @@ ${delta}`.slice(-64e3);
         log.info("agent-live", "control-footer-only-suppressed", { scope, input: nativeCommand });
         return;
       }
+      const preparedFinalState = prepareStateForReply(finalState);
+      const preparedText = completeReplyText(preparedFinalState).trim();
+      if (liveInputMode === "control" && !preparedText && !interactionTextBuffer.trim()) {
+        log.info("agent-live", "control-empty-final-suppressed", { scope, input: nativeCommand });
+        return;
+      }
+      if (opensLivePicker(nativeCommand) && !preparedText && !interactionTextBuffer.trim()) {
+        log.info("agent-live", "picker-empty-final-suppressed", { scope, input: nativeCommand });
+        return;
+      }
       await sendFinalReply({
         channel,
         chatId,
         scope,
-        state: prepareStateForReply(finalState),
+        state: preparedFinalState,
         replyMode: "card",
         sendOpts,
         cardRenderOptions,

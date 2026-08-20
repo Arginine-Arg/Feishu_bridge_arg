@@ -1322,6 +1322,51 @@ setInterval(() => {}, 1000);
     expect(text).toContain(`Attach command: tmux -S ${dir}/.ab-live-`);
   }, 15_000);
 
+  tmuxIt('waits for a delayed native status surface in the same turn', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-status-delayed-test-'));
+    const bin = join(dir, 'fake-tmux-delayed-status-agent.mjs');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+let sent = false;
+process.stdin.on('data', (chunk) => {
+  if (sent || !chunk.includes('/status')) return;
+  sent = true;
+  setTimeout(() => process.stdout.write([
+    '╭──────────────────────────────────────────────────────╮',
+    '│ >_ OpenAI Codex (v0.146.0)                           │',
+    '│ Model:                gpt-test (reasoning medium)    │',
+    '│ Token usage:          12K total  (10K input + 2K output) │',
+    '╰──────────────────────────────────────────────────────╯',
+  ].join('\\n') + '\\n'), 450);
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-status-delayed-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-status-delayed',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 40,
+      outputFlushMs: 10,
+      startupTimeoutMs: 1_000,
+    });
+
+    const events = await collect(session.run('tmux-status-delayed-run', '/status', dir, 'command').events);
+    await pool.closeAll();
+    const text = textOf(events);
+    expect(text).toContain('Token usage:');
+    expect((text.match(/Attach command:/g) ?? []).length).toBe(1);
+  }, 15_000);
+
   tmuxIt('interrupts a turn without destroying the tmux session or its history', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-stop-test-'));
     const bin = join(dir, 'fake-tmux-stop-agent.mjs');

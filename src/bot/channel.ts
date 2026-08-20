@@ -1544,6 +1544,10 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         ],
       };
     }
+    if (opensLivePicker(nativeCommand ?? '') && !currentText.trim() && !observedSurface) {
+      log.info('agent-live', 'picker-empty-final-suppressed', { scope, input: nativeCommand });
+      return { ...state, blocks: [] };
+    }
     return {
       ...state,
       blocks: [
@@ -1632,11 +1636,21 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         log.info('agent-live', 'control-footer-only-suppressed', { scope, input: nativeCommand });
         return;
       }
+      const preparedFinalState = prepareStateForReply(finalState);
+      const preparedText = completeReplyText(preparedFinalState).trim();
+      if (liveInputMode === 'control' && !preparedText && !interactionTextBuffer.trim()) {
+        log.info('agent-live', 'control-empty-final-suppressed', { scope, input: nativeCommand });
+        return;
+      }
+      if (opensLivePicker(nativeCommand) && !preparedText && !interactionTextBuffer.trim()) {
+        log.info('agent-live', 'picker-empty-final-suppressed', { scope, input: nativeCommand });
+        return;
+      }
       await sendFinalReply({
         channel,
         chatId,
         scope,
-        state: prepareStateForReply(finalState),
+        state: preparedFinalState,
         replyMode: 'card',
         sendOpts,
         cardRenderOptions,
