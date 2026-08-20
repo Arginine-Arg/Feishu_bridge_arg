@@ -1073,7 +1073,7 @@ describe('markdown stream startup failures', () => {
     expect(JSON.stringify(nextCard)).toContain('extended reasoning level');
   });
 
-  it('keeps rapid group messages as separate live terminal turns', async () => {
+  it('prioritizes native slash commands over rapid ordinary live messages', async () => {
     const h = await createHarness();
     h.profileConfig.preferences = {
       ...(h.profileConfig.preferences ?? {}),
@@ -1095,12 +1095,12 @@ describe('markdown stream startup failures', () => {
     await h.channel.handlers.message?.(message('om_group_status', '/codex /status', 'group', true));
     await waitFor(() => h.agent.runOptions.length === 3, 4000);
 
-    expect(h.agent.runOptions.map((opts) => userTextOrNative(opts.prompt))).toEqual(['nihao', '你好', '/status']);
+    expect(h.agent.runOptions.map((opts) => userTextOrNative(opts.prompt))).toEqual(['/status', 'nihao', '你好']);
     expect(h.agent.runOptions.map((opts) => opts.sessionMode)).toEqual(['live', 'live', 'live']);
     expect(h.agent.runOptions.map((opts) => opts.liveInputMode)).toEqual([
-      undefined,
-      undefined,
       'command',
+      undefined,
+      undefined,
     ]);
   });
 
