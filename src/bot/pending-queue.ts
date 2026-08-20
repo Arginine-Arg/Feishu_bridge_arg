@@ -25,6 +25,7 @@ const DEFAULT_BUSY_ACK_COOLDOWN_MS = 30_000;
 export class PendingQueue {
   private readonly map = new Map<string, PendingEntry>();
   private readonly blocked = new Set<string>();
+  private readonly flushImmediatelyOnUnblock = new Set<string>();
   private readonly deferredUntilFront = new Map<string, NormalizedMessage[]>();
   // Last "run in progress, your message is queued" acknowledgement per scope.
   // Long runs may stay blocked for hours, so suppress only short bursts rather
@@ -73,7 +74,7 @@ export class PendingQueue {
   pushFront(
     scope: string,
     messages: NormalizedMessage | readonly NormalizedMessage[],
-    options: { immediate?: boolean } = {},
+    options: { immediate?: boolean; preempt?: boolean } = {},
   ): number {
     const priority = Array.isArray(messages) ? [...messages] : [messages];
     const deferred = this.deferredUntilFront.get(scope) ?? [];
@@ -82,8 +83,13 @@ export class PendingQueue {
     if (deferred.length > 0) {
       this.deferredUntilFront.delete(scope);
       this.blocked.delete(scope);
+      this.flushImmediatelyOnUnblock.delete(scope);
       this.busyAckedAt.delete(scope);
       log.info('queue', 'interaction-released', { scope, deferred: deferred.length });
+    }
+    if (options.preempt && this.blocked.has(scope)) {
+      this.flushImmediatelyOnUnblock.add(scope);
+      log.info('queue', 'preemptive-front-armed', { scope });
     }
     const existing = this.map.get(scope);
     if (existing) {
@@ -120,6 +126,7 @@ export class PendingQueue {
     if (entry?.timer) clearTimeout(entry.timer);
     this.map.delete(scope);
     this.deferredUntilFront.delete(scope);
+    this.flushImmediatelyOnUnblock.delete(scope);
     if (deferred.length > 0) {
       this.blocked.delete(scope);
       this.busyAckedAt.delete(scope);
@@ -133,6 +140,7 @@ export class PendingQueue {
     }
     this.map.clear();
     this.deferredUntilFront.clear();
+    this.flushImmediatelyOnUnblock.clear();
     this.blocked.clear();
     this.busyAckedAt.clear();
   }
@@ -195,7 +203,8 @@ export class PendingQueue {
     log.info('queue', 'unblocked', { scope, queued: entry?.messages.length ?? 0 });
     if (!entry || entry.messages.length === 0) return;
     if (entry.timer) clearTimeout(entry.timer);
-    entry.timer = this.armTimer(scope);
+    const immediate = this.flushImmediatelyOnUnblock.delete(scope);
+    entry.timer = this.armTimer(scope, immediate ? 0 : undefined);
   }
 
   private armTimer(scope: string, delayMs = this.delayMs): NodeJS.Timeout {

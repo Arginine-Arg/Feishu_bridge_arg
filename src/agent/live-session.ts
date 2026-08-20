@@ -105,6 +105,8 @@ const COMPACT_NO_OUTPUT_IDLE_MS = 60_000;
 const COMMAND_DRAFT_CONFIRM_DELAY_MS = 2_500;
 const CONTROL_LITERAL_CONFIRM_DELAY_MS = 900;
 const NORMAL_SUBMIT_RETRY_DELAY_MS = 1_200;
+const NORMAL_SUBMIT_RETRY_POLL_MS = 400;
+const NORMAL_SUBMIT_RETRY_MAX_CHECKS = 12;
 const MAX_TURN_OUTPUT_CHARS = 120_000;
 const DEFAULT_PTY_ROWS = '48';
 const DEFAULT_PTY_COLUMNS = '120';
@@ -498,6 +500,7 @@ export class LiveTerminalSession {
     let terminalWasBusy = false;
     let sawNormalSubmitProgress = false;
     let normalSubmitRetried = false;
+    let normalSubmitRetryChecks = 0;
     const inputGraceMs = this.inputGraceMs(commandMode);
 
     if (commandMode) {
@@ -636,7 +639,7 @@ export class LiveTerminalSession {
     };
     const scheduleNormalSubmitRetry = (): void => {
       if ((commandMode && !sideMode) || inputMode === 'control' || normalSubmitRetried || normalSubmitRetryTimer) return;
-      normalSubmitRetryTimer = setTimeout(() => {
+      const retryIfDraftAppears = (): void => {
         normalSubmitRetryTimer = undefined;
         if (done || normalSubmitRetried || (sawNormalSubmitProgress && this.terminalInfo?.backend !== 'tmux')) {
           return;
@@ -646,7 +649,13 @@ export class LiveTerminalSession {
         // can otherwise show stale activity from the previous turn.
         if (sideMode || this.terminalInfo?.backend === 'tmux') {
           const terminal = `${this.lastTerminalSnapshot}\n${this.lastTerminalHistory?.text ?? ''}`;
-          if (!isPendingLivePromptDraft(terminal, turnPrompt)) return;
+          if (!isPendingLivePromptDraft(terminal, turnPrompt)) {
+            normalSubmitRetryChecks += 1;
+            if (normalSubmitRetryChecks < NORMAL_SUBMIT_RETRY_MAX_CHECKS) {
+              normalSubmitRetryTimer = setTimeout(retryIfDraftAppears, NORMAL_SUBMIT_RETRY_POLL_MS);
+            }
+            return;
+          }
         }
         normalSubmitRetried = true;
         this.turnRetryCount += 1;
@@ -662,7 +671,8 @@ export class LiveTerminalSession {
             err: err instanceof Error ? err.message : String(err),
           });
         });
-      }, NORMAL_SUBMIT_RETRY_DELAY_MS);
+      };
+      normalSubmitRetryTimer = setTimeout(retryIfDraftAppears, NORMAL_SUBMIT_RETRY_DELAY_MS);
     };
 
     const onData = (event: LiveOutput): void => {
@@ -1947,7 +1957,7 @@ function isLiveSideConversationFooter(lines: string[]): boolean {
   const footer = lines.join(' ').replace(/\s+/gu, ' ').trim();
   return (
     /^(?:gpt|codex|claude)[\w.-]*\b/iu.test(footer) &&
-    /\bside\s+from\s+main\s+thread\s*·\s*ctrl\s*\+\s*\/\s+to\s+switch\s*·\s*ctrl\s*\+\s*c\s+to\s+close\s*$/iu.test(footer)
+    /\bside\s+from\s+main\s+thread\s*·\s*ctrl\s*\+\s*\/\s+to\s+switch\s*·\s*ctrl\s*\+\s*c\s+to(?:\s+close)?\s*$/iu.test(footer)
   );
 }
 

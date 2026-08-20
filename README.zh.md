@@ -15,7 +15,7 @@
 - **常驻 tmux 执行**：每个 chat/topic 在 tmux 中运行一个原生 Claude/Codex CLI；普通消息和原生斜杠命令共享同一终端上下文。
 - **干净传输边界**：普通消息按用户原文转发，不携带 bridge XML、路由 ID 或运行指令；仅在真实存在时附加引用、卡片、话题上下文或已下载附件。
 - **幂等投递**：飞书重复事件会按 message ID 在进入 agent 前持久化去重；tmux 重绘和内嵌历史回放会归并为真正新增的文本，卡片更新按顺序提交。
-- **排队与消息合并**：短时间连续发送的消息会合并处理；任务运行中收到的普通消息会排队到下一轮，`/new`、`/cd`、`/ws use`、`/stop` 这类命令可以中断当前任务。
+- **排队与消息合并**：短时间连续发送的消息会合并处理；任务运行中收到的普通消息会排队到下一轮，bridge 控制命令和 `/btw` 走原生控制路径。`/btw` 会安全暂停 bridge relay，再打开或复用 side conversation，避免和当前终端并发写入。
 - **多工作空间**：用 `/cd` 切换当前项目，用 `/ws` 保存和复用常用项目目录。
 - **图片 / 文件**：直接发给 bot，bridge 下载到本地后交给本机 agent 处理。
 - **卡片按钮**：`/help`、`/ws list`、`/status` 返回可点击的交互卡片。
@@ -44,7 +44,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.1.1
+sh /tmp/install-arg-bridge.sh --version 1.1.2
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -88,10 +88,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.1.1"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.1.2"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.1.1`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.1.2`。
 
 ### 4. Node 或 npm 全局目录错误
 

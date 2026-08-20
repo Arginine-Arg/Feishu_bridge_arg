@@ -932,16 +932,30 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
               : undefined,
         )
       : routedMsg;
-  // A selection/navigational key belongs behind the command that opened its
-  // picker. Once the scope has actually entered that picker it must, however,
-  // run before the task paused by the picker; otherwise an approval/model
-  // choice can never release deferred work. Ctrl-C is the only control that
-  // may preempt without an established picker state.
+  // Picker controls and native slash commands form a separate control plane.
+  // They must run before ordinary work so a long task cannot strand a model,
+  // status, or side-conversation command in the conversational queue.
   const priorityLiveControl =
     liveInputModeForMessage(agentMsg) === 'control' &&
     (isLiveInterruptInput(agentMsg.content) || pickerActive);
-  const size = priorityLiveControl
-    ? pending.pushFront(scope, agentMsg, { immediate: true })
+  const nativeInputMode = liveInputModeForMessage(agentMsg);
+  const priorityNativeCommand =
+    isForceLiveAgentCommandMessage(agentMsg) &&
+    (nativeInputMode === 'command' || nativeInputMode === 'side');
+  if (priorityNativeCommand && activeRuns.get(scope)) {
+    log.info('intake', 'native-command-preempt', {
+      scope,
+      inputMode: nativeInputMode,
+      command: agentMsg.content.trim().slice(0, 120),
+    });
+    activeRuns.interrupt(scope);
+  }
+  const priorityLiveInput = priorityLiveControl || priorityNativeCommand;
+  const size = priorityLiveInput
+    ? pending.pushFront(scope, agentMsg, {
+        immediate: true,
+        ...(priorityNativeCommand ? { preempt: true } : {}),
+      })
     : pending.push(scope, agentMsg);
   log.info('intake', 'queued', { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
 
@@ -949,7 +963,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   // up until it finishes (block/unblock in the pending→run handoff). Without a
   // hint the sender thinks the bot is dead. Ack once per busy window — not per
   // queued message — and never let the ack block or throw into intake.
-  if (pending.shouldAckBusy(scope)) {
+  if (!priorityNativeCommand && pending.shouldAckBusy(scope)) {
     void channel
       .send(
         msg.chatId,

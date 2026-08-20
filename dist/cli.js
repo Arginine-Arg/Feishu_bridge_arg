@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.1.1",
+  version: "1.1.2",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -7170,6 +7170,8 @@ var COMPACT_NO_OUTPUT_IDLE_MS = 6e4;
 var COMMAND_DRAFT_CONFIRM_DELAY_MS = 2500;
 var CONTROL_LITERAL_CONFIRM_DELAY_MS = 900;
 var NORMAL_SUBMIT_RETRY_DELAY_MS = 1200;
+var NORMAL_SUBMIT_RETRY_POLL_MS = 400;
+var NORMAL_SUBMIT_RETRY_MAX_CHECKS = 12;
 var MAX_TURN_OUTPUT_CHARS = 12e4;
 var DEFAULT_PTY_ROWS = "48";
 var DEFAULT_PTY_COLUMNS = "120";
@@ -7507,6 +7509,7 @@ ${this.lastTerminalHistory?.text ?? ""}`;
     let terminalWasBusy = false;
     let sawNormalSubmitProgress = false;
     let normalSubmitRetried = false;
+    let normalSubmitRetryChecks = 0;
     const inputGraceMs = this.inputGraceMs(commandMode);
     if (commandMode) {
       log.info("agent-live", "command-start", {
@@ -7627,7 +7630,7 @@ ${this.lastTerminalHistory?.text ?? ""}`;
     };
     const scheduleNormalSubmitRetry = () => {
       if (commandMode && !sideMode || inputMode === "control" || normalSubmitRetried || normalSubmitRetryTimer) return;
-      normalSubmitRetryTimer = setTimeout(() => {
+      const retryIfDraftAppears = () => {
         normalSubmitRetryTimer = void 0;
         if (done || normalSubmitRetried || sawNormalSubmitProgress && this.terminalInfo?.backend !== "tmux") {
           return;
@@ -7635,7 +7638,13 @@ ${this.lastTerminalHistory?.text ?? ""}`;
         if (sideMode || this.terminalInfo?.backend === "tmux") {
           const terminal = `${this.lastTerminalSnapshot}
 ${this.lastTerminalHistory?.text ?? ""}`;
-          if (!isPendingLivePromptDraft(terminal, turnPrompt)) return;
+          if (!isPendingLivePromptDraft(terminal, turnPrompt)) {
+            normalSubmitRetryChecks += 1;
+            if (normalSubmitRetryChecks < NORMAL_SUBMIT_RETRY_MAX_CHECKS) {
+              normalSubmitRetryTimer = setTimeout(retryIfDraftAppears, NORMAL_SUBMIT_RETRY_POLL_MS);
+            }
+            return;
+          }
         }
         normalSubmitRetried = true;
         this.turnRetryCount += 1;
@@ -7647,7 +7656,8 @@ ${this.lastTerminalHistory?.text ?? ""}`;
             err: err instanceof Error ? err.message : String(err)
           });
         });
-      }, NORMAL_SUBMIT_RETRY_DELAY_MS);
+      };
+      normalSubmitRetryTimer = setTimeout(retryIfDraftAppears, NORMAL_SUBMIT_RETRY_DELAY_MS);
     };
     const onData = (event) => {
       this.turnLastOutputAt = Date.now();
@@ -8730,7 +8740,7 @@ function isLivePromptDraftFooterLine(line) {
 }
 function isLiveSideConversationFooter(lines) {
   const footer = lines.join(" ").replace(/\s+/gu, " ").trim();
-  return /^(?:gpt|codex|claude)[\w.-]*\b/iu.test(footer) && /\bside\s+from\s+main\s+thread\s*·\s*ctrl\s*\+\s*\/\s+to\s+switch\s*·\s*ctrl\s*\+\s*c\s+to\s+close\s*$/iu.test(footer);
+  return /^(?:gpt|codex|claude)[\w.-]*\b/iu.test(footer) && /\bside\s+from\s+main\s+thread\s*·\s*ctrl\s*\+\s*\/\s+to\s+switch\s*·\s*ctrl\s*\+\s*c\s+to(?:\s+close)?\s*$/iu.test(footer);
 }
 function isLiveMainConversationFooter(lines) {
   const footer = lines.join(" ").replace(/\s+/gu, " ").trim();
@@ -18699,6 +18709,7 @@ var DEFAULT_BUSY_ACK_COOLDOWN_MS = 3e4;
 var PendingQueue = class {
   map = /* @__PURE__ */ new Map();
   blocked = /* @__PURE__ */ new Set();
+  flushImmediatelyOnUnblock = /* @__PURE__ */ new Set();
   deferredUntilFront = /* @__PURE__ */ new Map();
   // Last "run in progress, your message is queued" acknowledgement per scope.
   // Long runs may stay blocked for hours, so suppress only short bursts rather
@@ -18744,8 +18755,13 @@ var PendingQueue = class {
     if (deferred.length > 0) {
       this.deferredUntilFront.delete(scope);
       this.blocked.delete(scope);
+      this.flushImmediatelyOnUnblock.delete(scope);
       this.busyAckedAt.delete(scope);
       log.info("queue", "interaction-released", { scope, deferred: deferred.length });
+    }
+    if (options.preempt && this.blocked.has(scope)) {
+      this.flushImmediatelyOnUnblock.add(scope);
+      log.info("queue", "preemptive-front-armed", { scope });
     }
     const existing = this.map.get(scope);
     if (existing) {
@@ -18776,6 +18792,7 @@ var PendingQueue = class {
     if (entry?.timer) clearTimeout(entry.timer);
     this.map.delete(scope);
     this.deferredUntilFront.delete(scope);
+    this.flushImmediatelyOnUnblock.delete(scope);
     if (deferred.length > 0) {
       this.blocked.delete(scope);
       this.busyAckedAt.delete(scope);
@@ -18788,6 +18805,7 @@ var PendingQueue = class {
     }
     this.map.clear();
     this.deferredUntilFront.clear();
+    this.flushImmediatelyOnUnblock.clear();
     this.blocked.clear();
     this.busyAckedAt.clear();
   }
@@ -18845,7 +18863,8 @@ var PendingQueue = class {
     log.info("queue", "unblocked", { scope, queued: entry?.messages.length ?? 0 });
     if (!entry || entry.messages.length === 0) return;
     if (entry.timer) clearTimeout(entry.timer);
-    entry.timer = this.armTimer(scope);
+    const immediate = this.flushImmediatelyOnUnblock.delete(scope);
+    entry.timer = this.armTimer(scope, immediate ? 0 : void 0);
   }
   armTimer(scope, delayMs = this.delayMs) {
     return setTimeout(() => this.flush(scope), delayMs);
@@ -20393,9 +20412,23 @@ async function intakeMessage(deps) {
     routedMsg.content.trimStart().startsWith("/") ? "command" : pickerActive ? "control" : void 0
   ) : routedMsg;
   const priorityLiveControl = liveInputModeForMessage(agentMsg) === "control" && (isLiveInterruptInput(agentMsg.content) || pickerActive);
-  const size = priorityLiveControl ? pending.pushFront(scope, agentMsg, { immediate: true }) : pending.push(scope, agentMsg);
+  const nativeInputMode = liveInputModeForMessage(agentMsg);
+  const priorityNativeCommand = isForceLiveAgentCommandMessage(agentMsg) && (nativeInputMode === "command" || nativeInputMode === "side");
+  if (priorityNativeCommand && activeRuns.get(scope)) {
+    log.info("intake", "native-command-preempt", {
+      scope,
+      inputMode: nativeInputMode,
+      command: agentMsg.content.trim().slice(0, 120)
+    });
+    activeRuns.interrupt(scope);
+  }
+  const priorityLiveInput = priorityLiveControl || priorityNativeCommand;
+  const size = priorityLiveInput ? pending.pushFront(scope, agentMsg, {
+    immediate: true,
+    ...priorityNativeCommand ? { preempt: true } : {}
+  }) : pending.push(scope, agentMsg);
   log.info("intake", "queued", { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
-  if (pending.shouldAckBusy(scope)) {
+  if (!priorityNativeCommand && pending.shouldAckBusy(scope)) {
     void channel.send(
       msg.chatId,
       {

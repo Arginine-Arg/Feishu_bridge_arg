@@ -113,6 +113,30 @@ describe('PendingQueue busy-ack', () => {
     }
   });
 
+  it('flushes a preemptive native command immediately after the run releases', () => {
+    vi.useFakeTimers();
+    try {
+      const flushed: string[][] = [];
+      const queue = new PendingQueue(10_000, (_scope, batch) => {
+        flushed.push(batch.map((message) => message.content));
+      });
+
+      queue.block(SCOPE);
+      queue.push(SCOPE, { content: 'ordinary task', chatId: SCOPE } as never);
+      queue.pushFront(
+        SCOPE,
+        { content: '/btw check the side thread', chatId: SCOPE } as never,
+        { immediate: true, preempt: true },
+      );
+      queue.unblock(SCOPE);
+      vi.advanceTimersByTime(0);
+
+      expect(flushed).toEqual([['/btw check the side thread', 'ordinary task']]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps startup work gated until a priority control releases it', () => {
     vi.useFakeTimers();
     try {

@@ -121,6 +121,16 @@ describe('parseLiveControlSequence', () => {
         prompt,
       ),
     ).toBe(false);
+    expect(
+      isPendingLivePromptDraft(
+        [
+          `› ${prompt}`,
+          'gpt-5.6-luna max · /workspace ·',
+          'Side from main thread · ctrl + / to switch · ctrl + c to',
+        ].join('\n'),
+        prompt,
+      ),
+    ).toBe(true);
   });
 });
 
