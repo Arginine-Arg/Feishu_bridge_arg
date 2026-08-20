@@ -28,6 +28,7 @@ import {
 } from '../card/dispatcher';
 import { consumeInteractivePrompts, PROMPT_CALLBACK_ACTION } from '../card/interactive-prompt';
 import { isLiveControlInput, isLiveInterruptInput } from '../agent/live-session';
+import type { TmuxBindingStatus } from '../agent/tmux-control';
 import {
   isBareAgentConfirmation,
   isActionableBinaryConfirmation,
@@ -123,6 +124,7 @@ const REACTION_CLEANUP_GRACE_MS = 1000;
 // silently folded to its head and tail inside one card.
 const LONG_REPLY_CARD_THRESHOLD_BYTES = 20_000;
 const LONG_REPLY_CHUNK_BYTES = 12_000;
+const LIVE_INTERACTION_TTL_MS = 30 * 60_000;
 
 // Lark SDK logs API errors at error level even when the caller catches them.
 // These specific codes are EXPECTED in our flow (wiki-node lookup that
@@ -263,6 +265,9 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   // scopes currently showing an agent picker so later up/down/enter messages
   // are routed as terminal controls instead of plain chat.
   const liveInteractionByScope = new Map<string, LiveInteractionState>();
+  for (const [scope, state] of sessions.liveInteractionEntries()) {
+    liveInteractionByScope.set(scope, state);
+  }
   const cotClient = new CotClient({
     tenant: cfg.accounts.app.tenant,
     appId: cfg.accounts.app.id,
@@ -418,6 +423,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
         for (const runBatch of runBatches) {
           await runAgentBatch({
             channel,
+            agent,
             executor,
             bridgeAgent,
             sessions,
@@ -491,6 +497,23 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           chatModeCache,
           callbackAuth,
           callbackPolicyFingerprintForScope: (scope) => activePolicyFingerprints.get(scope),
+          liveDiagnostics: async (scope) => {
+            const cwd = workspaces.cwdFor(scope) ?? controls.profileConfig.workspaces.default;
+            const live = await agent.tmux?.diagnostics?.(scope, cwd);
+            const tmux = await agent.tmux?.status(scope, cwd);
+            const queued = pending.snapshot(scope)[0];
+            const active = activeRuns.get(scope);
+            const picker = liveInteractionState(sessions, liveInteractionByScope, scope);
+            return {
+              ...(active ? { runId: active.run.runId } : {}),
+              ...(live ? { live } : {}),
+              ...(picker ? { picker } : {}),
+              ...(queued ? { queue: { queued: queued.queued, deferred: queued.deferred, blocked: queued.blocked } } : {}),
+              ...(tmux ? { tmux } : {}),
+            };
+          },
+          liveInteractionGeneration: (scope) =>
+            liveInteractionState(sessions, liveInteractionByScope, scope)?.generation,
         });
       }).catch((err) => {
         log.fail('cardAction', err);
@@ -796,7 +819,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   }
 
   const route = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
-  const pickerActive = liveInteractionByScope.has(scope);
+  const pickerActive = Boolean(liveInteractionState(sessions, liveInteractionByScope, scope));
   const pickerFollowup = pickerActive
     ? normalizeLivePickerFollowup(route.msg.content)
     : undefined;
@@ -847,6 +870,21 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
       processPool: pool,
       controls,
       allowLocalFileRoot,
+      liveDiagnostics: async () => {
+        const cwd = workspaces.cwdFor(scope) ?? controls.profileConfig.workspaces.default;
+        const live = await agent.tmux?.diagnostics?.(scope, cwd);
+        const tmux = await agent.tmux?.status(scope, cwd);
+        const queued = pending.snapshot(scope)[0];
+        const active = activeRuns.get(scope);
+        const picker = liveInteractionState(sessions, liveInteractionByScope, scope);
+        return {
+          ...(active ? { runId: active.run.runId } : {}),
+          ...(live ? { live } : {}),
+          ...(picker ? { picker } : {}),
+          ...(queued ? { queue: { queued: queued.queued, deferred: queued.deferred, blocked: queued.blocked } } : {}),
+          ...(tmux ? { tmux } : {}),
+        };
+      },
     });
     if (handled) {
       const preservePending = commandPreservesPendingMessages(routedMsg.content);
@@ -935,7 +973,7 @@ export function commandPreservesPendingMessages(content: string): boolean {
   return (
     /^\/(?:status|help|ps)(?:\s|$)/u.test(command) ||
     /^\/session(?:\s+\/?status)?\s*$/u.test(command) ||
-    /^\/tmux(?:\s+(?:list|status|tail))?(?:\s|$)/u.test(command) ||
+    /^\/tmux(?:\s+(?:list|status|tail|attach))?(?:\s|$)/u.test(command) ||
     /^\/(?:timeout|output)(?:\s|$)/u.test(command)
   );
 }
@@ -1047,11 +1085,56 @@ function splitNativeLiveBatches(
 interface LiveInteractionState {
   picker: true;
   updatedAt: number;
+  expiresAt: number;
   signature?: string;
+  generation?: string;
+}
+
+function liveInteractionState(
+  sessions: SessionStore,
+  map: Map<string, LiveInteractionState>,
+  scope: string,
+): LiveInteractionState | undefined {
+  const state = map.get(scope) ?? sessions.getLiveInteraction(scope);
+  if (!state || state.expiresAt <= Date.now()) {
+    if (map.delete(scope)) sessions.clearLiveInteraction(scope);
+    return undefined;
+  }
+  if (!map.has(scope)) map.set(scope, state);
+  return state;
+}
+
+function saveLiveInteractionState(
+  sessions: SessionStore,
+  map: Map<string, LiveInteractionState>,
+  scope: string,
+  state: Omit<LiveInteractionState, 'expiresAt'> & Partial<Pick<LiveInteractionState, 'expiresAt'>>,
+): LiveInteractionState {
+  const next: LiveInteractionState = {
+    ...state,
+    expiresAt: state.expiresAt ?? Date.now() + LIVE_INTERACTION_TTL_MS,
+  };
+  map.set(scope, next);
+  sessions.setLiveInteraction(scope, next);
+  return next;
+}
+
+function clearLiveInteractionState(
+  sessions: SessionStore,
+  map: Map<string, LiveInteractionState>,
+  scope: string,
+  generation?: string,
+): boolean {
+  const current = map.get(scope);
+  if (generation && current?.generation && current.generation !== generation) return false;
+  const deleted = map.delete(scope);
+  if (deleted || sessions.getLiveInteraction(scope)) sessions.clearLiveInteraction(scope);
+  return deleted;
 }
 
 interface RunBatchDeps {
   channel: LarkChannel;
+  agent: AgentAdapter;
   executor: RunExecutor;
   bridgeAgent: BridgeAgent;
   sessions: SessionStore;
@@ -1073,6 +1156,7 @@ interface RunBatchDeps {
 async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const {
     channel,
+    agent,
     executor,
     bridgeAgent,
     sessions,
@@ -1173,10 +1257,10 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const nativeInputMode = nativeCommand
     ? liveInputModeForBatch(batch, nativeCommand)
     : undefined;
-  if (useLiveSession && nativeInputMode === 'side' && liveInteractionByScope.delete(scope)) {
+  if (useLiveSession && nativeInputMode === 'side' && clearLiveInteractionState(sessions, liveInteractionByScope, scope)) {
     log.info('agent-live', 'picker-dismissed-for-side-conversation', { scope });
   }
-  if (useLiveSession && !nativeCommand && liveInteractionByScope.delete(scope)) {
+  if (useLiveSession && !nativeCommand && clearLiveInteractionState(sessions, liveInteractionByScope, scope)) {
     // A normal user task supersedes an abandoned native picker. The live
     // terminal will press Escape before typing this task; clear the bridge's
     // matching control-plane state so later words are never misrouted as
@@ -1288,6 +1372,16 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
 
   const { execution, cwdRealpath: cwd } = flow;
   artifactBroker.activate(artifactGrant.token, [cwd]);
+  const nativeStatusTmux =
+    useLiveSession && nativeCommand?.trim().toLowerCase() === '/status'
+      ? await agent.tmux?.status(scope, cwd).catch((err) => {
+          log.warn('agent-live', 'status-tmux-fallback-failed', { scope, err: String(err) });
+          return undefined;
+        })
+      : undefined;
+  const nativeStatusFallback = nativeStatusTmux
+    ? buildNativeStatusTmuxFallback(cwd, nativeStatusTmux)
+    : undefined;
   // Presentation is scope policy, not a property of this execution. Read it
   // again at every delivery boundary so `/output off` can mute an already
   // running task without cancelling the agent, and a later `/output final`
@@ -1339,11 +1433,25 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   let controlFooterOnly = false;
   const previousControlInteractionSignature =
     useLiveSession && nativeCommand && !nativeCommand.trimStart().startsWith('/')
-      ? liveInteractionByScope.get(scope)?.signature
+      ? liveInteractionState(sessions, liveInteractionByScope, scope)?.signature
       : undefined;
+  if (useLiveSession && nativeCommand && !nativeCommand.trimStart().startsWith('/')) {
+    const existing = liveInteractionState(sessions, liveInteractionByScope, scope);
+    if (existing) {
+      saveLiveInteractionState(sessions, liveInteractionByScope, scope, {
+        ...existing,
+        generation: execution.runId,
+        updatedAt: Date.now(),
+      });
+    }
+  }
   if (useLiveSession && nativeCommand && opensLivePicker(nativeCommand)) {
-    const wasActive = liveInteractionByScope.has(scope);
-    liveInteractionByScope.set(scope, { picker: true, updatedAt: Date.now() });
+    const wasActive = Boolean(liveInteractionState(sessions, liveInteractionByScope, scope));
+    saveLiveInteractionState(sessions, liveInteractionByScope, scope, {
+      picker: true,
+      updatedAt: Date.now(),
+      generation: execution.runId,
+    });
     if (!wasActive) log.info('agent-live', 'picker-enter', { scope, input: nativeCommand });
   }
   // A control turn starts from the picker that produced its card. The first
@@ -1400,12 +1508,15 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       sentInteractionSignatures.delete(previousControlInteractionSignature);
     }
     if (useLiveSession && (interaction || pickerLike)) {
-      const wasActive = liveInteractionByScope.has(scope);
-      const previous = liveInteractionByScope.get(scope);
+      const currentState = liveInteractionState(sessions, liveInteractionByScope, scope);
+      if (currentState?.generation && currentState.generation !== execution.runId) return;
+      const wasActive = Boolean(currentState);
+      const previous = currentState;
       const nextSignature = interaction?.signature ?? previous?.signature;
-      liveInteractionByScope.set(scope, {
+      saveLiveInteractionState(sessions, liveInteractionByScope, scope, {
         picker: true,
         updatedAt: Date.now(),
+        generation: execution.runId,
         ...(nextSignature ? { signature: nextSignature } : {}),
       });
       if (!wasActive) log.info('agent-live', 'picker-enter', { scope });
@@ -1524,6 +1635,15 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     const observed = interactionTextBuffer.trim();
     const observedSurface = observed ? liveInteractionSurface(observed) : undefined;
     const currentText = renderText(state, { activityMode: 'none' });
+    if (
+      nativeStatusFallback &&
+      (!currentText.trim() || currentText.includes('命令已发送到'))
+    ) {
+      return {
+        ...state,
+        blocks: [{ kind: 'text', content: `${nativeStatusFallback}\n`, streaming: false }],
+      };
+    }
     const shouldUseObservedPicker =
       Boolean(observedSurface) &&
       (!currentText.trim() ||
@@ -2271,7 +2391,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       const opensPicker = opensLivePicker(nativeCommand);
       const closesPicker = closesLivePicker(nativeCommand);
       if ((opensPicker || closesPicker) && !pickerObservedAfterInput) {
-        if (!controlFooterOnly && liveInteractionByScope.delete(scope)) {
+        if (!controlFooterOnly && clearLiveInteractionState(sessions, liveInteractionByScope, scope, execution.runId)) {
           log.info('agent-live', 'picker-exit', { scope, input: nativeCommand });
         }
       } else if (closesPicker && pickerObservedAfterInput) {
@@ -2480,6 +2600,7 @@ async function processAgentStream(
   };
   let streamFailure: unknown;
   let sawTerminalEvent = false;
+  let lastKeyframeFingerprint = '';
 
   // Idle watchdog: claude going silent for `idleTimeoutMs` is treated as
   // "presumed hung", we stop() and surface a timeout marker on the card.
@@ -2593,7 +2714,13 @@ async function processAgentStream(
       if (state.footer !== prevFooter || state.terminal !== prevTerminal) {
         log.info('card', 'transition', { footer: state.footer, terminal: state.terminal });
       }
-      await queueFlush(state);
+      const keyframe = runStateDeliveryFingerprint(state);
+      if (keyframe !== lastKeyframeFingerprint || state.terminal !== 'running') {
+        lastKeyframeFingerprint = keyframe;
+        await queueFlush(state);
+      } else {
+        log.info('card', 'keyframe-suppressed', { scope, event: evt.type });
+      }
       // Stop iterating as soon as we have a terminal state. Some claude
       // versions don't close stdout immediately after the result event, which
       // would leave the for-await waiting forever otherwise.
@@ -2675,6 +2802,21 @@ function runStateTextCursor(state: RunState): string {
     .filter((block): block is Extract<RunState['blocks'][number], { kind: 'text' }> => block.kind === 'text')
     .map((block) => block.content)
     .join('');
+}
+
+function runStateDeliveryFingerprint(state: RunState): string {
+  return JSON.stringify({
+    terminal: state.terminal,
+    footer: state.footer,
+    text: runStateTextCursor(state),
+    reasoning: state.reasoning.content,
+    tools: state.blocks
+      .filter((block): block is Extract<RunState['blocks'][number], { kind: 'tool' }> => block.kind === 'tool')
+      .map((block) => ({ id: block.tool.id, status: block.tool.status, output: block.tool.output })),
+    error: state.errorMsg,
+    idleTimeoutMinutes: state.idleTimeoutMinutes,
+    currentToolElapsedMs: state.currentToolElapsedMs,
+  });
 }
 
 function projectRunStateFromCursor(state: RunState, deliveredText: string): RunState {
@@ -3380,6 +3522,31 @@ function completeReplyText(state: RunState): string {
   });
 }
 
+function buildNativeStatusTmuxFallback(cwd: string, status: TmuxBindingStatus): string {
+  const terminal = status.terminal ?? (status.target
+    ? {
+        socketPath: status.target.socketPath,
+        target: status.target.paneId,
+        attachCommand: status.target.attachCommand,
+        ownership: status.target.ownership,
+      }
+    : undefined);
+  return [
+    'Codex live session status',
+    `Directory: ${cwd}`,
+    `Tmux state: ${status.state}`,
+    ...(terminal
+      ? [
+          `Tmux socket: ${terminal.socketPath}`,
+          `Tmux target: ${terminal.target}`,
+          `Tmux ownership: ${terminal.ownership}`,
+          `Attach command: ${terminal.attachCommand}`,
+        ]
+      : ['Tmux terminal: unavailable']),
+    '',
+  ].join('\n');
+}
+
 function isLongReplyText(text: string): boolean {
   const bytes = Buffer.byteLength(text, 'utf8');
   // Structured panels carry headers, borders and a code fence in addition to
@@ -3432,6 +3599,14 @@ async function sendCompleteReplyChunks(input: {
         input.sendOpts,
       );
     }
+    await ensureDeliveredTail({
+      channel: input.channel,
+      chatId: input.chatId,
+      sendOpts: input.sendOpts,
+      source: input.text,
+      delivered: chunks.flat().map((block) => block.content).join('\n'),
+      scope: input.scope,
+    });
     log.info('outbound', 'long-reply-split', {
       scope: input.scope,
       chunks: chunks.length,
@@ -3451,12 +3626,61 @@ async function sendCompleteReplyChunks(input: {
         : chunk;
     await input.channel.send(input.chatId, { markdown: content }, input.sendOpts);
   }
+  await ensureDeliveredTail({
+    channel: input.channel,
+    chatId: input.chatId,
+    sendOpts: input.sendOpts,
+    source: input.text,
+    delivered: chunks.join('\n'),
+    scope: input.scope,
+  });
   log.info('outbound', 'long-reply-split', {
     scope: input.scope,
     chunks: chunks.length,
     mode: 'markdown',
     bytes: Buffer.byteLength(input.text, 'utf8'),
   });
+}
+
+async function ensureDeliveredTail(input: {
+  channel: LarkChannel;
+  chatId: string;
+  sendOpts: { replyTo: string; replyInThread?: boolean };
+  source: string;
+  delivered: string;
+  scope: string;
+}): Promise<void> {
+  const sourceLines = input.source.replace(/\r\n?/gu, '\n').split('\n').filter((line) => line.trim());
+  if (sourceLines.length === 0) return;
+  const tailLines = sourceLines.slice(-8);
+  const tail = tailLines.join('\n');
+  let cursor = 0;
+  const covered = tailLines.every((line) => {
+    const needle = line.length > LONG_REPLY_CHUNK_BYTES
+      ? line.slice(-Math.min(256, line.length))
+      : line;
+    const index = input.delivered.indexOf(needle, cursor);
+    if (index < 0) return false;
+    cursor = index + needle.length;
+    return true;
+  });
+  log.info('outbound', 'delivery-integrity', {
+    scope: input.scope,
+    sourceSha256: createHash('sha256').update(input.source).digest('hex'),
+    deliveredSha256: createHash('sha256').update(input.delivered).digest('hex'),
+    sourceBytes: Buffer.byteLength(input.source, 'utf8'),
+    deliveredBytes: Buffer.byteLength(input.delivered, 'utf8'),
+    tailCovered: covered,
+  });
+  if (covered) return;
+  await input.channel.send(
+    input.chatId,
+    {
+      markdown: `⚠️ 正文尾部完整性校验发现缺失，补发最后内容：\n\n${tail.slice(-8_000)}`,
+    },
+    input.sendOpts,
+  );
+  log.warn('outbound', 'delivery-tail-recovered', { scope: input.scope, tailLines: Math.min(8, sourceLines.length) });
 }
 
 function isSkippedLiveInteractionForText(

@@ -82,6 +82,19 @@ export interface StatusInfo {
   scope: string;
   /** Chat mode — used to label scope. */
   chatMode: 'p2p' | 'group' | 'topic';
+  live?: {
+    runId?: string;
+    phase: string;
+    inputState: string;
+    retryCount: number;
+    generation?: string;
+    lastInputAt?: number;
+    lastOutputAt?: number;
+    promptPreview?: string;
+  };
+  picker?: { updatedAt: number; expiresAt: number; signature?: string; generation?: string };
+  liveQueue?: { queued: number; deferred: number; blocked: boolean };
+  tmux?: { state: string; attachCommand?: string; target?: string; message?: string };
 }
 
 export function statusCard(info: StatusInfo): object {
@@ -118,6 +131,24 @@ export function statusCard(info: StatusInfo): object {
         ]
       : []),
     `🚦 **queue**: ${queueLine}`,
+    ...(info.live ? [
+      `🧠 **live**: ${escapeMd(info.live.phase)} · input=${escapeMd(info.live.inputState)} · retry=${info.live.retryCount}`,
+      ...(info.live.runId ? [`🧬 **generation**: \`${escapeCode(info.live.runId.slice(0, 12))}…\``] : []),
+      ...(info.live.promptPreview ? [`✏️ **draft**: ${escapeMd(info.live.promptPreview)}`] : []),
+      ...(info.live.lastInputAt || info.live.lastOutputAt
+        ? [`⏱ **terminal I/O**: in ${formatAge(info.live.lastInputAt)} · out ${formatAge(info.live.lastOutputAt)}`]
+        : []),
+    ] : []),
+    ...(info.liveQueue ? [
+      `📥 **live queue**: ${info.liveQueue.queued} queued · ${info.liveQueue.deferred} deferred · ${info.liveQueue.blocked ? 'blocked' : 'ready'}`,
+    ] : []),
+    ...(info.picker ? [
+      `🎛 **picker**: active · expires ${formatStatusTime(info.picker.expiresAt)}${info.picker.signature ? ` · \`${escapeCode(info.picker.signature.slice(0, 10))}…\`` : ''}`,
+    ] : [`🎛 **picker**: none`]),
+    ...(info.tmux ? [
+      `🖥 **tmux**: ${escapeMd(info.tmux.state)}${info.tmux.target ? ` · \`${escapeCode(info.tmux.target)}\`` : ''}`,
+      ...(info.tmux.attachCommand ? [`🔌 **attach**: \`${escapeCode(info.tmux.attachCommand)}\``] : []),
+    ] : []),
     `👤 **owner API**: ${escapeMd(info.ownerState)}`,
   ];
   return shell('📊 当前状态', [
@@ -130,6 +161,17 @@ export function statusCard(info: StatusInfo): object {
       { text: '💡 帮助', value: { cmd: 'help' } },
     ]),
   ]);
+}
+
+function formatStatusTime(timestamp: number): string {
+  const seconds = Math.max(0, Math.round((timestamp - Date.now()) / 1000));
+  return seconds > 0 ? `${seconds}s` : 'expired';
+}
+
+function formatAge(timestamp: number | undefined): string {
+  if (!timestamp) return '—';
+  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+  return `${seconds}s ago`;
 }
 
 export interface ResumeEntry {

@@ -142,6 +142,20 @@ export class PendingQueue {
     return this.blocked.has(scope);
   }
 
+  snapshot(scope?: string): { scope: string; queued: number; deferred: number; blocked: boolean }[] {
+    const scopes = scope ? [scope] : [...new Set([
+      ...this.map.keys(),
+      ...this.deferredUntilFront.keys(),
+      ...this.blocked.values(),
+    ])];
+    return scopes.map((item) => ({
+      scope: item,
+      queued: this.map.get(item)?.messages.length ?? 0,
+      deferred: this.deferredUntilFront.get(item)?.length ?? 0,
+      blocked: this.blocked.has(item),
+    }));
+  }
+
   /**
    * Returns true when the scope is blocked and the per-scope cooldown elapsed.
    * This keeps rapid message bursts quiet while ensuring a later progress check

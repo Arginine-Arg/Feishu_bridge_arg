@@ -369,6 +369,29 @@ describe('Bridge command contracts', () => {
     expect(lastMarkdown(h.channel)).toContain('bridge 托管');
   });
 
+  it('offers a read-only /tmux attach shortcut for the current scope', async () => {
+    const h = await createHarness();
+    const attachCommand = 'tmux -S /tmp/tmux-2103/default attach -t argbridge-claude-abcd:0.0';
+    h.agent.tmux = {
+      list: vi.fn(async () => []),
+      bind: vi.fn(),
+      unbind: vi.fn(async () => false),
+      status: vi.fn(async () => ({
+        state: 'managed' as const,
+        terminal: {
+          socketPath: '/tmp/tmux-2103/default',
+          target: 'argbridge-claude-abcd:0.0',
+          attachCommand,
+          ownership: 'managed' as const,
+        },
+      })),
+    };
+
+    await expect(h.run('/tmux attach')).resolves.toBe(true);
+    expect(lastMarkdown(h.channel)).toContain(attachCommand);
+    expect(lastMarkdown(h.channel)).toContain('只读查询');
+  });
+
   it('captures the current tmux tail with a default of 27 lines', async () => {
     const h = await createHarness();
     const tail = vi.fn(async (_scope: string, lineCount: number) => ({

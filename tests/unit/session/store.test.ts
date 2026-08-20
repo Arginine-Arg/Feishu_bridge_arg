@@ -29,4 +29,38 @@ describe('scope output delivery policy', () => {
     expect(restored.getIdleTimeoutMinutes('chat-1')).toBe(0);
     expect(restored.getOutputMode('chat-1')).toBe('off');
   });
+
+  it('persists a live picker with generation and expires stale picker state', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'bridge-picker-store-'));
+    cleanups.push(dir);
+    const file = join(dir, 'sessions.json');
+    const store = new SessionStore(file);
+    const future = Date.now() + 60_000;
+    store.setLiveInteraction('chat-picker', {
+      picker: true,
+      updatedAt: Date.now(),
+      expiresAt: future,
+      signature: 'picker-signature',
+      generation: 'run-new',
+    });
+    await store.flush();
+
+    const restored = new SessionStore(file);
+    await restored.load();
+    expect(restored.liveInteractionEntries()).toEqual([
+      ['chat-picker', expect.objectContaining({ signature: 'picker-signature', generation: 'run-new' })],
+    ]);
+    expect(restored.getLiveInteraction('chat-picker')?.expiresAt).toBe(future);
+
+    restored.setLiveInteraction('chat-expired', {
+      picker: true,
+      updatedAt: Date.now() - 120_000,
+      expiresAt: Date.now() - 1,
+    });
+    expect(restored.getLiveInteraction('chat-expired')).toBeUndefined();
+    await restored.flush();
+    const reloaded = new SessionStore(file);
+    await reloaded.load();
+    expect(reloaded.getLiveInteraction('chat-expired')).toBeUndefined();
+  });
 });

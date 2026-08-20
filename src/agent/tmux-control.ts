@@ -10,6 +10,7 @@ import { writeFileAtomic } from '../platform/atomic-write';
 import { spawnProcessSync } from '../platform/spawn';
 import { resolveWorkingDirectory } from '../policy/workspace';
 import type { ArtifactDeliveryEnv } from './lark-channel-env';
+import type { LiveSessionDiagnostics } from './types';
 
 export type TmuxAgentKind = 'codex' | 'claude';
 export type TmuxOwnership = 'managed' | 'external';
@@ -55,6 +56,7 @@ export interface AgentTmuxControl {
   status(scopeId: string, cwd?: string): Promise<TmuxBindingStatus>;
   /** Captures only the current scope's active or bound pane. */
   tail?(scopeId: string, lineCount: number, cwd?: string): Promise<TmuxPaneTail>;
+  diagnostics?(scopeId: string, cwd?: string): Promise<LiveSessionDiagnostics>;
   /** Restores a persistent artifact grant to one bridge-managed tmux session. */
   restoreArtifactDelivery?(scopeId: string, artifact: ArtifactDeliveryEnv): Promise<boolean>;
 }

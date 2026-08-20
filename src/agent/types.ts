@@ -5,6 +5,37 @@ import type { AgentTmuxControl } from './tmux-control';
 
 export type { ClaudePermissionMode } from '../config/permissions';
 
+export type LiveTurnPhase =
+  | 'idle'
+  | 'starting'
+  | 'awaiting-input'
+  | 'submitted'
+  | 'busy'
+  | 'picker'
+  | 'streaming'
+  | 'settling'
+  | 'failed';
+
+export interface LiveSessionDiagnostics {
+  phase: LiveTurnPhase;
+  generation?: string;
+  promptPreview?: string;
+  inputState: 'empty' | 'draft' | 'submitted' | 'unknown';
+  retryCount: number;
+  startedAt?: number;
+  lastInputAt?: number;
+  lastOutputAt?: number;
+  lastError?: string;
+  terminal?: {
+    backend: 'tmux' | 'pty' | 'pipe';
+    socketPath?: string;
+    sessionName?: string;
+    target?: string;
+    attachCommand?: string;
+    ownership?: 'managed' | 'external';
+  };
+}
+
 export type AgentEvent =
   | { type: 'system'; sessionId?: string; threadId?: string; cwd?: string; model?: string }
   | {

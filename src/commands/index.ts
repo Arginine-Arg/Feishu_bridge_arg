@@ -6,6 +6,7 @@ import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
 import { claudeCapability, codexCapability } from '../agent/capability';
 import { DEFAULT_MODEL, normalizeModelSelection, supportedModels } from '../agent/models';
 import type { AgentAdapter } from '../agent/types';
+import type { LiveSessionDiagnostics } from '../agent/types';
 import { tmuxTargetKey, type TmuxBindingStatus, type TmuxPaneTarget } from '../agent/tmux-control';
 import type { ActiveRuns } from '../bot/active-runs';
 import {
@@ -141,6 +142,13 @@ export interface CommandContext {
   activeRuns: ActiveRuns;
   processPool?: ProcessPool;
   runExecutor?: RunExecutor;
+  liveDiagnostics?: () => Promise<{
+    runId?: string;
+    live?: LiveSessionDiagnostics;
+    picker?: { updatedAt: number; expiresAt: number; signature?: string; generation?: string };
+    queue?: { queued: number; deferred: number; blocked: boolean };
+    tmux?: TmuxBindingStatus;
+  }>;
   controls: Controls;
   codexHistoryProvider?: (
     options: ListCodexThreadHistoryOptions,
@@ -929,6 +937,10 @@ async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {
     isCodex && ctx.sessionCatalog && ctx.sessionCatalogIdentity
       ? ctx.sessionCatalog.activeFor(ctx.sessionCatalogIdentity)
       : undefined;
+  const diagnostics = await ctx.liveDiagnostics?.().catch((err) => {
+    log.warn('command', 'live-diagnostics-failed', { err: String(err) });
+    return undefined;
+  });
   const card = statusCard({
     profileName: ctx.controls.profile,
     cwd,
@@ -945,6 +957,27 @@ async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {
     ownerState: formatOwnerState(ctx),
     scope: ctx.scope,
     chatMode: ctx.chatMode,
+    ...(diagnostics?.live ? {
+      live: {
+        ...diagnostics.live,
+        ...(diagnostics.runId ? { runId: diagnostics.runId } : {}),
+      },
+    } : {}),
+    ...(diagnostics?.picker ? { picker: diagnostics.picker } : {}),
+    ...(diagnostics?.queue ? { liveQueue: diagnostics.queue } : {}),
+    ...(diagnostics?.tmux ? {
+      tmux: {
+        state: diagnostics.tmux.state,
+        ...(diagnostics.tmux.target ? {
+          target: diagnostics.tmux.target.paneId,
+          attachCommand: diagnostics.tmux.target.attachCommand,
+        } : diagnostics.tmux.terminal ? {
+          target: diagnostics.tmux.terminal.target,
+          attachCommand: diagnostics.tmux.terminal.attachCommand,
+        } : {}),
+        ...(diagnostics.tmux.message ? { message: diagnostics.tmux.message } : {}),
+      },
+    } : {}),
   });
   await ctx.channel.send(ctx.msg.chatId, { card }, commandReplyOptions(ctx));
 }
@@ -1086,6 +1119,30 @@ async function handleTmux(args: string, ctx: CommandContext): Promise<void> {
       await reply(ctx, formatTmuxStatus(status) || '当前 scope 尚未创建或绑定 tmux terminal。');
       return;
     }
+    if (action === 'attach') {
+      const status = await tmux.status(ctx.scope, effectiveWorkspaceCwd(ctx));
+      const terminal = status.terminal ?? (status.target
+        ? {
+            socketPath: status.target.socketPath,
+            target: status.target.paneId,
+            attachCommand: status.target.attachCommand,
+            ownership: status.target.ownership,
+          }
+        : undefined);
+      if (!terminal) {
+        await reply(ctx, '当前 scope 没有可进入的 tmux terminal。先运行一次 live 任务，或使用 `/tmux bind <编号>`。');
+        return;
+      }
+      await reply(ctx, [
+        `当前 tmux terminal：\`${terminal.target}\``,
+        '',
+        '在同一台机器上运行：',
+        fencedCodeBlock(terminal.attachCommand),
+        '',
+        '这是只读查询，不会改变 bridge 或 Codex 的运行状态。',
+      ].join('\n'));
+      return;
+    }
     if (action === 'tail') {
       const lineCount = parseTmuxTailLineCount(rest);
       if (lineCount === undefined) {
@@ -1118,7 +1175,7 @@ async function handleTmux(args: string, ctx: CommandContext): Promise<void> {
       );
       return;
     }
-    await reply(ctx, `用法：\`/tmux [list|bind <编号或 id>|status|tail [1-${MAX_TMUX_TAIL_LINES}]|unbind]\``);
+    await reply(ctx, `用法：\`/tmux [list|bind <编号或 id>|status|attach|tail [1-${MAX_TMUX_TAIL_LINES}]|unbind]\``);
   } catch (err) {
     await reply(ctx, `tmux 操作失败：${err instanceof Error ? err.message : String(err)}`);
   }

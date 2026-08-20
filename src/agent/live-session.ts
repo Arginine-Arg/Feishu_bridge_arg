@@ -10,7 +10,7 @@ import {
   spawnProcessSync,
   type SpawnedProcessByStdio,
 } from '../platform/spawn';
-import type { AgentEvent, AgentRun } from './types';
+import type { AgentEvent, AgentRun, LiveSessionDiagnostics, LiveTurnPhase } from './types';
 import {
   novelTerminalTextSuffix,
   stripReplayedTerminalSegments,
@@ -155,6 +155,14 @@ export class LiveSessionPool {
   terminalInfo(key: string): LiveTerminalInfo | undefined {
     return this.sessions.get(key)?.getTerminalInfo();
   }
+
+  diagnostics(key: string): LiveSessionDiagnostics {
+    return this.sessions.get(key)?.getDiagnostics() ?? {
+      phase: 'idle',
+      inputState: 'unknown',
+      retryCount: 0,
+    };
+  }
 }
 
 export class LiveTerminalSession {
@@ -179,6 +187,13 @@ export class LiveTerminalSession {
   private firstTerminalOutput: Promise<void> = Promise.resolve();
   private resolveFirstTerminalOutput: (() => void) | undefined;
   private startPromise: Promise<void> | undefined;
+  private turnPhase: LiveTurnPhase = 'idle';
+  private turnGeneration: string | undefined;
+  private turnPromptPreview: string | undefined;
+  private turnRetryCount = 0;
+  private turnLastInputAt: number | undefined;
+  private turnLastOutputAt: number | undefined;
+  private turnLastError: string | undefined;
 
   constructor(opts: LiveSessionCommand, onClose: () => void = () => {}) {
     this.opts = opts;
@@ -192,6 +207,40 @@ export class LiveTerminalSession {
 
   getTerminalInfo(): LiveTerminalInfo | undefined {
     return this.terminalInfo ? { ...this.terminalInfo } : undefined;
+  }
+
+  getDiagnostics(): LiveSessionDiagnostics {
+    const snapshot = `${this.lastTerminalSnapshot}\n${this.lastTerminalHistory?.text ?? ''}`;
+    const inputState = this.turnPromptPreview
+      ? isLiveTerminalReady(snapshot)
+        ? 'empty'
+        : isPendingLivePromptDraft(snapshot, this.turnPromptPreview)
+          ? 'draft'
+          : this.turnPhase === 'submitted' || this.turnPhase === 'busy' || this.turnPhase === 'streaming'
+            ? 'submitted'
+            : 'unknown'
+      : 'unknown';
+    return {
+      phase: this.turnPhase,
+      ...(this.turnGeneration ? { generation: this.turnGeneration } : {}),
+      ...(this.turnPromptPreview ? { promptPreview: previewLiveText(this.turnPromptPreview) } : {}),
+      inputState,
+      retryCount: this.turnRetryCount,
+      ...(this.startedAt ? { startedAt: this.startedAt } : {}),
+      ...(this.turnLastInputAt ? { lastInputAt: this.turnLastInputAt } : {}),
+      ...(this.turnLastOutputAt ? { lastOutputAt: this.turnLastOutputAt } : {}),
+      ...(this.turnLastError ? { lastError: this.turnLastError } : {}),
+      ...(this.terminalInfo ? {
+        terminal: {
+          backend: this.terminalInfo.backend,
+          ...(this.terminalInfo.socketPath ? { socketPath: this.terminalInfo.socketPath } : {}),
+          ...(this.terminalInfo.sessionName ? { sessionName: this.terminalInfo.sessionName } : {}),
+          ...(this.terminalInfo.target ? { target: this.terminalInfo.target } : {}),
+          ...(this.terminalInfo.attachCommand ? { attachCommand: this.terminalInfo.attachCommand } : {}),
+          ...(this.terminalInfo.ownership ? { ownership: this.terminalInfo.ownership } : {}),
+        },
+      } : {}),
+    };
   }
 
   /**
@@ -209,6 +258,11 @@ export class LiveTerminalSession {
   }
 
   run(runId: string, prompt: string, cwd: string, inputMode?: LiveTerminalInputMode): AgentRun {
+    this.turnGeneration = runId;
+    this.turnPromptPreview = prompt;
+    this.turnRetryCount = 0;
+    this.turnLastError = undefined;
+    this.turnPhase = 'starting';
     void this.start();
     const interruption: LiveTurnInterrupt = { requested: false };
     const events = this.turnEvents(prompt, cwd, inputMode, interruption);
@@ -389,6 +443,7 @@ export class LiveTerminalSession {
   private write(input: string): void {
     const child = this.child;
     if (!child || child.exitCode !== null || child.signalCode !== null) return;
+    this.turnLastInputAt = Date.now();
     child.stdin.write(
       this.terminalInfo?.backend === 'tmux' ? encodeTmuxInputFrame(input) : input,
     );
@@ -411,6 +466,7 @@ export class LiveTerminalSession {
       return;
     }
     const turnPrompt = sideMode ? sidePrompt! : prompt;
+    this.turnPhase = 'awaiting-input';
     const idleMs =
       commandMode
         ? Math.max(this.opts.idleMs ?? DEFAULT_IDLE_MS, COMMAND_IDLE_MS)
@@ -498,6 +554,8 @@ export class LiveTerminalSession {
     const finish = (failureMessage?: string): void => {
       if (done) return;
       done = true;
+      this.turnPhase = failureMessage ? 'failed' : 'settling';
+      if (failureMessage) this.turnLastError = failureMessage;
       if (commandMode) {
         log.info('agent-live', 'command-finish', {
           reason: failureMessage ? 'terminal-failure' : 'idle-or-startup',
@@ -591,6 +649,7 @@ export class LiveTerminalSession {
           if (!isPendingLivePromptDraft(terminal, turnPrompt)) return;
         }
         normalSubmitRetried = true;
+        this.turnRetryCount += 1;
         // Codex can occasionally leave a plain pasted message in its editor
         // without accepting the first submit key. Keep the existing draft and
         // send only the missing submit key; re-pasting can turn text into a
@@ -607,6 +666,7 @@ export class LiveTerminalSession {
     };
 
     const onData = (event: LiveOutput): void => {
+      this.turnLastOutputAt = Date.now();
       if (!acceptingOutput) {
         const terminalText = event.terminalText ?? event.text;
         if (terminalText && isLiveTerminalInteraction(terminalText)) {
@@ -659,6 +719,7 @@ export class LiveTerminalSession {
         markNormalSubmitProgress();
       }
       if (terminalBusy) {
+        this.turnPhase = 'busy';
         terminalWasBusy = true;
         suspendIdle();
       } else if (terminalWasBusy) {
@@ -727,6 +788,7 @@ export class LiveTerminalSession {
         });
       }
       if (accepted) {
+        this.turnPhase = isLiveTerminalInteraction(terminalState ?? event.text) ? 'picker' : 'streaming';
         if (!normalPromptDraftPending) markNormalSubmitProgress();
         const resultOutput = isLiveCommandResultOutput(text, turnPrompt);
         const statusSurfaceOutput =
@@ -787,6 +849,8 @@ export class LiveTerminalSession {
     };
     const onError = (err: Error): void => {
       if (done) return;
+      this.turnPhase = 'failed';
+      this.turnLastError = err.message;
       done = true;
       if (timer) clearTimeout(timer);
       flushOutput();
@@ -846,11 +910,13 @@ export class LiveTerminalSession {
           }
         }
         acceptingOutput = true;
+        this.turnPhase = 'submitted';
         if (sideMode) {
           const enteredSideConversation = await this.enterSideConversation();
           if (!enteredSideConversation) {
             finish('未确认 Codex 已进入 side conversation，/btw 正文未发送。请先回到主线程后重试。');
           } else if (turnPrompt) {
+            this.turnLastInputAt = Date.now();
             this.write(`${turnPrompt}\r`);
             scheduleNormalSubmitRetry();
           } else {
@@ -865,6 +931,7 @@ export class LiveTerminalSession {
             for (let i = 0; i < controlKeys.length; i++) {
               if (i > 0) await delay(CONTROL_KEY_GAP_MS);
               this.write(controlKeys[i]!);
+              this.turnLastInputAt = Date.now();
             }
           } else {
             if (commandMode) log.info('agent-live', 'command-submit', { commandText: turnPrompt });
@@ -876,9 +943,11 @@ export class LiveTerminalSession {
             // fallback key from selecting the nested menu's default option.
               log.info('agent-live', 'control-literal-type', { input: turnPrompt });
               this.write(turnPrompt);
+              this.turnLastInputAt = Date.now();
             } else if (inputMode === 'control' && shouldDeferControlLiteralSubmit(turnPrompt)) {
               log.info('agent-live', 'control-literal-type', { input: turnPrompt });
               this.write(turnPrompt);
+              this.turnLastInputAt = Date.now();
               controlLiteralConfirmTimer = setTimeout(() => {
                 controlLiteralConfirmTimer = undefined;
                 if (done || sawAcceptedOutput) return;
@@ -887,6 +956,7 @@ export class LiveTerminalSession {
               }, CONTROL_LITERAL_CONFIRM_DELAY_MS);
             } else {
               this.write(`${turnPrompt}\r`);
+              this.turnLastInputAt = Date.now();
               scheduleNormalSubmitRetry();
             }
           }
@@ -916,6 +986,8 @@ export class LiveTerminalSession {
         if (event) yield event;
       }
     } finally {
+      this.turnPhase = 'idle';
+      this.turnPromptPreview = undefined;
       cleanupTurn();
     }
   }

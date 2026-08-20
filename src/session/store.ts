@@ -21,9 +21,19 @@ export interface SessionEntry {
    * `off` suppresses agent-originated delivery altogether.
    */
   outputMode?: OutputMode;
+  /** Short-lived native picker state used to recover a bridge restart. */
+  liveInteraction?: PersistedLiveInteraction;
 }
 
 export type OutputMode = 'live' | 'final' | 'off';
+
+export interface PersistedLiveInteraction {
+  picker: true;
+  updatedAt: number;
+  expiresAt: number;
+  signature?: string;
+  generation?: string;
+}
 
 type SessionMap = Record<string, SessionEntry>;
 
@@ -53,14 +63,18 @@ export class SessionStore {
         const idleTimeoutMinutes =
           typeof entry.idleTimeoutMinutes === 'number' ? entry.idleTimeoutMinutes : undefined;
         const outputMode = isOutputMode(entry.outputMode) ? entry.outputMode : undefined;
+        const liveInteraction = isPersistedLiveInteraction(entry.liveInteraction)
+          ? entry.liveInteraction
+          : undefined;
         const hasSession = sessionId !== undefined && cwd !== undefined;
-        if (!hasSession && idleTimeoutMinutes === undefined && outputMode === undefined) continue;
+        if (!hasSession && idleTimeoutMinutes === undefined && outputMode === undefined && liveInteraction === undefined) continue;
         this.data[chatId] = {
           ...(sessionId !== undefined ? { sessionId } : {}),
           ...(cwd !== undefined ? { cwd } : {}),
           updatedAt: entry.updatedAt,
           ...(idleTimeoutMinutes !== undefined ? { idleTimeoutMinutes } : {}),
           ...(outputMode !== undefined ? { outputMode } : {}),
+          ...(liveInteraction !== undefined ? { liveInteraction } : {}),
         };
       }
     } catch (err) {
@@ -85,6 +99,43 @@ export class SessionStore {
     return this.data[chatId];
   }
 
+  liveInteractionEntries(): Array<[string, PersistedLiveInteraction]> {
+    const now = Date.now();
+    return Object.entries(this.data).flatMap(([scope, entry]) =>
+      entry.liveInteraction && entry.liveInteraction.expiresAt > now
+        ? [[scope, { ...entry.liveInteraction }]]
+        : [],
+    );
+  }
+
+  getLiveInteraction(chatId: string): PersistedLiveInteraction | undefined {
+    const state = this.data[chatId]?.liveInteraction;
+    if (!state || state.expiresAt <= Date.now()) {
+      if (state) this.clearLiveInteraction(chatId);
+      return undefined;
+    }
+    return { ...state };
+  }
+
+  setLiveInteraction(chatId: string, state: PersistedLiveInteraction): void {
+    const prev = this.data[chatId];
+    this.data[chatId] = {
+      ...(prev ?? { updatedAt: Date.now() }),
+      liveInteraction: { ...state },
+      updatedAt: Date.now(),
+    };
+    this.schedulePersist();
+  }
+
+  clearLiveInteraction(chatId: string): void {
+    const prev = this.data[chatId];
+    if (!prev?.liveInteraction) return;
+    const { liveInteraction: _, ...rest } = prev;
+    if (Object.keys(rest).length === 1 && rest.updatedAt !== undefined) delete this.data[chatId];
+    else this.data[chatId] = { ...rest, updatedAt: Date.now() };
+    this.schedulePersist();
+  }
+
   set(chatId: string, sessionId: string, cwd: string): void {
     // Preserve per-scope controls across run starts. They are delivery and
     // watchdog preferences, not a native agent-session identity.
@@ -97,6 +148,7 @@ export class SessionStore {
         ? { idleTimeoutMinutes: prev.idleTimeoutMinutes }
         : {}),
       ...(prev?.outputMode !== undefined ? { outputMode: prev.outputMode } : {}),
+      ...(prev?.liveInteraction !== undefined ? { liveInteraction: prev.liveInteraction } : {}),
     };
     this.schedulePersist();
   }
@@ -109,11 +161,13 @@ export class SessionStore {
         idleTimeoutMinutes: prev.idleTimeoutMinutes,
         updatedAt: Date.now(),
         ...(prev.outputMode !== undefined ? { outputMode: prev.outputMode } : {}),
+        ...(prev.liveInteraction !== undefined ? { liveInteraction: prev.liveInteraction } : {}),
       };
     } else if (prev.outputMode !== undefined) {
       this.data[chatId] = {
         outputMode: prev.outputMode,
         updatedAt: Date.now(),
+        ...(prev.liveInteraction !== undefined ? { liveInteraction: prev.liveInteraction } : {}),
       };
     } else {
       delete this.data[chatId];
@@ -181,4 +235,14 @@ export class SessionStore {
 
 function isOutputMode(value: unknown): value is OutputMode {
   return value === 'live' || value === 'final' || value === 'off';
+}
+
+function isPersistedLiveInteraction(value: unknown): value is PersistedLiveInteraction {
+  if (!value || typeof value !== 'object') return false;
+  const item = value as Partial<PersistedLiveInteraction>;
+  return item.picker === true &&
+    typeof item.updatedAt === 'number' &&
+    typeof item.expiresAt === 'number' &&
+    (item.signature === undefined || typeof item.signature === 'string') &&
+    (item.generation === undefined || typeof item.generation === 'string');
 }

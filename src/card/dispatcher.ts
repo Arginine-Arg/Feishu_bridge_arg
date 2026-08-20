@@ -56,6 +56,10 @@ export interface CardDispatchDeps {
   callbackAuth?: CallbackAuth;
   callbackPolicyFingerprint?: string;
   callbackPolicyFingerprintForScope?: (scope: string) => string | undefined;
+  liveDiagnostics?: NonNullable<CommandContext['liveDiagnostics']> extends () => infer R
+    ? (scope: string) => R
+    : never;
+  liveInteractionGeneration?: (scope: string) => string | undefined;
 }
 
 export async function handleCardAction(deps: CardDispatchDeps): Promise<CardActionResponse | undefined> {
@@ -141,6 +145,7 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<CardActi
       controls: deps.controls,
       formValue,
       fromCardAction: true,
+      liveDiagnostics: deps.liveDiagnostics ? () => deps.liveDiagnostics!(scope) : undefined,
     };
 
     const [name, ...rest] = cmd.split('.');
@@ -225,6 +230,17 @@ function verifyDeferredInputToken(
       reason: result.reason,
     });
     return false;
+  }
+  if (action === LIVE_INPUT_CALLBACK_ACTION && deps.liveInteractionGeneration) {
+    const generation = deps.liveInteractionGeneration(scope);
+    if (!generation || result.payload.r !== generation) {
+      log.info('cardAction', 'skip-stale-live-input-generation', {
+        scope,
+        tokenGeneration: result.payload.r,
+        currentGeneration: generation,
+      });
+      return false;
+    }
   }
   return true;
 }

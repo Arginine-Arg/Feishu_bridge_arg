@@ -107,6 +107,22 @@ export class CodexAdapter implements AgentAdapter {
         const terminal = tmuxTerminalForStatus(await this.tmuxStatus(scopeId, cwd));
         return captureTmuxPaneTail(terminal, lineCount);
       },
+      diagnostics: async (scopeId, cwd) => {
+        const diagnostics = this.liveSessions.diagnostics(scopeId);
+        const status = await this.tmuxStatus(scopeId, cwd);
+        const terminal = status.terminal ?? (status.target
+          ? {
+              socketPath: status.target.socketPath,
+              target: status.target.paneId,
+              attachCommand: status.target.attachCommand,
+              ownership: status.target.ownership,
+            }
+          : undefined);
+        return {
+          ...diagnostics,
+          ...(terminal ? { terminal: { backend: 'tmux' as const, ...terminal } } : {}),
+        };
+      },
       restoreArtifactDelivery: (scopeId, artifact) =>
         this.tmuxBindings.restoreManagedArtifactDelivery(scopeId, artifact),
     };

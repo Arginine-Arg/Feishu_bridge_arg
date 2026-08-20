@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.0.9",
+  version: "1.1.0",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -7215,6 +7215,13 @@ var LiveSessionPool = class {
   terminalInfo(key) {
     return this.sessions.get(key)?.getTerminalInfo();
   }
+  diagnostics(key) {
+    return this.sessions.get(key)?.getDiagnostics() ?? {
+      phase: "idle",
+      inputState: "unknown",
+      retryCount: 0
+    };
+  }
 };
 var LiveTerminalSession = class {
   signature;
@@ -7237,6 +7244,13 @@ var LiveTerminalSession = class {
   firstTerminalOutput = Promise.resolve();
   resolveFirstTerminalOutput;
   startPromise;
+  turnPhase = "idle";
+  turnGeneration;
+  turnPromptPreview;
+  turnRetryCount = 0;
+  turnLastInputAt;
+  turnLastOutputAt;
+  turnLastError;
   constructor(opts, onClose = () => {
   }) {
     this.opts = opts;
@@ -7248,6 +7262,32 @@ var LiveTerminalSession = class {
   }
   getTerminalInfo() {
     return this.terminalInfo ? { ...this.terminalInfo } : void 0;
+  }
+  getDiagnostics() {
+    const snapshot = `${this.lastTerminalSnapshot}
+${this.lastTerminalHistory?.text ?? ""}`;
+    const inputState = this.turnPromptPreview ? isLiveTerminalReady(snapshot) ? "empty" : isPendingLivePromptDraft(snapshot, this.turnPromptPreview) ? "draft" : this.turnPhase === "submitted" || this.turnPhase === "busy" || this.turnPhase === "streaming" ? "submitted" : "unknown" : "unknown";
+    return {
+      phase: this.turnPhase,
+      ...this.turnGeneration ? { generation: this.turnGeneration } : {},
+      ...this.turnPromptPreview ? { promptPreview: previewLiveText(this.turnPromptPreview) } : {},
+      inputState,
+      retryCount: this.turnRetryCount,
+      ...this.startedAt ? { startedAt: this.startedAt } : {},
+      ...this.turnLastInputAt ? { lastInputAt: this.turnLastInputAt } : {},
+      ...this.turnLastOutputAt ? { lastOutputAt: this.turnLastOutputAt } : {},
+      ...this.turnLastError ? { lastError: this.turnLastError } : {},
+      ...this.terminalInfo ? {
+        terminal: {
+          backend: this.terminalInfo.backend,
+          ...this.terminalInfo.socketPath ? { socketPath: this.terminalInfo.socketPath } : {},
+          ...this.terminalInfo.sessionName ? { sessionName: this.terminalInfo.sessionName } : {},
+          ...this.terminalInfo.target ? { target: this.terminalInfo.target } : {},
+          ...this.terminalInfo.attachCommand ? { attachCommand: this.terminalInfo.attachCommand } : {},
+          ...this.terminalInfo.ownership ? { ownership: this.terminalInfo.ownership } : {}
+        }
+      } : {}
+    };
   }
   /**
    * Returns true exactly once per session (the first call), false afterwards.
@@ -7263,6 +7303,11 @@ var LiveTerminalSession = class {
     return true;
   }
   run(runId, prompt, cwd, inputMode) {
+    this.turnGeneration = runId;
+    this.turnPromptPreview = prompt;
+    this.turnRetryCount = 0;
+    this.turnLastError = void 0;
+    this.turnPhase = "starting";
     void this.start();
     const interruption = { requested: false };
     const events = this.turnEvents(prompt, cwd, inputMode, interruption);
@@ -7420,6 +7465,7 @@ var LiveTerminalSession = class {
   write(input) {
     const child = this.child;
     if (!child || child.exitCode !== null || child.signalCode !== null) return;
+    this.turnLastInputAt = Date.now();
     child.stdin.write(
       this.terminalInfo?.backend === "tmux" ? encodeTmuxInputFrame(input) : input
     );
@@ -7435,6 +7481,7 @@ var LiveTerminalSession = class {
       return;
     }
     const turnPrompt = sideMode ? sidePrompt : prompt;
+    this.turnPhase = "awaiting-input";
     const idleMs = commandMode ? Math.max(this.opts.idleMs ?? DEFAULT_IDLE_MS, COMMAND_IDLE_MS) : this.opts.idleMs ?? DEFAULT_IDLE_MS;
     const outputFlushMs = this.opts.outputFlushMs ?? DEFAULT_OUTPUT_FLUSH_MS;
     const startupTimeoutMs = commandMode ? Math.max(this.opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS, COMMAND_STARTUP_TIMEOUT_MS) : this.opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
@@ -7511,6 +7558,8 @@ var LiveTerminalSession = class {
     const finish = (failureMessage) => {
       if (done) return;
       done = true;
+      this.turnPhase = failureMessage ? "failed" : "settling";
+      if (failureMessage) this.turnLastError = failureMessage;
       if (commandMode) {
         log.info("agent-live", "command-finish", {
           reason: failureMessage ? "terminal-failure" : "idle-or-startup"
@@ -7589,6 +7638,7 @@ ${this.lastTerminalHistory?.text ?? ""}`;
           if (!isPendingLivePromptDraft(terminal, turnPrompt)) return;
         }
         normalSubmitRetried = true;
+        this.turnRetryCount += 1;
         void (async () => {
           log.warn("agent-live", "normal-submit-retry", { promptPreview: previewLiveText(turnPrompt) });
           this.write("\r");
@@ -7600,6 +7650,7 @@ ${this.lastTerminalHistory?.text ?? ""}`;
       }, NORMAL_SUBMIT_RETRY_DELAY_MS);
     };
     const onData = (event) => {
+      this.turnLastOutputAt = Date.now();
       if (!acceptingOutput) {
         const terminalText = event.terminalText ?? event.text;
         if (terminalText && isLiveTerminalInteraction(terminalText)) {
@@ -7638,6 +7689,7 @@ ${this.lastTerminalHistory?.text ?? ""}`;
         markNormalSubmitProgress();
       }
       if (terminalBusy) {
+        this.turnPhase = "busy";
         terminalWasBusy = true;
         suspendIdle();
       } else if (terminalWasBusy) {
@@ -7679,6 +7731,7 @@ ${this.lastTerminalHistory?.text ?? ""}`;
         });
       }
       if (accepted) {
+        this.turnPhase = isLiveTerminalInteraction(terminalState ?? event.text) ? "picker" : "streaming";
         if (!normalPromptDraftPending) markNormalSubmitProgress();
         const resultOutput = isLiveCommandResultOutput(text, turnPrompt);
         const statusSurfaceOutput = !isStatusLiveCommand(turnPrompt) || this.terminalInfo?.backend !== "tmux" || isLiveStatusPanelOutput(output.lastAcceptedText());
@@ -7725,6 +7778,8 @@ ${this.lastTerminalHistory?.text ?? ""}`;
     };
     const onError = (err) => {
       if (done) return;
+      this.turnPhase = "failed";
+      this.turnLastError = err.message;
       done = true;
       if (timer) clearTimeout(timer);
       flushOutput();
@@ -7782,11 +7837,13 @@ ${this.lastTerminalHistory?.text ?? ""}`;
           }
         }
         acceptingOutput = true;
+        this.turnPhase = "submitted";
         if (sideMode) {
           const enteredSideConversation = await this.enterSideConversation();
           if (!enteredSideConversation) {
             finish("\u672A\u786E\u8BA4 Codex \u5DF2\u8FDB\u5165 side conversation\uFF0C/btw \u6B63\u6587\u672A\u53D1\u9001\u3002\u8BF7\u5148\u56DE\u5230\u4E3B\u7EBF\u7A0B\u540E\u91CD\u8BD5\u3002");
           } else if (turnPrompt) {
+            this.turnLastInputAt = Date.now();
             this.write(`${turnPrompt}\r`);
             scheduleNormalSubmitRetry();
           } else {
@@ -7798,15 +7855,18 @@ ${this.lastTerminalHistory?.text ?? ""}`;
             for (let i = 0; i < controlKeys.length; i++) {
               if (i > 0) await delay(CONTROL_KEY_GAP_MS);
               this.write(controlKeys[i]);
+              this.turnLastInputAt = Date.now();
             }
           } else {
             if (commandMode) log.info("agent-live", "command-submit", { commandText: turnPrompt });
             if (inputMode === "control" && isNumericControlLiteral(turnPrompt)) {
               log.info("agent-live", "control-literal-type", { input: turnPrompt });
               this.write(turnPrompt);
+              this.turnLastInputAt = Date.now();
             } else if (inputMode === "control" && shouldDeferControlLiteralSubmit(turnPrompt)) {
               log.info("agent-live", "control-literal-type", { input: turnPrompt });
               this.write(turnPrompt);
+              this.turnLastInputAt = Date.now();
               controlLiteralConfirmTimer = setTimeout(() => {
                 controlLiteralConfirmTimer = void 0;
                 if (done || sawAcceptedOutput) return;
@@ -7815,6 +7875,7 @@ ${this.lastTerminalHistory?.text ?? ""}`;
               }, CONTROL_LITERAL_CONFIRM_DELAY_MS);
             } else {
               this.write(`${turnPrompt}\r`);
+              this.turnLastInputAt = Date.now();
               scheduleNormalSubmitRetry();
             }
           }
@@ -7840,6 +7901,8 @@ ${this.lastTerminalHistory?.text ?? ""}`;
         if (event) yield event;
       }
     } finally {
+      this.turnPhase = "idle";
+      this.turnPromptPreview = void 0;
       cleanupTurn();
     }
   }
@@ -9960,6 +10023,20 @@ var ClaudeAdapter = class {
         const terminal = tmuxTerminalForStatus(await this.tmuxStatus(scopeId, cwd));
         return captureTmuxPaneTail(terminal, lineCount);
       },
+      diagnostics: async (scopeId, cwd) => {
+        const diagnostics = this.liveSessions.diagnostics(scopeId);
+        const status = await this.tmuxStatus(scopeId, cwd);
+        const terminal = status.terminal ?? (status.target ? {
+          socketPath: status.target.socketPath,
+          target: status.target.paneId,
+          attachCommand: status.target.attachCommand,
+          ownership: status.target.ownership
+        } : void 0);
+        return {
+          ...diagnostics,
+          ...terminal ? { terminal: { backend: "tmux", ...terminal } } : {}
+        };
+      },
       restoreArtifactDelivery: (scopeId, artifact) => this.tmuxBindings.restoreManagedArtifactDelivery(scopeId, artifact)
     };
   }
@@ -10573,6 +10650,20 @@ var CodexAdapter = class {
       tail: async (scopeId, lineCount, cwd) => {
         const terminal = tmuxTerminalForStatus2(await this.tmuxStatus(scopeId, cwd));
         return captureTmuxPaneTail(terminal, lineCount);
+      },
+      diagnostics: async (scopeId, cwd) => {
+        const diagnostics = this.liveSessions.diagnostics(scopeId);
+        const status = await this.tmuxStatus(scopeId, cwd);
+        const terminal = status.terminal ?? (status.target ? {
+          socketPath: status.target.socketPath,
+          target: status.target.paneId,
+          attachCommand: status.target.attachCommand,
+          ownership: status.target.ownership
+        } : void 0);
+        return {
+          ...diagnostics,
+          ...terminal ? { terminal: { backend: "tmux", ...terminal } } : {}
+        };
       },
       restoreArtifactDelivery: (scopeId, artifact) => this.tmuxBindings.restoreManagedArtifactDelivery(scopeId, artifact)
     };
@@ -12052,6 +12143,22 @@ function statusCard(info) {
       `\u{1F4DD} **comment runs**: ${info.activeCommentScopes.map((scope) => `\`${escapeCode(scope)}\``).join(", ")}`
     ] : [],
     `\u{1F6A6} **queue**: ${queueLine}`,
+    ...info.live ? [
+      `\u{1F9E0} **live**: ${escapeMd(info.live.phase)} \xB7 input=${escapeMd(info.live.inputState)} \xB7 retry=${info.live.retryCount}`,
+      ...info.live.runId ? [`\u{1F9EC} **generation**: \`${escapeCode(info.live.runId.slice(0, 12))}\u2026\``] : [],
+      ...info.live.promptPreview ? [`\u270F\uFE0F **draft**: ${escapeMd(info.live.promptPreview)}`] : [],
+      ...info.live.lastInputAt || info.live.lastOutputAt ? [`\u23F1 **terminal I/O**: in ${formatAge(info.live.lastInputAt)} \xB7 out ${formatAge(info.live.lastOutputAt)}`] : []
+    ] : [],
+    ...info.liveQueue ? [
+      `\u{1F4E5} **live queue**: ${info.liveQueue.queued} queued \xB7 ${info.liveQueue.deferred} deferred \xB7 ${info.liveQueue.blocked ? "blocked" : "ready"}`
+    ] : [],
+    ...info.picker ? [
+      `\u{1F39B} **picker**: active \xB7 expires ${formatStatusTime(info.picker.expiresAt)}${info.picker.signature ? ` \xB7 \`${escapeCode(info.picker.signature.slice(0, 10))}\u2026\`` : ""}`
+    ] : [`\u{1F39B} **picker**: none`],
+    ...info.tmux ? [
+      `\u{1F5A5} **tmux**: ${escapeMd(info.tmux.state)}${info.tmux.target ? ` \xB7 \`${escapeCode(info.tmux.target)}\`` : ""}`,
+      ...info.tmux.attachCommand ? [`\u{1F50C} **attach**: \`${escapeCode(info.tmux.attachCommand)}\``] : []
+    ] : [],
     `\u{1F464} **owner API**: ${escapeMd(info.ownerState)}`
   ];
   return shell("\u{1F4CA} \u5F53\u524D\u72B6\u6001", [
@@ -12064,6 +12171,15 @@ function statusCard(info) {
       { text: "\u{1F4A1} \u5E2E\u52A9", value: { cmd: "help" } }
     ])
   ]);
+}
+function formatStatusTime(timestamp) {
+  const seconds = Math.max(0, Math.round((timestamp - Date.now()) / 1e3));
+  return seconds > 0 ? `${seconds}s` : "expired";
+}
+function formatAge(timestamp) {
+  if (!timestamp) return "\u2014";
+  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1e3));
+  return `${seconds}s ago`;
 }
 function resumeCard(cwd, entries) {
   const elements = [];
@@ -14313,6 +14429,10 @@ async function handleStatus(_args, ctx) {
   const sess = ctx.sessions.getRaw(ctx.scope);
   const isCodex = ctx.controls.profileConfig.agentKind === "codex";
   const catalogEntry = isCodex && ctx.sessionCatalog && ctx.sessionCatalogIdentity ? ctx.sessionCatalog.activeFor(ctx.sessionCatalogIdentity) : void 0;
+  const diagnostics = await ctx.liveDiagnostics?.().catch((err) => {
+    log.warn("command", "live-diagnostics-failed", { err: String(err) });
+    return void 0;
+  });
   const card = statusCard({
     profileName: ctx.controls.profile,
     cwd,
@@ -14328,7 +14448,28 @@ async function handleStatus(_args, ctx) {
     queue: ctx.processPool?.snapshot(),
     ownerState: formatOwnerState(ctx),
     scope: ctx.scope,
-    chatMode: ctx.chatMode
+    chatMode: ctx.chatMode,
+    ...diagnostics?.live ? {
+      live: {
+        ...diagnostics.live,
+        ...diagnostics.runId ? { runId: diagnostics.runId } : {}
+      }
+    } : {},
+    ...diagnostics?.picker ? { picker: diagnostics.picker } : {},
+    ...diagnostics?.queue ? { liveQueue: diagnostics.queue } : {},
+    ...diagnostics?.tmux ? {
+      tmux: {
+        state: diagnostics.tmux.state,
+        ...diagnostics.tmux.target ? {
+          target: diagnostics.tmux.target.paneId,
+          attachCommand: diagnostics.tmux.target.attachCommand
+        } : diagnostics.tmux.terminal ? {
+          target: diagnostics.tmux.terminal.target,
+          attachCommand: diagnostics.tmux.terminal.attachCommand
+        } : {},
+        ...diagnostics.tmux.message ? { message: diagnostics.tmux.message } : {}
+      }
+    } : {}
   });
   await ctx.channel.send(ctx.msg.chatId, { card }, commandReplyOptions(ctx));
 }
@@ -14454,6 +14595,28 @@ async function handleTmux(args, ctx) {
       await reply(ctx, formatTmuxStatus(status) || "\u5F53\u524D scope \u5C1A\u672A\u521B\u5EFA\u6216\u7ED1\u5B9A tmux terminal\u3002");
       return;
     }
+    if (action === "attach") {
+      const status = await tmux.status(ctx.scope, effectiveWorkspaceCwd(ctx));
+      const terminal = status.terminal ?? (status.target ? {
+        socketPath: status.target.socketPath,
+        target: status.target.paneId,
+        attachCommand: status.target.attachCommand,
+        ownership: status.target.ownership
+      } : void 0);
+      if (!terminal) {
+        await reply(ctx, "\u5F53\u524D scope \u6CA1\u6709\u53EF\u8FDB\u5165\u7684 tmux terminal\u3002\u5148\u8FD0\u884C\u4E00\u6B21 live \u4EFB\u52A1\uFF0C\u6216\u4F7F\u7528 `/tmux bind <\u7F16\u53F7>`\u3002");
+        return;
+      }
+      await reply(ctx, [
+        `\u5F53\u524D tmux terminal\uFF1A\`${terminal.target}\``,
+        "",
+        "\u5728\u540C\u4E00\u53F0\u673A\u5668\u4E0A\u8FD0\u884C\uFF1A",
+        fencedCodeBlock(terminal.attachCommand),
+        "",
+        "\u8FD9\u662F\u53EA\u8BFB\u67E5\u8BE2\uFF0C\u4E0D\u4F1A\u6539\u53D8 bridge \u6216 Codex \u7684\u8FD0\u884C\u72B6\u6001\u3002"
+      ].join("\n"));
+      return;
+    }
     if (action === "tail") {
       const lineCount = parseTmuxTailLineCount(rest);
       if (lineCount === void 0) {
@@ -14485,7 +14648,7 @@ ${fencedCodeBlock(content)}`
       );
       return;
     }
-    await reply(ctx, `\u7528\u6CD5\uFF1A\`/tmux [list|bind <\u7F16\u53F7\u6216 id>|status|tail [1-${MAX_TMUX_TAIL_LINES}]|unbind]\``);
+    await reply(ctx, `\u7528\u6CD5\uFF1A\`/tmux [list|bind <\u7F16\u53F7\u6216 id>|status|attach|tail [1-${MAX_TMUX_TAIL_LINES}]|unbind]\``);
   } catch (err) {
     await reply(ctx, `tmux \u64CD\u4F5C\u5931\u8D25\uFF1A${err instanceof Error ? err.message : String(err)}`);
   }
@@ -16041,7 +16204,8 @@ async function handleCardAction(deps) {
       runExecutor: deps.runExecutor,
       controls: deps.controls,
       formValue,
-      fromCardAction: true
+      fromCardAction: true,
+      liveDiagnostics: deps.liveDiagnostics ? () => deps.liveDiagnostics(scope) : void 0
     };
     const [name, ...rest] = cmd.split(".");
     const sub = rest.join(" ");
@@ -16094,6 +16258,17 @@ function verifyDeferredInputToken(deps, payload, scope, operatorId, action) {
       reason: result.reason
     });
     return false;
+  }
+  if (action === LIVE_INPUT_CALLBACK_ACTION && deps.liveInteractionGeneration) {
+    const generation = deps.liveInteractionGeneration(scope);
+    if (!generation || result.payload.r !== generation) {
+      log.info("cardAction", "skip-stale-live-input-generation", {
+        scope,
+        tokenGeneration: result.payload.r,
+        currentGeneration: generation
+      });
+      return false;
+    }
   }
   return true;
 }
@@ -18625,6 +18800,19 @@ var PendingQueue = class {
   isBlocked(scope) {
     return this.blocked.has(scope);
   }
+  snapshot(scope) {
+    const scopes = scope ? [scope] : [.../* @__PURE__ */ new Set([
+      ...this.map.keys(),
+      ...this.deferredUntilFront.keys(),
+      ...this.blocked.values()
+    ])];
+    return scopes.map((item) => ({
+      scope: item,
+      queued: this.map.get(item)?.messages.length ?? 0,
+      deferred: this.deferredUntilFront.get(item)?.length ?? 0,
+      blocked: this.blocked.has(item)
+    }));
+  }
   /**
    * Returns true when the scope is blocked and the per-scope cooldown elapsed.
    * This keeps rapid message bursts quiet while ensuring a later progress check
@@ -19596,6 +19784,7 @@ var STREAM_ROLLOVER_MS = 8 * 6e4;
 var REACTION_CLEANUP_GRACE_MS = 1e3;
 var LONG_REPLY_CARD_THRESHOLD_BYTES = 2e4;
 var LONG_REPLY_CHUNK_BYTES = 12e3;
+var LIVE_INTERACTION_TTL_MS = 30 * 6e4;
 var SUPPRESSED_API_ERROR_CODES = /* @__PURE__ */ new Set([
   131005,
   // wiki.space.getNode "not found" — the doc isn't a wiki node
@@ -19685,6 +19874,9 @@ async function startChannel(deps) {
   }) : void 0;
   const activePolicyFingerprints = /* @__PURE__ */ new Map();
   const liveInteractionByScope = /* @__PURE__ */ new Map();
+  for (const [scope, state] of sessions.liveInteractionEntries()) {
+    liveInteractionByScope.set(scope, state);
+  }
   const cotClient = new CotClient({
     tenant: cfg.accounts.app.tenant,
     appId: cfg.accounts.app.id,
@@ -19816,6 +20008,7 @@ async function startChannel(deps) {
         for (const runBatch of runBatches) {
           await runAgentBatch({
             channel,
+            agent,
             executor,
             bridgeAgent,
             sessions,
@@ -19886,7 +20079,23 @@ async function startChannel(deps) {
           pending,
           chatModeCache,
           callbackAuth,
-          callbackPolicyFingerprintForScope: (scope) => activePolicyFingerprints.get(scope)
+          callbackPolicyFingerprintForScope: (scope) => activePolicyFingerprints.get(scope),
+          liveDiagnostics: async (scope) => {
+            const cwd = workspaces.cwdFor(scope) ?? controls.profileConfig.workspaces.default;
+            const live = await agent.tmux?.diagnostics?.(scope, cwd);
+            const tmux = await agent.tmux?.status(scope, cwd);
+            const queued = pending.snapshot(scope)[0];
+            const active2 = activeRuns.get(scope);
+            const picker = liveInteractionState(sessions, liveInteractionByScope, scope);
+            return {
+              ...active2 ? { runId: active2.run.runId } : {},
+              ...live ? { live } : {},
+              ...picker ? { picker } : {},
+              ...queued ? { queue: { queued: queued.queued, deferred: queued.deferred, blocked: queued.blocked } } : {},
+              ...tmux ? { tmux } : {}
+            };
+          },
+          liveInteractionGeneration: (scope) => liveInteractionState(sessions, liveInteractionByScope, scope)?.generation
         });
       }).catch((err) => {
         log.fail("cardAction", err);
@@ -20109,7 +20318,7 @@ async function intakeMessage(deps) {
     return;
   }
   const route = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
-  const pickerActive = liveInteractionByScope.has(scope);
+  const pickerActive = Boolean(liveInteractionState(sessions, liveInteractionByScope, scope));
   const pickerFollowup = pickerActive ? normalizeLivePickerFollowup(route.msg.content) : void 0;
   const routedMsg = pickerFollowup ? { ...route.msg, content: pickerFollowup } : route.msg;
   const nativeModelCommand = routedMsg.content.trim() === "/model";
@@ -20150,7 +20359,22 @@ async function intakeMessage(deps) {
       runExecutor: executor,
       processPool: pool,
       controls,
-      allowLocalFileRoot
+      allowLocalFileRoot,
+      liveDiagnostics: async () => {
+        const cwd = workspaces.cwdFor(scope) ?? controls.profileConfig.workspaces.default;
+        const live = await agent.tmux?.diagnostics?.(scope, cwd);
+        const tmux = await agent.tmux?.status(scope, cwd);
+        const queued = pending.snapshot(scope)[0];
+        const active2 = activeRuns.get(scope);
+        const picker = liveInteractionState(sessions, liveInteractionByScope, scope);
+        return {
+          ...active2 ? { runId: active2.run.runId } : {},
+          ...live ? { live } : {},
+          ...picker ? { picker } : {},
+          ...queued ? { queue: { queued: queued.queued, deferred: queued.deferred, blocked: queued.blocked } } : {},
+          ...tmux ? { tmux } : {}
+        };
+      }
     });
     if (handled) {
       const preservePending = commandPreservesPendingMessages(routedMsg.content);
@@ -20188,7 +20412,7 @@ async function intakeMessage(deps) {
 }
 function commandPreservesPendingMessages(content) {
   const command = content.trim().toLowerCase();
-  return /^\/(?:status|help|ps)(?:\s|$)/u.test(command) || /^\/session(?:\s+\/?status)?\s*$/u.test(command) || /^\/tmux(?:\s+(?:list|status|tail))?(?:\s|$)/u.test(command) || /^\/(?:timeout|output)(?:\s|$)/u.test(command);
+  return /^\/(?:status|help|ps)(?:\s|$)/u.test(command) || /^\/session(?:\s+\/?status)?\s*$/u.test(command) || /^\/tmux(?:\s+(?:list|status|tail|attach))?(?:\s|$)/u.test(command) || /^\/(?:timeout|output)(?:\s|$)/u.test(command);
 }
 function rewriteAgentCommandMessage(msg, agentKind) {
   const trimmed = msg.content.trimStart();
@@ -20271,9 +20495,35 @@ function splitNativeLiveBatches(batch, splitEveryMessage = false) {
   flushOrdinary();
   return out;
 }
+function liveInteractionState(sessions, map, scope) {
+  const state = map.get(scope) ?? sessions.getLiveInteraction(scope);
+  if (!state || state.expiresAt <= Date.now()) {
+    if (map.delete(scope)) sessions.clearLiveInteraction(scope);
+    return void 0;
+  }
+  if (!map.has(scope)) map.set(scope, state);
+  return state;
+}
+function saveLiveInteractionState(sessions, map, scope, state) {
+  const next = {
+    ...state,
+    expiresAt: state.expiresAt ?? Date.now() + LIVE_INTERACTION_TTL_MS
+  };
+  map.set(scope, next);
+  sessions.setLiveInteraction(scope, next);
+  return next;
+}
+function clearLiveInteractionState(sessions, map, scope, generation) {
+  const current = map.get(scope);
+  if (generation && current?.generation && current.generation !== generation) return false;
+  const deleted = map.delete(scope);
+  if (deleted || sessions.getLiveInteraction(scope)) sessions.clearLiveInteraction(scope);
+  return deleted;
+}
 async function runAgentBatch(deps) {
   const {
     channel,
+    agent,
     executor,
     bridgeAgent,
     sessions,
@@ -20355,10 +20605,10 @@ async function runAgentBatch(deps) {
   const forceLiveSession = batch.some(isForceLiveAgentCommandMessage);
   const useLiveSession = forceLiveSession || getAgentSessionMode(controls.cfg) === "live";
   const nativeInputMode = nativeCommand ? liveInputModeForBatch(batch, nativeCommand) : void 0;
-  if (useLiveSession && nativeInputMode === "side" && liveInteractionByScope.delete(scope)) {
+  if (useLiveSession && nativeInputMode === "side" && clearLiveInteractionState(sessions, liveInteractionByScope, scope)) {
     log.info("agent-live", "picker-dismissed-for-side-conversation", { scope });
   }
-  if (useLiveSession && !nativeCommand && liveInteractionByScope.delete(scope)) {
+  if (useLiveSession && !nativeCommand && clearLiveInteractionState(sessions, liveInteractionByScope, scope)) {
     log.info("agent-live", "picker-dismissed-for-task", { scope });
   }
   const structuredPrompt = buildPrompt(
@@ -20446,6 +20696,11 @@ async function runAgentBatch(deps) {
   }
   const { execution, cwdRealpath: cwd } = flow;
   artifactBroker.activate(artifactGrant.token, [cwd]);
+  const nativeStatusTmux = useLiveSession && nativeCommand?.trim().toLowerCase() === "/status" ? await agent.tmux?.status(scope, cwd).catch((err) => {
+    log.warn("agent-live", "status-tmux-fallback-failed", { scope, err: String(err) });
+    return void 0;
+  }) : void 0;
+  const nativeStatusFallback = nativeStatusTmux ? buildNativeStatusTmuxFallback(cwd, nativeStatusTmux) : void 0;
   const outputModeAtStart = sessions.getOutputMode(scope);
   const currentOutputMode = () => sessions.getOutputMode(scope);
   log.info("delivery", "run-policy", { scope, mode: outputModeAtStart });
@@ -20487,10 +20742,24 @@ async function runAgentBatch(deps) {
   let startupInteractionDeferred = false;
   let pickerObservedAfterInput = false;
   let controlFooterOnly = false;
-  const previousControlInteractionSignature = useLiveSession && nativeCommand && !nativeCommand.trimStart().startsWith("/") ? liveInteractionByScope.get(scope)?.signature : void 0;
+  const previousControlInteractionSignature = useLiveSession && nativeCommand && !nativeCommand.trimStart().startsWith("/") ? liveInteractionState(sessions, liveInteractionByScope, scope)?.signature : void 0;
+  if (useLiveSession && nativeCommand && !nativeCommand.trimStart().startsWith("/")) {
+    const existing = liveInteractionState(sessions, liveInteractionByScope, scope);
+    if (existing) {
+      saveLiveInteractionState(sessions, liveInteractionByScope, scope, {
+        ...existing,
+        generation: execution.runId,
+        updatedAt: Date.now()
+      });
+    }
+  }
   if (useLiveSession && nativeCommand && opensLivePicker(nativeCommand)) {
-    const wasActive = liveInteractionByScope.has(scope);
-    liveInteractionByScope.set(scope, { picker: true, updatedAt: Date.now() });
+    const wasActive = Boolean(liveInteractionState(sessions, liveInteractionByScope, scope));
+    saveLiveInteractionState(sessions, liveInteractionByScope, scope, {
+      picker: true,
+      updatedAt: Date.now(),
+      generation: execution.runId
+    });
     if (!wasActive) log.info("agent-live", "picker-enter", { scope, input: nativeCommand });
   }
   if (useLiveSession && nativeCommand && !nativeCommand.trimStart().startsWith("/")) {
@@ -20528,12 +20797,15 @@ ${delta}`.slice(-64e3);
       sentInteractionSignatures.delete(previousControlInteractionSignature);
     }
     if (useLiveSession && (interaction || pickerLike)) {
-      const wasActive = liveInteractionByScope.has(scope);
-      const previous = liveInteractionByScope.get(scope);
+      const currentState = liveInteractionState(sessions, liveInteractionByScope, scope);
+      if (currentState?.generation && currentState.generation !== execution.runId) return;
+      const wasActive = Boolean(currentState);
+      const previous = currentState;
       const nextSignature = interaction?.signature ?? previous?.signature;
-      liveInteractionByScope.set(scope, {
+      saveLiveInteractionState(sessions, liveInteractionByScope, scope, {
         picker: true,
         updatedAt: Date.now(),
+        generation: execution.runId,
         ...nextSignature ? { signature: nextSignature } : {}
       });
       if (!wasActive) log.info("agent-live", "picker-enter", { scope });
@@ -20608,6 +20880,13 @@ ${delta}`.slice(-64e3);
     const observed = interactionTextBuffer.trim();
     const observedSurface = observed ? liveInteractionSurface(observed) : void 0;
     const currentText = renderText(state, { activityMode: "none" });
+    if (nativeStatusFallback && (!currentText.trim() || currentText.includes("\u547D\u4EE4\u5DF2\u53D1\u9001\u5230"))) {
+      return {
+        ...state,
+        blocks: [{ kind: "text", content: `${nativeStatusFallback}
+`, streaming: false }]
+      };
+    }
     const shouldUseObservedPicker = Boolean(observedSurface) && (!currentText.trim() || looksLikeAgentPicker(currentText));
     if (shouldUseObservedPicker && observedSurface) {
       log.info("agent-live", "picker-final-fallback", {
@@ -21234,7 +21513,7 @@ ${delta}`.slice(-64e3);
       const opensPicker = opensLivePicker(nativeCommand);
       const closesPicker = closesLivePicker(nativeCommand);
       if ((opensPicker || closesPicker) && !pickerObservedAfterInput) {
-        if (!controlFooterOnly && liveInteractionByScope.delete(scope)) {
+        if (!controlFooterOnly && clearLiveInteractionState(sessions, liveInteractionByScope, scope, execution.runId)) {
           log.info("agent-live", "picker-exit", { scope, input: nativeCommand });
         }
       } else if (closesPicker && pickerObservedAfterInput) {
@@ -21387,6 +21666,7 @@ async function processAgentStream(handle, events, scope, idleTimeoutMs, progress
   };
   let streamFailure;
   let sawTerminalEvent = false;
+  let lastKeyframeFingerprint = "";
   let idleFired = false;
   let timer;
   const inFlightTools = /* @__PURE__ */ new Set();
@@ -21465,7 +21745,13 @@ async function processAgentStream(handle, events, scope, idleTimeoutMs, progress
       if (state.footer !== prevFooter || state.terminal !== prevTerminal) {
         log.info("card", "transition", { footer: state.footer, terminal: state.terminal });
       }
-      await queueFlush(state);
+      const keyframe = runStateDeliveryFingerprint(state);
+      if (keyframe !== lastKeyframeFingerprint || state.terminal !== "running") {
+        lastKeyframeFingerprint = keyframe;
+        await queueFlush(state);
+      } else {
+        log.info("card", "keyframe-suppressed", { scope, event: evt.type });
+      }
       if (state.terminal !== "running") {
         sawTerminalEvent = true;
         break;
@@ -21521,6 +21807,18 @@ async function processAgentStream(handle, events, scope, idleTimeoutMs, progress
 }
 function runStateTextCursor(state) {
   return state.blocks.filter((block) => block.kind === "text").map((block) => block.content).join("");
+}
+function runStateDeliveryFingerprint(state) {
+  return JSON.stringify({
+    terminal: state.terminal,
+    footer: state.footer,
+    text: runStateTextCursor(state),
+    reasoning: state.reasoning.content,
+    tools: state.blocks.filter((block) => block.kind === "tool").map((block) => ({ id: block.tool.id, status: block.tool.status, output: block.tool.output })),
+    error: state.errorMsg,
+    idleTimeoutMinutes: state.idleTimeoutMinutes,
+    currentToolElapsedMs: state.currentToolElapsedMs
+  });
 }
 function projectRunStateFromCursor(state, deliveredText) {
   if (!deliveredText) return state;
@@ -21977,6 +22275,26 @@ function completeReplyText(state) {
     activityMode: "none"
   });
 }
+function buildNativeStatusTmuxFallback(cwd, status) {
+  const terminal = status.terminal ?? (status.target ? {
+    socketPath: status.target.socketPath,
+    target: status.target.paneId,
+    attachCommand: status.target.attachCommand,
+    ownership: status.target.ownership
+  } : void 0);
+  return [
+    "Codex live session status",
+    `Directory: ${cwd}`,
+    `Tmux state: ${status.state}`,
+    ...terminal ? [
+      `Tmux socket: ${terminal.socketPath}`,
+      `Tmux target: ${terminal.target}`,
+      `Tmux ownership: ${terminal.ownership}`,
+      `Attach command: ${terminal.attachCommand}`
+    ] : ["Tmux terminal: unavailable"],
+    ""
+  ].join("\n");
+}
 function isLongReplyText(text) {
   const bytes = Buffer.byteLength(text, "utf8");
   return bytes > LONG_REPLY_CARD_THRESHOLD_BYTES || answerHasStructuredBlocks(text) && bytes > LONG_REPLY_CARD_THRESHOLD_BYTES - 4e3;
@@ -22012,6 +22330,14 @@ async function sendCompleteReplyChunks(input) {
         input.sendOpts
       );
     }
+    await ensureDeliveredTail({
+      channel: input.channel,
+      chatId: input.chatId,
+      sendOpts: input.sendOpts,
+      source: input.text,
+      delivered: chunks2.flat().map((block) => block.content).join("\n"),
+      scope: input.scope
+    });
     log.info("outbound", "long-reply-split", {
       scope: input.scope,
       chunks: chunks2.length,
@@ -22029,12 +22355,53 @@ async function sendCompleteReplyChunks(input) {
 ${chunk}` : chunk;
     await input.channel.send(input.chatId, { markdown: content }, input.sendOpts);
   }
+  await ensureDeliveredTail({
+    channel: input.channel,
+    chatId: input.chatId,
+    sendOpts: input.sendOpts,
+    source: input.text,
+    delivered: chunks.join("\n"),
+    scope: input.scope
+  });
   log.info("outbound", "long-reply-split", {
     scope: input.scope,
     chunks: chunks.length,
     mode: "markdown",
     bytes: Buffer.byteLength(input.text, "utf8")
   });
+}
+async function ensureDeliveredTail(input) {
+  const sourceLines = input.source.replace(/\r\n?/gu, "\n").split("\n").filter((line) => line.trim());
+  if (sourceLines.length === 0) return;
+  const tailLines = sourceLines.slice(-8);
+  const tail = tailLines.join("\n");
+  let cursor = 0;
+  const covered = tailLines.every((line) => {
+    const needle = line.length > LONG_REPLY_CHUNK_BYTES ? line.slice(-Math.min(256, line.length)) : line;
+    const index = input.delivered.indexOf(needle, cursor);
+    if (index < 0) return false;
+    cursor = index + needle.length;
+    return true;
+  });
+  log.info("outbound", "delivery-integrity", {
+    scope: input.scope,
+    sourceSha256: createHash8("sha256").update(input.source).digest("hex"),
+    deliveredSha256: createHash8("sha256").update(input.delivered).digest("hex"),
+    sourceBytes: Buffer.byteLength(input.source, "utf8"),
+    deliveredBytes: Buffer.byteLength(input.delivered, "utf8"),
+    tailCovered: covered
+  });
+  if (covered) return;
+  await input.channel.send(
+    input.chatId,
+    {
+      markdown: `\u26A0\uFE0F \u6B63\u6587\u5C3E\u90E8\u5B8C\u6574\u6027\u6821\u9A8C\u53D1\u73B0\u7F3A\u5931\uFF0C\u8865\u53D1\u6700\u540E\u5185\u5BB9\uFF1A
+
+${tail.slice(-8e3)}`
+    },
+    input.sendOpts
+  );
+  log.warn("outbound", "delivery-tail-recovered", { scope: input.scope, tailLines: Math.min(8, sourceLines.length) });
 }
 function isSkippedLiveInteractionForText(text, skipSignatures, inputRoute = "live") {
   const allowBareConfirmation = inputRoute === "agent";
@@ -22171,14 +22538,16 @@ var SessionStore = class {
         const cwd = typeof entry.cwd === "string" ? entry.cwd : void 0;
         const idleTimeoutMinutes = typeof entry.idleTimeoutMinutes === "number" ? entry.idleTimeoutMinutes : void 0;
         const outputMode = isOutputMode(entry.outputMode) ? entry.outputMode : void 0;
+        const liveInteraction = isPersistedLiveInteraction(entry.liveInteraction) ? entry.liveInteraction : void 0;
         const hasSession = sessionId !== void 0 && cwd !== void 0;
-        if (!hasSession && idleTimeoutMinutes === void 0 && outputMode === void 0) continue;
+        if (!hasSession && idleTimeoutMinutes === void 0 && outputMode === void 0 && liveInteraction === void 0) continue;
         this.data[chatId] = {
           ...sessionId !== void 0 ? { sessionId } : {},
           ...cwd !== void 0 ? { cwd } : {},
           updatedAt: entry.updatedAt,
           ...idleTimeoutMinutes !== void 0 ? { idleTimeoutMinutes } : {},
-          ...outputMode !== void 0 ? { outputMode } : {}
+          ...outputMode !== void 0 ? { outputMode } : {},
+          ...liveInteraction !== void 0 ? { liveInteraction } : {}
         };
       }
     } catch (err) {
@@ -22200,6 +22569,37 @@ var SessionStore = class {
   getRaw(chatId) {
     return this.data[chatId];
   }
+  liveInteractionEntries() {
+    const now = Date.now();
+    return Object.entries(this.data).flatMap(
+      ([scope, entry]) => entry.liveInteraction && entry.liveInteraction.expiresAt > now ? [[scope, { ...entry.liveInteraction }]] : []
+    );
+  }
+  getLiveInteraction(chatId) {
+    const state = this.data[chatId]?.liveInteraction;
+    if (!state || state.expiresAt <= Date.now()) {
+      if (state) this.clearLiveInteraction(chatId);
+      return void 0;
+    }
+    return { ...state };
+  }
+  setLiveInteraction(chatId, state) {
+    const prev = this.data[chatId];
+    this.data[chatId] = {
+      ...prev ?? { updatedAt: Date.now() },
+      liveInteraction: { ...state },
+      updatedAt: Date.now()
+    };
+    this.schedulePersist();
+  }
+  clearLiveInteraction(chatId) {
+    const prev = this.data[chatId];
+    if (!prev?.liveInteraction) return;
+    const { liveInteraction: _, ...rest } = prev;
+    if (Object.keys(rest).length === 1 && rest.updatedAt !== void 0) delete this.data[chatId];
+    else this.data[chatId] = { ...rest, updatedAt: Date.now() };
+    this.schedulePersist();
+  }
   set(chatId, sessionId, cwd) {
     const prev = this.data[chatId];
     this.data[chatId] = {
@@ -22207,7 +22607,8 @@ var SessionStore = class {
       cwd,
       updatedAt: Date.now(),
       ...prev?.idleTimeoutMinutes !== void 0 ? { idleTimeoutMinutes: prev.idleTimeoutMinutes } : {},
-      ...prev?.outputMode !== void 0 ? { outputMode: prev.outputMode } : {}
+      ...prev?.outputMode !== void 0 ? { outputMode: prev.outputMode } : {},
+      ...prev?.liveInteraction !== void 0 ? { liveInteraction: prev.liveInteraction } : {}
     };
     this.schedulePersist();
   }
@@ -22218,12 +22619,14 @@ var SessionStore = class {
       this.data[chatId] = {
         idleTimeoutMinutes: prev.idleTimeoutMinutes,
         updatedAt: Date.now(),
-        ...prev.outputMode !== void 0 ? { outputMode: prev.outputMode } : {}
+        ...prev.outputMode !== void 0 ? { outputMode: prev.outputMode } : {},
+        ...prev.liveInteraction !== void 0 ? { liveInteraction: prev.liveInteraction } : {}
       };
     } else if (prev.outputMode !== void 0) {
       this.data[chatId] = {
         outputMode: prev.outputMode,
-        updatedAt: Date.now()
+        updatedAt: Date.now(),
+        ...prev.liveInteraction !== void 0 ? { liveInteraction: prev.liveInteraction } : {}
       };
     } else {
       delete this.data[chatId];
@@ -22282,6 +22685,11 @@ var SessionStore = class {
 };
 function isOutputMode(value) {
   return value === "live" || value === "final" || value === "off";
+}
+function isPersistedLiveInteraction(value) {
+  if (!value || typeof value !== "object") return false;
+  const item = value;
+  return item.picker === true && typeof item.updatedAt === "number" && typeof item.expiresAt === "number" && (item.signature === void 0 || typeof item.signature === "string") && (item.generation === void 0 || typeof item.generation === "string");
 }
 
 // src/session/catalog.ts
