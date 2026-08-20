@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.0.8",
+  version: "1.0.9",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -8646,11 +8646,26 @@ function isPendingLivePromptDraft(input, prompt) {
     if (!matches) continue;
     const trailing = lines.slice(cursor).map((line) => line.trim()).filter(Boolean);
     if (isLivePromptDraftFooter(trailing)) return true;
+    if (isLivePromptDraftContinuation(trailing, promptLines)) return true;
   }
   return false;
 }
+function isLivePromptDraftContinuation(lines, promptLines) {
+  if (lines.length === 0 || promptLines.length === 0) return false;
+  const expected = new Set(promptLines.map((line) => normalizeDraftLine(line)));
+  for (let footerIndex = 0; footerIndex <= lines.length; footerIndex += 1) {
+    const continuation = lines.slice(0, footerIndex);
+    if (continuation.length === 0) continue;
+    if (!continuation.every((line) => expected.has(normalizeDraftLine(line)))) continue;
+    if (isLivePromptDraftFooter(lines.slice(footerIndex))) return true;
+  }
+  return false;
+}
+function normalizeDraftLine(line) {
+  return line.replace(/\s+/gu, " ").trim();
+}
 function isLivePromptDraftFooter(lines) {
-  return lines.length === 0 || lines.every(isLivePromptDraftFooterLine) || isLiveSideConversationFooter(lines);
+  return lines.length === 0 || lines.every(isLivePromptDraftFooterLine) || isLiveSideConversationFooter(lines) || isLiveMainConversationFooter(lines);
 }
 function isLivePromptDraftFooterLine(line) {
   return /^tab to queue message\b.*context left$/iu.test(line) || /^\d+% context left$/iu.test(line);
@@ -8658,6 +8673,11 @@ function isLivePromptDraftFooterLine(line) {
 function isLiveSideConversationFooter(lines) {
   const footer = lines.join(" ").replace(/\s+/gu, " ").trim();
   return /^(?:gpt|codex|claude)[\w.-]*\b/iu.test(footer) && /\bside\s+from\s+main\s+thread\s*·\s*ctrl\s*\+\s*\/\s+to\s+switch\s*·\s*ctrl\s*\+\s*c\s+to\s+close\s*$/iu.test(footer);
+}
+function isLiveMainConversationFooter(lines) {
+  const footer = lines.join(" ").replace(/\s+/gu, " ").trim();
+  if (!footer || /\bside\s+from\s+main\s+thread\b/iu.test(footer)) return false;
+  return /^(?:gpt|claude|codex)[\w.-]*\b.*\s·\s+(?:[A-Za-z]:[\\/]|\/|~\/)/iu.test(footer) && !/(?:select\s+(?:a\s+)?model|reasoning\s+level|press\s+enter\s+to\s+confirm|\bworking\b|\brunning\b)/iu.test(footer);
 }
 function shouldDeferControlLiteralSubmit(input) {
   const trimmed = input.trim();

@@ -2788,8 +2788,9 @@ process.stdin.on('data', (chunk) => {
     }
     submits += 1;
     if (submits === 1) {
-      // The first Enter only leaves a draft in the TUI.
-      screen(['› ' + draft]);
+      // The first Enter can become a newline in Codex's editor. The body is
+      // echoed again below the prompt while the main-thread footer remains.
+      screen(['› ' + draft, draft, 'gpt-5.6-luna max · /tmp · Main [default]']);
       continue;
     }
     if (draft === expected) screen(['› ' + expected, '• ordinary-submit-confirmed', '›']);
@@ -4055,6 +4056,23 @@ setInterval(() => {}, 1000);
     expect(cleanTerminalOutput('⚠\nI\n\n78 g\n\n78 n\n\n78 o\n\n78 r\n\n78 i\n\n78 n\n\n78 g\n')).toBe(
       '⚠Ignoring',
     );
+  });
+
+  it('recognizes a draft after Codex turns the first Enter into a newline', () => {
+    const prompt = 'continue';
+    const mainFooter = 'gpt-5.6-luna max · /workspace · Main [default]';
+    expect(
+      isPendingLivePromptDraft(
+        [`› ${prompt}`, prompt, mainFooter].join('\n'),
+        prompt,
+      ),
+    ).toBe(true);
+    expect(
+      isPendingLivePromptDraft(
+        [`› ${prompt}`, 'Select Model and Effort', 'Press enter to confirm or esc to go back'].join('\n'),
+        prompt,
+      ),
+    ).toBe(false);
   });
 });
 

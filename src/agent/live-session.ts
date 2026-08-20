@@ -1833,14 +1833,32 @@ export function isPendingLivePromptDraft(input: string, prompt: string): boolean
     // echo and lets normal submit progress be acknowledged.
     const trailing = lines.slice(cursor).map((line) => line.trim()).filter(Boolean);
     if (isLivePromptDraftFooter(trailing)) return true;
+    if (isLivePromptDraftContinuation(trailing, promptLines)) return true;
   }
   return false;
+}
+
+function isLivePromptDraftContinuation(lines: string[], promptLines: string[]): boolean {
+  if (lines.length === 0 || promptLines.length === 0) return false;
+  const expected = new Set(promptLines.map((line) => normalizeDraftLine(line)));
+  for (let footerIndex = 0; footerIndex <= lines.length; footerIndex += 1) {
+    const continuation = lines.slice(0, footerIndex);
+    if (continuation.length === 0) continue;
+    if (!continuation.every((line) => expected.has(normalizeDraftLine(line)))) continue;
+    if (isLivePromptDraftFooter(lines.slice(footerIndex))) return true;
+  }
+  return false;
+}
+
+function normalizeDraftLine(line: string): string {
+  return line.replace(/\s+/gu, ' ').trim();
 }
 
 function isLivePromptDraftFooter(lines: string[]): boolean {
   return lines.length === 0 ||
     lines.every(isLivePromptDraftFooterLine) ||
-    isLiveSideConversationFooter(lines);
+    isLiveSideConversationFooter(lines) ||
+    isLiveMainConversationFooter(lines);
 }
 
 function isLivePromptDraftFooterLine(line: string): boolean {
@@ -1861,6 +1879,15 @@ function isLiveSideConversationFooter(lines: string[]): boolean {
   return (
     /^(?:gpt|codex|claude)[\w.-]*\b/iu.test(footer) &&
     /\bside\s+from\s+main\s+thread\s*·\s*ctrl\s*\+\s*\/\s+to\s+switch\s*·\s*ctrl\s*\+\s*c\s+to\s+close\s*$/iu.test(footer)
+  );
+}
+
+function isLiveMainConversationFooter(lines: string[]): boolean {
+  const footer = lines.join(' ').replace(/\s+/gu, ' ').trim();
+  if (!footer || /\bside\s+from\s+main\s+thread\b/iu.test(footer)) return false;
+  return (
+    /^(?:gpt|claude|codex)[\w.-]*\b.*\s·\s+(?:[A-Za-z]:[\\/]|\/|~\/)/iu.test(footer) &&
+    !/(?:select\s+(?:a\s+)?model|reasoning\s+level|press\s+enter\s+to\s+confirm|\bworking\b|\brunning\b)/iu.test(footer)
   );
 }
 
