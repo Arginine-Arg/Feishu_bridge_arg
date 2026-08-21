@@ -1036,10 +1036,13 @@ export class LiveTerminalSession {
       if (
         !retriedDraft &&
         current !== beforeSide &&
-        isPendingLiveCommandDraft(current, '/btw')
+        isPendingLiveCommandDraft(current, '/btw', { allowBusy: true })
       ) {
         retriedDraft = true;
-        log.warn('agent-live', 'side-command-confirm-draft', { commandText: '/btw' });
+        log.warn('agent-live', 'side-command-confirm-draft', {
+          commandText: '/btw',
+          terminalBusy: isLiveTerminalBusy(current),
+        });
         this.write('\r');
       }
       await delay(Math.min(SIDE_ENTRY_RETRY_POLL_MS, Math.max(1, deadline - Date.now())));
@@ -1858,12 +1861,16 @@ export function isLiveInterruptInput(input: string): boolean {
  * exact command draft. Historical echoes, busy/ready screens, and pickers must
  * never trigger another Enter because that key would act on the next surface.
  */
-export function isPendingLiveCommandDraft(input: string, prompt: string): boolean {
+export function isPendingLiveCommandDraft(
+  input: string,
+  prompt: string,
+  options: { allowBusy?: boolean } = {},
+): boolean {
   const command = prompt.trim();
   if (!command.startsWith('/') || !input.trim()) return false;
   const cleaned = cleanTerminalOutput(input);
   if (
-    isLiveTerminalBusy(cleaned) ||
+    (!options.allowBusy && isLiveTerminalBusy(cleaned)) ||
     isLiveTerminalReady(cleaned) ||
     isStructuredLiveInteraction(cleaned)
   ) {

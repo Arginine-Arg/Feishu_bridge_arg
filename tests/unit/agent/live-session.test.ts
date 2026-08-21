@@ -71,6 +71,14 @@ describe('parseLiveControlSequence', () => {
     ).toBe(false);
     expect(isPendingLiveCommandDraft('› /model\n• Working (1s · esc to interrupt)', '/model')).toBe(false);
     expect(isPendingLiveCommandDraft('› /model\n›', '/model')).toBe(false);
+    expect(isPendingLiveCommandDraft('› /btw\n• Working (4s • esc to interrupt)', '/btw')).toBe(false);
+    expect(
+      isPendingLiveCommandDraft(
+        '› /btw\n• Working (4s • esc to interrupt)',
+        '/btw',
+        { allowBusy: true },
+      ),
+    ).toBe(true);
   });
 
   it('keeps an ordinary draft pending when stale activity appears around it', () => {
@@ -3442,6 +3450,87 @@ setInterval(() => {}, 1000);
 
     const events = await collect(
       session.run('tmux-btw-entry-retry-run', `/btw ${body}`, dir, 'side').events,
+    );
+    await pool.closeAll();
+
+    expect(textOf(events)).toContain('• side-body-confirmed\n');
+    expect(textOf(events)).not.toContain('未确认 Codex 已进入 side conversation');
+  }, 20_000);
+
+  tmuxIt('retries a /btw draft when stale Working chrome surrounds the editor', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-btw-busy-draft-test-'));
+    const bin = join(dir, 'fake-tmux-btw-busy-draft-agent.mjs');
+    const body = '请总结当前进展';
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+let draft = '';
+let side = false;
+let entryAttempts = 0;
+function screen(lines) {
+  process.stdout.write('\\x1b[2J\\x1b[H' + lines.join('\\n') + '\\n');
+}
+function mainFooter() {
+  return 'gpt-5.6-terra xhigh · /tmp · Goal paused (/goal resume)';
+}
+function sideFooter() {
+  return 'gpt-5.6-terra xhigh · /tmp · Side from main thread · ctrl + / to switch · ctrl + c to close';
+}
+screen([mainFooter(), '›']);
+process.stdin.on('data', (chunk) => {
+  for (const char of chunk) {
+    if (char !== '\\r' && char !== '\\n') {
+      draft += char;
+      continue;
+    }
+    const line = draft;
+    if (line === '/btw' && !side) {
+      entryAttempts += 1;
+      if (entryAttempts === 1) {
+        screen([
+          '• Working (4s • esc to interrupt)',
+          '• Conversation interrupted',
+          '› /btw',
+          'tab to queue message 38% context left',
+        ]);
+        continue;
+      }
+      draft = '';
+      side = true;
+      screen([sideFooter(), '›']);
+      continue;
+    }
+    draft = '';
+    if (side && line === ${JSON.stringify(body)}) {
+      screen(['• side-body-confirmed', sideFooter(), '›']);
+    } else if (line) {
+      screen(['unexpected:' + JSON.stringify(line), sideFooter(), '›']);
+    }
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-btw-busy-draft-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-btw-busy-draft',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 180,
+      outputFlushMs: 20,
+      startupTimeoutMs: 4_000,
+    });
+
+    const events = await collect(
+      session.run('tmux-btw-busy-draft-run', `/btw ${body}`, dir, 'side').events,
     );
     await pool.closeAll();
 

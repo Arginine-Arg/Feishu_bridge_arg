@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.1.3",
+  version: "1.1.4",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -7941,9 +7941,12 @@ ${this.lastTerminalHistory?.text ?? ""}`;
         await delay(SIDE_COMMAND_SETTLE_MS);
         return true;
       }
-      if (!retriedDraft && current !== beforeSide && isPendingLiveCommandDraft(current, "/btw")) {
+      if (!retriedDraft && current !== beforeSide && isPendingLiveCommandDraft(current, "/btw", { allowBusy: true })) {
         retriedDraft = true;
-        log.warn("agent-live", "side-command-confirm-draft", { commandText: "/btw" });
+        log.warn("agent-live", "side-command-confirm-draft", {
+          commandText: "/btw",
+          terminalBusy: isLiveTerminalBusy(current)
+        });
         this.write("\r");
       }
       await delay(Math.min(SIDE_ENTRY_RETRY_POLL_MS, Math.max(1, deadline - Date.now())));
@@ -8681,11 +8684,11 @@ function isLiveInterruptInput(input) {
   const sequence = parseLiveControlSequence(input);
   return sequence !== null && sequence.length > 0 && sequence.every((key) => key === "");
 }
-function isPendingLiveCommandDraft(input, prompt) {
+function isPendingLiveCommandDraft(input, prompt, options = {}) {
   const command = prompt.trim();
   if (!command.startsWith("/") || !input.trim()) return false;
   const cleaned = cleanTerminalOutput(input);
-  if (isLiveTerminalBusy(cleaned) || isLiveTerminalReady(cleaned) || isStructuredLiveInteraction(cleaned)) {
+  if (!options.allowBusy && isLiveTerminalBusy(cleaned) || isLiveTerminalReady(cleaned) || isStructuredLiveInteraction(cleaned)) {
     return false;
   }
   const draft = new RegExp(`^[\u203A\u276F>]\\s*${escapeRegExp(command)}\\s*$`, "iu");
