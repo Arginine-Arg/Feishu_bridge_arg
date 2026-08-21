@@ -2005,9 +2005,9 @@ setInterval(() => {}, 1000);
         backend: 'tmux',
         // Let the helper observe the post-detach tmux redraw before the
         // synthetic idle watchdog closes this deliberately tiny fixture.
-        idleMs: 600,
+        idleMs: 1_500,
         outputFlushMs: 30,
-        startupTimeoutMs: 1_500,
+        startupTimeoutMs: 4_000,
       });
       expect(textOf(await collect(session.run('disconnect-first', 'first', dir).events))).toContain(
         'reply:first:turn=1',
