@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.1.4",
+  version: "1.1.5",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -7312,7 +7312,7 @@ ${this.lastTerminalHistory?.text ?? ""}`;
     this.turnLastError = void 0;
     this.turnPhase = "starting";
     void this.start();
-    const interruption = { requested: false };
+    const interruption = { requested: false, detached: false };
     const events = this.turnEvents(prompt, cwd, inputMode, interruption);
     return {
       runId,
@@ -7321,6 +7321,11 @@ ${this.lastTerminalHistory?.text ?? ""}`;
         if (interruption.requested) return;
         interruption.requested = true;
         interruption.cancel?.();
+      },
+      detach: async () => {
+        if (interruption.detached) return;
+        interruption.detached = true;
+        interruption.detach?.();
       },
       waitForExit: async () => true
     };
@@ -7473,7 +7478,7 @@ ${this.lastTerminalHistory?.text ?? ""}`;
       this.terminalInfo?.backend === "tmux" ? encodeTmuxInputFrame(input) : input
     );
   }
-  async *turnEvents(prompt, cwd, inputMode, interruption = { requested: false }) {
+  async *turnEvents(prompt, cwd, inputMode, interruption = { requested: false, detached: false }) {
     yield { type: "system", cwd };
     await this.start();
     const commandMode = inputMode === "command" || inputMode === "side";
@@ -7811,17 +7816,20 @@ ${this.lastTerminalHistory?.text ?? ""}`;
       this.emitter.off("error", onError);
       if (this.activeTurnCleanup === cleanupTurn) this.activeTurnCleanup = void 0;
       if (interruption.cancel === cancelCurrentTurn) interruption.cancel = void 0;
+      if (interruption.detach === cleanupTurn) interruption.detach = void 0;
       wake?.();
     };
     this.activeTurnCleanup?.();
     this.activeTurnCleanup = cleanupTurn;
     interruption.cancel = cancelCurrentTurn;
+    interruption.detach = cleanupTurn;
     this.emitter.on("data", onData);
     this.emitter.once("exit", onExit);
     this.emitter.once("error", onError);
     for (const event of this.pendingTerminalOutput.splice(0)) onData(event);
     try {
-      if (interruption.requested) cancelCurrentTurn();
+      if (interruption.detached) cleanupTurn();
+      else if (interruption.requested) cancelCurrentTurn();
       await this.waitForInputReady(
         inputGraceMs,
         !commandMode && inputMode !== "control" && !turnPrompt.trim().startsWith("/")
@@ -7841,6 +7849,8 @@ ${this.lastTerminalHistory?.text ?? ""}`;
         if (commandMode) {
           if (isLiveTerminalReady(this.lastTerminalSnapshot)) {
             log.info("agent-live", "command-fast-submit", { reason: "ready-prompt" });
+          } else if (sideMode && isLiveTerminalBusy(this.lastTerminalSnapshot)) {
+            log.info("agent-live", "side-command-busy-no-clear");
           } else {
             log.info("agent-live", "command-clear", { sequence: "esc ctrl-a ctrl-k" });
             await this.clearPendingInput();
@@ -7912,8 +7922,10 @@ ${this.lastTerminalHistory?.text ?? ""}`;
         if (event) yield event;
       }
     } finally {
-      this.turnPhase = "idle";
-      this.turnPromptPreview = void 0;
+      if (this.activeTurnCleanup === cleanupTurn) {
+        this.turnPhase = "idle";
+        this.turnPromptPreview = void 0;
+      }
       cleanupTurn();
     }
   }
@@ -17432,6 +17444,11 @@ function requestRunStop(handle) {
   handle.stopPromise = Promise.resolve().then(() => handle.run.stop());
   return handle.stopPromise;
 }
+function requestRunDetach(handle) {
+  if (handle.detachPromise) return handle.detachPromise;
+  handle.detachPromise = Promise.resolve().then(() => handle.run.detach?.()).then(() => void 0);
+  return handle.detachPromise;
+}
 var ActiveRuns = class {
   handles = /* @__PURE__ */ new Map();
   reservations = /* @__PURE__ */ new Set();
@@ -17506,6 +17523,17 @@ var ActiveRuns = class {
     });
     return true;
   }
+  detach(chatId) {
+    const h = this.handles.get(chatId);
+    if (!h) return false;
+    this.reservations.delete(chatId);
+    h.interrupted = true;
+    h.detached = true;
+    this.handles.delete(chatId);
+    void requestRunDetach(h).catch(() => {
+    });
+    return true;
+  }
   async stopAll() {
     const all = [...this.handles.values()];
     this.handles.clear();
@@ -17527,6 +17555,7 @@ var ActiveRuns = class {
       h.interrupted = true;
       h.detached = true;
     }
+    await Promise.allSettled(all.map((h) => requestRunDetach(h)));
   }
   async waitForAll(timeoutMs = 3e5) {
     const all = [...this.handles.values()];
@@ -17704,6 +17733,7 @@ var RunExecutor = class {
       cleaned = true;
       this.activeRuns.unregister(input.scopeId, run);
       release();
+      if (handle.detached) return;
       if (waitForExit) {
         const exited = await run.waitForExit(this.postDoneExitGraceMs);
         if (!exited) {
@@ -20423,7 +20453,11 @@ async function intakeMessage(deps) {
       inputMode: nativeInputMode,
       command: agentMsg.content.trim().slice(0, 120)
     });
-    activeRuns.interrupt(scope);
+    if (nativeInputMode === "side") {
+      activeRuns.detach(scope);
+    } else {
+      activeRuns.interrupt(scope);
+    }
   }
   const priorityLiveInput = priorityLiveControl || priorityNativeCommand;
   const size = priorityLiveInput ? pending.pushFront(scope, agentMsg, {

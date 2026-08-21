@@ -15,7 +15,7 @@ For a product walkthrough, see the [Feishu document](https://larkcommunity.feish
 - **Persistent tmux execution**: each chat or topic runs one native Claude/Codex CLI inside tmux. Normal messages and native slash commands share that same terminal context.
 - **Clean transport boundary**: ordinary chat is forwarded as the user's text, without bridge XML, routing IDs, or operational instructions. Only an actual reply quote, card, topic context, or downloaded attachment is added when present.
 - **Idempotent delivery**: duplicate Feishu events are durably claimed by message ID before they reach the agent; tmux redraws and embedded history replays are reconciled to their genuinely new text, and card updates are serialized.
-- **Queueing and batching**: messages sent in quick succession are handled together; ordinary messages sent during a run are queued for the next turn, while bridge controls and `/btw` stay on the native control path. `/btw` safely preempts the bridge relay, then opens or reuses the side conversation without competing terminal writes.
+- **Queueing and batching**: messages sent in quick succession are handled together; ordinary messages sent during a run are queued for the next turn, while bridge controls and `/btw` stay on the native control path. `/btw` detaches only the bridge relay (it never sends Ctrl-C to the running goal), then opens or reuses the side conversation without competing terminal writes.
 - **Multiple workspaces**: use `/cd` to switch the current project, and `/ws` to save and reuse common project directories.
 - **Images and files**: send them to the bot directly, and the bridge downloads them locally for the agent.
 - **Interactive cards**: `/help`, `/ws list`, and `/status` return cards with clickable buttons.
@@ -44,7 +44,7 @@ Install a pinned release or use a writable custom npm prefix when required:
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.1.4
+sh /tmp/install-arg-bridge.sh --version 1.1.5
 # Example for a machine without permission to write npm's configured global prefix:
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -88,10 +88,10 @@ Release tarballs are preferred. If a Git install is required, keep both compatib
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.1.4"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.1.5"
 ```
 
-`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.1.4`.
+`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.1.5`.
 
 ### 4. Node or npm global-prefix errors
 

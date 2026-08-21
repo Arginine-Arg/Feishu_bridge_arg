@@ -48,7 +48,9 @@ type LiveOutput = {
 };
 type LiveTurnInterrupt = {
   requested: boolean;
+  detached: boolean;
   cancel?: () => void;
+  detach?: () => void;
 };
 export type LiveTerminalBackend = 'auto' | 'tmux' | 'pty' | 'pipe';
 
@@ -267,7 +269,7 @@ export class LiveTerminalSession {
     this.turnLastError = undefined;
     this.turnPhase = 'starting';
     void this.start();
-    const interruption: LiveTurnInterrupt = { requested: false };
+    const interruption: LiveTurnInterrupt = { requested: false, detached: false };
     const events = this.turnEvents(prompt, cwd, inputMode, interruption);
     return {
       runId,
@@ -276,6 +278,11 @@ export class LiveTerminalSession {
         if (interruption.requested) return;
         interruption.requested = true;
         interruption.cancel?.();
+      },
+      detach: async () => {
+        if (interruption.detached) return;
+        interruption.detached = true;
+        interruption.detach?.();
       },
       waitForExit: async () => true,
     };
@@ -456,7 +463,7 @@ export class LiveTerminalSession {
     prompt: string,
     cwd: string,
     inputMode?: LiveTerminalInputMode,
-    interruption: LiveTurnInterrupt = { requested: false },
+    interruption: LiveTurnInterrupt = { requested: false, detached: false },
   ): AsyncGenerator<AgentEvent> {
     yield { type: 'system', cwd };
     await this.start();
@@ -883,18 +890,21 @@ export class LiveTerminalSession {
       this.emitter.off('error', onError);
       if (this.activeTurnCleanup === cleanupTurn) this.activeTurnCleanup = undefined;
       if (interruption.cancel === cancelCurrentTurn) interruption.cancel = undefined;
+      if (interruption.detach === cleanupTurn) interruption.detach = undefined;
       wake?.();
     };
 
     this.activeTurnCleanup?.();
     this.activeTurnCleanup = cleanupTurn;
     interruption.cancel = cancelCurrentTurn;
+    interruption.detach = cleanupTurn;
     this.emitter.on('data', onData);
     this.emitter.once('exit', onExit);
     this.emitter.once('error', onError);
     for (const event of this.pendingTerminalOutput.splice(0)) onData(event);
     try {
-      if (interruption.requested) cancelCurrentTurn();
+      if (interruption.detached) cleanupTurn();
+      else if (interruption.requested) cancelCurrentTurn();
       await this.waitForInputReady(
         inputGraceMs,
         !commandMode && inputMode !== 'control' && !turnPrompt.trim().startsWith('/'),
@@ -914,6 +924,8 @@ export class LiveTerminalSession {
         if (commandMode) {
           if (isLiveTerminalReady(this.lastTerminalSnapshot)) {
             log.info('agent-live', 'command-fast-submit', { reason: 'ready-prompt' });
+          } else if (sideMode && isLiveTerminalBusy(this.lastTerminalSnapshot)) {
+            log.info('agent-live', 'side-command-busy-no-clear');
           } else {
             log.info('agent-live', 'command-clear', { sequence: 'esc ctrl-a ctrl-k' });
             await this.clearPendingInput();
@@ -997,8 +1009,10 @@ export class LiveTerminalSession {
         if (event) yield event;
       }
     } finally {
-      this.turnPhase = 'idle';
-      this.turnPromptPreview = undefined;
+      if (this.activeTurnCleanup === cleanupTurn) {
+        this.turnPhase = 'idle';
+        this.turnPromptPreview = undefined;
+      }
       cleanupTurn();
     }
   }

@@ -948,7 +948,11 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
       inputMode: nativeInputMode,
       command: agentMsg.content.trim().slice(0, 120),
     });
-    activeRuns.interrupt(scope);
+    if (nativeInputMode === 'side') {
+      activeRuns.detach(scope);
+    } else {
+      activeRuns.interrupt(scope);
+    }
   }
   const priorityLiveInput = priorityLiveControl || priorityNativeCommand;
   const size = priorityLiveInput

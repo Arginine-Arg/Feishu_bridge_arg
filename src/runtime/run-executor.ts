@@ -173,6 +173,7 @@ export class RunExecutor {
       cleaned = true;
       this.activeRuns.unregister(input.scopeId, run);
       release();
+      if (handle.detached) return;
       if (waitForExit) {
         const exited = await run.waitForExit(this.postDoneExitGraceMs);
         if (!exited) {

@@ -24,6 +24,7 @@ import {
   undeliveredSnapshotSuffix,
 } from '../../../src/agent/live-session';
 import { defaultTmuxSocketPath } from '../../../src/agent/tmux-control';
+import { ActiveRuns } from '../../../src/bot/active-runs';
 
 beforeAll(async () => {
   if (!process.env.TMUX_TMPDIR || typeof process.getuid !== 'function') return;
@@ -1560,6 +1561,9 @@ process.stdin.on('data', (chunk) => {
     if (draft.trim() === 'long task') {
       draft = '';
       screen(['relay stays detached', '• Working (0s • esc to interrupt)']);
+    } else if (draft.trim() === 'follow up') {
+      draft = '';
+      screen(['follow-up survived detach', '› ']);
     } else {
       draft = '';
     }
@@ -1585,14 +1589,18 @@ setInterval(() => {}, 1000);
       startupTimeoutMs: 2_000,
     });
     const turn = session.run('detach-active-run', 'long task', dir);
+    const activeRuns = new ActiveRuns();
+    const handle = activeRuns.register(scopeKey, turn);
     const iterator = turn.events[Symbol.asyncIterator]();
     try {
       expect((await iterator.next()).value).toMatchObject({ type: 'system' });
       expect((await iterator.next()).value).toMatchObject({ type: 'text' });
 
-      await pool.detachAll();
+      expect(activeRuns.detach(scopeKey)).toBe(true);
+      await handle.detachPromise;
+      const followUp = await collect(session.run('detach-follow-up', 'follow up', dir).events);
+      expect(textOf(followUp)).toContain('follow-up survived detach');
       await new Promise<void>((resolve) => setTimeout(resolve, 150));
-
       await expect(readFile(inputTrace, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
       expect(
         spawnSync('tmux', ['-S', socketPath, 'has-session', '-t', sessionName], { stdio: 'ignore' }).status,
@@ -1601,6 +1609,107 @@ setInterval(() => {}, 1000);
       await iterator.return?.();
       await pool.closeAll();
       spawnSync('tmux', ['-S', socketPath, 'kill-server'], { stdio: 'ignore' });
+    }
+  }, 20_000);
+
+  tmuxIt('routes /btw beside a running goal without cancelling the goal', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-btw-running-goal-test-'));
+    const bin = join(dir, 'fake-tmux-btw-running-goal-agent.mjs');
+    const trace = join(dir, 'input-trace.txt');
+    const body = '询问运行中的 goal';
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs';
+process.stdin.setEncoding('utf8');
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+let draft = '';
+let goalActive = false;
+let side = false;
+function screen(lines) {
+  process.stdout.write('\\x1b[2J\\x1b[H' + lines.join('\\n') + '\\n');
+}
+function mainFooter() {
+  return 'gpt-5.6-terra xhigh · /tmp · Main [default]';
+}
+function sideFooter() {
+  return 'gpt-5.6-terra xhigh · /tmp · Side from main thread · ctrl + / to switch · ctrl + c to close';
+}
+screen([mainFooter(), '›']);
+process.stdin.on('data', (chunk) => {
+  for (const char of chunk) {
+    if (char === '\\x03') {
+      appendFileSync(${JSON.stringify(trace)}, 'ctrl-c\\n');
+      continue;
+    }
+    if (char === '\\x1b' || char === '\\x01' || char === '\\x0b') {
+      appendFileSync(${JSON.stringify(trace)}, 'destructive-key\\n');
+      continue;
+    }
+    if (char !== '\\r' && char !== '\\n') {
+      draft += char;
+      continue;
+    }
+    const line = draft;
+    draft = '';
+    if (!goalActive && line === 'long goal') {
+      goalActive = true;
+      screen(['goal continues', '• Working (12s • esc to interrupt)', mainFooter()]);
+      continue;
+    }
+    if (goalActive && !side && line === '/btw') {
+      side = true;
+      screen([sideFooter(), '›']);
+      continue;
+    }
+    if (goalActive && side && line === ${JSON.stringify(body)}) {
+      appendFileSync(${JSON.stringify(trace)}, 'side-body-with-goal-active\\n');
+      screen(['• side-answer: ' + line, sideFooter(), '›']);
+      continue;
+    }
+    if (line) screen(['unexpected:' + JSON.stringify(line), sideFooter(), '›']);
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const scope = 'tmux-btw-running-goal-scope';
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate(scope, {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-btw-running-goal',
+      tmuxScopeId: scope,
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 300,
+      outputFlushMs: 20,
+      startupTimeoutMs: 2_000,
+    });
+    const goal = session.run('running-goal', 'long goal', dir);
+    const goalIterator = goal.events[Symbol.asyncIterator]();
+    const activeRuns = new ActiveRuns();
+    const handle = activeRuns.register(scope, goal);
+    try {
+      expect((await goalIterator.next()).value).toMatchObject({ type: 'system' });
+      expect((await goalIterator.next()).value).toMatchObject({ type: 'text' });
+      expect(activeRuns.detach(scope)).toBe(true);
+      await handle.detachPromise;
+
+      const sideEvents = await collect(session.run('running-goal-btw', `/btw ${body}`, dir, 'side').events);
+      const sideText = textOf(sideEvents);
+      expect(sideText).toContain('• side-answer: ' + body);
+      expect(sideText).not.toContain('未确认 Codex 已进入 side conversation');
+      const traceText = await readFile(trace, 'utf8');
+      expect(traceText).toContain('side-body-with-goal-active');
+      expect(traceText).not.toMatch(/ctrl-c|destructive-key/);
+    } finally {
+      await goalIterator.return?.();
+      await pool.closeAll();
     }
   }, 20_000);
 
@@ -3402,9 +3511,13 @@ function mainFooter() {
 function sideFooter() {
   return 'gpt-5.6-terra xhigh · /tmp · Side from main thread · ctrl + / to switch · ctrl + c to close';
 }
-screen([mainFooter(), '›']);
+screen(['• Working (4s • esc to interrupt)', mainFooter(), '›']);
 process.stdin.on('data', (chunk) => {
   for (const char of chunk) {
+    if (char === '\\x03' || char === '\\x1B' || char === '\\x01' || char === '\\x0B') {
+      screen(['unsafe-clear-or-interrupt', mainFooter(), '›']);
+      continue;
+    }
     if (char !== '\\r' && char !== '\\n') {
       draft += char;
       continue;
@@ -3455,6 +3568,7 @@ setInterval(() => {}, 1000);
 
     expect(textOf(events)).toContain('• side-body-confirmed\n');
     expect(textOf(events)).not.toContain('未确认 Codex 已进入 side conversation');
+    expect(textOf(events)).not.toContain('unsafe-clear-or-interrupt');
   }, 20_000);
 
   tmuxIt('retries a /btw draft when stale Working chrome surrounds the editor', async () => {
@@ -3491,7 +3605,6 @@ process.stdin.on('data', (chunk) => {
       if (entryAttempts === 1) {
         screen([
           '• Working (4s • esc to interrupt)',
-          '• Conversation interrupted',
           '› /btw',
           'tab to queue message 38% context left',
         ]);

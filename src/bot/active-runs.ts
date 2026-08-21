@@ -8,6 +8,7 @@ export interface RunHandle {
   /** A stop request is a one-shot terminal operation, never a retry loop. */
   stopRequested: boolean;
   stopPromise?: Promise<void>;
+  detachPromise?: Promise<void>;
 }
 
 /**
@@ -20,6 +21,14 @@ export function requestRunStop(handle: RunHandle): Promise<void> {
   handle.stopRequested = true;
   handle.stopPromise = Promise.resolve().then(() => handle.run.stop());
   return handle.stopPromise;
+}
+
+export function requestRunDetach(handle: RunHandle): Promise<void> {
+  if (handle.detachPromise) return handle.detachPromise;
+  handle.detachPromise = Promise.resolve()
+    .then(() => handle.run.detach?.())
+    .then(() => undefined);
+  return handle.detachPromise;
 }
 
 export class ActiveRuns {
@@ -108,6 +117,19 @@ export class ActiveRuns {
     return true;
   }
 
+  detach(chatId: string): boolean {
+    const h = this.handles.get(chatId);
+    if (!h) return false;
+    this.reservations.delete(chatId);
+    h.interrupted = true;
+    h.detached = true;
+    this.handles.delete(chatId);
+    void requestRunDetach(h).catch(() => {
+      /* detach errors are non-fatal */
+    });
+    return true;
+  }
+
   async stopAll(): Promise<void> {
     const all = [...this.handles.values()];
     this.handles.clear();
@@ -133,6 +155,7 @@ export class ActiveRuns {
       h.interrupted = true;
       h.detached = true;
     }
+    await Promise.allSettled(all.map((h) => requestRunDetach(h)));
   }
 
   async waitForAll(timeoutMs = 300_000): Promise<void> {
