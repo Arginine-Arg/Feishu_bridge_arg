@@ -3373,6 +3373,82 @@ setInterval(() => {}, 1000);
     expect(textOf(second)).not.toContain('side unavailable');
   }, 20_000);
 
+  tmuxIt('retries the /btw entry when the first Enter leaves the command draft', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-btw-entry-retry-test-'));
+    const bin = join(dir, 'fake-tmux-btw-entry-retry-agent.mjs');
+    const body = '目前为止有什么新进展？';
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+let draft = '';
+let side = false;
+let entryAttempts = 0;
+function screen(lines) {
+  process.stdout.write('\\x1b[2J\\x1b[H' + lines.join('\\n') + '\\n');
+}
+function mainFooter() {
+  return 'gpt-5.6-terra xhigh · /tmp · Goal paused (/goal resume)';
+}
+function sideFooter() {
+  return 'gpt-5.6-terra xhigh · /tmp · Side from main thread · ctrl + / to switch · ctrl + c to close';
+}
+screen([mainFooter(), '›']);
+process.stdin.on('data', (chunk) => {
+  for (const char of chunk) {
+    if (char !== '\\r' && char !== '\\n') {
+      draft += char;
+      continue;
+    }
+    const line = draft;
+    if (line === '/btw' && !side) {
+      entryAttempts += 1;
+      if (entryAttempts === 1) {
+        screen(['› /btw', mainFooter()]);
+        continue;
+      }
+      draft = '';
+      side = true;
+      screen([sideFooter(), '›']);
+      continue;
+    }
+    draft = '';
+    if (side && line === ${JSON.stringify(body)}) {
+      screen(['• side-body-confirmed', sideFooter(), '›']);
+    } else if (line) {
+      screen(['unexpected:' + JSON.stringify(line), sideFooter(), '›']);
+    }
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-btw-entry-retry-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-btw-entry-retry',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 180,
+      outputFlushMs: 20,
+      startupTimeoutMs: 4_000,
+    });
+
+    const events = await collect(
+      session.run('tmux-btw-entry-retry-run', `/btw ${body}`, dir, 'side').events,
+    );
+    await pool.closeAll();
+
+    expect(textOf(events)).toContain('• side-body-confirmed\n');
+    expect(textOf(events)).not.toContain('未确认 Codex 已进入 side conversation');
+  }, 20_000);
+
   tmuxIt('reuses a paused Goal side conversation instead of sending /btw inside it', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-btw-goal-side-test-'));
     const bin = join(dir, 'fake-tmux-btw-goal-side-agent.mjs');

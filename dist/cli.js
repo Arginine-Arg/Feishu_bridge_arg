@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.1.2",
+  version: "1.1.3",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -7161,6 +7161,7 @@ var FRESH_TERMINAL_GRACE_MS = 2500;
 var CONTROL_KEY_GAP_MS = 40;
 var SIDE_COMMAND_SETTLE_MS = 450;
 var SIDE_SWITCH_TIMEOUT_MS = 3e3;
+var SIDE_ENTRY_RETRY_POLL_MS = 80;
 var COMMAND_ESCAPE_SETTLE_MS = 250;
 var COMMAND_CLEAR_SETTLE_MS = 500;
 var COMMAND_STARTUP_TIMEOUT_MS = 25e3;
@@ -7932,21 +7933,20 @@ ${this.lastTerminalHistory?.text ?? ""}`;
     }
     const beforeSide = this.lastTerminalSnapshot;
     this.write("/btw\r");
-    const enteredSide = await this.waitForTerminalSnapshot(
-      isLiveSideConversation,
-      SIDE_SWITCH_TIMEOUT_MS,
-      beforeSide
-    );
-    if (!enteredSide) return false;
-    await delay(SIDE_COMMAND_SETTLE_MS);
-    return true;
-  }
-  async waitForTerminalSnapshot(predicate, timeoutMs, previousSnapshot = "") {
-    const deadline = Date.now() + timeoutMs;
+    const deadline = Date.now() + SIDE_SWITCH_TIMEOUT_MS;
+    let retriedDraft = false;
     while (Date.now() < deadline) {
-      const text = this.lastTerminalSnapshot;
-      if (text !== previousSnapshot && predicate(text)) return true;
-      await delay(80);
+      const current = this.lastTerminalSnapshot;
+      if (current !== beforeSide && isLiveSideConversation(current)) {
+        await delay(SIDE_COMMAND_SETTLE_MS);
+        return true;
+      }
+      if (!retriedDraft && current !== beforeSide && isPendingLiveCommandDraft(current, "/btw")) {
+        retriedDraft = true;
+        log.warn("agent-live", "side-command-confirm-draft", { commandText: "/btw" });
+        this.write("\r");
+      }
+      await delay(Math.min(SIDE_ENTRY_RETRY_POLL_MS, Math.max(1, deadline - Date.now())));
     }
     return false;
   }
