@@ -1700,7 +1700,9 @@ setInterval(() => {}, 1000);
       expect(activeRuns.detach(scope)).toBe(true);
       await handle.detachPromise;
 
-      const sideEvents = await collect(session.run('running-goal-btw', `/btw ${body}`, dir, 'side').events);
+      const sideEntry = await collect(session.run('running-goal-btw-entry', '/btw', dir, 'side').events);
+      expect(textOf(sideEntry)).toContain('已进入 Codex btw side conversation');
+      const sideEvents = await collect(session.run('running-goal-btw-body', body, dir).events);
       const sideText = textOf(sideEvents);
       expect(sideText).toContain('• side-answer: ' + body);
       expect(sideText).not.toContain('未确认 Codex 已进入 side conversation');
@@ -3489,6 +3491,94 @@ setInterval(() => {}, 1000);
     expect(textOf(second)).toContain('side-answer: check the tests');
     expect(textOf(second)).not.toContain('side unavailable');
   }, 20_000);
+
+  tmuxIt('accepts an empty /btw and recovers a slow pre-existing draft before later text', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-btw-empty-slow-test-'));
+    const bin = join(dir, 'fake-tmux-btw-empty-slow-agent.mjs');
+    const trace = join(dir, 'input-trace.txt');
+    const body = '请继续询问 side conversation';
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs';
+process.stdin.setEncoding('utf8');
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+let draft = '/btw';
+let side = false;
+let entryAttempts = 0;
+function screen(lines) {
+  process.stdout.write('\\x1b[2J\\x1b[H' + lines.join('\\n') + '\\n');
+}
+function mainFooter() {
+  return 'gpt-5.6-terra xhigh · /tmp · Goal paused (/goal resume)';
+}
+function sideFooter() {
+  return 'gpt-5.6-terra xhigh · /tmp · Side from main thread · ctrl + / to switch · ctrl + c to close';
+}
+screen(['• Working (18s • esc to interrupt)', '› /btw', mainFooter()]);
+process.stdin.on('data', (chunk) => {
+  appendFileSync(${JSON.stringify(trace)}, chunk.includes('/btw') ? 'literal-btw\\n' : 'safe-input\\n');
+  for (const char of chunk) {
+    if (char === '\\x03' || char === '\\x1b' || char === '\\x01' || char === '\\x0b') {
+      appendFileSync(${JSON.stringify(trace)}, 'unsafe-key\\n');
+      continue;
+    }
+    if (char !== '\\r' && char !== '\\n') {
+      draft += char;
+      continue;
+    }
+    const line = draft;
+    if (!side && line === '/btw') {
+      entryAttempts += 1;
+      if (entryAttempts < 6) {
+        screen(['• Working (18s • esc to interrupt)', '› /btw', mainFooter()]);
+        continue;
+      }
+      draft = '';
+      side = true;
+      screen([sideFooter(), '›']);
+      continue;
+    }
+    draft = '';
+    if (side && line === ${JSON.stringify(body)}) {
+      screen(['• side-body-confirmed', sideFooter(), '›']);
+    } else if (line) {
+      screen(['unexpected:' + JSON.stringify(line), sideFooter(), '›']);
+    }
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-btw-empty-slow-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-btw-empty-slow',
+      tmuxScopeId: 'tmux-btw-empty-slow-scope',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 220,
+      outputFlushMs: 20,
+      startupTimeoutMs: 4_000,
+    });
+
+    const entered = await collect(session.run('btw-empty', '/btw', dir, 'side').events);
+    expect(textOf(entered)).toContain('已进入 Codex btw side conversation');
+    expect(textOf(entered)).not.toContain('缺少 /btw 的正文');
+
+    const followUp = await collect(session.run('btw-empty-follow-up', body, dir).events);
+    await pool.closeAll();
+
+    expect(textOf(followUp)).toContain('• side-body-confirmed');
+    const inputTrace = await readFile(trace, 'utf8');
+    expect(inputTrace).not.toContain('literal-btw');
+    expect(inputTrace).not.toContain('unsafe-key');
+  }, 30_000);
 
   tmuxIt('retries the /btw entry when the first Enter leaves the command draft', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-btw-entry-retry-test-'));

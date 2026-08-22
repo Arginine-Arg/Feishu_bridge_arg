@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.1.5",
+  version: "1.1.6",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -7160,8 +7160,9 @@ var COMMAND_FRESH_SESSION_GRACE_MS = 1200;
 var FRESH_TERMINAL_GRACE_MS = 2500;
 var CONTROL_KEY_GAP_MS = 40;
 var SIDE_COMMAND_SETTLE_MS = 450;
-var SIDE_SWITCH_TIMEOUT_MS = 3e3;
-var SIDE_ENTRY_RETRY_POLL_MS = 80;
+var SIDE_SWITCH_TIMEOUT_MS = 12e3;
+var SIDE_ENTRY_RETRY_POLL_MS = 120;
+var SIDE_ENTRY_RETRY_INTERVAL_MS = 700;
 var COMMAND_ESCAPE_SETTLE_MS = 250;
 var COMMAND_CLEAR_SETTLE_MS = 500;
 var COMMAND_STARTUP_TIMEOUT_MS = 25e3;
@@ -7484,11 +7485,11 @@ ${this.lastTerminalHistory?.text ?? ""}`;
     const commandMode = inputMode === "command" || inputMode === "side";
     const sideMode = inputMode === "side";
     const sidePrompt = sideMode ? parseSidePrompt(prompt) : void 0;
-    if (sideMode && sidePrompt === void 0) {
+    if (sideMode && sidePrompt === null) {
       yield { type: "error", message: "\u7F3A\u5C11 /btw \u7684\u6B63\u6587\u3002", terminationReason: "failed" };
       return;
     }
-    const turnPrompt = sideMode ? sidePrompt : prompt;
+    const turnPrompt = sideMode ? sidePrompt ?? "" : prompt;
     this.turnPhase = "awaiting-input";
     const idleMs = commandMode ? Math.max(this.opts.idleMs ?? DEFAULT_IDLE_MS, COMMAND_IDLE_MS) : this.opts.idleMs ?? DEFAULT_IDLE_MS;
     const outputFlushMs = this.opts.outputFlushMs ?? DEFAULT_OUTPUT_FLUSH_MS;
@@ -7849,6 +7850,8 @@ ${this.lastTerminalHistory?.text ?? ""}`;
         if (commandMode) {
           if (isLiveTerminalReady(this.lastTerminalSnapshot)) {
             log.info("agent-live", "command-fast-submit", { reason: "ready-prompt" });
+          } else if (sideMode && isPendingLiveCommandDraft(this.lastTerminalSnapshot, "/btw", { allowBusy: true })) {
+            log.info("agent-live", "side-command-draft-no-clear");
           } else if (sideMode && isLiveTerminalBusy(this.lastTerminalSnapshot)) {
             log.info("agent-live", "side-command-busy-no-clear");
           } else {
@@ -7868,6 +7871,12 @@ ${this.lastTerminalHistory?.text ?? ""}`;
             this.write(`${turnPrompt}\r`);
             scheduleNormalSubmitRetry();
           } else {
+            push({
+              type: "text",
+              delta: "\u5DF2\u8FDB\u5165 Codex btw side conversation\uFF0C\u8BF7\u53D1\u9001\u6B63\u6587\u3002\n",
+              source: "live-terminal",
+              sequence: ++liveTextSequence
+            });
             finish();
           }
         } else {
@@ -7944,17 +7953,20 @@ ${this.lastTerminalHistory?.text ?? ""}`;
       return true;
     }
     const beforeSide = this.lastTerminalSnapshot;
-    this.write("/btw\r");
+    const hasPendingEntryDraft = isPendingLiveCommandDraft(terminal, "/btw", {
+      allowBusy: true
+    });
+    this.write(hasPendingEntryDraft ? "\r" : "/btw\r");
     const deadline = Date.now() + SIDE_SWITCH_TIMEOUT_MS;
-    let retriedDraft = false;
+    let lastDraftRetryAt = hasPendingEntryDraft ? Date.now() : 0;
     while (Date.now() < deadline) {
       const current = this.lastTerminalSnapshot;
       if (current !== beforeSide && isLiveSideConversation(current)) {
         await delay(SIDE_COMMAND_SETTLE_MS);
         return true;
       }
-      if (!retriedDraft && current !== beforeSide && isPendingLiveCommandDraft(current, "/btw", { allowBusy: true })) {
-        retriedDraft = true;
+      if (Date.now() - lastDraftRetryAt >= SIDE_ENTRY_RETRY_INTERVAL_MS && isPendingLiveCommandDraft(current, "/btw", { allowBusy: true })) {
+        lastDraftRetryAt = Date.now();
         log.warn("agent-live", "side-command-confirm-draft", {
           commandText: "/btw",
           terminalBusy: isLiveTerminalBusy(current)
@@ -9819,9 +9831,9 @@ function isLiveSideConversation(input) {
 }
 function parseSidePrompt(input) {
   const match = /^\/btw(?:\s+([\s\S]+))?$/iu.exec(input.trim());
-  if (!match) return void 0;
+  if (!match) return null;
   const body = match[1]?.trim();
-  return body || void 0;
+  return body ?? "";
 }
 function detectLiveTerminalFailure(input) {
   const lines = cleanTerminalOutput(input).split("\n").map((line) => line.trim()).filter(Boolean).slice(-24);

@@ -44,7 +44,7 @@ Install a pinned release or use a writable custom npm prefix when required:
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.1.5
+sh /tmp/install-arg-bridge.sh --version 1.1.6
 # Example for a machine without permission to write npm's configured global prefix:
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -88,10 +88,10 @@ Release tarballs are preferred. If a Git install is required, keep both compatib
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.1.5"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.1.6"
 ```
 
-`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.1.5`.
+`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.1.6`.
 
 ### 4. Node or npm global-prefix errors
 
@@ -244,7 +244,7 @@ If a profile was created with the wrong agent kind, stop or unregister any match
 | `/sendfile <absolute-path>` | Admin-only: reply with a regular file from the current workspace, bridge media cache, or an explicitly allowed outbound directory, without invoking the agent |
 | `/config` | Adjust presentation preferences, access settings, and lark-cli identity policy |
 | `/model` | Choose the model; Codex uses its native model/reasoning picker and syncs the result to the active profile. `/codex model` is a shorthand for `/codex /model`. |
-| `/btw <text>` | Codex only: open or reuse a side conversation, then submit the text as a separate prompt. `/codex /btw <text>` is equivalent. |
+| `/btw [<text>]` | Codex only: open or reuse a side conversation; with text, submit it as a separate prompt, or send the text in a follow-up message. `/codex /btw [<text>]` is equivalent. |
 | `/session [status\|live\|turn]` | Inspect terminal execution. tmux/live is the default; `turn` remains a legacy compatibility fallback |
 | `/tmux tail [N]` | Admin-only: display the final `N` lines from the current scope's tmux pane (default: 27; maximum: 200) |
 | `/tmux attach` | Admin-only: return a ready-to-run, read-only tmux attach command for the current live session |

@@ -89,6 +89,19 @@ describe('agent command routing aliases', () => {
     });
   });
 
+  it('routes empty /btw through the side-conversation control path', () => {
+    expect(rewriteAgentCommandMessage(message('/btw'), 'codex')).toMatchObject({
+      msg: { content: '/btw' },
+      forceNative: true,
+      nativeMode: 'side',
+    });
+    expect(rewriteAgentCommandMessage(message('/codex /btw'), 'codex')).toMatchObject({
+      msg: { content: '/btw' },
+      forceNative: true,
+      nativeMode: 'side',
+    });
+  });
+
   it('leaves non-matching agent aliases untouched', () => {
     expect(rewriteAgentCommandMessage(message('/claude /resume'), 'codex')).toMatchObject({
       msg: { content: '/claude /resume' },

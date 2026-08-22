@@ -94,8 +94,9 @@ const COMMAND_FRESH_SESSION_GRACE_MS = 1200;
 const FRESH_TERMINAL_GRACE_MS = 2500;
 const CONTROL_KEY_GAP_MS = 40;
 const SIDE_COMMAND_SETTLE_MS = 450;
-const SIDE_SWITCH_TIMEOUT_MS = 3_000;
-const SIDE_ENTRY_RETRY_POLL_MS = 80;
+const SIDE_SWITCH_TIMEOUT_MS = 12_000;
+const SIDE_ENTRY_RETRY_POLL_MS = 120;
+const SIDE_ENTRY_RETRY_INTERVAL_MS = 700;
 const COMMAND_ESCAPE_SETTLE_MS = 250;
 const COMMAND_CLEAR_SETTLE_MS = 500;
 const COMMAND_STARTUP_TIMEOUT_MS = 25_000;
@@ -471,11 +472,11 @@ export class LiveTerminalSession {
     const commandMode = inputMode === 'command' || inputMode === 'side';
     const sideMode = inputMode === 'side';
     const sidePrompt = sideMode ? parseSidePrompt(prompt) : undefined;
-    if (sideMode && sidePrompt === undefined) {
+    if (sideMode && sidePrompt === null) {
       yield { type: 'error', message: '缺少 /btw 的正文。', terminationReason: 'failed' };
       return;
     }
-    const turnPrompt = sideMode ? sidePrompt! : prompt;
+    const turnPrompt = sideMode ? sidePrompt ?? '' : prompt;
     this.turnPhase = 'awaiting-input';
     const idleMs =
       commandMode
@@ -924,6 +925,11 @@ export class LiveTerminalSession {
         if (commandMode) {
           if (isLiveTerminalReady(this.lastTerminalSnapshot)) {
             log.info('agent-live', 'command-fast-submit', { reason: 'ready-prompt' });
+          } else if (
+            sideMode &&
+            isPendingLiveCommandDraft(this.lastTerminalSnapshot, '/btw', { allowBusy: true })
+          ) {
+            log.info('agent-live', 'side-command-draft-no-clear');
           } else if (sideMode && isLiveTerminalBusy(this.lastTerminalSnapshot)) {
             log.info('agent-live', 'side-command-busy-no-clear');
           } else {
@@ -943,6 +949,12 @@ export class LiveTerminalSession {
             this.write(`${turnPrompt}\r`);
             scheduleNormalSubmitRetry();
           } else {
+            push({
+              type: 'text',
+              delta: '已进入 Codex btw side conversation，请发送正文。\n',
+              source: 'live-terminal',
+              sequence: ++liveTextSequence,
+            });
             finish();
           }
         } else {
@@ -1038,9 +1050,12 @@ export class LiveTerminalSession {
       return true;
     }
     const beforeSide = this.lastTerminalSnapshot;
-    this.write('/btw\r');
+    const hasPendingEntryDraft = isPendingLiveCommandDraft(terminal, '/btw', {
+      allowBusy: true,
+    });
+    this.write(hasPendingEntryDraft ? '\r' : '/btw\r');
     const deadline = Date.now() + SIDE_SWITCH_TIMEOUT_MS;
-    let retriedDraft = false;
+    let lastDraftRetryAt = hasPendingEntryDraft ? Date.now() : 0;
     while (Date.now() < deadline) {
       const current = this.lastTerminalSnapshot;
       if (current !== beforeSide && isLiveSideConversation(current)) {
@@ -1048,11 +1063,10 @@ export class LiveTerminalSession {
         return true;
       }
       if (
-        !retriedDraft &&
-        current !== beforeSide &&
+        Date.now() - lastDraftRetryAt >= SIDE_ENTRY_RETRY_INTERVAL_MS &&
         isPendingLiveCommandDraft(current, '/btw', { allowBusy: true })
       ) {
-        retriedDraft = true;
+        lastDraftRetryAt = Date.now();
         log.warn('agent-live', 'side-command-confirm-draft', {
           commandText: '/btw',
           terminalBusy: isLiveTerminalBusy(current),
@@ -3397,11 +3411,11 @@ export function isLiveSideConversation(input: string): boolean {
   return /\bside\s+from\s+main\s+thread\b/iu.test(recent);
 }
 
-function parseSidePrompt(input: string): string | undefined {
+function parseSidePrompt(input: string): string | null {
   const match = /^\/btw(?:\s+([\s\S]+))?$/iu.exec(input.trim());
-  if (!match) return undefined;
+  if (!match) return null;
   const body = match[1]?.trim();
-  return body || undefined;
+  return body ?? '';
 }
 
 /**
