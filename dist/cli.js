@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.1.6",
+  version: "1.1.7",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -7173,7 +7173,9 @@ var COMMAND_DRAFT_CONFIRM_DELAY_MS = 2500;
 var CONTROL_LITERAL_CONFIRM_DELAY_MS = 900;
 var NORMAL_SUBMIT_RETRY_DELAY_MS = 1200;
 var NORMAL_SUBMIT_RETRY_POLL_MS = 400;
+var NORMAL_SUBMIT_RETRY_MAX_ATTEMPTS = 5;
 var NORMAL_SUBMIT_RETRY_MAX_CHECKS = 12;
+var NORMAL_SUBMIT_RETRY_MAX_WAIT_MS = 2e4;
 var MAX_TURN_OUTPUT_CHARS = 12e4;
 var DEFAULT_PTY_ROWS = "48";
 var DEFAULT_PTY_COLUMNS = "120";
@@ -7515,8 +7517,9 @@ ${this.lastTerminalHistory?.text ?? ""}`;
     let latestCommandTerminalText = "";
     let terminalWasBusy = false;
     let sawNormalSubmitProgress = false;
-    let normalSubmitRetried = false;
+    let normalSubmitRetryAttempts = 0;
     let normalSubmitRetryChecks = 0;
+    let normalSubmitRetryStartedAt = 0;
     const inputGraceMs = this.inputGraceMs(commandMode);
     if (commandMode) {
       log.info("agent-live", "command-start", {
@@ -7561,6 +7564,11 @@ ${this.lastTerminalHistory?.text ?? ""}`;
       slashConfirmTimer = void 0;
     };
     const markNormalSubmitProgress = () => {
+      if (sideMode) {
+        sawNormalSubmitProgress = true;
+        cancelNormalSubmitRetry();
+        return;
+      }
       if (commandMode || inputMode === "control") return;
       sawNormalSubmitProgress = true;
       if (this.terminalInfo?.backend !== "tmux") cancelNormalSubmitRetry();
@@ -7636,16 +7644,40 @@ ${this.lastTerminalHistory?.text ?? ""}`;
       }, COMMAND_DRAFT_CONFIRM_DELAY_MS);
     };
     const scheduleNormalSubmitRetry = () => {
-      if (commandMode && !sideMode || inputMode === "control" || normalSubmitRetried || normalSubmitRetryTimer) return;
+      if (commandMode && !sideMode || inputMode === "control" || normalSubmitRetryTimer) return;
+      if (!normalSubmitRetryStartedAt) normalSubmitRetryStartedAt = Date.now();
       const retryIfDraftAppears = () => {
         normalSubmitRetryTimer = void 0;
-        if (done || normalSubmitRetried || sawNormalSubmitProgress && this.terminalInfo?.backend !== "tmux") {
+        if (done || sawNormalSubmitProgress && this.terminalInfo?.backend !== "tmux") {
           return;
         }
         if (sideMode || this.terminalInfo?.backend === "tmux") {
           const terminal = `${this.lastTerminalSnapshot}
 ${this.lastTerminalHistory?.text ?? ""}`;
-          if (!isPendingLivePromptDraft(terminal, turnPrompt)) {
+          const draftPending = isPendingLivePromptDraft(terminal, turnPrompt);
+          if (draftPending) {
+            if (sideMode) suspendIdle();
+            if (normalSubmitRetryAttempts < NORMAL_SUBMIT_RETRY_MAX_ATTEMPTS) {
+              normalSubmitRetryAttempts += 1;
+              this.turnRetryCount += 1;
+              log.warn("agent-live", "normal-submit-retry", {
+                promptPreview: previewLiveText(turnPrompt),
+                attempt: normalSubmitRetryAttempts
+              });
+              this.write("\r");
+            }
+            normalSubmitRetryTimer = setTimeout(retryIfDraftAppears, NORMAL_SUBMIT_RETRY_POLL_MS);
+            return;
+          }
+          if (sideMode && !sawNormalSubmitProgress && Date.now() - normalSubmitRetryStartedAt >= NORMAL_SUBMIT_RETRY_MAX_WAIT_MS) {
+            finish("Codex \u672A\u786E\u8BA4 /btw \u6B63\u6587\u5DF2\u63D0\u4EA4\uFF0C\u6B63\u6587\u672A\u53D1\u9001\u3002\u8BF7\u7A0D\u540E\u91CD\u8BD5\u3002");
+            return;
+          }
+          if (sideMode && !sawNormalSubmitProgress && Date.now() - normalSubmitRetryStartedAt < NORMAL_SUBMIT_RETRY_MAX_WAIT_MS) {
+            normalSubmitRetryTimer = setTimeout(retryIfDraftAppears, NORMAL_SUBMIT_RETRY_POLL_MS);
+            return;
+          }
+          if (this.terminalInfo?.backend === "tmux") {
             normalSubmitRetryChecks += 1;
             if (normalSubmitRetryChecks < NORMAL_SUBMIT_RETRY_MAX_CHECKS) {
               normalSubmitRetryTimer = setTimeout(retryIfDraftAppears, NORMAL_SUBMIT_RETRY_POLL_MS);
@@ -7653,16 +7685,14 @@ ${this.lastTerminalHistory?.text ?? ""}`;
             return;
           }
         }
-        normalSubmitRetried = true;
+        if (normalSubmitRetryAttempts > 0) return;
+        normalSubmitRetryAttempts = 1;
         this.turnRetryCount += 1;
-        void (async () => {
-          log.warn("agent-live", "normal-submit-retry", { promptPreview: previewLiveText(turnPrompt) });
-          this.write("\r");
-        })().catch((err) => {
-          log.warn("agent-live", "normal-submit-retry-failed", {
-            err: err instanceof Error ? err.message : String(err)
-          });
+        log.warn("agent-live", "normal-submit-retry", {
+          promptPreview: previewLiveText(turnPrompt),
+          attempt: normalSubmitRetryAttempts
         });
+        this.write("\r");
       };
       normalSubmitRetryTimer = setTimeout(retryIfDraftAppears, NORMAL_SUBMIT_RETRY_DELAY_MS);
     };
@@ -7694,7 +7724,7 @@ ${this.lastTerminalHistory?.text ?? ""}`;
         return;
       }
       const terminalState = event.terminalText;
-      const normalPromptDraftPending = !commandMode && inputMode !== "control" && Boolean(terminalState) && isPendingLivePromptDraft(terminalState ?? "", turnPrompt);
+      const normalPromptDraftPending = inputMode !== "control" && (sideMode || !commandMode) && Boolean(turnPrompt.trim()) && Boolean(terminalState) && isPendingLivePromptDraft(terminalState ?? "", turnPrompt);
       if (commandMode && terminalState) {
         latestCommandTerminalText = terminalState;
         if (!isPendingLiveCommandDraft(terminalState, turnPrompt)) cancelSlashCommandConfirm();
@@ -7869,6 +7899,7 @@ ${this.lastTerminalHistory?.text ?? ""}`;
           } else if (turnPrompt) {
             this.turnLastInputAt = Date.now();
             this.write(`${turnPrompt}\r`);
+            suspendIdle();
             scheduleNormalSubmitRetry();
           } else {
             push({

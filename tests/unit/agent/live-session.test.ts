@@ -140,6 +140,16 @@ describe('parseLiveControlSequence', () => {
         prompt,
       ),
     ).toBe(true);
+    expect(
+      isPendingLivePromptDraft(
+        [
+          `› ${prompt}`,
+          'gpt-5.6-luna max · /workspace · Agent',
+          'Side from main thread · ctrl + / to switch · ctrl + c to close',
+        ].join('\n'),
+        prompt,
+      ),
+    ).toBe(true);
   });
 });
 
@@ -3885,6 +3895,86 @@ setInterval(() => {}, 1000);
 
     expect(textOf(events)).toContain('• side-body-retry-confirmed\n');
   }, 20_000);
+
+  tmuxIt('does not release a slow side draft before repeated Enter retries can submit it', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-btw-slow-submit-test-'));
+    const bin = join(dir, 'fake-tmux-btw-slow-submit-agent.mjs');
+    const body = '请继续核对慢速 side 消息';
+    const followUp = '后续普通消息不能覆盖 side 草稿';
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+let draft = '';
+let side = false;
+let bodySubmits = 0;
+function screen(lines) {
+  process.stdout.write('\\x1b[2J\\x1b[H' + lines.join('\\n') + '\\n');
+}
+function sideFooter() {
+  return 'gpt-5.6-luna max · /tmp · Side from main thread · ctrl + / to switch · ctrl + c to close';
+}
+screen(['gpt-5.6-luna max · /tmp', '›']);
+process.stdin.on('data', (chunk) => {
+  for (const char of chunk) {
+    if (char !== '\\r' && char !== '\\n') {
+      draft += char;
+      continue;
+    }
+    const line = draft;
+    if (!side && line === '/btw') {
+      draft = '';
+      side = true;
+      screen([sideFooter(), '›']);
+      continue;
+    }
+    if (side && line === ${JSON.stringify(body)}) {
+      bodySubmits += 1;
+      if (bodySubmits < 5) {
+        screen(['› ' + draft, sideFooter()]);
+        continue;
+      }
+      draft = '';
+      screen(['• slow-side-body-confirmed', sideFooter(), '›']);
+      continue;
+    }
+    if (side && line === ${JSON.stringify(followUp)}) {
+      screen(['• follow-up-main-input', sideFooter(), '›']);
+      continue;
+    }
+    if (line) screen(['• mixed-side-draft: ' + line, sideFooter(), '›']);
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-btw-slow-submit-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-btw-slow-submit',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 180,
+      outputFlushMs: 20,
+      startupTimeoutMs: 4_000,
+    });
+
+    const first = await collect(
+      session.run('btw-slow-submit-run', `/btw ${body}`, dir, 'side').events,
+    );
+    const second = await collect(session.run('btw-slow-submit-follow-up', followUp, dir).events);
+    await pool.closeAll();
+
+    expect(textOf(first)).toContain('• slow-side-body-confirmed\n');
+    expect(textOf(second)).toContain('• follow-up-main-input\n');
+    expect(textOf(second)).not.toContain('mixed-side-draft');
+  }, 30_000);
 
   tmuxIt('does not send /btw body when Codex never enters a side conversation', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-btw-unavailable-test-'));

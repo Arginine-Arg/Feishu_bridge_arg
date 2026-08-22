@@ -110,7 +110,9 @@ const COMMAND_DRAFT_CONFIRM_DELAY_MS = 2_500;
 const CONTROL_LITERAL_CONFIRM_DELAY_MS = 900;
 const NORMAL_SUBMIT_RETRY_DELAY_MS = 1_200;
 const NORMAL_SUBMIT_RETRY_POLL_MS = 400;
+const NORMAL_SUBMIT_RETRY_MAX_ATTEMPTS = 5;
 const NORMAL_SUBMIT_RETRY_MAX_CHECKS = 12;
+const NORMAL_SUBMIT_RETRY_MAX_WAIT_MS = 20_000;
 const MAX_TURN_OUTPUT_CHARS = 120_000;
 const DEFAULT_PTY_ROWS = '48';
 const DEFAULT_PTY_COLUMNS = '120';
@@ -508,8 +510,9 @@ export class LiveTerminalSession {
     let latestCommandTerminalText = '';
     let terminalWasBusy = false;
     let sawNormalSubmitProgress = false;
-    let normalSubmitRetried = false;
+    let normalSubmitRetryAttempts = 0;
     let normalSubmitRetryChecks = 0;
+    let normalSubmitRetryStartedAt = 0;
     const inputGraceMs = this.inputGraceMs(commandMode);
 
     if (commandMode) {
@@ -556,6 +559,11 @@ export class LiveTerminalSession {
       slashConfirmTimer = undefined;
     };
     const markNormalSubmitProgress = (): void => {
+      if (sideMode) {
+        sawNormalSubmitProgress = true;
+        cancelNormalSubmitRetry();
+        return;
+      }
       if (commandMode || inputMode === 'control') return;
       sawNormalSubmitProgress = true;
       // A tmux redraw can still be stale activity from the previous turn. Its
@@ -647,10 +655,11 @@ export class LiveTerminalSession {
       }, COMMAND_DRAFT_CONFIRM_DELAY_MS);
     };
     const scheduleNormalSubmitRetry = (): void => {
-      if ((commandMode && !sideMode) || inputMode === 'control' || normalSubmitRetried || normalSubmitRetryTimer) return;
+      if ((commandMode && !sideMode) || inputMode === 'control' || normalSubmitRetryTimer) return;
+      if (!normalSubmitRetryStartedAt) normalSubmitRetryStartedAt = Date.now();
       const retryIfDraftAppears = (): void => {
         normalSubmitRetryTimer = undefined;
-        if (done || normalSubmitRetried || (sawNormalSubmitProgress && this.terminalInfo?.backend !== 'tmux')) {
+        if (done || (sawNormalSubmitProgress && this.terminalInfo?.backend !== 'tmux')) {
           return;
         }
         // /btw has always required proof that its body is still in the
@@ -658,7 +667,38 @@ export class LiveTerminalSession {
         // can otherwise show stale activity from the previous turn.
         if (sideMode || this.terminalInfo?.backend === 'tmux') {
           const terminal = `${this.lastTerminalSnapshot}\n${this.lastTerminalHistory?.text ?? ''}`;
-          if (!isPendingLivePromptDraft(terminal, turnPrompt)) {
+          const draftPending = isPendingLivePromptDraft(terminal, turnPrompt);
+          if (draftPending) {
+            if (sideMode) suspendIdle();
+            if (normalSubmitRetryAttempts < NORMAL_SUBMIT_RETRY_MAX_ATTEMPTS) {
+              normalSubmitRetryAttempts += 1;
+              this.turnRetryCount += 1;
+              log.warn('agent-live', 'normal-submit-retry', {
+                promptPreview: previewLiveText(turnPrompt),
+                attempt: normalSubmitRetryAttempts,
+              });
+              this.write('\r');
+            }
+            normalSubmitRetryTimer = setTimeout(retryIfDraftAppears, NORMAL_SUBMIT_RETRY_POLL_MS);
+            return;
+          }
+          if (
+            sideMode &&
+            !sawNormalSubmitProgress &&
+            Date.now() - normalSubmitRetryStartedAt >= NORMAL_SUBMIT_RETRY_MAX_WAIT_MS
+          ) {
+            finish('Codex 未确认 /btw 正文已提交，正文未发送。请稍后重试。');
+            return;
+          }
+          if (
+            sideMode &&
+            !sawNormalSubmitProgress &&
+            Date.now() - normalSubmitRetryStartedAt < NORMAL_SUBMIT_RETRY_MAX_WAIT_MS
+          ) {
+            normalSubmitRetryTimer = setTimeout(retryIfDraftAppears, NORMAL_SUBMIT_RETRY_POLL_MS);
+            return;
+          }
+          if (this.terminalInfo?.backend === 'tmux') {
             normalSubmitRetryChecks += 1;
             if (normalSubmitRetryChecks < NORMAL_SUBMIT_RETRY_MAX_CHECKS) {
               normalSubmitRetryTimer = setTimeout(retryIfDraftAppears, NORMAL_SUBMIT_RETRY_POLL_MS);
@@ -666,20 +706,14 @@ export class LiveTerminalSession {
             return;
           }
         }
-        normalSubmitRetried = true;
+        if (normalSubmitRetryAttempts > 0) return;
+        normalSubmitRetryAttempts = 1;
         this.turnRetryCount += 1;
-        // Codex can occasionally leave a plain pasted message in its editor
-        // without accepting the first submit key. Keep the existing draft and
-        // send only the missing submit key; re-pasting can turn text into a
-        // multiline draft again.
-        void (async () => {
-          log.warn('agent-live', 'normal-submit-retry', { promptPreview: previewLiveText(turnPrompt) });
-          this.write('\r');
-        })().catch((err) => {
-          log.warn('agent-live', 'normal-submit-retry-failed', {
-            err: err instanceof Error ? err.message : String(err),
-          });
+        log.warn('agent-live', 'normal-submit-retry', {
+          promptPreview: previewLiveText(turnPrompt),
+          attempt: normalSubmitRetryAttempts,
         });
+        this.write('\r');
       };
       normalSubmitRetryTimer = setTimeout(retryIfDraftAppears, NORMAL_SUBMIT_RETRY_DELAY_MS);
     };
@@ -720,8 +754,9 @@ export class LiveTerminalSession {
       // task output and must retain the normal idle completion behavior.
       const terminalState = event.terminalText;
       const normalPromptDraftPending =
-        !commandMode &&
         inputMode !== 'control' &&
+        (sideMode || !commandMode) &&
+        Boolean(turnPrompt.trim()) &&
         Boolean(terminalState) &&
         isPendingLivePromptDraft(terminalState ?? '', turnPrompt);
       if (commandMode && terminalState) {
@@ -947,6 +982,7 @@ export class LiveTerminalSession {
           } else if (turnPrompt) {
             this.turnLastInputAt = Date.now();
             this.write(`${turnPrompt}\r`);
+            suspendIdle();
             scheduleNormalSubmitRetry();
           } else {
             push({
