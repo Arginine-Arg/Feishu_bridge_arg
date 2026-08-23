@@ -28,7 +28,7 @@ import {
   type TmuxPaneTarget,
 } from './tmux-control';
 
-export type LiveTerminalInputMode = 'command' | 'control' | 'side';
+export type LiveTerminalInputMode = 'command' | 'control' | 'side' | 'side-exit';
 
 type LiveChild = SpawnedProcessByStdio<Writable, Readable, Readable>;
 interface LiveHistorySnapshot {
@@ -75,6 +75,7 @@ export interface LiveSessionCommand {
   idleMs?: number;
   outputFlushMs?: number;
   startupTimeoutMs?: number;
+  sideSwitchTimeoutMs?: number;
   tmuxSessionName?: string;
   tmuxProfile?: string;
   tmuxScopeId?: string;
@@ -94,9 +95,15 @@ const COMMAND_FRESH_SESSION_GRACE_MS = 1200;
 const FRESH_TERMINAL_GRACE_MS = 2500;
 const CONTROL_KEY_GAP_MS = 40;
 const SIDE_COMMAND_SETTLE_MS = 450;
-const SIDE_SWITCH_TIMEOUT_MS = 12_000;
-const SIDE_ENTRY_RETRY_POLL_MS = 120;
-const SIDE_ENTRY_RETRY_INTERVAL_MS = 700;
+// Codex can take tens of seconds to redraw a side conversation when the
+// provider or the local machine is loaded. Keep the request alive while the
+// exact entry draft is pending instead of turning a slow redraw into a false
+// failure. The timeout is only a final safety boundary; it never emits keys.
+const SIDE_SWITCH_TIMEOUT_MS = 120_000;
+const SIDE_ENTRY_RETRY_POLL_MS = 160;
+const SIDE_ENTRY_RETRY_INTERVAL_MS = 900;
+const SIDE_ENTRY_MAX_RETRIES = 8;
+const SIDE_BODY_TIMEOUT_MS = 120_000;
 const COMMAND_ESCAPE_SETTLE_MS = 250;
 const COMMAND_CLEAR_SETTLE_MS = 500;
 const COMMAND_STARTUP_TIMEOUT_MS = 25_000;
@@ -112,7 +119,7 @@ const NORMAL_SUBMIT_RETRY_DELAY_MS = 1_200;
 const NORMAL_SUBMIT_RETRY_POLL_MS = 400;
 const NORMAL_SUBMIT_RETRY_MAX_ATTEMPTS = 5;
 const NORMAL_SUBMIT_RETRY_MAX_CHECKS = 12;
-const NORMAL_SUBMIT_RETRY_MAX_WAIT_MS = 20_000;
+const NORMAL_SUBMIT_RETRY_MAX_WAIT_MS = 120_000;
 const MAX_TURN_OUTPUT_CHARS = 120_000;
 const DEFAULT_PTY_ROWS = '48';
 const DEFAULT_PTY_COLUMNS = '120';
@@ -471,8 +478,9 @@ export class LiveTerminalSession {
     yield { type: 'system', cwd };
     await this.start();
 
-    const commandMode = inputMode === 'command' || inputMode === 'side';
     const sideMode = inputMode === 'side';
+    const sideExitMode = inputMode === 'side-exit';
+    const commandMode = inputMode === 'command' || sideMode || sideExitMode;
     const sidePrompt = sideMode ? parseSidePrompt(prompt) : undefined;
     if (sideMode && sidePrompt === null) {
       yield { type: 'error', message: '缺少 /btw 的正文。', terminationReason: 'failed' };
@@ -513,6 +521,7 @@ export class LiveTerminalSession {
     let normalSubmitRetryAttempts = 0;
     let normalSubmitRetryChecks = 0;
     let normalSubmitRetryStartedAt = 0;
+    let sideBodyAwaitingSubmit = false;
     const inputGraceMs = this.inputGraceMs(commandMode);
 
     if (commandMode) {
@@ -604,6 +613,12 @@ export class LiveTerminalSession {
     };
     const cancelCurrentTurn = (): void => {
       if (done) return;
+      if (sideExitMode) {
+        // `/btw out` owns at most one guarded close key. A later lifecycle
+        // cleanup must never send a second Ctrl-C into the shared pane.
+        finish();
+        return;
+      }
       // A repeated Ctrl-C can close a CLI that is the pane's only process.
       // Only inject it after the terminal has positively rendered an active
       // task. If the terminal is silent, end bridge observation instead of
@@ -655,7 +670,7 @@ export class LiveTerminalSession {
       }, COMMAND_DRAFT_CONFIRM_DELAY_MS);
     };
     const scheduleNormalSubmitRetry = (): void => {
-      if ((commandMode && !sideMode) || inputMode === 'control' || normalSubmitRetryTimer) return;
+      if ((commandMode && !sideMode) || inputMode === 'control' || sideExitMode || normalSubmitRetryTimer) return;
       if (!normalSubmitRetryStartedAt) normalSubmitRetryStartedAt = Date.now();
       const retryIfDraftAppears = (): void => {
         normalSubmitRetryTimer = undefined;
@@ -787,6 +802,10 @@ export class LiveTerminalSession {
         } else {
           suspendIdle();
         }
+      }
+      if (normalPromptDraftPending) {
+        scheduleNormalSubmitRetry();
+        return;
       }
       const terminalSnapshot = event.terminalText ?? event.text;
       const historySnapshot = event.history?.text ?? '';
@@ -946,7 +965,7 @@ export class LiveTerminalSession {
         !commandMode && inputMode !== 'control' && !turnPrompt.trim().startsWith('/'),
       );
       if (!done) {
-        if (startupInteractionText && inputMode !== 'control') {
+        if (startupInteractionText && inputMode !== 'control' && !sideMode && !sideExitMode) {
           log.info('agent-live', 'startup-interaction-dismiss', {
             inputMode: inputMode ?? 'task',
           });
@@ -967,6 +986,13 @@ export class LiveTerminalSession {
             log.info('agent-live', 'side-command-draft-no-clear');
           } else if (sideMode && isLiveTerminalBusy(this.lastTerminalSnapshot)) {
             log.info('agent-live', 'side-command-busy-no-clear');
+          } else if (sideMode || sideExitMode) {
+            // Side entry/exit must never clear the shared editor. Esc/Ctrl-A/
+            // Ctrl-K can cancel the user's active goal when the terminal
+            // snapshot is one frame behind the real TUI state.
+            log.info('agent-live', 'side-command-no-clear', {
+              mode: sideExitMode ? 'side-exit' : 'side',
+            });
           } else {
             log.info('agent-live', 'command-clear', { sequence: 'esc ctrl-a ctrl-k' });
             await this.clearPendingInput();
@@ -975,13 +1001,32 @@ export class LiveTerminalSession {
         }
         acceptingOutput = true;
         this.turnPhase = 'submitted';
-        if (sideMode) {
+        if (sideExitMode) {
+          const exitedSideConversation = await this.exitSideConversation();
+          if (exitedSideConversation) {
+            push({
+              type: 'text',
+              delta: '已退出 Codex btw side conversation，主线程继续运行。\n',
+              source: 'live-terminal',
+              sequence: ++liveTextSequence,
+            });
+          } else {
+            push({
+              type: 'text',
+              delta: '当前未确认处于 Codex btw side conversation，未发送任何退出按键。\n',
+              source: 'live-terminal',
+              sequence: ++liveTextSequence,
+            });
+          }
+          finish();
+        } else if (sideMode) {
           const enteredSideConversation = await this.enterSideConversation();
           if (!enteredSideConversation) {
             finish('未确认 Codex 已进入 side conversation，/btw 正文未发送。请先回到主线程后重试。');
           } else if (turnPrompt) {
             this.turnLastInputAt = Date.now();
             this.write(`${turnPrompt}\r`);
+            sideBodyAwaitingSubmit = true;
             suspendIdle();
             scheduleNormalSubmitRetry();
           } else {
@@ -1032,7 +1077,9 @@ export class LiveTerminalSession {
             }
           }
         }
-        if (commandMode && isStatusLiveCommand(turnPrompt)) {
+        if (sideBodyAwaitingSubmit) {
+          arm(SIDE_BODY_TIMEOUT_MS);
+        } else if (commandMode && isStatusLiveCommand(turnPrompt)) {
           arm(
             this.terminalInfo?.backend === 'tmux'
               ? noOutputIdleMs(turnPrompt, idleMs)
@@ -1089,27 +1136,71 @@ export class LiveTerminalSession {
     const hasPendingEntryDraft = isPendingLiveCommandDraft(terminal, '/btw', {
       allowBusy: true,
     });
-    this.write(hasPendingEntryDraft ? '\r' : '/btw\r');
-    const deadline = Date.now() + SIDE_SWITCH_TIMEOUT_MS;
+    if (isStructuredLiveInteraction(terminal)) {
+      log.warn('agent-live', 'side-entry-blocked-picker', {
+        reason: 'picker-is-active',
+      });
+    } else {
+      this.write(hasPendingEntryDraft ? '\r' : '/btw\r');
+    }
+    const deadline = Date.now() + (this.opts.sideSwitchTimeoutMs ?? SIDE_SWITCH_TIMEOUT_MS);
     let lastDraftRetryAt = hasPendingEntryDraft ? Date.now() : 0;
+    let entryRetries = 0;
+    let entrySent = !isStructuredLiveInteraction(terminal);
     while (Date.now() < deadline) {
       const current = this.lastTerminalSnapshot;
-      if (current !== beforeSide && isLiveSideConversation(current)) {
+      if (isLiveSideConversation(current) && (current !== beforeSide || isLiveSideConversation(beforeSide))) {
         await delay(SIDE_COMMAND_SETTLE_MS);
         return true;
       }
       if (
+        !isStructuredLiveInteraction(current) &&
         Date.now() - lastDraftRetryAt >= SIDE_ENTRY_RETRY_INTERVAL_MS &&
+        entryRetries < SIDE_ENTRY_MAX_RETRIES &&
         isPendingLiveCommandDraft(current, '/btw', { allowBusy: true })
       ) {
         lastDraftRetryAt = Date.now();
+        entryRetries += 1;
         log.warn('agent-live', 'side-command-confirm-draft', {
           commandText: '/btw',
           terminalBusy: isLiveTerminalBusy(current),
+          attempt: entryRetries,
         });
         this.write('\r');
       }
+      if (
+        !entrySent &&
+        !isStructuredLiveInteraction(current) &&
+        !isPendingLiveCommandDraft(current, '/btw', { allowBusy: true }) &&
+        (current === beforeSide || isLiveMainConversation(current))
+      ) {
+        // A slow helper may not have delivered the initial frame when the
+        // operation starts. Send the command once after a fresh snapshot, but
+        // never repeat it against a picker or unknown editor surface.
+        entrySent = true;
+        this.write('/btw\r');
+      }
       await delay(Math.min(SIDE_ENTRY_RETRY_POLL_MS, Math.max(1, deadline - Date.now())));
+    }
+    return false;
+  }
+
+  private async exitSideConversation(): Promise<boolean> {
+    const before = this.lastTerminalSnapshot;
+    if (!isLiveSideConversation(before)) return false;
+    // A side session is the only state in which this key is safe. It is sent
+    // exactly once; unlike ordinary stop handling there is deliberately no
+    // retry path and no Esc/Ctrl-A/Ctrl-K cleanup.
+    this.write('\x03');
+    log.info('agent-live', 'side-conversation-exit-sent');
+    const deadline = Date.now() + (this.opts.sideSwitchTimeoutMs ?? SIDE_SWITCH_TIMEOUT_MS);
+    while (Date.now() < deadline) {
+      const current = this.lastTerminalSnapshot;
+      if (!isLiveSideConversation(current) && isLiveMainConversation(current)) {
+        await delay(SIDE_COMMAND_SETTLE_MS);
+        return true;
+      }
+      await delay(SIDE_ENTRY_RETRY_POLL_MS);
     }
     return false;
   }
@@ -1981,8 +2072,31 @@ export function isPendingLivePromptDraft(input: string, prompt: string): boolean
     // busy marker, picker, or a fresh empty prompt proves the draft is an old
     // echo and lets normal submit progress be acknowledged.
     const trailing = lines.slice(cursor).map((line) => line.trim()).filter(Boolean);
-    if (isLivePromptDraftFooter(trailing)) return true;
+    if (isLivePromptDraftTail(trailing, promptLines)) return true;
     if (isLivePromptDraftContinuation(trailing, promptLines)) return true;
+  }
+
+  // tmux captures the rendered terminal, not the logical editor buffer. Long
+  // Feishu messages therefore arrive as soft-wrapped rows (the continuation
+  // rows do not contain a newline in the user's message). Match every
+  // possible prompt/footer boundary after normalizing whitespace, but still
+  // require the exact editor footer so historical assistant echoes cannot
+  // authorize an extra Enter.
+  const expectedSoft = compactTerminalPrompt(echo);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]?.trim() ?? '';
+    if (!/^[›❯>]/u.test(line)) continue;
+    for (let cursor = index + 1; cursor <= lines.length; cursor += 1) {
+      const candidateLines = lines
+        .slice(index, cursor)
+        .map((item, offset) => offset === 0 ? item.replace(/^[›❯>]\s*/u, '') : item)
+        .filter((item) => item.trim());
+      const candidate = candidateLines.map(compactTerminalPrompt).join('');
+      const spacedCandidate = candidateLines.map(normalizeDraftLine).join(' ');
+      if (candidate !== expectedSoft && spacedCandidate !== normalizeDraftLine(echo)) continue;
+      const trailing = lines.slice(cursor).map((item) => item.trim()).filter(Boolean);
+      if (isLivePromptDraftTail(trailing, promptLines)) return true;
+    }
   }
   return false;
 }
@@ -1999,13 +2113,33 @@ function isLivePromptDraftContinuation(lines: string[], promptLines: string[]): 
   return false;
 }
 
+function isLivePromptDraftTail(lines: string[], promptLines: string[]): boolean {
+  if (isLivePromptDraftFooter(lines)) return true;
+  const expectedCompact = promptLines.map(compactTerminalPrompt).join('');
+  const expectedSpaced = promptLines.map(normalizeDraftLine).join(' ');
+  for (let footerIndex = 1; footerIndex < lines.length; footerIndex += 1) {
+    const prefix = lines.slice(0, footerIndex).filter((line) => line.trim());
+    if (prefix.length === 0) continue;
+    const compact = prefix.map(compactTerminalPrompt).join('');
+    const spaced = prefix.map(normalizeDraftLine).join(' ');
+    if ((compact !== expectedCompact && spaced !== expectedSpaced) ||
+        !isLivePromptDraftFooter(lines.slice(footerIndex))) {
+      continue;
+    }
+    return true;
+  }
+  return false;
+}
+
 function normalizeDraftLine(line: string): string {
   return line.replace(/\s+/gu, ' ').trim();
 }
 
 function isLivePromptDraftFooter(lines: string[]): boolean {
-  return lines.length === 0 ||
-    lines.every(isLivePromptDraftFooterLine) ||
+  if (lines.length === 0 || lines.every(isLivePromptDraftFooterLine)) return true;
+  const hasQueueFooter = lines.some((line) => /^tab to queue message\b.*context left$/iu.test(line));
+  const hasBusyFooter = lines.some((line) => /^[•◦]\s+(?:Working|Waiting\s+for\s+background\s+terminal)\b.*\b(?:esc|escape)\s+to\s+interrupt\b.*$/iu.test(line));
+  return (hasQueueFooter && hasBusyFooter) ||
     isLiveSideConversationFooter(lines) ||
     isLiveMainConversationFooter(lines);
 }
@@ -3445,6 +3579,13 @@ export function isLiveTerminalBusy(input: string): boolean {
 export function isLiveSideConversation(input: string): boolean {
   const recent = cleanTerminalOutput(input).split('\n').slice(-20).join('\n');
   return /\bside\s+from\s+main\s+thread\b/iu.test(recent);
+}
+
+function isLiveMainConversation(input: string): boolean {
+  const recent = cleanTerminalOutput(input).split('\n').slice(-20).join(' ').replace(/\s+/gu, ' ').trim();
+  if (!recent || /\bside\s+from\s+main\s+thread\b/iu.test(recent)) return false;
+  return /\bmain\s*\[[^\]]+\]/iu.test(recent) ||
+    /^(?:gpt|claude|codex)[\w.-]*\b.*\s·\s+(?:[A-Za-z]:[\\/]|\/|~\/)/iu.test(recent);
 }
 
 function parseSidePrompt(input: string): string | null {

@@ -7,7 +7,7 @@ export type BridgeOutputKind = 'picker' | 'code' | 'execution-log' | 'final';
 
 export interface BridgeRouteInput {
   userInput: string;
-  inputMode?: 'command' | 'control' | 'side';
+  inputMode?: 'command' | 'control' | 'side' | 'side-exit';
 }
 
 export interface BridgeRoute {
@@ -15,7 +15,7 @@ export interface BridgeRoute {
   kind: BridgeInputKind;
   presentation: BridgePresentation;
   inputSha256: string;
-  inputMode?: 'command' | 'control' | 'side';
+  inputMode?: 'command' | 'control' | 'side' | 'side-exit';
 }
 
 export interface BridgeAgentDecision {
@@ -142,7 +142,7 @@ function deterministicRoute(input: BridgeRouteInput): BridgeRoute {
   const kind =
     input.inputMode === 'control'
       ? 'terminal-control'
-      : input.inputMode === 'command' || input.inputMode === 'side' || trimmed.startsWith('/')
+      : input.inputMode === 'command' || input.inputMode === 'side' || input.inputMode === 'side-exit' || trimmed.startsWith('/')
         ? 'native-command'
         : 'task';
   return {

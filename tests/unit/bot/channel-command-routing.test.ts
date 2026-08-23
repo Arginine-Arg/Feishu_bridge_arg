@@ -102,6 +102,19 @@ describe('agent command routing aliases', () => {
     });
   });
 
+  it('routes /btw out to the guarded side-exit control path', () => {
+    expect(rewriteAgentCommandMessage(message('/btw out'), 'codex')).toMatchObject({
+      msg: { content: '/btw out' },
+      forceNative: true,
+      nativeMode: 'side-exit',
+    });
+    expect(rewriteAgentCommandMessage(message('/codex /btw out'), 'codex')).toMatchObject({
+      msg: { content: '/btw out' },
+      forceNative: true,
+      nativeMode: 'side-exit',
+    });
+  });
+
   it('leaves non-matching agent aliases untouched', () => {
     expect(rewriteAgentCommandMessage(message('/claude /resume'), 'codex')).toMatchObject({
       msg: { content: '/claude /resume' },

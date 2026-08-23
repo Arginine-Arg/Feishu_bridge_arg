@@ -941,14 +941,14 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   const nativeInputMode = liveInputModeForMessage(agentMsg);
   const priorityNativeCommand =
     isForceLiveAgentCommandMessage(agentMsg) &&
-    (nativeInputMode === 'command' || nativeInputMode === 'side');
+    (nativeInputMode === 'command' || nativeInputMode === 'side' || nativeInputMode === 'side-exit');
   if (priorityNativeCommand && activeRuns.get(scope)) {
     log.info('intake', 'native-command-preempt', {
       scope,
       inputMode: nativeInputMode,
       command: agentMsg.content.trim().slice(0, 120),
     });
-    if (nativeInputMode === 'side') {
+    if (nativeInputMode === 'side' || nativeInputMode === 'side-exit') {
       activeRuns.detach(scope);
     } else {
       activeRuns.interrupt(scope);
@@ -1005,7 +1005,7 @@ export function rewriteAgentCommandMessage(
     return {
       msg: { ...msg, content: trimmed },
       forceNative: true,
-      nativeMode: 'side',
+      nativeMode: /^\/btw\s+out\s*$/iu.test(trimmed) ? 'side-exit' : 'side',
     };
   }
   const match = /^\/([A-Za-z][A-Za-z0-9_-]*)(?:\s+([\s\S]+))?$/.exec(trimmed);
@@ -1040,7 +1040,11 @@ function normalizeAgentPrefixedNativeInput(input: string): {
     return { text: '/model', forceNative: true, nativeMode: 'command' };
   }
   if (/^\/btw(?:\s|$)/iu.test(trimmed)) {
-    return { text: input, forceNative: true, nativeMode: 'side' };
+    return {
+      text: input,
+      forceNative: true,
+      nativeMode: /^\/btw\s+out\s*$/iu.test(trimmed) ? 'side-exit' : 'side',
+    };
   }
   const slashless = /^\/([A-Za-z0-9_-]+)$/u.exec(trimmed)?.[1];
   const controlText = slashless && isLivePickerInput(slashless) ? slashless : trimmed;
@@ -1275,7 +1279,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const nativeInputMode = nativeCommand
     ? liveInputModeForBatch(batch, nativeCommand)
     : undefined;
-  if (useLiveSession && nativeInputMode === 'side' && clearLiveInteractionState(sessions, liveInteractionByScope, scope)) {
+  if (
+    useLiveSession &&
+    (nativeInputMode === 'side' || nativeInputMode === 'side-exit') &&
+    clearLiveInteractionState(sessions, liveInteractionByScope, scope)
+  ) {
     log.info('agent-live', 'picker-dismissed-for-side-conversation', { scope });
   }
   if (useLiveSession && !nativeCommand && clearLiveInteractionState(sessions, liveInteractionByScope, scope)) {

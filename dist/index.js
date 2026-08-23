@@ -1881,7 +1881,7 @@ function createBridgeAgentFromEnvironment(environment = process.env) {
 function deterministicRoute(input) {
   const inputSha256 = sha256(input.userInput);
   const trimmed = input.userInput.trim();
-  const kind = input.inputMode === "control" ? "terminal-control" : input.inputMode === "command" || input.inputMode === "side" || trimmed.startsWith("/") ? "native-command" : "task";
+  const kind = input.inputMode === "control" ? "terminal-control" : input.inputMode === "command" || input.inputMode === "side" || input.inputMode === "side-exit" || trimmed.startsWith("/") ? "native-command" : "task";
   return {
     stdin: input.userInput,
     kind,

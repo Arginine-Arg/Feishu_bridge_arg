@@ -20,7 +20,7 @@ export interface SubmitRunInput {
   scopeId: string;
   policy: RunPolicyAllow;
   sessionMode?: 'turn' | 'live';
-  liveInputMode?: 'command' | 'control' | 'side';
+  liveInputMode?: 'command' | 'control' | 'side' | 'side-exit';
   sessionId?: string;
   threadId?: string;
   model?: string;

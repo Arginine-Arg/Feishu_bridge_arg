@@ -102,6 +102,43 @@ describe('parseLiveControlSequence', () => {
     ).toBe(false);
   });
 
+  it('recognizes a long soft-wrapped ordinary draft without authorizing picker input', () => {
+    const prompt = '这是一条足够长的普通消息，用来模拟 tmux 在窄窗口中把 Feishu 文本折成多行之后仍然等待提交';
+    expect(
+      isPendingLivePromptDraft(
+        [
+          '› 这是一条足够长的普通消息，用来模拟 tmux 在窄窗口中把 Feishu 文本折成多行之后仍然',
+          '  等待提交',
+          'gpt-5.6-terra xhigh · /workspace · Main [default]',
+        ].join('\n'),
+        prompt,
+      ),
+    ).toBe(true);
+    expect(
+      isPendingLivePromptDraft(
+        [
+          '› 这是一条足够长的普通消息，用来模拟 tmux 在窄窗口中把 Feishu 文本折成多行之后仍然',
+          '  等待提交',
+          '这是一条足够长的普通消息，用来模拟 tmux 在窄窗口中把 Feishu 文本折成多行之后仍然',
+          '  等待提交',
+          'gpt-5.6-terra xhigh · /workspace · Main [default]',
+        ].join('\n'),
+        prompt,
+      ),
+    ).toBe(true);
+    expect(
+      isPendingLivePromptDraft(
+        [
+          '› 这是一条足够长的普通消息，用来模拟 tmux 在窄窗口中把 Feishu 文本折成多行之后仍然',
+          '  等待提交',
+          'Select Model and Effort',
+          'Press enter to confirm or esc to go back',
+        ].join('\n'),
+        prompt,
+      ),
+    ).toBe(false);
+  });
+
   it('recognizes an ordinary draft in a Codex side conversation', () => {
     const prompt = 'How many files have been modified?';
     const sideDraft = [
@@ -2902,7 +2939,7 @@ setInterval(() => {}, 1000);
   tmuxIt('retries an ordinary prompt once when its initial submit is left as a draft', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-normal-submit-retry-test-'));
     const bin = join(dir, 'fake-tmux-normal-submit-retry-agent.mjs');
-    const prompt = '你好，帮我确认普通消息已经提交';
+    const prompt = '这是一条很长的普通消息，用来确认 bridge 在 tmux 软换行后仍然会自动提交正文并等待 Codex 响应，而不是把文本留在输入框里要求用户手动按 Enter';
     await writeFile(
       bin,
       `#!/usr/bin/env node
@@ -3502,6 +3539,134 @@ setInterval(() => {}, 1000);
     expect(textOf(second)).not.toContain('side unavailable');
   }, 20_000);
 
+  tmuxIt('waits for a slow side redraw before sending the buffered body', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-btw-slow-entry-test-'));
+    const bin = join(dir, 'fake-tmux-btw-slow-entry-agent.mjs');
+    const trace = join(dir, 'input-trace.txt');
+    const body = '慢速 side 仍然要完整提交';
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs';
+process.stdin.setEncoding('utf8');
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+let draft = '';
+let side = false;
+function footer() {
+  return side
+    ? 'gpt-5.6-terra xhigh · /tmp · Side from main thread · ctrl + / to switch · ctrl + c to close'
+    : 'gpt-5.6-terra xhigh · /tmp · Main [default]';
+}
+function screen(lines) { process.stdout.write('\\x1b[2J\\x1b[H' + lines.join('\\n') + '\\n'); }
+screen([footer(), '›']);
+process.stdin.on('data', (chunk) => {
+  for (const char of chunk) {
+    if (char === '\\x03' || char === '\\x1b' || char === '\\x01' || char === '\\x0b') {
+      appendFileSync(${JSON.stringify(trace)}, 'unsafe-key\\n');
+      continue;
+    }
+    if (char !== '\\r' && char !== '\\n') { draft += char; continue; }
+    const line = draft;
+    if (!side && line === '/btw') {
+      appendFileSync(${JSON.stringify(trace)}, 'entry\\n');
+      setTimeout(() => { side = true; draft = ''; screen([footer(), '›']); }, 13_000);
+      continue;
+    }
+    if (side && line === ${JSON.stringify(body)}) {
+      appendFileSync(${JSON.stringify(trace)}, 'body\\n');
+      draft = '';
+      screen(['• slow-side-body-confirmed', footer(), '›']);
+    }
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-btw-slow-entry-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-btw-slow-entry',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 250,
+      outputFlushMs: 20,
+      startupTimeoutMs: 2_000,
+    });
+    try {
+      const events = await collect(session.run('btw-slow-entry', `/btw ${body}`, dir, 'side').events);
+      expect(textOf(events)).toContain('• slow-side-body-confirmed');
+      expect(textOf(events)).not.toContain('未确认 Codex 已进入 side conversation');
+      expect(await readFile(trace, 'utf8')).toBe('entry\nbody\n');
+    } finally {
+      await pool.closeAll();
+    }
+  }, 35_000);
+
+  tmuxIt('exits a confirmed side conversation with one Ctrl-C and no cleanup keys', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-btw-out-test-'));
+    const bin = join(dir, 'fake-tmux-btw-out-agent.mjs');
+    const trace = join(dir, 'input-trace.txt');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs';
+process.stdin.setEncoding('utf8');
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+let draft = '';
+let side = true;
+function footer() {
+  return side
+    ? 'gpt-5.6-terra xhigh · /tmp · Side from main thread · ctrl + / to switch · ctrl + c to close'
+    : 'gpt-5.6-terra xhigh · /tmp · Main [default]';
+}
+function screen(lines) { process.stdout.write('\\x1b[2J\\x1b[H' + lines.join('\\n') + '\\n'); }
+screen([footer(), '›']);
+process.stdin.on('data', (chunk) => {
+  for (const char of chunk) {
+    if (char === '\\x03') {
+      appendFileSync(${JSON.stringify(trace)}, 'ctrl-c\\n');
+      if (side) { side = false; draft = ''; screen([footer(), '›']); }
+      continue;
+    }
+    if (char === '\\x1b' || char === '\\x01' || char === '\\x0b') {
+      appendFileSync(${JSON.stringify(trace)}, 'unsafe-key\\n');
+      continue;
+    }
+    if (char !== '\\r' && char !== '\\n') draft += char;
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-btw-out-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-btw-out',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 250,
+      outputFlushMs: 20,
+      startupTimeoutMs: 2_000,
+    });
+    try {
+      const events = await collect(session.run('btw-out', '/btw out', dir, 'side-exit').events);
+      expect(textOf(events)).toContain('已退出 Codex btw side conversation');
+      expect(await readFile(trace, 'utf8')).toBe('ctrl-c\n');
+    } finally {
+      await pool.closeAll();
+    }
+  }, 20_000);
+
   tmuxIt('accepts an empty /btw and recovers a slow pre-existing draft before later text', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-btw-empty-slow-test-'));
     const bin = join(dir, 'fake-tmux-btw-empty-slow-agent.mjs');
@@ -4021,6 +4186,7 @@ setInterval(() => {}, 1000);
       idleMs: 180,
       outputFlushMs: 20,
       startupTimeoutMs: 4_000,
+      sideSwitchTimeoutMs: 1_500,
     });
 
     const events = await collect(session.run('btw-unavailable', '/btw inspect the main thread', dir, 'side').events);

@@ -1,6 +1,6 @@
 import type { NormalizedMessage } from '@larksuite/channel';
 
-export type LiveInputMode = 'command' | 'control' | 'side';
+export type LiveInputMode = 'command' | 'control' | 'side' | 'side-exit';
 
 const NATIVE_AGENT_COMMAND_RAW_KEY = '__larkChannelNativeAgentCommand';
 const FORCE_LIVE_AGENT_COMMAND_RAW_KEY = '__larkChannelForceLiveAgentCommand';
@@ -45,5 +45,7 @@ export function isForceLiveAgentCommandMessage(msg: NormalizedMessage): boolean 
 export function liveInputModeForMessage(msg: NormalizedMessage): LiveInputMode | undefined {
   if (!msg.raw || typeof msg.raw !== 'object' || Array.isArray(msg.raw)) return undefined;
   const mode = (msg.raw as Record<string, unknown>)[LIVE_INPUT_MODE_RAW_KEY];
-  return mode === 'command' || mode === 'control' || mode === 'side' ? mode : undefined;
+  return mode === 'command' || mode === 'control' || mode === 'side' || mode === 'side-exit'
+    ? mode
+    : undefined;
 }

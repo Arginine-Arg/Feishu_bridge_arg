@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.1.7",
+  version: "1.1.8",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -7160,9 +7160,11 @@ var COMMAND_FRESH_SESSION_GRACE_MS = 1200;
 var FRESH_TERMINAL_GRACE_MS = 2500;
 var CONTROL_KEY_GAP_MS = 40;
 var SIDE_COMMAND_SETTLE_MS = 450;
-var SIDE_SWITCH_TIMEOUT_MS = 12e3;
-var SIDE_ENTRY_RETRY_POLL_MS = 120;
-var SIDE_ENTRY_RETRY_INTERVAL_MS = 700;
+var SIDE_SWITCH_TIMEOUT_MS = 12e4;
+var SIDE_ENTRY_RETRY_POLL_MS = 160;
+var SIDE_ENTRY_RETRY_INTERVAL_MS = 900;
+var SIDE_ENTRY_MAX_RETRIES = 8;
+var SIDE_BODY_TIMEOUT_MS = 12e4;
 var COMMAND_ESCAPE_SETTLE_MS = 250;
 var COMMAND_CLEAR_SETTLE_MS = 500;
 var COMMAND_STARTUP_TIMEOUT_MS = 25e3;
@@ -7175,7 +7177,7 @@ var NORMAL_SUBMIT_RETRY_DELAY_MS = 1200;
 var NORMAL_SUBMIT_RETRY_POLL_MS = 400;
 var NORMAL_SUBMIT_RETRY_MAX_ATTEMPTS = 5;
 var NORMAL_SUBMIT_RETRY_MAX_CHECKS = 12;
-var NORMAL_SUBMIT_RETRY_MAX_WAIT_MS = 2e4;
+var NORMAL_SUBMIT_RETRY_MAX_WAIT_MS = 12e4;
 var MAX_TURN_OUTPUT_CHARS = 12e4;
 var DEFAULT_PTY_ROWS = "48";
 var DEFAULT_PTY_COLUMNS = "120";
@@ -7484,8 +7486,9 @@ ${this.lastTerminalHistory?.text ?? ""}`;
   async *turnEvents(prompt, cwd, inputMode, interruption = { requested: false, detached: false }) {
     yield { type: "system", cwd };
     await this.start();
-    const commandMode = inputMode === "command" || inputMode === "side";
     const sideMode = inputMode === "side";
+    const sideExitMode = inputMode === "side-exit";
+    const commandMode = inputMode === "command" || sideMode || sideExitMode;
     const sidePrompt = sideMode ? parseSidePrompt(prompt) : void 0;
     if (sideMode && sidePrompt === null) {
       yield { type: "error", message: "\u7F3A\u5C11 /btw \u7684\u6B63\u6587\u3002", terminationReason: "failed" };
@@ -7520,6 +7523,7 @@ ${this.lastTerminalHistory?.text ?? ""}`;
     let normalSubmitRetryAttempts = 0;
     let normalSubmitRetryChecks = 0;
     let normalSubmitRetryStartedAt = 0;
+    let sideBodyAwaitingSubmit = false;
     const inputGraceMs = this.inputGraceMs(commandMode);
     if (commandMode) {
       log.info("agent-live", "command-start", {
@@ -7604,6 +7608,10 @@ ${this.lastTerminalHistory?.text ?? ""}`;
     };
     const cancelCurrentTurn = () => {
       if (done) return;
+      if (sideExitMode) {
+        finish();
+        return;
+      }
       const terminal = this.terminalInfo;
       const terminalBusy = isLiveTerminalBusy(this.lastTerminalSnapshot) || isLiveTerminalBusy(this.lastTerminalHistory?.text ?? "");
       if (terminal?.backend !== "tmux" || terminalBusy) {
@@ -7644,7 +7652,7 @@ ${this.lastTerminalHistory?.text ?? ""}`;
       }, COMMAND_DRAFT_CONFIRM_DELAY_MS);
     };
     const scheduleNormalSubmitRetry = () => {
-      if (commandMode && !sideMode || inputMode === "control" || normalSubmitRetryTimer) return;
+      if (commandMode && !sideMode || inputMode === "control" || sideExitMode || normalSubmitRetryTimer) return;
       if (!normalSubmitRetryStartedAt) normalSubmitRetryStartedAt = Date.now();
       const retryIfDraftAppears = () => {
         normalSubmitRetryTimer = void 0;
@@ -7746,6 +7754,10 @@ ${this.lastTerminalHistory?.text ?? ""}`;
         } else {
           suspendIdle();
         }
+      }
+      if (normalPromptDraftPending) {
+        scheduleNormalSubmitRetry();
+        return;
       }
       const terminalSnapshot = event.terminalText ?? event.text;
       const historySnapshot = event.history?.text ?? "";
@@ -7866,7 +7878,7 @@ ${this.lastTerminalHistory?.text ?? ""}`;
         !commandMode && inputMode !== "control" && !turnPrompt.trim().startsWith("/")
       );
       if (!done) {
-        if (startupInteractionText && inputMode !== "control") {
+        if (startupInteractionText && inputMode !== "control" && !sideMode && !sideExitMode) {
           log.info("agent-live", "startup-interaction-dismiss", {
             inputMode: inputMode ?? "task"
           });
@@ -7884,6 +7896,10 @@ ${this.lastTerminalHistory?.text ?? ""}`;
             log.info("agent-live", "side-command-draft-no-clear");
           } else if (sideMode && isLiveTerminalBusy(this.lastTerminalSnapshot)) {
             log.info("agent-live", "side-command-busy-no-clear");
+          } else if (sideMode || sideExitMode) {
+            log.info("agent-live", "side-command-no-clear", {
+              mode: sideExitMode ? "side-exit" : "side"
+            });
           } else {
             log.info("agent-live", "command-clear", { sequence: "esc ctrl-a ctrl-k" });
             await this.clearPendingInput();
@@ -7892,13 +7908,32 @@ ${this.lastTerminalHistory?.text ?? ""}`;
         }
         acceptingOutput = true;
         this.turnPhase = "submitted";
-        if (sideMode) {
+        if (sideExitMode) {
+          const exitedSideConversation = await this.exitSideConversation();
+          if (exitedSideConversation) {
+            push({
+              type: "text",
+              delta: "\u5DF2\u9000\u51FA Codex btw side conversation\uFF0C\u4E3B\u7EBF\u7A0B\u7EE7\u7EED\u8FD0\u884C\u3002\n",
+              source: "live-terminal",
+              sequence: ++liveTextSequence
+            });
+          } else {
+            push({
+              type: "text",
+              delta: "\u5F53\u524D\u672A\u786E\u8BA4\u5904\u4E8E Codex btw side conversation\uFF0C\u672A\u53D1\u9001\u4EFB\u4F55\u9000\u51FA\u6309\u952E\u3002\n",
+              source: "live-terminal",
+              sequence: ++liveTextSequence
+            });
+          }
+          finish();
+        } else if (sideMode) {
           const enteredSideConversation = await this.enterSideConversation();
           if (!enteredSideConversation) {
             finish("\u672A\u786E\u8BA4 Codex \u5DF2\u8FDB\u5165 side conversation\uFF0C/btw \u6B63\u6587\u672A\u53D1\u9001\u3002\u8BF7\u5148\u56DE\u5230\u4E3B\u7EBF\u7A0B\u540E\u91CD\u8BD5\u3002");
           } else if (turnPrompt) {
             this.turnLastInputAt = Date.now();
             this.write(`${turnPrompt}\r`);
+            sideBodyAwaitingSubmit = true;
             suspendIdle();
             scheduleNormalSubmitRetry();
           } else {
@@ -7941,7 +7976,9 @@ ${this.lastTerminalHistory?.text ?? ""}`;
             }
           }
         }
-        if (commandMode && isStatusLiveCommand(turnPrompt)) {
+        if (sideBodyAwaitingSubmit) {
+          arm(SIDE_BODY_TIMEOUT_MS);
+        } else if (commandMode && isStatusLiveCommand(turnPrompt)) {
           arm(
             this.terminalInfo?.backend === "tmux" ? noOutputIdleMs(turnPrompt, idleMs) : idleMs
           );
@@ -7987,24 +8024,54 @@ ${this.lastTerminalHistory?.text ?? ""}`;
     const hasPendingEntryDraft = isPendingLiveCommandDraft(terminal, "/btw", {
       allowBusy: true
     });
-    this.write(hasPendingEntryDraft ? "\r" : "/btw\r");
-    const deadline = Date.now() + SIDE_SWITCH_TIMEOUT_MS;
+    if (isStructuredLiveInteraction(terminal)) {
+      log.warn("agent-live", "side-entry-blocked-picker", {
+        reason: "picker-is-active"
+      });
+    } else {
+      this.write(hasPendingEntryDraft ? "\r" : "/btw\r");
+    }
+    const deadline = Date.now() + (this.opts.sideSwitchTimeoutMs ?? SIDE_SWITCH_TIMEOUT_MS);
     let lastDraftRetryAt = hasPendingEntryDraft ? Date.now() : 0;
+    let entryRetries = 0;
+    let entrySent = !isStructuredLiveInteraction(terminal);
     while (Date.now() < deadline) {
       const current = this.lastTerminalSnapshot;
-      if (current !== beforeSide && isLiveSideConversation(current)) {
+      if (isLiveSideConversation(current) && (current !== beforeSide || isLiveSideConversation(beforeSide))) {
         await delay(SIDE_COMMAND_SETTLE_MS);
         return true;
       }
-      if (Date.now() - lastDraftRetryAt >= SIDE_ENTRY_RETRY_INTERVAL_MS && isPendingLiveCommandDraft(current, "/btw", { allowBusy: true })) {
+      if (!isStructuredLiveInteraction(current) && Date.now() - lastDraftRetryAt >= SIDE_ENTRY_RETRY_INTERVAL_MS && entryRetries < SIDE_ENTRY_MAX_RETRIES && isPendingLiveCommandDraft(current, "/btw", { allowBusy: true })) {
         lastDraftRetryAt = Date.now();
+        entryRetries += 1;
         log.warn("agent-live", "side-command-confirm-draft", {
           commandText: "/btw",
-          terminalBusy: isLiveTerminalBusy(current)
+          terminalBusy: isLiveTerminalBusy(current),
+          attempt: entryRetries
         });
         this.write("\r");
       }
+      if (!entrySent && !isStructuredLiveInteraction(current) && !isPendingLiveCommandDraft(current, "/btw", { allowBusy: true }) && (current === beforeSide || isLiveMainConversation(current))) {
+        entrySent = true;
+        this.write("/btw\r");
+      }
       await delay(Math.min(SIDE_ENTRY_RETRY_POLL_MS, Math.max(1, deadline - Date.now())));
+    }
+    return false;
+  }
+  async exitSideConversation() {
+    const before = this.lastTerminalSnapshot;
+    if (!isLiveSideConversation(before)) return false;
+    this.write("");
+    log.info("agent-live", "side-conversation-exit-sent");
+    const deadline = Date.now() + (this.opts.sideSwitchTimeoutMs ?? SIDE_SWITCH_TIMEOUT_MS);
+    while (Date.now() < deadline) {
+      const current = this.lastTerminalSnapshot;
+      if (!isLiveSideConversation(current) && isLiveMainConversation(current)) {
+        await delay(SIDE_COMMAND_SETTLE_MS);
+        return true;
+      }
+      await delay(SIDE_ENTRY_RETRY_POLL_MS);
     }
     return false;
   }
@@ -8771,8 +8838,21 @@ function isPendingLivePromptDraft(input, prompt) {
     }
     if (!matches) continue;
     const trailing = lines.slice(cursor).map((line) => line.trim()).filter(Boolean);
-    if (isLivePromptDraftFooter(trailing)) return true;
+    if (isLivePromptDraftTail(trailing, promptLines)) return true;
     if (isLivePromptDraftContinuation(trailing, promptLines)) return true;
+  }
+  const expectedSoft = compactTerminalPrompt(echo);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]?.trim() ?? "";
+    if (!/^[›❯>]/u.test(line)) continue;
+    for (let cursor = index + 1; cursor <= lines.length; cursor += 1) {
+      const candidateLines = lines.slice(index, cursor).map((item, offset) => offset === 0 ? item.replace(/^[›❯>]\s*/u, "") : item).filter((item) => item.trim());
+      const candidate = candidateLines.map(compactTerminalPrompt).join("");
+      const spacedCandidate = candidateLines.map(normalizeDraftLine).join(" ");
+      if (candidate !== expectedSoft && spacedCandidate !== normalizeDraftLine(echo)) continue;
+      const trailing = lines.slice(cursor).map((item) => item.trim()).filter(Boolean);
+      if (isLivePromptDraftTail(trailing, promptLines)) return true;
+    }
   }
   return false;
 }
@@ -8787,11 +8867,30 @@ function isLivePromptDraftContinuation(lines, promptLines) {
   }
   return false;
 }
+function isLivePromptDraftTail(lines, promptLines) {
+  if (isLivePromptDraftFooter(lines)) return true;
+  const expectedCompact = promptLines.map(compactTerminalPrompt).join("");
+  const expectedSpaced = promptLines.map(normalizeDraftLine).join(" ");
+  for (let footerIndex = 1; footerIndex < lines.length; footerIndex += 1) {
+    const prefix = lines.slice(0, footerIndex).filter((line) => line.trim());
+    if (prefix.length === 0) continue;
+    const compact = prefix.map(compactTerminalPrompt).join("");
+    const spaced = prefix.map(normalizeDraftLine).join(" ");
+    if (compact !== expectedCompact && spaced !== expectedSpaced || !isLivePromptDraftFooter(lines.slice(footerIndex))) {
+      continue;
+    }
+    return true;
+  }
+  return false;
+}
 function normalizeDraftLine(line) {
   return line.replace(/\s+/gu, " ").trim();
 }
 function isLivePromptDraftFooter(lines) {
-  return lines.length === 0 || lines.every(isLivePromptDraftFooterLine) || isLiveSideConversationFooter(lines) || isLiveMainConversationFooter(lines);
+  if (lines.length === 0 || lines.every(isLivePromptDraftFooterLine)) return true;
+  const hasQueueFooter = lines.some((line) => /^tab to queue message\b.*context left$/iu.test(line));
+  const hasBusyFooter = lines.some((line) => /^[•◦]\s+(?:Working|Waiting\s+for\s+background\s+terminal)\b.*\b(?:esc|escape)\s+to\s+interrupt\b.*$/iu.test(line));
+  return hasQueueFooter && hasBusyFooter || isLiveSideConversationFooter(lines) || isLiveMainConversationFooter(lines);
 }
 function isLivePromptDraftFooterLine(line) {
   return /^tab to queue message\b.*context left$/iu.test(line) || /^\d+% context left$/iu.test(line);
@@ -9859,6 +9958,11 @@ function isLiveTerminalBusy(input) {
 function isLiveSideConversation(input) {
   const recent = cleanTerminalOutput(input).split("\n").slice(-20).join("\n");
   return /\bside\s+from\s+main\s+thread\b/iu.test(recent);
+}
+function isLiveMainConversation(input) {
+  const recent = cleanTerminalOutput(input).split("\n").slice(-20).join(" ").replace(/\s+/gu, " ").trim();
+  if (!recent || /\bside\s+from\s+main\s+thread\b/iu.test(recent)) return false;
+  return /\bmain\s*\[[^\]]+\]/iu.test(recent) || /^(?:gpt|claude|codex)[\w.-]*\b.*\s·\s+(?:[A-Za-z]:[\\/]|\/|~\/)/iu.test(recent);
 }
 function parseSidePrompt(input) {
   const match = /^\/btw(?:\s+([\s\S]+))?$/iu.exec(input.trim());
@@ -11322,7 +11426,7 @@ function createBridgeAgentFromEnvironment(environment = process.env) {
 function deterministicRoute(input) {
   const inputSha256 = sha256(input.userInput);
   const trimmed = input.userInput.trim();
-  const kind = input.inputMode === "control" ? "terminal-control" : input.inputMode === "command" || input.inputMode === "side" || trimmed.startsWith("/") ? "native-command" : "task";
+  const kind = input.inputMode === "control" ? "terminal-control" : input.inputMode === "command" || input.inputMode === "side" || input.inputMode === "side-exit" || trimmed.startsWith("/") ? "native-command" : "task";
   return {
     stdin: input.userInput,
     kind,
@@ -15981,7 +16085,7 @@ function isForceLiveAgentCommandMessage(msg) {
 function liveInputModeForMessage(msg) {
   if (!msg.raw || typeof msg.raw !== "object" || Array.isArray(msg.raw)) return void 0;
   const mode = msg.raw[LIVE_INPUT_MODE_RAW_KEY];
-  return mode === "command" || mode === "control" || mode === "side" ? mode : void 0;
+  return mode === "command" || mode === "control" || mode === "side" || mode === "side-exit" ? mode : void 0;
 }
 
 // src/bot/session-catalog-identity.ts
@@ -20489,14 +20593,14 @@ async function intakeMessage(deps) {
   ) : routedMsg;
   const priorityLiveControl = liveInputModeForMessage(agentMsg) === "control" && (isLiveInterruptInput(agentMsg.content) || pickerActive);
   const nativeInputMode = liveInputModeForMessage(agentMsg);
-  const priorityNativeCommand = isForceLiveAgentCommandMessage(agentMsg) && (nativeInputMode === "command" || nativeInputMode === "side");
+  const priorityNativeCommand = isForceLiveAgentCommandMessage(agentMsg) && (nativeInputMode === "command" || nativeInputMode === "side" || nativeInputMode === "side-exit");
   if (priorityNativeCommand && activeRuns.get(scope)) {
     log.info("intake", "native-command-preempt", {
       scope,
       inputMode: nativeInputMode,
       command: agentMsg.content.trim().slice(0, 120)
     });
-    if (nativeInputMode === "side") {
+    if (nativeInputMode === "side" || nativeInputMode === "side-exit") {
       activeRuns.detach(scope);
     } else {
       activeRuns.interrupt(scope);
@@ -20528,7 +20632,7 @@ function rewriteAgentCommandMessage(msg, agentKind) {
     return {
       msg: { ...msg, content: trimmed },
       forceNative: true,
-      nativeMode: "side"
+      nativeMode: /^\/btw\s+out\s*$/iu.test(trimmed) ? "side-exit" : "side"
     };
   }
   const match = /^\/([A-Za-z][A-Za-z0-9_-]*)(?:\s+([\s\S]+))?$/.exec(trimmed);
@@ -20553,7 +20657,11 @@ function normalizeAgentPrefixedNativeInput(input) {
     return { text: "/model", forceNative: true, nativeMode: "command" };
   }
   if (/^\/btw(?:\s|$)/iu.test(trimmed)) {
-    return { text: input, forceNative: true, nativeMode: "side" };
+    return {
+      text: input,
+      forceNative: true,
+      nativeMode: /^\/btw\s+out\s*$/iu.test(trimmed) ? "side-exit" : "side"
+    };
   }
   const slashless = /^\/([A-Za-z0-9_-]+)$/u.exec(trimmed)?.[1];
   const controlText = slashless && isLivePickerInput(slashless) ? slashless : trimmed;
@@ -20713,7 +20821,7 @@ async function runAgentBatch(deps) {
   const forceLiveSession = batch.some(isForceLiveAgentCommandMessage);
   const useLiveSession = forceLiveSession || getAgentSessionMode(controls.cfg) === "live";
   const nativeInputMode = nativeCommand ? liveInputModeForBatch(batch, nativeCommand) : void 0;
-  if (useLiveSession && nativeInputMode === "side" && clearLiveInteractionState(sessions, liveInteractionByScope, scope)) {
+  if (useLiveSession && (nativeInputMode === "side" || nativeInputMode === "side-exit") && clearLiveInteractionState(sessions, liveInteractionByScope, scope)) {
     log.info("agent-live", "picker-dismissed-for-side-conversation", { scope });
   }
   if (useLiveSession && !nativeCommand && clearLiveInteractionState(sessions, liveInteractionByScope, scope)) {
