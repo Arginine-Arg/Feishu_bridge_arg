@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.1.8",
+  version: "1.1.9",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -9945,12 +9945,14 @@ function isTerminalChromeLine(trimmed) {
   return /^Tip:/i.test(trimmed) || /^\s*[•◦]\s+Running\b.*$/iu.test(trimmed) || /^[•◦]\s+(?:Working|Waiting\s+for\s+background\s+terminal)\s+\((?:\d+h\s+)?(?:\d+m\s+)?\d+s\b.*\)(?:\s+·\s+.*)?$/i.test(trimmed) || /^tab to queue message\b.*context left$/i.test(trimmed) || /^\d+%\s+context left$/i.test(trimmed) || /^[╭╰╮╯─│\s]+$/u.test(trimmed) || /^[›❯]\s*$/.test(trimmed) || isTerminalSuggestionLine(trimmed) || /^[A-Za-z0-9_.-]+(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?\s+·\s+.+$/.test(trimmed);
 }
 function isTerminalSuggestionLine(trimmed) {
-  return /^›\s*(?:Use\s+\/[a-z][\w-]*(?:\s+.*)?|Implement \{feature\}|Summarize recent commits|Find and fix a bug in @filename|Improve documentation in @filename|Explain this codebase|Write tests for @filename|Run \/review on my current changes)\s*$/i.test(
+  return /^›\s*(?:Ask Codex to do anything|Use\s+\/[a-z][\w-]*(?:\s+.*)?|Implement \{feature\}|Summarize recent commits|Find and fix a bug in @filename|Improve documentation in @filename|Explain this codebase|Write tests for @filename|Run \/review on my current changes)\s*$/i.test(
     trimmed
   );
 }
 function isLiveTerminalBusy(input) {
-  const recent = cleanTerminalOutput(input).split("\n").slice(-12).join("\n");
+  const cleaned = cleanTerminalOutput(input);
+  if (isLiveTerminalReady(cleaned)) return false;
+  const recent = cleaned.split("\n").slice(-12).join("\n");
   return /(?:(?:working|waiting\s+for\s+background\s+terminal)\s*\([^)]*(?:esc|escape)\s+to\s+interrupt|esc(?:ape)?\s+to\s+interrupt|compacting(?:\s+context)?|^\s*[•◦]\s+running\b)/imu.test(
     recent
   );
@@ -10004,11 +10006,23 @@ function detectLiveTerminalFailure(input) {
   return void 0;
 }
 function isLiveTerminalReady(input) {
-  const recent = cleanTerminalOutput(input).split("\n").slice(-6);
-  return recent.some((line) => {
+  const cleaned = cleanTerminalOutput(input);
+  const recent = cleaned.split("\n").slice(-12);
+  const hasInteraction = isStructuredLiveInteraction(cleaned);
+  let lastBusyLine = -1;
+  for (const [index, line] of recent.entries()) {
+    if (isLiveTerminalBusyLine(line.trim())) lastBusyLine = index;
+  }
+  return recent.some((line, index) => {
     const trimmed = line.trim();
-    return /^[›❯]\s*$/.test(trimmed) || isTerminalSuggestionLine(trimmed);
+    if (index < lastBusyLine) return false;
+    return /^[›❯]\s*$/.test(trimmed) || !hasInteraction && isTerminalSuggestionLine(trimmed);
   });
+}
+function isLiveTerminalBusyLine(trimmed) {
+  return /(?:(?:working|waiting\s+for\s+background\s+terminal)\s*\([^)]*(?:esc|escape)\s+to\s+interrupt|esc(?:ape)?\s+to\s+interrupt|compacting(?:\s+context)?|^[•◦]\s+running\b)/iu.test(
+    trimmed
+  );
 }
 function isLiveTerminalInteraction(input) {
   return isStructuredLiveInteraction(cleanTerminalOutput(input));

@@ -630,6 +630,19 @@ describe('tmux input framing and snapshots', () => {
     ).toBe(true);
     const waiting = '• Waiting for background terminal (3m 34s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close';
     expect(isLiveTerminalBusy(waiting)).toBe(true);
+    // Codex can leave the waiting row in the final redraw even after it has
+    // returned to the editor. The native empty/suggestion prompt is the
+    // stronger lifecycle signal in that combined frame.
+    expect(
+      isLiveTerminalBusy(
+        `${waiting}\ngpt-5.6-luna max · /tmp · Main [default]\n› Ask Codex to do anything`,
+      ),
+    ).toBe(false);
+    expect(
+      isLiveTerminalBusy(
+        `› Ask Codex to do anything\ngpt-5.6-luna max · /tmp · Main [default]\n• Working (14s • esc to interrupt)`,
+      ),
+    ).toBe(true);
     expect(sanitizeLiveTurnOutput(`${waiting}\n• 已完成核心检查。`)).toBe('• 已完成核心检查。');
     expect(sanitizeLiveTurnOutput('• Running find . -maxdepth 2 -type f\n• 已完成核心检查。')).toBe('• 已完成核心检查。');
     expect(isLiveTerminalBusy('tab to queue message 99% context left')).toBe(false);
@@ -1656,6 +1669,83 @@ setInterval(() => {}, 1000);
       await iterator.return?.();
       await pool.closeAll();
       spawnSync('tmux', ['-S', socketPath, 'kill-server'], { stdio: 'ignore' });
+    }
+  }, 20_000);
+
+  tmuxIt('releases a completed turn when stale Waiting chrome remains above the ready prompt', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-stale-waiting-test-'));
+    const bin = join(dir, 'fake-tmux-stale-waiting-agent.mjs');
+    const trace = join(dir, 'input-trace.txt');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs';
+process.stdin.setEncoding('utf8');
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+let draft = '';
+let turn = 0;
+function screen(lines) {
+  process.stdout.write('\\x1b[2J\\x1b[H' + lines.join('\\n') + '\\n');
+}
+function footer() {
+  return 'gpt-5.6-luna max · /tmp · Main [default]';
+}
+function ready(lines) {
+  screen([...lines, '• Waiting for background terminal (3m 34s • esc to interrupt)', footer(), '› Ask Codex to do anything']);
+}
+screen([footer(), '› Ask Codex to do anything']);
+process.stdin.on('data', (chunk) => {
+  for (const char of chunk) {
+    if (char !== '\\r' && char !== '\\n') {
+      draft += char;
+      continue;
+    }
+    const line = draft;
+    draft = '';
+    if (!line) continue;
+    turn += 1;
+    appendFileSync(${JSON.stringify(trace)}, line + '\\n');
+    if (turn === 1) {
+      // First publish only the stale busy footer, then redraw the final
+      // answer and the native ready suggestion in the same viewport.
+      screen(['• Waiting for background terminal (3m 34s • esc to interrupt)', footer()]);
+      setTimeout(() => ready(['• first task completed']), 120);
+    } else {
+      ready(['• second task completed']);
+    }
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-stale-waiting-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-stale-waiting',
+      tmuxScopeId: 'tmux-stale-waiting-scope',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 220,
+      outputFlushMs: 20,
+      startupTimeoutMs: 2_000,
+    });
+
+    try {
+      const first = await collect(session.run('stale-waiting-first', 'first task', dir).events);
+      expect(textOf(first)).toContain('first task completed');
+      expect(first.some((event) => event.type === 'done')).toBe(true);
+
+      const second = await collect(session.run('stale-waiting-second', 'second task', dir).events);
+      expect(textOf(second)).toContain('second task completed');
+      expect(second.some((event) => event.type === 'done')).toBe(true);
+      expect(await readFile(trace, 'utf8')).toBe('first task\nsecond task\n');
+    } finally {
+      await pool.closeAll();
     }
   }, 20_000);
 

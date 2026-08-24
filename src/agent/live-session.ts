@@ -3561,13 +3561,20 @@ function isTerminalChromeLine(trimmed: string): boolean {
 }
 
 function isTerminalSuggestionLine(trimmed: string): boolean {
-  return /^›\s*(?:Use\s+\/[a-z][\w-]*(?:\s+.*)?|Implement \{feature\}|Summarize recent commits|Find and fix a bug in @filename|Improve documentation in @filename|Explain this codebase|Write tests for @filename|Run \/review on my current changes)\s*$/i.test(
+  return /^›\s*(?:Ask Codex to do anything|Use\s+\/[a-z][\w-]*(?:\s+.*)?|Implement \{feature\}|Summarize recent commits|Find and fix a bug in @filename|Improve documentation in @filename|Explain this codebase|Write tests for @filename|Run \/review on my current changes)\s*$/i.test(
     trimmed,
   );
 }
 
 export function isLiveTerminalBusy(input: string): boolean {
-  const recent = cleanTerminalOutput(input).split('\n').slice(-12).join('\n');
+  const cleaned = cleanTerminalOutput(input);
+  // Codex can leave a completed background-terminal status row in the
+  // viewport after returning to its editor. An explicit empty editor prompt
+  // or the native "Ask Codex" suggestion is stronger evidence than that
+  // stale busy chrome, and prevents a finished turn from holding the bridge
+  // queue forever.
+  if (isLiveTerminalReady(cleaned)) return false;
+  const recent = cleaned.split('\n').slice(-12).join('\n');
   return /(?:(?:working|waiting\s+for\s+background\s+terminal)\s*\([^)]*(?:esc|escape)\s+to\s+interrupt|esc(?:ape)?\s+to\s+interrupt|compacting(?:\s+context)?|^\s*[•◦]\s+running\b)/imu.test(
     recent,
   );
@@ -3655,11 +3662,28 @@ export function detectLiveTerminalFailure(input: string): string | undefined {
 }
 
 function isLiveTerminalReady(input: string): boolean {
-  const recent = cleanTerminalOutput(input).split('\n').slice(-6);
-  return recent.some((line) => {
+  const cleaned = cleanTerminalOutput(input);
+  const recent = cleaned.split('\n').slice(-12);
+  const hasInteraction = isStructuredLiveInteraction(cleaned);
+  let lastBusyLine = -1;
+  for (const [index, line] of recent.entries()) {
+    if (isLiveTerminalBusyLine(line.trim())) lastBusyLine = index;
+  }
+  return recent.some((line, index) => {
     const trimmed = line.trim();
-    return /^[›❯]\s*$/.test(trimmed) || isTerminalSuggestionLine(trimmed);
+    // The "Ask Codex" suggestion is a ready editor marker only when a
+    // picker/approval interaction is not currently occupying the TUI. This
+    // prevents a stale suggestion from releasing a control turn while a
+    // nested picker is still being redrawn.
+    if (index < lastBusyLine) return false;
+    return /^[›❯]\s*$/.test(trimmed) || (!hasInteraction && isTerminalSuggestionLine(trimmed));
   });
+}
+
+function isLiveTerminalBusyLine(trimmed: string): boolean {
+  return /(?:(?:working|waiting\s+for\s+background\s+terminal)\s*\([^)]*(?:esc|escape)\s+to\s+interrupt|esc(?:ape)?\s+to\s+interrupt|compacting(?:\s+context)?|^[•◦]\s+running\b)/iu.test(
+    trimmed,
+  );
 }
 
 export function isLiveTerminalInteraction(input: string): boolean {
