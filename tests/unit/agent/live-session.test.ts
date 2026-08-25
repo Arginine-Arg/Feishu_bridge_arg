@@ -649,6 +649,20 @@ describe('tmux input framing and snapshots', () => {
     expect(isLiveTerminalBusy('• Running find . -maxdepth 2 -type f')).toBe(true);
     expect(isLiveTerminalBusy('› ready for the next task')).toBe(false);
     expect(isLiveTerminalBusy('› How many files have been modified?\ntab to queue message 99% context left')).toBe(false);
+    expect(
+      isLiveTerminalBusy(
+        '• Working (14s • esc to interrupt)\n' +
+          'gpt-5.6-luna max · /tmp · Main [default]\n' +
+          '› How many files have been modified?',
+      ),
+    ).toBe(false);
+    expect(
+      isLiveTerminalBusy(
+        '• Working (14s • esc to interrupt)\n' +
+          'gpt-5.6-luna max · /tmp · Main [default]\n' +
+          '› Check recently modified functions for compatibility',
+      ),
+    ).toBe(false);
     expect(isLiveSideConversation('gpt-5.6-terra xhigh · /workspace · Side from main thread')).toBe(true);
     expect(isLiveSideConversation('Tip: Use /side to start a side conversation')).toBe(false);
   });
@@ -3404,6 +3418,79 @@ setInterval(() => {}, 1000);
       '4. 用 encoder checkpoint 构造训练集。',
       '',
     ].join('\n'));
+  }, 20_000);
+
+  tmuxIt('keeps listening after a ready suggestion until late final output arrives', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-late-final-test-'));
+    const bin = join(dir, 'fake-tmux-late-final-agent.mjs');
+    const prompt = '请汇总最后的实验结论';
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+process.stdin.setEncoding('utf8');
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+let input = '';
+const footer = 'gpt-5.6-luna max · /tmp · Main [default]';
+function screen(lines) {
+  process.stdout.write('\\x1b[2J\\x1b[H' + lines.join('\\n') + '\\n');
+}
+screen([footer, '› Ask Codex to do anything']);
+process.stdin.on('data', (chunk) => {
+  input += chunk;
+  const index = input.search(/[\\r\\n]/);
+  if (index < 0) return;
+  const line = input.slice(0, index).trim();
+  input = input.slice(index + 1);
+  if (line === 'follow-up after recommendation') {
+    screen(['• FOLLOW_UP_ACCEPTED', footer, '› Check recently modified functions for compatibility']);
+    return;
+  }
+  if (line !== ${JSON.stringify(prompt)}) return;
+  screen(['› ' + line, '• Working (0s • esc to interrupt)', 'tab to queue message 99% context left']);
+  setTimeout(() => screen([
+    '› ' + line,
+    '• 第一段结论已经完成。',
+    footer,
+    '› How many files have been modified?',
+  ]), 160);
+  // This arrives after a short idle window and used to be lost after the
+  // bridge emitted done on the recommendation redraw.
+  setTimeout(() => screen([
+    '› ' + line,
+    '• 第一段结论已经完成。',
+    '• 迟到的最终结论也已经完成。',
+    footer,
+    '› How many files have been modified?',
+  ]), 520);
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-late-final-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-late-final',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 180,
+      outputFlushMs: 20,
+      startupTimeoutMs: 5_000,
+    });
+
+    const events = await collect(session.run('tmux-late-final-run', prompt, dir).events);
+    const followUp = await collect(
+      session.run('tmux-late-final-follow-up', 'follow-up after recommendation', dir).events,
+    );
+    await pool.closeAll();
+
+    expect(textOf(events)).toContain('• 第一段结论已经完成。\n');
+    expect(textOf(events)).toContain('• 迟到的最终结论也已经完成。\n');
+    expect(textOf(followUp)).toContain('• FOLLOW_UP_ACCEPTED\n');
   }, 20_000);
 
   tmuxIt('releases a busy turn for a native approval prompt and accepts its card control', async () => {

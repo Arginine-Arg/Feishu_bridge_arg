@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.1.9",
+  version: "1.2.0",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -7178,6 +7178,7 @@ var NORMAL_SUBMIT_RETRY_POLL_MS = 400;
 var NORMAL_SUBMIT_RETRY_MAX_ATTEMPTS = 5;
 var NORMAL_SUBMIT_RETRY_MAX_CHECKS = 12;
 var NORMAL_SUBMIT_RETRY_MAX_WAIT_MS = 12e4;
+var TMUX_FINAL_SETTLE_MS = 1e3;
 var MAX_TURN_OUTPUT_CHARS = 12e4;
 var DEFAULT_PTY_ROWS = "48";
 var DEFAULT_PTY_COLUMNS = "120";
@@ -7524,6 +7525,8 @@ ${this.lastTerminalHistory?.text ?? ""}`;
     let normalSubmitRetryChecks = 0;
     let normalSubmitRetryStartedAt = 0;
     let sideBodyAwaitingSubmit = false;
+    let settlingTimer;
+    let settling = false;
     const inputGraceMs = this.inputGraceMs(commandMode);
     if (commandMode) {
       log.info("agent-live", "command-start", {
@@ -7577,9 +7580,12 @@ ${this.lastTerminalHistory?.text ?? ""}`;
       sawNormalSubmitProgress = true;
       if (this.terminalInfo?.backend !== "tmux") cancelNormalSubmitRetry();
     };
-    const finish = (failureMessage) => {
+    const finalize = (failureMessage) => {
       if (done) return;
       done = true;
+      settling = false;
+      if (settlingTimer) clearTimeout(settlingTimer);
+      settlingTimer = void 0;
       this.turnPhase = failureMessage ? "failed" : "settling";
       if (failureMessage) this.turnLastError = failureMessage;
       if (commandMode) {
@@ -7605,6 +7611,29 @@ ${this.lastTerminalHistory?.text ?? ""}`;
       } else {
         push({ type: "done", terminationReason: "normal" });
       }
+    };
+    const finish = (failureMessage) => {
+      if (done) return;
+      if (failureMessage || this.terminalInfo?.backend !== "tmux") {
+        finalize(failureMessage);
+        return;
+      }
+      if (settling) return;
+      settling = true;
+      this.turnPhase = "settling";
+      if (timer) clearTimeout(timer);
+      timer = void 0;
+      flushOutput();
+      settlingTimer = setTimeout(() => {
+        settlingTimer = void 0;
+        if (!done) finalize();
+      }, TMUX_FINAL_SETTLE_MS);
+    };
+    const reopenSettlement = () => {
+      if (!settling) return;
+      settling = false;
+      if (settlingTimer) clearTimeout(settlingTimer);
+      settlingTimer = void 0;
     };
     const cancelCurrentTurn = () => {
       if (done) return;
@@ -7731,6 +7760,8 @@ ${this.lastTerminalHistory?.text ?? ""}`;
         }
         return;
       }
+      const resumedFromSettlement = settling;
+      reopenSettlement();
       const terminalState = event.terminalText;
       const normalPromptDraftPending = inputMode !== "control" && (sideMode || !commandMode) && Boolean(turnPrompt.trim()) && Boolean(terminalState) && isPendingLivePromptDraft(terminalState ?? "", turnPrompt);
       if (commandMode && terminalState) {
@@ -7777,6 +7808,8 @@ ${this.lastTerminalHistory?.text ?? ""}`;
           arm(
             waitingForStatusSurface ? noOutputIdleMs(turnPrompt, idleMs) : sawAcceptedOutput || isKnownSilentLiveCommand(turnPrompt) ? idleMs : noOutputIdleMs(turnPrompt, idleMs)
           );
+        } else if (resumedFromSettlement) {
+          arm(idleMs);
         }
         return;
       }
@@ -7817,6 +7850,8 @@ ${this.lastTerminalHistory?.text ?? ""}`;
         if (!terminalWasBusy) {
           arm(sawAcceptedOutput ? idleMs : noOutputIdleMs(turnPrompt, idleMs));
         }
+      } else if (resumedFromSettlement) {
+        arm(idleMs);
       }
       const terminalFailure = accepted ? detectLiveTerminalFailure(output.lastAcceptedText()) : void 0;
       if (terminalFailure) {
@@ -7853,6 +7888,9 @@ ${this.lastTerminalHistory?.text ?? ""}`;
       if (outputTimer) clearTimeout(outputTimer);
       if (slashConfirmTimer) clearTimeout(slashConfirmTimer);
       if (controlLiteralConfirmTimer) clearTimeout(controlLiteralConfirmTimer);
+      if (settlingTimer) clearTimeout(settlingTimer);
+      settlingTimer = void 0;
+      settling = false;
       cancelNormalSubmitRetry();
       this.emitter.off("data", onData);
       this.emitter.off("exit", onExit);
@@ -8260,6 +8298,7 @@ function shellQuote2(value) {
 }
 var TMUX_BRIDGE_HELPER = String.raw`
 const { spawnSync } = require('node:child_process');
+const { createHash } = require('node:crypto');
 const { existsSync } = require('node:fs');
 
 const [mode, socketPath, session, requestedTarget, commandBase64, cwd, rows, columns, profile, scope, agentKind, ownerPid] = process.argv.slice(1);
@@ -8615,7 +8654,7 @@ function terminalReadyForFullReconcile(snapshot) {
   return recent.some((line) => {
     const trimmed = line.trim();
     return /^[›❯]\s*$/u.test(trimmed) ||
-      /^›\s*(?:Use\s+\/[a-z][\w-]*(?:\s+.*)?|Implement \{feature\}|Summarize recent commits|Find and fix a bug in @filename|Improve documentation in @filename|Explain this codebase|Write tests for @filename|Run \/review on my current changes)\s*$/iu.test(trimmed);
+      /^›\s*(?:Ask Codex to do anything|How many files have been modified\?|Check recently modified functions for compatibility|Use\s+\/[a-z][\w-]*(?:\s+.*)?|Implement \{feature\}|Summarize recent commits|Find and fix a bug in @filename|Improve documentation in @filename|Explain this codebase|Write tests for @filename|Run \/review on my current changes)\s*$/iu.test(trimmed);
   });
 }
 
@@ -8688,9 +8727,13 @@ function capture() {
   // A TUI can keep its visible footer stable while new assistant output is
   // appended to scrollback.  Compare a bounded history fingerprint as well
   // as the visible snapshot so those late lines still reach TurnOutputBuffer.
+  // A prefix/suffix fingerprint misses edits in the middle of a long
+  // scrollback window when line coordinates and the visible footer stay
+  // unchanged. Hash the complete bounded capture so every substantive
+  // history change produces a delivery frame.
+  const historyDigest = createHash('sha256').update(history, 'utf8').digest('hex');
   const historyFingerprint =
-    historyIdentity + '|' + historyStartLine + '|' + historyEndLine + '|' +
-    history.slice(0, 512) + '|' + history.slice(-4096);
+    historyIdentity + '|' + historyStartLine + '|' + historyEndLine + '|' + historyDigest;
   // The viewport can be blank after a full-screen redraw while the final
   // answer is already present in tmux scrollback.  History is still a valid
   // delivery frame in that state; gating on snapshot silently drops the
@@ -9945,7 +9988,7 @@ function isTerminalChromeLine(trimmed) {
   return /^Tip:/i.test(trimmed) || /^\s*[•◦]\s+Running\b.*$/iu.test(trimmed) || /^[•◦]\s+(?:Working|Waiting\s+for\s+background\s+terminal)\s+\((?:\d+h\s+)?(?:\d+m\s+)?\d+s\b.*\)(?:\s+·\s+.*)?$/i.test(trimmed) || /^tab to queue message\b.*context left$/i.test(trimmed) || /^\d+%\s+context left$/i.test(trimmed) || /^[╭╰╮╯─│\s]+$/u.test(trimmed) || /^[›❯]\s*$/.test(trimmed) || isTerminalSuggestionLine(trimmed) || /^[A-Za-z0-9_.-]+(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?\s+·\s+.+$/.test(trimmed);
 }
 function isTerminalSuggestionLine(trimmed) {
-  return /^›\s*(?:Ask Codex to do anything|Use\s+\/[a-z][\w-]*(?:\s+.*)?|Implement \{feature\}|Summarize recent commits|Find and fix a bug in @filename|Improve documentation in @filename|Explain this codebase|Write tests for @filename|Run \/review on my current changes)\s*$/i.test(
+  return /^›\s*(?:Ask Codex to do anything|How many files have been modified\?|Check recently modified functions for compatibility|Use\s+\/[a-z][\w-]*(?:\s+.*)?|Implement \{feature\}|Summarize recent commits|Find and fix a bug in @filename|Improve documentation in @filename|Explain this codebase|Write tests for @filename|Run \/review on my current changes)\s*$/i.test(
     trimmed
   );
 }

@@ -120,6 +120,11 @@ const NORMAL_SUBMIT_RETRY_POLL_MS = 400;
 const NORMAL_SUBMIT_RETRY_MAX_ATTEMPTS = 5;
 const NORMAL_SUBMIT_RETRY_MAX_CHECKS = 12;
 const NORMAL_SUBMIT_RETRY_MAX_WAIT_MS = 120_000;
+// tmux capture is a screen/history stream rather than an end-of-process
+// signal. Keep the listener alive for several capture ticks after the native
+// editor becomes ready so a final scrollback frame cannot arrive after the
+// bridge has already emitted `done`.
+const TMUX_FINAL_SETTLE_MS = 1_000;
 const MAX_TURN_OUTPUT_CHARS = 120_000;
 const DEFAULT_PTY_ROWS = '48';
 const DEFAULT_PTY_COLUMNS = '120';
@@ -522,6 +527,8 @@ export class LiveTerminalSession {
     let normalSubmitRetryChecks = 0;
     let normalSubmitRetryStartedAt = 0;
     let sideBodyAwaitingSubmit = false;
+    let settlingTimer: ReturnType<typeof setTimeout> | undefined;
+    let settling = false;
     const inputGraceMs = this.inputGraceMs(commandMode);
 
     if (commandMode) {
@@ -580,9 +587,12 @@ export class LiveTerminalSession {
       // draft is in the editor instead of trusting this progress marker.
       if (this.terminalInfo?.backend !== 'tmux') cancelNormalSubmitRetry();
     };
-    const finish = (failureMessage?: string): void => {
+    const finalize = (failureMessage?: string): void => {
       if (done) return;
       done = true;
+      settling = false;
+      if (settlingTimer) clearTimeout(settlingTimer);
+      settlingTimer = undefined;
       this.turnPhase = failureMessage ? 'failed' : 'settling';
       if (failureMessage) this.turnLastError = failureMessage;
       if (commandMode) {
@@ -610,6 +620,31 @@ export class LiveTerminalSession {
       } else {
         push({ type: 'done', terminationReason: 'normal' });
       }
+    };
+    const finish = (failureMessage?: string): void => {
+      if (done) return;
+      if (failureMessage || this.terminalInfo?.backend !== 'tmux') {
+        finalize(failureMessage);
+        return;
+      }
+      if (settling) return;
+      settling = true;
+      this.turnPhase = 'settling';
+      if (timer) clearTimeout(timer);
+      timer = undefined;
+      // Make already-rendered output visible immediately, then leave the
+      // listener attached for late history/snapshot frames.
+      flushOutput();
+      settlingTimer = setTimeout(() => {
+        settlingTimer = undefined;
+        if (!done) finalize();
+      }, TMUX_FINAL_SETTLE_MS);
+    };
+    const reopenSettlement = (): void => {
+      if (!settling) return;
+      settling = false;
+      if (settlingTimer) clearTimeout(settlingTimer);
+      settlingTimer = undefined;
     };
     const cancelCurrentTurn = (): void => {
       if (done) return;
@@ -764,6 +799,11 @@ export class LiveTerminalSession {
         }
         return;
       }
+      // A late tmux history frame means the apparent completion was only a
+      // provisional idle. Re-open the turn and let the normal lifecycle and
+      // output deduplication decide when it is genuinely quiet.
+      const resumedFromSettlement = settling;
+      reopenSettlement();
       // Only PTY/tmux screen snapshots carry terminal lifecycle state. Pipe
       // adapters can legitimately print words such as "Working" as ordinary
       // task output and must retain the normal idle completion behavior.
@@ -846,6 +886,11 @@ export class LiveTerminalSession {
                 ? idleMs
                 : noOutputIdleMs(turnPrompt, idleMs),
           );
+        } else if (resumedFromSettlement) {
+          // A history-only redraw may carry no novel deliverable text. The
+          // provisional completion was still invalidated, so restore the
+          // ordinary idle watchdog instead of leaving the turn unbounded.
+          arm(idleMs);
         }
         return;
       }
@@ -893,6 +938,8 @@ export class LiveTerminalSession {
         if (!terminalWasBusy) {
           arm(sawAcceptedOutput ? idleMs : noOutputIdleMs(turnPrompt, idleMs));
         }
+      } else if (resumedFromSettlement) {
+        arm(idleMs);
       }
       // Native live sessions keep the Codex process alive after an API
       // failure, then return to the normal editor. Only inspect text newly
@@ -939,6 +986,9 @@ export class LiveTerminalSession {
       if (outputTimer) clearTimeout(outputTimer);
       if (slashConfirmTimer) clearTimeout(slashConfirmTimer);
       if (controlLiteralConfirmTimer) clearTimeout(controlLiteralConfirmTimer);
+      if (settlingTimer) clearTimeout(settlingTimer);
+      settlingTimer = undefined;
+      settling = false;
       cancelNormalSubmitRetry();
       this.emitter.off('data', onData);
       this.emitter.off('exit', onExit);
@@ -1464,6 +1514,7 @@ function shellQuote(value: string): string {
 
 const TMUX_BRIDGE_HELPER = String.raw`
 const { spawnSync } = require('node:child_process');
+const { createHash } = require('node:crypto');
 const { existsSync } = require('node:fs');
 
 const [mode, socketPath, session, requestedTarget, commandBase64, cwd, rows, columns, profile, scope, agentKind, ownerPid] = process.argv.slice(1);
@@ -1819,7 +1870,7 @@ function terminalReadyForFullReconcile(snapshot) {
   return recent.some((line) => {
     const trimmed = line.trim();
     return /^[›❯]\s*$/u.test(trimmed) ||
-      /^›\s*(?:Use\s+\/[a-z][\w-]*(?:\s+.*)?|Implement \{feature\}|Summarize recent commits|Find and fix a bug in @filename|Improve documentation in @filename|Explain this codebase|Write tests for @filename|Run \/review on my current changes)\s*$/iu.test(trimmed);
+      /^›\s*(?:Ask Codex to do anything|How many files have been modified\?|Check recently modified functions for compatibility|Use\s+\/[a-z][\w-]*(?:\s+.*)?|Implement \{feature\}|Summarize recent commits|Find and fix a bug in @filename|Improve documentation in @filename|Explain this codebase|Write tests for @filename|Run \/review on my current changes)\s*$/iu.test(trimmed);
   });
 }
 
@@ -1892,9 +1943,13 @@ function capture() {
   // A TUI can keep its visible footer stable while new assistant output is
   // appended to scrollback.  Compare a bounded history fingerprint as well
   // as the visible snapshot so those late lines still reach TurnOutputBuffer.
+  // A prefix/suffix fingerprint misses edits in the middle of a long
+  // scrollback window when line coordinates and the visible footer stay
+  // unchanged. Hash the complete bounded capture so every substantive
+  // history change produces a delivery frame.
+  const historyDigest = createHash('sha256').update(history, 'utf8').digest('hex');
   const historyFingerprint =
-    historyIdentity + '|' + historyStartLine + '|' + historyEndLine + '|' +
-    history.slice(0, 512) + '|' + history.slice(-4096);
+    historyIdentity + '|' + historyStartLine + '|' + historyEndLine + '|' + historyDigest;
   // The viewport can be blank after a full-screen redraw while the final
   // answer is already present in tmux scrollback.  History is still a valid
   // delivery frame in that state; gating on snapshot silently drops the
@@ -3561,7 +3616,7 @@ function isTerminalChromeLine(trimmed: string): boolean {
 }
 
 function isTerminalSuggestionLine(trimmed: string): boolean {
-  return /^›\s*(?:Ask Codex to do anything|Use\s+\/[a-z][\w-]*(?:\s+.*)?|Implement \{feature\}|Summarize recent commits|Find and fix a bug in @filename|Improve documentation in @filename|Explain this codebase|Write tests for @filename|Run \/review on my current changes)\s*$/i.test(
+  return /^›\s*(?:Ask Codex to do anything|How many files have been modified\?|Check recently modified functions for compatibility|Use\s+\/[a-z][\w-]*(?:\s+.*)?|Implement \{feature\}|Summarize recent commits|Find and fix a bug in @filename|Improve documentation in @filename|Explain this codebase|Write tests for @filename|Run \/review on my current changes)\s*$/i.test(
     trimmed,
   );
 }
