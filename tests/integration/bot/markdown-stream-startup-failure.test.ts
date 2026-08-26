@@ -1104,6 +1104,219 @@ describe('markdown stream startup failures', () => {
     ]);
   });
 
+  it('routes text after an empty /codex /btw into the confirmed side without busy-acking', async () => {
+    const h = await createHarness();
+    h.profileConfig.preferences = {
+      ...(h.profileConfig.preferences ?? {}),
+      agentSessionMode: 'live',
+      messageReply: 'text',
+      messageReplyMigrated: true,
+    };
+    h.controls.profileConfig.preferences = h.profileConfig.preferences;
+    h.controls.cfg.preferences = h.profileConfig.preferences;
+    h.agent.setEvents([
+      [
+        { type: 'text', delta: 'main goal is still running\n' },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+      [{ type: 'text', delta: 'side conversation ready\n' }, { type: 'done', terminationReason: 'normal' }],
+      [{ type: 'text', delta: 'side answer\n' }, { type: 'done', terminationReason: 'normal' }],
+    ]);
+    // Keep the main run active while the side entry and its follow-up arrive.
+    delayFakeAgentEvents(h.agent, 2_000);
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_side_main', 'start the long goal'));
+    await waitFor(() => h.agent.runOptions.length === 1);
+    await h.channel.handlers.message?.(message('om_side_open', '/codex /btw'));
+    await waitFor(() => h.agent.sideRunOptions.length === 1);
+    await h.channel.handlers.message?.(message('om_side_body', '现在目前的进展是什么？'));
+    await waitFor(() => h.agent.sideRunOptions.length === 2);
+
+    expect(h.agent.sideRunOptions.map((options) => options.prompt)).toEqual([
+      '/btw',
+      '/btw 现在目前的进展是什么？',
+    ]);
+    expect(JSON.stringify(h.channel.sent)).not.toContain('当前任务仍在运行');
+    expect(h.agent.runs[0]?.stopped).toBe(false);
+  }, 10_000);
+
+  it('keeps an opening side relay when a stale main diagnostic arrives before the footer', async () => {
+    const h = await createHarness();
+    h.profileConfig.preferences = {
+      ...(h.profileConfig.preferences ?? {}),
+      agentSessionMode: 'live',
+      messageReply: 'text',
+      messageReplyMigrated: true,
+    };
+    h.controls.profileConfig.preferences = h.profileConfig.preferences;
+    h.controls.cfg.preferences = h.profileConfig.preferences;
+    h.agent.tmux = {
+      list: async () => [],
+      bind: async () => { throw new Error('not used'); },
+      unbind: async () => false,
+      status: async () => ({ state: 'none' as const }),
+      // The helper can legitimately return the previous main frame while the
+      // side footer is still being painted. This must not clear `opening`.
+      diagnostics: async () => ({
+        phase: 'idle' as const,
+        inputState: 'unknown' as const,
+        retryCount: 0,
+        sideConversation: false,
+      }),
+    } as never;
+    h.agent.setEvents([
+      [{ type: 'text', delta: 'goal remains active\n' }, { type: 'done', terminationReason: 'normal' }],
+      [{ type: 'text', delta: 'side opened\n' }, { type: 'done', terminationReason: 'normal' }],
+      [{ type: 'text', delta: 'side body answer\n' }, { type: 'done', terminationReason: 'normal' }],
+    ]);
+    // Keep the main run and side entry alive long enough for the body to race
+    // the stale diagnostic frame, matching a slow remote Codex redraw.
+    delayFakeAgentEvents(h.agent, 500);
+    const runSide = h.agent.runSide.bind(h.agent);
+    h.agent.runSide = (opts) => {
+      const result = runSide(opts);
+      return {
+        runId: result.runId,
+        stop: () => result.stop(),
+        waitForExit: (timeoutMs: number) => result.waitForExit(timeoutMs),
+        events: (async function* () {
+          await new Promise((resolve) => setTimeout(resolve, 700));
+          for await (const event of result.events) yield event;
+        })(),
+      };
+    };
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_stale_open_goal', 'keep the goal running'));
+    await waitFor(() => h.agent.runOptions.length === 1);
+    await h.channel.handlers.message?.(message('om_stale_open_side', '/codex /btw'));
+    await waitFor(() => h.agent.sideRunOptions.length === 1);
+    await h.channel.handlers.message?.(message('om_stale_open_body', '正文不应进入忙线队列'));
+
+    await waitFor(() => h.agent.sideRunOptions.length === 2, 4_000);
+    expect(h.agent.sideRunOptions.map((options) => options.prompt)).toEqual([
+      '/btw',
+      '/btw 正文不应进入忙线队列',
+    ]);
+    expect(JSON.stringify(h.channel.sent)).not.toContain('当前任务仍在运行');
+    expect(h.agent.runs[0]?.stopped).toBe(false);
+  }, 10_000);
+
+  it('recovers a side relay from terminal diagnostics after a stale entry result', async () => {
+    const h = await createHarness();
+    h.profileConfig.preferences = {
+      ...(h.profileConfig.preferences ?? {}),
+      agentSessionMode: 'live',
+      messageReply: 'text',
+      messageReplyMigrated: true,
+    };
+    h.controls.profileConfig.preferences = h.profileConfig.preferences;
+    h.controls.cfg.preferences = h.profileConfig.preferences;
+
+    let diagnosticsCalls = 0;
+    h.agent.tmux = {
+      list: async () => [],
+      bind: async () => { throw new Error('not used'); },
+      unbind: async () => false,
+      status: async () => ({ state: 'none' as const }),
+      diagnostics: async () => {
+        diagnosticsCalls += 1;
+        // The first capture can still be the main-thread frame even though
+        // the side entry has already succeeded. A later capture is the
+        // authoritative side footer.
+        return {
+          phase: 'idle' as const,
+          inputState: 'unknown' as const,
+          retryCount: 0,
+          sideConversation: diagnosticsCalls >= 2,
+        };
+      },
+    } as never;
+    h.agent.setEvents([
+      [{ type: 'text', delta: 'side conversation ready\n' }, { type: 'done', terminationReason: 'normal' }],
+      [{ type: 'text', delta: 'side answer\n' }, { type: 'done', terminationReason: 'normal' }],
+    ]);
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_diag_side_open', '/codex /btw'));
+    await waitFor(() => diagnosticsCalls >= 1 && h.channel.sent.length >= 1, 4000);
+
+    // There is no bridge marker left after the stale first diagnostics frame.
+    // The second diagnostics frame must restore side ownership before this
+    // ordinary-looking body can reach the pending queue.
+    await h.channel.handlers.message?.(message('om_diag_side_body', '继续询问 side 状态'));
+    await waitFor(
+      () => h.agent.runOptions.length === 2 && h.agent.runOptions[1]?.liveInputMode === 'side',
+      4000,
+    );
+
+    expect(h.agent.runOptions.map((options) => options.prompt)).toEqual([
+      '/btw',
+      '/btw 继续询问 side 状态',
+    ]);
+    expect(JSON.stringify(h.channel.sent)).not.toContain('当前任务仍在运行');
+  }, 10_000);
+
+  it('forwards a body supplied with /codex /btw as one side turn', async () => {
+    const h = await createHarness();
+    h.profileConfig.preferences = {
+      ...(h.profileConfig.preferences ?? {}),
+      agentSessionMode: 'live',
+      messageReply: 'text',
+      messageReplyMigrated: true,
+    };
+    h.controls.profileConfig.preferences = h.profileConfig.preferences;
+    h.controls.cfg.preferences = h.profileConfig.preferences;
+    h.agent.setEvents([
+      [{ type: 'text', delta: 'direct side answer\n' }, { type: 'done', terminationReason: 'normal' }],
+    ]);
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_direct_side', '/codex /btw 直接询问当前进展'));
+    await waitFor(() => h.agent.runOptions.length === 1 && h.channel.sent.length >= 1, 4000);
+
+    expect(h.agent.runOptions[0]).toMatchObject({
+      prompt: '/btw 直接询问当前进展',
+      liveInputMode: 'side',
+      sessionMode: 'live',
+    });
+    expect(JSON.stringify(h.channel.sent)).not.toContain('当前任务仍在运行');
+  }, 10_000);
+
+  it('clears side routing only after /btw out is confirmed', async () => {
+    const h = await createHarness();
+    h.profileConfig.preferences = {
+      ...(h.profileConfig.preferences ?? {}),
+      agentSessionMode: 'live',
+      messageReply: 'text',
+      messageReplyMigrated: true,
+    };
+    h.controls.profileConfig.preferences = h.profileConfig.preferences;
+    h.controls.cfg.preferences = h.profileConfig.preferences;
+    h.agent.setEvents([
+      [{ type: 'text', delta: 'side opened\n' }, { type: 'done', terminationReason: 'normal' }],
+      [{ type: 'text', delta: '已退出 Codex btw side conversation，主线程继续运行。\n' }, { type: 'done', terminationReason: 'normal' }],
+      [{ type: 'text', delta: 'main reply\n' }, { type: 'done', terminationReason: 'normal' }],
+    ]);
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_exit_open', '/codex /btw'));
+    await waitFor(() => h.agent.runOptions.length === 1 && h.channel.sent.length >= 1, 4000);
+    await h.channel.handlers.message?.(message('om_exit', '/btw out'));
+    await waitFor(() => h.agent.runOptions.length === 2 && h.channel.sent.length >= 2, 4000);
+    await h.channel.handlers.message?.(message('om_after_exit', '退出后发送主线程消息'));
+    await waitFor(() => h.agent.runOptions.length === 3, 4000);
+
+    expect(h.agent.runOptions.map((options) => options.liveInputMode)).toEqual([
+      'side',
+      'side-exit',
+      undefined,
+    ]);
+    expect(h.agent.runOptions[2]?.prompt).toContain('退出后发送主线程消息');
+    expect(JSON.stringify(h.channel.sent)).toContain('已退出 Codex btw side conversation');
+  }, 10_000);
+
   it('drains a muted live run without sending output and resumes delivery later', async () => {
     const h = await createHarness();
     h.profileConfig.preferences = {

@@ -250,6 +250,7 @@ export class LiveTerminalSession {
       : 'unknown';
     return {
       phase: this.turnPhase,
+      sideConversation: isLiveSideConversation(snapshot),
       ...(this.turnGeneration ? { generation: this.turnGeneration } : {}),
       ...(this.turnPromptPreview ? { promptPreview: previewLiveText(this.turnPromptPreview) } : {}),
       inputState,

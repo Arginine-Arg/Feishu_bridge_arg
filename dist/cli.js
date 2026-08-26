@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.2.2",
+  version: "1.2.3",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -7282,6 +7282,7 @@ ${this.lastTerminalHistory?.text ?? ""}`;
     const inputState = this.turnPromptPreview ? isLiveTerminalReady(snapshot) ? "empty" : isPendingLivePromptDraft(snapshot, this.turnPromptPreview) ? "draft" : this.turnPhase === "submitted" || this.turnPhase === "busy" || this.turnPhase === "streaming" ? "submitted" : "unknown" : "unknown";
     return {
       phase: this.turnPhase,
+      sideConversation: isLiveSideConversation(snapshot),
       ...this.turnGeneration ? { generation: this.turnGeneration } : {},
       ...this.turnPromptPreview ? { promptPreview: previewLiveText(this.turnPromptPreview) } : {},
       inputState,
@@ -20165,6 +20166,11 @@ var REACTION_CLEANUP_GRACE_MS = 1e3;
 var LONG_REPLY_CARD_THRESHOLD_BYTES = 2e4;
 var LONG_REPLY_CHUNK_BYTES = 12e3;
 var LIVE_INTERACTION_TTL_MS = 30 * 6e4;
+var SIDE_CONVERSATION_TTL_MS = 24 * 60 * 6e4;
+var SIDE_OPENING_TTL_MS = 5 * 6e4;
+var SIDE_CLOSING_TTL_MS = 2 * 6e4;
+var SIDE_CLOSED_TTL_MS = 1e4;
+var SIDE_MAIN_CONFIRM_GRACE_MS = 5e3;
 var SUPPRESSED_API_ERROR_CODES = /* @__PURE__ */ new Set([
   131005,
   // wiki.space.getNode "not found" — the doc isn't a wiki node
@@ -20254,6 +20260,7 @@ async function startChannel(deps) {
   }) : void 0;
   const activePolicyFingerprints = /* @__PURE__ */ new Map();
   const liveInteractionByScope = /* @__PURE__ */ new Map();
+  const sideConversationByScope = /* @__PURE__ */ new Map();
   for (const [scope, state] of sessions.liveInteractionEntries()) {
     liveInteractionByScope.set(scope, state);
   }
@@ -20402,6 +20409,7 @@ async function startChannel(deps) {
             callbackAuth,
             activePolicyFingerprints,
             liveInteractionByScope,
+            sideConversationByScope,
             artifactBroker,
             pending,
             scope,
@@ -20436,6 +20444,7 @@ async function startChannel(deps) {
           executor,
           pool,
           liveInteractionByScope,
+          sideConversationByScope,
           allowLocalFileRoot,
           inboundMessages
         })
@@ -20638,6 +20647,7 @@ async function intakeMessage(deps) {
     executor,
     pool,
     liveInteractionByScope,
+    sideConversationByScope,
     allowLocalFileRoot,
     inboundMessages
   } = deps;
@@ -20700,8 +20710,33 @@ async function intakeMessage(deps) {
   }
   const route = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
   const pickerActive = Boolean(liveInteractionState(sessions, liveInteractionByScope, scope));
+  const existingSideState = await refreshSideConversationState(
+    sideConversationByScope,
+    scope,
+    agent,
+    workspaces,
+    controls
+  );
   const pickerFollowup = pickerActive ? normalizeLivePickerFollowup(route.msg.content) : void 0;
-  const routedMsg = pickerFollowup ? { ...route.msg, content: pickerFollowup } : route.msg;
+  const sideCommandRequested = route.nativeMode === "side";
+  const sideExitRequested = route.nativeMode === "side-exit";
+  if (sideCommandRequested) {
+    saveSideConversationState(sideConversationByScope, scope, "opening");
+  } else if (sideExitRequested && existingSideState) {
+    saveSideConversationState(sideConversationByScope, scope, "closing", existingSideState.generation);
+  }
+  const sideFollowup = !pickerActive && !pickerFollowup && !route.forceNative && !isSlashCommandText(route.msg.content) && Boolean(existingSideState && (existingSideState.phase === "opening" || existingSideState.phase === "active"));
+  const routedMsg = pickerFollowup ? { ...route.msg, content: pickerFollowup } : sideFollowup ? markNativeAgentCommand(
+    { ...route.msg, content: `/btw ${route.msg.content.trim()}` },
+    "side"
+  ) : route.msg;
+  if (sideFollowup) {
+    log.info("intake", "side-followup-routed", {
+      scope,
+      phase: existingSideState?.phase,
+      preview: route.msg.content.slice(0, 120)
+    });
+  }
   const nativeModelCommand = routedMsg.content.trim() === "/model";
   if (nativeModelCommand && !canRunAdminCommand(controls.profileConfig, controls, msg.senderId).ok) {
     log.info("command", "admin-deny", {
@@ -20758,6 +20793,13 @@ async function intakeMessage(deps) {
       }
     });
     if (handled) {
+      if (clearsSideConversationOnCommand(routedMsg.content)) {
+        clearSideConversationState(sideConversationByScope, scope);
+        log.info("agent-live", "side-state-cleared-command", {
+          scope,
+          command: routedMsg.content.trim().split(/\s+/u)[0] ?? ""
+        });
+      }
       const preservePending = commandPreservesPendingMessages(routedMsg.content);
       const dropped = preservePending ? [] : pending.cancel(scope);
       log.info("intake", "command", {
@@ -20769,11 +20811,12 @@ async function intakeMessage(deps) {
     }
   }
   const nativeInputActive = pickerActive || getAgentSessionMode(controls.cfg) === "live";
+  const routedInputMode = liveInputModeForMessage(routedMsg);
   const explicitLiveControl = nativeInputActive && isLiveControlInput(routedMsg.content);
-  const forceNative = route.forceNative || nativeModelCommand || Boolean(pickerFollowup) || explicitLiveControl;
+  const forceNative = route.forceNative || nativeModelCommand || Boolean(pickerFollowup) || explicitLiveControl || isForceLiveAgentCommandMessage(routedMsg);
   const agentMsg = forceNative ? markNativeAgentCommand(
     routedMsg,
-    explicitLiveControl ? "control" : pickerFollowup ? "control" : nativeModelCommand ? "command" : route.nativeMode ?? "command"
+    explicitLiveControl ? "control" : pickerFollowup ? "control" : nativeModelCommand ? "command" : route.nativeMode ?? routedInputMode ?? "command"
   ) : nativeInputActive && isNativeAgentInputText(routedMsg.content, pickerActive) ? markNativeAgentCommand(
     routedMsg,
     routedMsg.content.trimStart().startsWith("/") ? "command" : pickerActive ? "control" : void 0
@@ -20864,6 +20907,10 @@ function normalizeAgentPrefixedNativeInput(input) {
 function isSlashCommandText(text) {
   return text.trimStart().startsWith("/");
 }
+function clearsSideConversationOnCommand(content) {
+  const command = content.trim().toLowerCase();
+  return /^(?:\/new|\/reset|\/cd|\/resume)(?:\s|$)/u.test(command);
+}
 function isNativeAgentInputText(text, pickerActive) {
   if (isSlashCommandText(text)) return true;
   return pickerActive && isLivePickerInput(text);
@@ -20897,6 +20944,97 @@ function splitNativeLiveBatches(batch, splitEveryMessage = false) {
   }
   flushOrdinary();
   return out;
+}
+function sideConversationState(map, scope) {
+  const state = map.get(scope);
+  if (!state) return void 0;
+  if (state.expiresAt <= Date.now()) {
+    map.delete(scope);
+    return void 0;
+  }
+  return state;
+}
+function saveSideConversationState(map, scope, phase, generation) {
+  const now = Date.now();
+  const next = {
+    phase,
+    updatedAt: now,
+    expiresAt: now + (phase === "opening" ? SIDE_OPENING_TTL_MS : phase === "closing" ? SIDE_CLOSING_TTL_MS : phase === "closed" ? SIDE_CLOSED_TTL_MS : SIDE_CONVERSATION_TTL_MS),
+    ...generation ? { generation } : {}
+  };
+  map.set(scope, next);
+  return next;
+}
+function clearSideConversationState(map, scope) {
+  map.delete(scope);
+}
+async function refreshSideConversationState(map, scope, agent, workspaces, controls) {
+  const state = sideConversationState(map, scope);
+  const diagnostics = await agent.tmux?.diagnostics?.(
+    scope,
+    workspaces.cwdFor(scope) ?? controls.profileConfig.workspaces.default
+  ).catch((err) => {
+    log.info("agent-live", "side-state-refresh-failed", { scope, err: String(err) });
+    return void 0;
+  });
+  if (diagnostics?.sideConversation === true) {
+    if (state?.phase === "closed") return state;
+    return saveSideConversationState(map, scope, "active", state?.generation);
+  }
+  if (diagnostics?.sideConversation === false) {
+    if (state?.phase === "opening" || state?.phase === "closing") {
+      return state;
+    }
+    if (state?.phase === "active" && Date.now() - state.updatedAt < SIDE_MAIN_CONFIRM_GRACE_MS) {
+      return state;
+    }
+    if (state) {
+      clearSideConversationState(map, scope);
+      log.info("agent-live", "side-state-cleared-terminal-main", { scope });
+    }
+    return void 0;
+  }
+  return state;
+}
+async function reconcileSideConversationState(input) {
+  const before = sideConversationState(input.map, input.scope);
+  const diagnostics = await input.agent.tmux?.diagnostics?.(input.scope, input.cwd).catch((err) => {
+    log.info("agent-live", "side-state-reconcile-failed", {
+      scope: input.scope,
+      err: String(err)
+    });
+    return void 0;
+  });
+  if (input.inputMode === "side-exit") {
+    if (input.exitConfirmed === true || diagnostics?.sideConversation === false) {
+      saveSideConversationState(input.map, input.scope, "closed", before?.generation);
+      log.info("agent-live", "side-state-closed-exit", { scope: input.scope });
+      return;
+    }
+    if (diagnostics?.sideConversation === true || input.exitConfirmed === false || before) {
+      saveSideConversationState(input.map, input.scope, "active", before?.generation);
+    }
+    return;
+  }
+  if (diagnostics?.sideConversation === false) {
+    if (input.inputMode === "side" && before?.phase === "active") {
+      saveSideConversationState(input.map, input.scope, "active", before.generation);
+      return;
+    }
+    if (input.inputMode === "side" && before?.phase === "opening" && !input.failed) {
+      saveSideConversationState(input.map, input.scope, "active", before.generation);
+      return;
+    }
+    clearSideConversationState(input.map, input.scope);
+    log.info("agent-live", "side-state-cleared-main", { scope: input.scope });
+    return;
+  }
+  if (input.failed && before?.phase !== "active") {
+    clearSideConversationState(input.map, input.scope);
+    log.info("agent-live", "side-state-cleared-failed-entry", { scope: input.scope });
+    return;
+  }
+  saveSideConversationState(input.map, input.scope, "active", before?.generation);
 }
 function liveInteractionState(sessions, map, scope) {
   const state = map.get(scope) ?? sessions.getLiveInteraction(scope);
@@ -20940,6 +21078,7 @@ async function runAgentBatch(deps) {
     callbackAuth,
     activePolicyFingerprints,
     liveInteractionByScope,
+    sideConversationByScope,
     artifactBroker,
     pending,
     scope,
@@ -21019,6 +21158,7 @@ async function runAgentBatch(deps) {
   const forceLiveSession = batch.some(isForceLiveAgentCommandMessage);
   const useLiveSession = forceLiveSession || getAgentSessionMode(controls.cfg) === "live";
   const nativeInputMode = nativeCommand ? liveInputModeForBatch(batch, nativeCommand) : void 0;
+  const sideInputMode = nativeInputMode === "side" || nativeInputMode === "side-exit";
   if (useLiveSession && (nativeInputMode === "side" || nativeInputMode === "side-exit") && clearLiveInteractionState(sessions, liveInteractionByScope, scope)) {
     log.info("agent-live", "picker-dismissed-for-side-conversation", { scope });
   }
@@ -21098,6 +21238,9 @@ async function runAgentBatch(deps) {
     }
   });
   if (!flow.ok) {
+    if (sideInputMode) {
+      clearSideConversationState(sideConversationByScope, scope);
+    }
     if (!useLiveSession) artifactBroker.revoke(artifactGrant.token);
     log.info("run-flow", "rejected", { scope, code: flow.rejectReason.code });
     log.warn("policy", "denied", {
@@ -21122,6 +21265,8 @@ async function runAgentBatch(deps) {
   activePolicyFingerprints.set(scope, flow.policy.policyFingerprint);
   const handle = execution.handle;
   const eventStream = execution.subscribe();
+  let sideRunFailed = false;
+  let sideExitConfirmed;
   if (flow.resumeFrom) {
     log.info("session", "resume", { sessionId: flow.resumeFrom, cwd });
   } else {
@@ -21183,6 +21328,11 @@ async function runAgentBatch(deps) {
     }
   }
   const observeLiveEvent = (evt, opts = {}) => {
+    if (sideInputMode && evt.type === "error") sideRunFailed = true;
+    if (nativeInputMode === "side-exit" && evt.type === "text") {
+      if (evt.delta.includes("\u5DF2\u9000\u51FA Codex btw side conversation")) sideExitConfirmed = true;
+      if (evt.delta.includes("\u672A\u786E\u8BA4\u5904\u4E8E Codex btw side conversation")) sideExitConfirmed = false;
+    }
     const isStartupInteraction = evt.type === "interactive" && evt.phase === "startup";
     if (evt.type !== "text" && evt.type !== "interactive") return;
     const delta = evt.type === "text" ? evt.delta : evt.text;
@@ -21324,6 +21474,7 @@ ${delta}`.slice(-64e3);
       log.info("agent-live", "picker-empty-final-suppressed", { scope, input: nativeCommand });
       return { ...state, blocks: [] };
     }
+    if (currentText.trim()) return state;
     return {
       ...state,
       blocks: [
@@ -21940,6 +22091,17 @@ ${delta}`.slice(-64e3);
       } else if (closesPicker && pickerObservedAfterInput) {
         log.info("agent-live", "picker-advance", { scope, input: nativeCommand });
       }
+    }
+    if (sideInputMode) {
+      await reconcileSideConversationState({
+        map: sideConversationByScope,
+        scope,
+        agent,
+        inputMode: nativeInputMode,
+        failed: sideRunFailed,
+        exitConfirmed: sideExitConfirmed,
+        cwd
+      });
     }
     if (previousActivePolicyFingerprint) {
       activePolicyFingerprints.set(scope, previousActivePolicyFingerprint);

@@ -18,6 +18,8 @@ export type LiveTurnPhase =
 
 export interface LiveSessionDiagnostics {
   phase: LiveTurnPhase;
+  /** True when the persistent terminal is currently in a side conversation. */
+  sideConversation?: boolean;
   generation?: string;
   promptPreview?: string;
   inputState: 'empty' | 'draft' | 'submitted' | 'unknown';

@@ -125,6 +125,21 @@ const REACTION_CLEANUP_GRACE_MS = 1000;
 const LONG_REPLY_CARD_THRESHOLD_BYTES = 20_000;
 const LONG_REPLY_CHUNK_BYTES = 12_000;
 const LIVE_INTERACTION_TTL_MS = 30 * 60_000;
+// Side mode belongs to the persistent terminal, not to one bridge run. Keep a
+// short-lived bridge marker so a body sent immediately after `/btw` can be
+// routed while the terminal is still redrawing, then refresh it from tmux.
+const SIDE_CONVERSATION_TTL_MS = 24 * 60 * 60_000;
+const SIDE_OPENING_TTL_MS = 5 * 60_000;
+const SIDE_CLOSING_TTL_MS = 2 * 60_000;
+// Keep a confirmed-exit tombstone while tmux can still return the previous
+// side footer. Without this, the next ordinary message can be re-routed into
+// side mode before the terminal's main-thread frame has been captured.
+const SIDE_CLOSED_TTL_MS = 10_000;
+// A tmux capture can briefly lag the side footer immediately after Codex
+// switches panels. Keep a recently confirmed side marker through that one
+// stale main-thread frame; an older false observation still clears manually
+// exited side sessions on the next message.
+const SIDE_MAIN_CONFIRM_GRACE_MS = 5_000;
 
 // Lark SDK logs API errors at error level even when the caller catches them.
 // These specific codes are EXPECTED in our flow (wiki-node lookup that
@@ -265,6 +280,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   // scopes currently showing an agent picker so later up/down/enter messages
   // are routed as terminal controls instead of plain chat.
   const liveInteractionByScope = new Map<string, LiveInteractionState>();
+  const sideConversationByScope = new Map<string, SideConversationState>();
   for (const [scope, state] of sessions.liveInteractionEntries()) {
     liveInteractionByScope.set(scope, state);
   }
@@ -437,6 +453,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
             callbackAuth,
             activePolicyFingerprints,
             liveInteractionByScope,
+            sideConversationByScope,
             artifactBroker,
             pending,
             scope,
@@ -473,6 +490,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           executor,
           pool,
           liveInteractionByScope,
+          sideConversationByScope,
           allowLocalFileRoot,
           inboundMessages,
         }),
@@ -701,6 +719,7 @@ interface IntakeDeps {
   executor: RunExecutor;
   pool: ProcessPool;
   liveInteractionByScope: Map<string, LiveInteractionState>;
+  sideConversationByScope: Map<string, SideConversationState>;
   allowLocalFileRoot: (root: string) => Promise<boolean>;
   inboundMessages: InboundMessageLedger;
 }
@@ -727,6 +746,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     executor,
     pool,
     liveInteractionByScope,
+    sideConversationByScope,
     allowLocalFileRoot,
     inboundMessages,
   } = deps;
@@ -821,12 +841,44 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
 
   const route = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
   const pickerActive = Boolean(liveInteractionState(sessions, liveInteractionByScope, scope));
+  const existingSideState = await refreshSideConversationState(
+    sideConversationByScope,
+    scope,
+    agent,
+    workspaces,
+    controls,
+  );
   const pickerFollowup = pickerActive
     ? normalizeLivePickerFollowup(route.msg.content)
     : undefined;
+  const sideCommandRequested = route.nativeMode === 'side';
+  const sideExitRequested = route.nativeMode === 'side-exit';
+  if (sideCommandRequested) {
+    saveSideConversationState(sideConversationByScope, scope, 'opening');
+  } else if (sideExitRequested && existingSideState) {
+    saveSideConversationState(sideConversationByScope, scope, 'closing', existingSideState.generation);
+  }
+  const sideFollowup =
+    !pickerActive &&
+    !pickerFollowup &&
+    !route.forceNative &&
+    !isSlashCommandText(route.msg.content) &&
+    Boolean(existingSideState && (existingSideState.phase === 'opening' || existingSideState.phase === 'active'));
   const routedMsg = pickerFollowup
     ? { ...route.msg, content: pickerFollowup }
-    : route.msg;
+    : sideFollowup
+      ? markNativeAgentCommand(
+          { ...route.msg, content: `/btw ${route.msg.content.trim()}` },
+          'side',
+        )
+      : route.msg;
+  if (sideFollowup) {
+    log.info('intake', 'side-followup-routed', {
+      scope,
+      phase: existingSideState?.phase,
+      preview: route.msg.content.slice(0, 120),
+    });
+  }
   const nativeModelCommand = routedMsg.content.trim() === '/model';
 
   if (
@@ -888,6 +940,13 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
       },
     });
     if (handled) {
+      if (clearsSideConversationOnCommand(routedMsg.content)) {
+        clearSideConversationState(sideConversationByScope, scope);
+        log.info('agent-live', 'side-state-cleared-command', {
+          scope,
+          command: routedMsg.content.trim().split(/\s+/u)[0] ?? '',
+        });
+      }
       const preservePending = commandPreservesPendingMessages(routedMsg.content);
       const dropped = preservePending ? [] : pending.cancel(scope);
       log.info('intake', 'command', {
@@ -906,11 +965,17 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   // typed into a TUI.
   const nativeInputActive =
     pickerActive || getAgentSessionMode(controls.cfg) === 'live';
+  const routedInputMode = liveInputModeForMessage(routedMsg);
   // Native controls are a separate control plane.  They must never pass
   // through prompt batching just because an earlier picker card expired or a
   // bridge restart lost its in-memory picker flag.
   const explicitLiveControl = nativeInputActive && isLiveControlInput(routedMsg.content);
-  const forceNative = route.forceNative || nativeModelCommand || Boolean(pickerFollowup) || explicitLiveControl;
+  const forceNative =
+    route.forceNative ||
+    nativeModelCommand ||
+    Boolean(pickerFollowup) ||
+    explicitLiveControl ||
+    isForceLiveAgentCommandMessage(routedMsg);
   const agentMsg = forceNative
     ? markNativeAgentCommand(
         routedMsg,
@@ -920,7 +985,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
           ? 'control'
           : nativeModelCommand
             ? 'command'
-            : (route.nativeMode ?? 'command'),
+            : (route.nativeMode ?? routedInputMode ?? 'command'),
       )
     : nativeInputActive &&
         isNativeAgentInputText(routedMsg.content, pickerActive)
@@ -1066,6 +1131,11 @@ function isSlashCommandText(text: string): boolean {
   return text.trimStart().startsWith('/');
 }
 
+function clearsSideConversationOnCommand(content: string): boolean {
+  const command = content.trim().toLowerCase();
+  return /^(?:\/new|\/reset|\/cd|\/resume)(?:\s|$)/u.test(command);
+}
+
 function isNativeAgentInputText(text: string, pickerActive: boolean): boolean {
   if (isSlashCommandText(text)) return true;
   return pickerActive && isLivePickerInput(text);
@@ -1114,6 +1184,166 @@ interface LiveInteractionState {
   expiresAt: number;
   signature?: string;
   generation?: string;
+}
+
+type SideConversationPhase = 'opening' | 'active' | 'closing' | 'closed';
+
+interface SideConversationState {
+  phase: SideConversationPhase;
+  updatedAt: number;
+  expiresAt: number;
+  generation?: string;
+}
+
+function sideConversationState(
+  map: Map<string, SideConversationState>,
+  scope: string,
+): SideConversationState | undefined {
+  const state = map.get(scope);
+  if (!state) return undefined;
+  if (state.expiresAt <= Date.now()) {
+    map.delete(scope);
+    return undefined;
+  }
+  return state;
+}
+
+function saveSideConversationState(
+  map: Map<string, SideConversationState>,
+  scope: string,
+  phase: SideConversationPhase,
+  generation?: string,
+): SideConversationState {
+  const now = Date.now();
+  const next: SideConversationState = {
+    phase,
+    updatedAt: now,
+    expiresAt:
+      now +
+      (phase === 'opening'
+        ? SIDE_OPENING_TTL_MS
+        : phase === 'closing'
+          ? SIDE_CLOSING_TTL_MS
+          : phase === 'closed'
+            ? SIDE_CLOSED_TTL_MS
+            : SIDE_CONVERSATION_TTL_MS),
+    ...(generation ? { generation } : {}),
+  };
+  map.set(scope, next);
+  return next;
+}
+
+function clearSideConversationState(map: Map<string, SideConversationState>, scope: string): void {
+  map.delete(scope);
+}
+
+async function refreshSideConversationState(
+  map: Map<string, SideConversationState>,
+  scope: string,
+  agent: AgentAdapter,
+  workspaces: WorkspaceStore,
+  controls: Controls,
+): Promise<SideConversationState | undefined> {
+  const state = sideConversationState(map, scope);
+  const diagnostics = await agent.tmux?.diagnostics?.(
+    scope,
+    workspaces.cwdFor(scope) ?? controls.profileConfig.workspaces.default,
+  ).catch((err) => {
+    log.info('agent-live', 'side-state-refresh-failed', { scope, err: String(err) });
+    return undefined;
+  });
+  if (diagnostics?.sideConversation === true) {
+    // A confirmed `/btw out` owns the transition. Ignore a stale side footer
+    // until a main-thread frame arrives or the short tombstone expires.
+    if (state?.phase === 'closed') return state;
+    // Recover side ownership after a bridge restart or a stale reconciliation
+    // frame cleared the in-memory marker. The terminal footer is the durable
+    // source of truth for the shared live session.
+    return saveSideConversationState(map, scope, 'active', state?.generation);
+  }
+  if (diagnostics?.sideConversation === false) {
+    // During an explicit side transition, `false` is commonly just the
+    // previous main-thread frame: the helper can answer before Codex paints
+    // the side footer. Keep the transition marker until the side run's
+    // reconciliation has either confirmed success or recorded a failure.
+    if (state?.phase === 'opening' || state?.phase === 'closing') {
+      return state;
+    }
+    // Do not let one lagging capture immediately hijack a body that follows a
+    // just-opened side panel. A later false observation (after the grace
+    // window) still releases a manually exited side session.
+    if (state?.phase === 'active' && Date.now() - state.updatedAt < SIDE_MAIN_CONFIRM_GRACE_MS) {
+      return state;
+    }
+    if (state) {
+      clearSideConversationState(map, scope);
+      log.info('agent-live', 'side-state-cleared-terminal-main', { scope });
+    }
+    return undefined;
+  }
+  // Older adapters do not expose sideConversation. Preserve the marker in that
+  // case; the marker still expires and is refreshed after every side command.
+  return state;
+}
+
+async function reconcileSideConversationState(input: {
+  map: Map<string, SideConversationState>;
+  scope: string;
+  agent: AgentAdapter;
+  inputMode: 'side' | 'side-exit';
+  failed: boolean;
+  exitConfirmed?: boolean;
+  cwd: string;
+}): Promise<void> {
+  const before = sideConversationState(input.map, input.scope);
+  const diagnostics = await input.agent.tmux?.diagnostics?.(input.scope, input.cwd).catch((err) => {
+    log.info('agent-live', 'side-state-reconcile-failed', {
+      scope: input.scope,
+      err: String(err),
+    });
+    return undefined;
+  });
+  if (input.inputMode === 'side-exit') {
+    if (input.exitConfirmed === true || diagnostics?.sideConversation === false) {
+      saveSideConversationState(input.map, input.scope, 'closed', before?.generation);
+      log.info('agent-live', 'side-state-closed-exit', { scope: input.scope });
+      return;
+    }
+    if (diagnostics?.sideConversation === true || input.exitConfirmed === false || before) {
+      saveSideConversationState(input.map, input.scope, 'active', before?.generation);
+    }
+    return;
+  }
+
+  if (diagnostics?.sideConversation === false) {
+    // A side operation owns the transition and may finish before the next
+    // tmux capture paints the side footer. Preserve a successful/active side
+    // marker through that stale main-thread frame. A failed entry has no side
+    // ownership to preserve; a failed body keeps an already confirmed side so
+    // the user can retry the body without re-opening the panel.
+    if (input.inputMode === 'side' && before?.phase === 'active') {
+      saveSideConversationState(input.map, input.scope, 'active', before.generation);
+      return;
+    }
+    if (input.inputMode === 'side' && before?.phase === 'opening' && !input.failed) {
+      saveSideConversationState(input.map, input.scope, 'active', before.generation);
+      return;
+    }
+    // If an entry failed while the terminal is visibly in the main thread, do
+    // not leave a marker that would hijack the next ordinary task.
+    clearSideConversationState(input.map, input.scope);
+    log.info('agent-live', 'side-state-cleared-main', { scope: input.scope });
+    return;
+  }
+  if (input.failed && before?.phase !== 'active') {
+    clearSideConversationState(input.map, input.scope);
+    log.info('agent-live', 'side-state-cleared-failed-entry', { scope: input.scope });
+    return;
+  }
+  // A successful side entry/body leaves Codex in side mode. When an older
+  // adapter has no diagnostics hook, the side run itself is still sufficient
+  // evidence; the next refresh will revalidate if the hook becomes available.
+  saveSideConversationState(input.map, input.scope, 'active', before?.generation);
 }
 
 function liveInteractionState(
@@ -1174,6 +1404,7 @@ interface RunBatchDeps {
   callbackAuth?: CallbackAuth;
   activePolicyFingerprints: Map<string, string>;
   liveInteractionByScope: Map<string, LiveInteractionState>;
+  sideConversationByScope: Map<string, SideConversationState>;
   artifactBroker: ArtifactBroker;
   pending: PendingQueue;
   scope: string;
@@ -1197,6 +1428,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     callbackAuth,
     activePolicyFingerprints,
     liveInteractionByScope,
+    sideConversationByScope,
     artifactBroker,
     pending,
     scope,
@@ -1299,6 +1531,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const nativeInputMode = nativeCommand
     ? liveInputModeForBatch(batch, nativeCommand)
     : undefined;
+  const sideInputMode = nativeInputMode === 'side' || nativeInputMode === 'side-exit';
   if (
     useLiveSession &&
     (nativeInputMode === 'side' || nativeInputMode === 'side-exit') &&
@@ -1405,6 +1638,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     },
   });
   if (!flow.ok) {
+    if (sideInputMode) {
+      clearSideConversationState(sideConversationByScope, scope);
+    }
     if (!useLiveSession) artifactBroker.revoke(artifactGrant.token);
     log.info('run-flow', 'rejected', { scope, code: flow.rejectReason.code });
     log.warn('policy', 'denied', {
@@ -1439,6 +1675,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   activePolicyFingerprints.set(scope, flow.policy.policyFingerprint);
   const handle = execution.handle;
   const eventStream = execution.subscribe();
+  let sideRunFailed = false;
+  let sideExitConfirmed: boolean | undefined;
   if (flow.resumeFrom) {
     log.info('session', 'resume', { sessionId: flow.resumeFrom, cwd });
   } else {
@@ -1511,6 +1749,14 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     }
   }
   const observeLiveEvent = (evt: AgentEvent, opts: { sendInteractionCard?: boolean } = {}): void => {
+    // `recordSession` is intentionally limited to system events. Side
+    // lifecycle evidence arrives as text/error events, so capture it here
+    // before the interaction-only observer returns early.
+    if (sideInputMode && evt.type === 'error') sideRunFailed = true;
+    if (nativeInputMode === 'side-exit' && evt.type === 'text') {
+      if (evt.delta.includes('已退出 Codex btw side conversation')) sideExitConfirmed = true;
+      if (evt.delta.includes('未确认处于 Codex btw side conversation')) sideExitConfirmed = false;
+    }
     const isStartupInteraction = evt.type === 'interactive' && evt.phase === 'startup';
     if (evt.type !== 'text' && evt.type !== 'interactive') return;
     const delta = evt.type === 'text' ? evt.delta : evt.text;
@@ -1715,6 +1961,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       log.info('agent-live', 'picker-empty-final-suppressed', { scope, input: nativeCommand });
       return { ...state, blocks: [] };
     }
+    // Native commands can return a real acknowledgement or result (for
+    // example `/btw out` confirms that the main thread resumed). Preserve it;
+    // the generic acknowledgement is only for a command that produced no
+    // usable terminal text at all.
+    if (currentText.trim()) return state;
     return {
       ...state,
       blocks: [
@@ -2450,6 +2701,17 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       } else if (closesPicker && pickerObservedAfterInput) {
         log.info('agent-live', 'picker-advance', { scope, input: nativeCommand });
       }
+    }
+    if (sideInputMode) {
+      await reconcileSideConversationState({
+        map: sideConversationByScope,
+        scope,
+        agent,
+        inputMode: nativeInputMode!,
+        failed: sideRunFailed,
+        exitConfirmed: sideExitConfirmed,
+        cwd,
+      });
     }
     if (previousActivePolicyFingerprint) {
       activePolicyFingerprints.set(scope, previousActivePolicyFingerprint);
