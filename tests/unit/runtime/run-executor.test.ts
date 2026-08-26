@@ -64,6 +64,49 @@ describe('RunExecutor policy runtime options', () => {
 
     await collect(execution.subscribe());
   });
+
+  it('runs a side conversation without replacing the active scope run', async () => {
+    const agent = new FakeAgentAdapter({
+      events: [
+        [],
+        [{ type: 'text', delta: 'side answer' }, { type: 'done', terminationReason: 'normal' }],
+      ],
+    });
+    const activeRuns = new ActiveRuns();
+    const executor = new RunExecutor({
+      agent,
+      pool: new ProcessPool(() => 2),
+      activeRuns,
+      createRunId: (() => {
+        let n = 0;
+        return () => `run-${++n}`;
+      })(),
+      now: () => 1000,
+      postDoneExitGraceMs: 10,
+    });
+
+    const main = await executor.submit({
+      scopeId: 'scope-side',
+      policy: policy(),
+      sessionMode: 'live',
+    });
+    const side = await executor.submit({
+      scopeId: 'scope-side',
+      policy: policy({ prompt: '/btw inspect the running goal' }),
+      sessionMode: 'live',
+      liveInputMode: 'side',
+    });
+
+    expect(agent.sideRunOptions).toHaveLength(1);
+    expect(activeRuns.get('scope-side')).toBe(main.handle);
+    expect(await collect(side.subscribe())).toEqual([
+      { type: 'text', delta: 'side answer' },
+      { type: 'done', terminationReason: 'normal' },
+    ]);
+    expect(activeRuns.get('scope-side')).toBe(main.handle);
+
+    await main.stop();
+  });
 });
 
 function policy(overrides: Partial<RunPolicyAllow> = {}): RunPolicyAllow {

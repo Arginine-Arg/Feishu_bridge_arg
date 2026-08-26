@@ -424,6 +424,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           await runAgentBatch({
             channel,
             agent,
+            activeRuns,
             executor,
             bridgeAgent,
             sessions,
@@ -949,7 +950,10 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
       command: agentMsg.content.trim().slice(0, 120),
     });
     if (nativeInputMode === 'side' || nativeInputMode === 'side-exit') {
-      activeRuns.detach(scope);
+      // Side conversations share the live terminal but are observed through
+      // a separate run. Never detach the main handle here: doing so removes
+      // its EventFanout listener and makes the pursuing goal appear to stop.
+      log.info('intake', 'native-side-coexists-with-main', { scope, inputMode: nativeInputMode });
     } else {
       activeRuns.interrupt(scope);
     }
@@ -1157,6 +1161,7 @@ function clearLiveInteractionState(
 interface RunBatchDeps {
   channel: LarkChannel;
   agent: AgentAdapter;
+  activeRuns: ActiveRuns;
   executor: RunExecutor;
   bridgeAgent: BridgeAgent;
   sessions: SessionStore;
@@ -1179,6 +1184,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const {
     channel,
     agent,
+    activeRuns,
     executor,
     bridgeAgent,
     sessions,
@@ -1200,6 +1206,20 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const firstMsg = batch[0];
   const lastMsg = batch[batch.length - 1];
   if (!firstMsg || !lastMsg) return;
+
+  // A priority `/btw` batch can be flushed while the main live run remains
+  // active. Do not consume ordinary messages that happened to be queued
+  // behind it; put them back and let the main run release the scope normally.
+  const firstInputMode = liveInputModeForMessage(firstMsg);
+  const isSideBatch = firstInputMode === 'side' || firstInputMode === 'side-exit';
+  if (!isSideBatch && activeRuns.get(scope)) {
+    for (const message of batch) pending.push(scope, message);
+    log.info('flush', 'ordinary-batch-deferred-during-side', {
+      scope,
+      batchSize: batch.length,
+    });
+    return;
+  }
 
   const chatId = firstMsg.chatId;
   const threadId = firstMsg.threadId;
@@ -1415,6 +1435,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const outputModeAtStart = sessions.getOutputMode(scope);
   const currentOutputMode = (): OutputMode => sessions.getOutputMode(scope);
   log.info('delivery', 'run-policy', { scope, mode: outputModeAtStart });
+  const previousActivePolicyFingerprint = activePolicyFingerprints.get(scope);
   activePolicyFingerprints.set(scope, flow.policy.policyFingerprint);
   const handle = execution.handle;
   const eventStream = execution.subscribe();
@@ -1995,12 +2016,15 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           await deliverLongReply();
           return;
         }
-        await channel.send(
-          chatId,
-          {
-            card: renderLiveAwareReplyCard(replyState, cardRenderOptions, useLiveSession ? 'live' : 'agent'),
-          },
-          sendOpts,
+        await sendWithRetry(
+          () => channel.send(
+            chatId,
+            {
+              card: renderLiveAwareReplyCard(replyState, cardRenderOptions, useLiveSession ? 'live' : 'agent'),
+            },
+            sendOpts,
+          ),
+          { scope, chunk: 0, total: 0, warning: true },
         );
       };
       let lastSentCardSerialized: string | undefined;
@@ -2221,7 +2245,10 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         }
         const body = renderText(replyState, { activityMode: 'summary' });
         if (body.trim()) {
-          await channel.send(chatId, { markdown: body }, sendOpts);
+          await sendWithRetry(
+            () => channel.send(chatId, { markdown: body }, sendOpts),
+            { scope, chunk: 0, total: 0, warning: true },
+          );
         }
       };
       let lastSentMarkdownText: string | undefined;
@@ -2424,7 +2451,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         log.info('agent-live', 'picker-advance', { scope, input: nativeCommand });
       }
     }
-    activePolicyFingerprints.delete(scope);
+    if (previousActivePolicyFingerprint) {
+      activePolicyFingerprints.set(scope, previousActivePolicyFingerprint);
+    } else {
+      activePolicyFingerprints.delete(scope);
+    }
     scheduleWorkingReactionCleanup(channel, lastMsg.messageId, reactionPromise);
   }
 }
@@ -2622,6 +2653,13 @@ async function processAgentStream(
       // serialized delivery queue. Do not let a stale bridge process update a
       // card after its replacement has attached to this conversation.
       if (!handle.detached) await flush(snapshot);
+    }).catch((err) => {
+      // A transient Feishu patch failure must not abort state reduction. The
+      // terminal state is still rendered by the final fallback path.
+      log.warn('stream', 'flush-rejected', {
+        scope,
+        err: err instanceof Error ? err.message : String(err),
+      });
     });
   };
   let streamFailure: unknown;
@@ -2960,6 +2998,11 @@ export async function runRollingReplyStream(input: {
             });
           }
         });
+        // The stream producer can remain inside a slow CardKit update after
+        // the agent state has already reached terminal. Never return empty in
+        // that case: publish the fully rendered final state through the
+        // ordinary send path so a late/failed patch cannot erase the answer.
+        await runFallbackReply(input.mode, first.state, input.fallback);
         return;
       }
       if (!terminal.ok) throw terminal.err;
@@ -3618,12 +3661,20 @@ async function sendCompleteReplyChunks(input: {
   if (promoteToCards) {
     const chunks = splitAnswerForDelivery(input.text, LONG_REPLY_CHUNK_BYTES);
     if (chunks.length === 0) return;
+    const failedChunks: number[] = [];
     for (const [index, chunk] of chunks.entries()) {
-      await input.channel.send(
-        input.chatId,
-        { card: answerCard(chunk, index + 1, chunks.length) },
-        input.sendOpts,
-      );
+      try {
+        await sendWithRetry(
+          () => input.channel.send(
+            input.chatId,
+            { card: answerCard(chunk, index + 1, chunks.length) },
+            input.sendOpts,
+          ),
+          { scope: input.scope, chunk: index + 1, total: chunks.length },
+        );
+      } catch {
+        failedChunks.push(index + 1);
+      }
     }
     await ensureDeliveredTail({
       channel: input.channel,
@@ -3633,6 +3684,16 @@ async function sendCompleteReplyChunks(input: {
       delivered: chunks.flat().map((block) => block.content).join('\n'),
       scope: input.scope,
     });
+    if (failedChunks.length > 0) {
+      await sendWithRetry(
+        () => input.channel.send(
+          input.chatId,
+          { markdown: `⚠️ 部分长消息投递失败（分段 ${failedChunks.join('、')}），已完成自动重试。请发送 /tmux tail 查看原始输出。` },
+          input.sendOpts,
+        ),
+        { scope: input.scope, chunk: 0, total: chunks.length, warning: true },
+      ).catch(() => undefined);
+    }
     log.info('outbound', 'long-reply-split', {
       scope: input.scope,
       chunks: chunks.length,
@@ -3645,12 +3706,20 @@ async function sendCompleteReplyChunks(input: {
 
   const chunks = splitTextForDelivery(input.text, LONG_REPLY_CHUNK_BYTES);
   if (chunks.length === 0) return;
+  const failedChunks: number[] = [];
   for (const [index, chunk] of chunks.entries()) {
     const content =
       chunks.length > 1
         ? `（${index + 1}/${chunks.length}）\n\n${chunk}`
         : chunk;
-    await input.channel.send(input.chatId, { markdown: content }, input.sendOpts);
+    try {
+      await sendWithRetry(
+        () => input.channel.send(input.chatId, { markdown: content }, input.sendOpts),
+        { scope: input.scope, chunk: index + 1, total: chunks.length },
+      );
+    } catch {
+      failedChunks.push(index + 1);
+    }
   }
   await ensureDeliveredTail({
     channel: input.channel,
@@ -3660,12 +3729,47 @@ async function sendCompleteReplyChunks(input: {
     delivered: chunks.join('\n'),
     scope: input.scope,
   });
+  if (failedChunks.length > 0) {
+    await sendWithRetry(
+      () => input.channel.send(
+        input.chatId,
+        { markdown: `⚠️ 部分长消息投递失败（分段 ${failedChunks.join('、')}），已完成自动重试。请发送 /tmux tail 查看原始输出。` },
+        input.sendOpts,
+      ),
+      { scope: input.scope, chunk: 0, total: chunks.length, warning: true },
+    ).catch(() => undefined);
+  }
   log.info('outbound', 'long-reply-split', {
     scope: input.scope,
     chunks: chunks.length,
     mode: 'markdown',
     bytes: Buffer.byteLength(input.text, 'utf8'),
   });
+}
+
+async function sendWithRetry(
+  send: () => Promise<unknown>,
+  meta: { scope: string; chunk: number; total: number; warning?: boolean },
+): Promise<void> {
+  const maxAttempts = 3;
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      await send();
+      if (attempt > 1) log.info('outbound', 'chunk-recovered', { ...meta, attempt });
+      return;
+    } catch (err) {
+      lastError = err;
+      log.warn('outbound', 'chunk-send-retry', {
+        ...meta,
+        attempt,
+        maxAttempts,
+        err: err instanceof Error ? err.message : String(err),
+      });
+      if (attempt < maxAttempts) await delay(250 * attempt);
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError ?? 'message send failed'));
 }
 
 async function ensureDeliveredTail(input: {
@@ -3699,12 +3803,15 @@ async function ensureDeliveredTail(input: {
     tailCovered: covered,
   });
   if (covered) return;
-  await input.channel.send(
-    input.chatId,
-    {
-      markdown: `⚠️ 正文尾部完整性校验发现缺失，补发最后内容：\n\n${tail.slice(-8_000)}`,
-    },
-    input.sendOpts,
+  await sendWithRetry(
+    () => input.channel.send(
+      input.chatId,
+      {
+        markdown: `⚠️ 正文尾部完整性校验发现缺失，补发最后内容：\n\n${tail.slice(-8_000)}`,
+      },
+      input.sendOpts,
+    ),
+    { scope: input.scope, chunk: 0, total: 0, warning: true },
   );
   log.warn('outbound', 'delivery-tail-recovered', { scope: input.scope, tailLines: Math.min(8, sourceLines.length) });
 }

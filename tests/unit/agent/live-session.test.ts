@@ -1848,15 +1848,18 @@ setInterval(() => {}, 1000);
     try {
       expect((await goalIterator.next()).value).toMatchObject({ type: 'system' });
       expect((await goalIterator.next()).value).toMatchObject({ type: 'text' });
-      expect(activeRuns.detach(scope)).toBe(true);
-      await handle.detachPromise;
+      // The side observer must coexist with the main handle. Detaching here
+      // reproduces the historical bug where the bridge stopped forwarding the
+      // pursuing goal as soon as `/btw` was received.
+      expect(activeRuns.get(scope)).toBe(handle);
 
-      const sideEntry = await collect(session.run('running-goal-btw-entry', '/btw', dir, 'side').events);
+      const sideEntry = await collect(session.runSide('running-goal-btw-entry', '/btw', dir, 'side').events);
       expect(textOf(sideEntry)).toContain('已进入 Codex btw side conversation');
-      const sideEvents = await collect(session.run('running-goal-btw-body', body, dir).events);
+      const sideEvents = await collect(session.runSide('running-goal-btw-body', `/btw ${body}`, dir, 'side').events);
       const sideText = textOf(sideEvents);
       expect(sideText).toContain('• side-answer: ' + body);
       expect(sideText).not.toContain('未确认 Codex 已进入 side conversation');
+      expect(activeRuns.get(scope)).toBe(handle);
       const traceText = await readFile(trace, 'utf8');
       expect(traceText).toContain('side-body-with-goal-active');
       expect(traceText).not.toMatch(/ctrl-c|destructive-key/);
@@ -1865,6 +1868,112 @@ setInterval(() => {}, 1000);
       await pool.closeAll();
     }
   }, 20_000);
+
+  tmuxIt('replays the main completion after a side conversation exits', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-btw-main-resume-test-'));
+    const bin = join(dir, 'fake-tmux-btw-main-resume-agent.mjs');
+    const trace = join(dir, 'input-trace.txt');
+    const body = 'side question while the goal is running';
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs';
+process.stdin.setEncoding('utf8');
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+let draft = '';
+let goalActive = false;
+let goalDone = false;
+let side = false;
+function screen(lines) {
+  process.stdout.write('\\x1b[2J\\x1b[H' + lines.join('\\n') + '\\n');
+}
+function mainFooter() {
+  return 'gpt-5.6-terra xhigh · /tmp · Main [default]';
+}
+function sideFooter() {
+  return 'gpt-5.6-terra xhigh · /tmp · Side from main thread · ctrl + / to switch · ctrl + c to close';
+}
+screen([mainFooter(), '›']);
+process.stdin.on('data', (chunk) => {
+  for (const char of chunk) {
+    if (char === '\\x03') {
+      appendFileSync(${JSON.stringify(trace)}, 'ctrl-c\\n');
+      if (side) {
+        side = false;
+        draft = '';
+        screen(goalDone ? ['• main goal completed', mainFooter(), '›'] : [mainFooter(), '›']);
+      }
+      continue;
+    }
+    if (char !== '\\r' && char !== '\\n') {
+      draft += char;
+      continue;
+    }
+    const line = draft;
+    draft = '';
+    if (!goalActive && line === 'long goal') {
+      appendFileSync(${JSON.stringify(trace)}, 'goal\\n');
+      goalActive = true;
+      screen(['• Working (12s • esc to interrupt)', mainFooter()]);
+      continue;
+    }
+    if (goalActive && !side && line === '/btw') {
+      side = true;
+      screen([sideFooter(), '›']);
+      setTimeout(() => { goalDone = true; }, 180);
+      continue;
+    }
+    if (goalActive && side && line === ${JSON.stringify(body)}) {
+      appendFileSync(${JSON.stringify(trace)}, 'side-body\\n');
+      screen(['• side answer complete', sideFooter(), '›']);
+      continue;
+    }
+    if (line) screen(['unexpected:' + JSON.stringify(line), side ? sideFooter() : mainFooter(), '›']);
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-btw-main-resume-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-btw-main-resume',
+      tmuxScopeId: 'tmux-btw-main-resume-scope',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 180,
+      outputFlushMs: 20,
+      startupTimeoutMs: 3_000,
+    });
+
+    const goal = session.run('main-goal', 'long goal', dir);
+    const goalEvents = collect(goal.events);
+    try {
+      await waitForFileText(trace, 'goal\n', 5_000);
+      const sideEntry = await collect(session.runSide('side-entry', '/btw', dir, 'side').events);
+      expect(textOf(sideEntry)).toContain('已进入 Codex btw side conversation');
+      const sideAnswer = await collect(
+        session.runSide('side-body', `/btw ${body}`, dir, 'side').events,
+      );
+      expect(textOf(sideAnswer)).toContain('• side answer complete');
+
+      const sideExit = await collect(session.runSide('side-exit', '/btw out', dir, 'side-exit').events);
+      expect(textOf(sideExit)).toContain('已退出 Codex btw side conversation');
+
+      const mainEvents = await goalEvents;
+      expect(textOf(mainEvents)).toContain('• main goal completed');
+      expect(mainEvents.some((event) => event.type === 'done')).toBe(true);
+      expect(await readFile(trace, 'utf8')).toBe('goal\nside-body\nctrl-c\n');
+    } finally {
+      await pool.closeAll();
+      await goalEvents.catch(() => undefined);
+    }
+  }, 30_000);
 
   it('ignores stale status panels for other commands and strips stale goal usage from status', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-stale-status-panel-test-'));

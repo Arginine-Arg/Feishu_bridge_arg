@@ -97,4 +97,29 @@ describe('rolling reply stream', () => {
       vi.useRealTimers();
     }
   });
+
+  it('falls back to the final state when the stream producer hangs after terminal', async () => {
+    vi.useFakeTimers();
+    try {
+      const finalState = reduce(initialState, { type: 'done', terminationReason: 'normal' });
+      const fallback = vi.fn(async () => {});
+      const renderDone = Promise.resolve(finalState);
+      const running = runRollingReplyStream({
+        mode: 'markdown',
+        renderDone,
+        rolloverMs: 1_000,
+        startSegment: async (_segmentDone, markProducerStarted) => {
+          markProducerStarted();
+          await new Promise<void>(() => {});
+        },
+        fallback,
+      });
+
+      await vi.advanceTimersByTimeAsync(3_000);
+      await running;
+      expect(fallback).toHaveBeenCalledWith(finalState);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

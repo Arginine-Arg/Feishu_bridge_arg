@@ -305,11 +305,15 @@ export class CodexAdapter implements AgentAdapter {
     };
   }
 
+  runSide(opts: AgentRunOptions): AgentRun {
+    return this.runLive(opts, true);
+  }
+
   async shutdown(): Promise<void> {
     await this.liveSessions.detachAll();
   }
 
-  private runLive(opts: AgentRunOptions): AgentRun {
+  private runLive(opts: AgentRunOptions, side = false): AgentRun {
     if (!opts.cwd) {
       throw new Error('cwd is required for CodexAdapter.run');
     }
@@ -372,6 +376,9 @@ export class CodexAdapter implements AgentAdapter {
         });
       },
     });
+    if (side && (opts.liveInputMode === 'side' || opts.liveInputMode === 'side-exit')) {
+      return session.runSide(opts.runId, opts.prompt, opts.cwd, opts.liveInputMode);
+    }
     return session.run(opts.runId, opts.prompt, opts.cwd, opts.liveInputMode);
   }
 }

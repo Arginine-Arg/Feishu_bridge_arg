@@ -76,12 +76,22 @@ export class RunExecutor {
         this.activeRuns.newRunsPauseReason() ?? 'new runs are temporarily paused',
       );
     }
-    const releaseScope = this.activeRuns.reserve(input.scopeId);
+    const concurrentSide =
+      (input.liveInputMode === 'side' || input.liveInputMode === 'side-exit') &&
+      Boolean(this.activeRuns.get(input.scopeId)) &&
+      typeof this.agent.runSide === 'function';
+    const releaseScope = concurrentSide ? () => {} : this.activeRuns.reserve(input.scopeId);
     if (!releaseScope) {
       throw new RunRejected('run-already-active', 'another run is already active for this scope');
     }
 
-    const release = input.nowait ? this.pool.tryAcquire() : await this.pool.acquire();
+    // A side conversation multiplexes the existing live process; it is not a
+    // second agent process and must never wait behind a one-slot process pool.
+    const release = concurrentSide
+      ? () => {}
+      : input.nowait
+        ? this.pool.tryAcquire()
+        : await this.pool.acquire();
     if (!release) {
       releaseScope();
       throw new RunRejected('pool-full', 'process pool is full');
@@ -133,7 +143,7 @@ export class RunExecutor {
       );
     }
     try {
-      run = this.agent.run(runOptions);
+      run = concurrentSide ? this.agent.runSide!(runOptions) : this.agent.run(runOptions);
     } catch (err) {
       release();
       releaseScope();
@@ -156,22 +166,31 @@ export class RunExecutor {
     });
 
     let handle: RunHandle;
-    try {
-      handle = this.activeRuns.register(input.scopeId, run);
-    } catch (err) {
-      releaseScope();
-      release();
-      await run.stop().catch(() => {});
-      throw new RunRejected(
-        'run-already-active',
-        err instanceof Error ? err.message : 'another run is already active for this scope',
-      );
+    if (concurrentSide) {
+      handle = {
+        run,
+        interrupted: false,
+        detached: false,
+        stopRequested: false,
+      };
+    } else {
+      try {
+        handle = this.activeRuns.register(input.scopeId, run);
+      } catch (err) {
+        releaseScope();
+        release();
+        await run.stop().catch(() => {});
+        throw new RunRejected(
+          'run-already-active',
+          err instanceof Error ? err.message : 'another run is already active for this scope',
+        );
+      }
     }
     let cleaned = false;
     const cleanup = async (waitForExit: boolean): Promise<void> => {
       if (cleaned) return;
       cleaned = true;
-      this.activeRuns.unregister(input.scopeId, run);
+      if (!concurrentSide) this.activeRuns.unregister(input.scopeId, run);
       release();
       if (handle.detached) return;
       if (waitForExit) {

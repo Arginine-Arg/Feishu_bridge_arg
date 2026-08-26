@@ -124,7 +124,12 @@ const NORMAL_SUBMIT_RETRY_MAX_WAIT_MS = 120_000;
 // signal. Keep the listener alive for several capture ticks after the native
 // editor becomes ready so a final scrollback frame cannot arrive after the
 // bridge has already emitted `done`.
-const TMUX_FINAL_SETTLE_MS = 1_000;
+const TMUX_FINAL_SETTLE_MS = 2_500;
+// A tmux capture can lag the native CLI by several polling intervals (and a
+// full history reconcile can arrive seconds after the footer).  The quiet
+// window is restarted whenever a frame arrives; the hard cap prevents a
+// broken helper from keeping a completed run registered forever.
+const TMUX_FINAL_SETTLE_MAX_MS = 15_000;
 const MAX_TURN_OUTPUT_CHARS = 120_000;
 const DEFAULT_PTY_ROWS = '48';
 const DEFAULT_PTY_COLUMNS = '120';
@@ -199,6 +204,9 @@ export class LiveTerminalSession {
   private primed = false;
   private startedAt = 0;
   private activeTurnCleanup: (() => void) | undefined;
+  private concurrentSideDepth = 0;
+  private pendingMainResumeOutput: LiveOutput | undefined;
+  private resumeMainAfterSide: ((event: LiveOutput) => void) | undefined;
   private readonly pendingTerminalOutput: LiveOutput[] = [];
   private lastTerminalSnapshot = '';
   private lastTerminalHistory: LiveHistorySnapshot | undefined;
@@ -285,7 +293,29 @@ export class LiveTerminalSession {
     this.turnPhase = 'starting';
     void this.start();
     const interruption: LiveTurnInterrupt = { requested: false, detached: false };
-    const events = this.turnEvents(prompt, cwd, inputMode, interruption);
+    const events = this.turnEvents(prompt, cwd, inputMode, interruption, false);
+    return {
+      runId,
+      events,
+      stop: async () => {
+        if (interruption.requested) return;
+        interruption.requested = true;
+        interruption.cancel?.();
+      },
+      detach: async () => {
+        if (interruption.detached) return;
+        interruption.detached = true;
+        interruption.detach?.();
+      },
+      waitForExit: async () => true,
+    };
+  }
+
+  /** Observe a side conversation without replacing the main live turn. */
+  runSide(runId: string, prompt: string, cwd: string, inputMode: 'side' | 'side-exit'): AgentRun {
+    void this.start();
+    const interruption: LiveTurnInterrupt = { requested: false, detached: false };
+    const events = this.turnEvents(prompt, cwd, inputMode, interruption, true);
     return {
       runId,
       events,
@@ -479,6 +509,7 @@ export class LiveTerminalSession {
     cwd: string,
     inputMode?: LiveTerminalInputMode,
     interruption: LiveTurnInterrupt = { requested: false, detached: false },
+    concurrentSide = false,
   ): AsyncGenerator<AgentEvent> {
     yield { type: 'system', cwd };
     await this.start();
@@ -492,6 +523,9 @@ export class LiveTerminalSession {
       return;
     }
     const turnPrompt = sideMode ? sidePrompt ?? '' : prompt;
+    const previousPhase = this.turnPhase;
+    let finishDeferredUntilMainResumes = false;
+    if (concurrentSide) this.concurrentSideDepth += 1;
     this.turnPhase = 'awaiting-input';
     const idleMs =
       commandMode
@@ -529,6 +563,7 @@ export class LiveTerminalSession {
     let sideBodyAwaitingSubmit = false;
     let settlingTimer: ReturnType<typeof setTimeout> | undefined;
     let settling = false;
+    let settlingStartedAt = 0;
     const inputGraceMs = this.inputGraceMs(commandMode);
 
     if (commandMode) {
@@ -623,22 +658,50 @@ export class LiveTerminalSession {
     };
     const finish = (failureMessage?: string): void => {
       if (done) return;
-      if (failureMessage || this.terminalInfo?.backend !== 'tmux') {
+      if (this.concurrentSideDepth > 0 && !concurrentSide && !failureMessage) {
+        // A side conversation temporarily owns the TUI. The main observer
+        // must not turn a side redraw into an idle completion. Keep the
+        // completion request pending; the side-exit frame will wake the main
+        // observer with a fresh main-thread snapshot.
+        finishDeferredUntilMainResumes = true;
+        return;
+      }
+      if (failureMessage || sideExitMode || this.terminalInfo?.backend !== 'tmux') {
         finalize(failureMessage);
         return;
       }
       if (settling) return;
       settling = true;
+      settlingStartedAt = Date.now();
       this.turnPhase = 'settling';
       if (timer) clearTimeout(timer);
       timer = undefined;
       // Make already-rendered output visible immediately, then leave the
       // listener attached for late history/snapshot frames.
       flushOutput();
-      settlingTimer = setTimeout(() => {
-        settlingTimer = undefined;
-        if (!done) finalize();
-      }, TMUX_FINAL_SETTLE_MS);
+      const armSettlement = (): void => {
+        if (settlingTimer) clearTimeout(settlingTimer);
+        const elapsed = Date.now() - settlingStartedAt;
+        if (elapsed >= TMUX_FINAL_SETTLE_MAX_MS) {
+          settlingTimer = undefined;
+          if (!done) {
+            log.warn('agent-live', 'tmux-settlement-cap-reached', {
+              capMs: TMUX_FINAL_SETTLE_MAX_MS,
+            });
+            finalize();
+          }
+          return;
+        }
+        settlingTimer = setTimeout(() => {
+          settlingTimer = undefined;
+          if (!done) {
+            // One last capture interval is deliberately required to be quiet;
+            // any late history frame reopens the settlement in onData().
+            finalize();
+          }
+        }, Math.min(TMUX_FINAL_SETTLE_MS, TMUX_FINAL_SETTLE_MAX_MS - elapsed));
+      };
+      armSettlement();
     };
     const reopenSettlement = (): void => {
       if (!settling) return;
@@ -769,6 +832,17 @@ export class LiveTerminalSession {
     };
 
     const onData = (event: LiveOutput): void => {
+      if (this.concurrentSideDepth > 0 && !concurrentSide) {
+        // Side output belongs to the side subscriber. Remember only a frame
+        // that proves the TUI has returned to the main conversation; replaying
+        // a side footer into the goal stream would contaminate the final
+        // answer and could falsely complete the goal.
+        const terminalText = event.terminalText ?? event.text;
+        if (terminalText && isLiveMainConversation(terminalText)) {
+          this.pendingMainResumeOutput = event;
+        }
+        return;
+      }
       this.turnLastOutputAt = Date.now();
       if (!acceptingOutput) {
         const terminalText = event.terminalText ?? event.text;
@@ -996,11 +1070,31 @@ export class LiveTerminalSession {
       if (this.activeTurnCleanup === cleanupTurn) this.activeTurnCleanup = undefined;
       if (interruption.cancel === cancelCurrentTurn) interruption.cancel = undefined;
       if (interruption.detach === cleanupTurn) interruption.detach = undefined;
+      if (this.resumeMainAfterSide === resumeMainCallback) this.resumeMainAfterSide = undefined;
       wake?.();
     };
 
-    this.activeTurnCleanup?.();
-    this.activeTurnCleanup = cleanupTurn;
+    let resumeMainCallback: ((event: LiveOutput) => void) | undefined;
+    if (!concurrentSide) {
+      this.activeTurnCleanup?.();
+      this.activeTurnCleanup = cleanupTurn;
+      resumeMainCallback = (event: LiveOutput): void => {
+        if (done) return;
+        this.pendingMainResumeOutput = undefined;
+        onData(event);
+        if (!finishDeferredUntilMainResumes || done) return;
+        finishDeferredUntilMainResumes = false;
+        const terminalText = event.terminalText ?? event.text;
+        if (
+          !timer &&
+          !isLiveTerminalBusy(terminalText) &&
+          !isLiveTerminalInteraction(terminalText)
+        ) {
+          arm(idleMs);
+        }
+      };
+      this.resumeMainAfterSide = resumeMainCallback;
+    }
     interruption.cancel = cancelCurrentTurn;
     interruption.detach = cleanupTurn;
     this.emitter.on('data', onData);
@@ -1154,6 +1248,27 @@ export class LiveTerminalSession {
         if (event) yield event;
       }
     } finally {
+      if (concurrentSide) {
+        this.concurrentSideDepth = Math.max(0, this.concurrentSideDepth - 1);
+        if (this.concurrentSideDepth === 0) {
+          const terminalText = this.lastTerminalSnapshot;
+          const mainFrame =
+            this.pendingMainResumeOutput ??
+            (isLiveMainConversation(terminalText)
+              ? {
+                  mode: 'snapshot' as const,
+                  text: '',
+                  terminalText,
+                  ...(this.lastTerminalHistory ? { history: this.lastTerminalHistory } : {}),
+                }
+              : undefined);
+          if (mainFrame && isLiveMainConversation(terminalText)) {
+            this.pendingMainResumeOutput = undefined;
+            this.resumeMainAfterSide?.(mainFrame);
+          }
+        }
+        this.turnPhase = previousPhase;
+      }
       if (this.activeTurnCleanup === cleanupTurn) {
         this.turnPhase = 'idle';
         this.turnPromptPreview = undefined;
@@ -1811,7 +1926,8 @@ function sendBracketedPaste(text) {
 }
 
 function sendInput(input) {
-  if (input !== '\x03' && !ensureLivePane()) return;
+  const paneReady = input === '\x03' || ensureLivePane();
+  if (!paneReady) return;
   if (input === '\x03') {
     sendKeys(['C-c']);
     return;

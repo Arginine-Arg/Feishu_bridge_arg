@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.2.0",
+  version: "1.2.1",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -7178,7 +7178,8 @@ var NORMAL_SUBMIT_RETRY_POLL_MS = 400;
 var NORMAL_SUBMIT_RETRY_MAX_ATTEMPTS = 5;
 var NORMAL_SUBMIT_RETRY_MAX_CHECKS = 12;
 var NORMAL_SUBMIT_RETRY_MAX_WAIT_MS = 12e4;
-var TMUX_FINAL_SETTLE_MS = 1e3;
+var TMUX_FINAL_SETTLE_MS = 2500;
+var TMUX_FINAL_SETTLE_MAX_MS = 15e3;
 var MAX_TURN_OUTPUT_CHARS = 12e4;
 var DEFAULT_PTY_ROWS = "48";
 var DEFAULT_PTY_COLUMNS = "120";
@@ -7245,6 +7246,9 @@ var LiveTerminalSession = class {
   primed = false;
   startedAt = 0;
   activeTurnCleanup;
+  concurrentSideDepth = 0;
+  pendingMainResumeOutput;
+  resumeMainAfterSide;
   pendingTerminalOutput = [];
   lastTerminalSnapshot = "";
   lastTerminalHistory;
@@ -7319,7 +7323,28 @@ ${this.lastTerminalHistory?.text ?? ""}`;
     this.turnPhase = "starting";
     void this.start();
     const interruption = { requested: false, detached: false };
-    const events = this.turnEvents(prompt, cwd, inputMode, interruption);
+    const events = this.turnEvents(prompt, cwd, inputMode, interruption, false);
+    return {
+      runId,
+      events,
+      stop: async () => {
+        if (interruption.requested) return;
+        interruption.requested = true;
+        interruption.cancel?.();
+      },
+      detach: async () => {
+        if (interruption.detached) return;
+        interruption.detached = true;
+        interruption.detach?.();
+      },
+      waitForExit: async () => true
+    };
+  }
+  /** Observe a side conversation without replacing the main live turn. */
+  runSide(runId, prompt, cwd, inputMode) {
+    void this.start();
+    const interruption = { requested: false, detached: false };
+    const events = this.turnEvents(prompt, cwd, inputMode, interruption, true);
     return {
       runId,
       events,
@@ -7484,7 +7509,7 @@ ${this.lastTerminalHistory?.text ?? ""}`;
       this.terminalInfo?.backend === "tmux" ? encodeTmuxInputFrame(input) : input
     );
   }
-  async *turnEvents(prompt, cwd, inputMode, interruption = { requested: false, detached: false }) {
+  async *turnEvents(prompt, cwd, inputMode, interruption = { requested: false, detached: false }, concurrentSide = false) {
     yield { type: "system", cwd };
     await this.start();
     const sideMode = inputMode === "side";
@@ -7496,6 +7521,9 @@ ${this.lastTerminalHistory?.text ?? ""}`;
       return;
     }
     const turnPrompt = sideMode ? sidePrompt ?? "" : prompt;
+    const previousPhase = this.turnPhase;
+    let finishDeferredUntilMainResumes = false;
+    if (concurrentSide) this.concurrentSideDepth += 1;
     this.turnPhase = "awaiting-input";
     const idleMs = commandMode ? Math.max(this.opts.idleMs ?? DEFAULT_IDLE_MS, COMMAND_IDLE_MS) : this.opts.idleMs ?? DEFAULT_IDLE_MS;
     const outputFlushMs = this.opts.outputFlushMs ?? DEFAULT_OUTPUT_FLUSH_MS;
@@ -7527,6 +7555,7 @@ ${this.lastTerminalHistory?.text ?? ""}`;
     let sideBodyAwaitingSubmit = false;
     let settlingTimer;
     let settling = false;
+    let settlingStartedAt = 0;
     const inputGraceMs = this.inputGraceMs(commandMode);
     if (commandMode) {
       log.info("agent-live", "command-start", {
@@ -7614,20 +7643,42 @@ ${this.lastTerminalHistory?.text ?? ""}`;
     };
     const finish = (failureMessage) => {
       if (done) return;
-      if (failureMessage || this.terminalInfo?.backend !== "tmux") {
+      if (this.concurrentSideDepth > 0 && !concurrentSide && !failureMessage) {
+        finishDeferredUntilMainResumes = true;
+        return;
+      }
+      if (failureMessage || sideExitMode || this.terminalInfo?.backend !== "tmux") {
         finalize(failureMessage);
         return;
       }
       if (settling) return;
       settling = true;
+      settlingStartedAt = Date.now();
       this.turnPhase = "settling";
       if (timer) clearTimeout(timer);
       timer = void 0;
       flushOutput();
-      settlingTimer = setTimeout(() => {
-        settlingTimer = void 0;
-        if (!done) finalize();
-      }, TMUX_FINAL_SETTLE_MS);
+      const armSettlement = () => {
+        if (settlingTimer) clearTimeout(settlingTimer);
+        const elapsed = Date.now() - settlingStartedAt;
+        if (elapsed >= TMUX_FINAL_SETTLE_MAX_MS) {
+          settlingTimer = void 0;
+          if (!done) {
+            log.warn("agent-live", "tmux-settlement-cap-reached", {
+              capMs: TMUX_FINAL_SETTLE_MAX_MS
+            });
+            finalize();
+          }
+          return;
+        }
+        settlingTimer = setTimeout(() => {
+          settlingTimer = void 0;
+          if (!done) {
+            finalize();
+          }
+        }, Math.min(TMUX_FINAL_SETTLE_MS, TMUX_FINAL_SETTLE_MAX_MS - elapsed));
+      };
+      armSettlement();
     };
     const reopenSettlement = () => {
       if (!settling) return;
@@ -7734,6 +7785,13 @@ ${this.lastTerminalHistory?.text ?? ""}`;
       normalSubmitRetryTimer = setTimeout(retryIfDraftAppears, NORMAL_SUBMIT_RETRY_DELAY_MS);
     };
     const onData = (event) => {
+      if (this.concurrentSideDepth > 0 && !concurrentSide) {
+        const terminalText = event.terminalText ?? event.text;
+        if (terminalText && isLiveMainConversation(terminalText)) {
+          this.pendingMainResumeOutput = event;
+        }
+        return;
+      }
       this.turnLastOutputAt = Date.now();
       if (!acceptingOutput) {
         const terminalText = event.terminalText ?? event.text;
@@ -7898,10 +7956,26 @@ ${this.lastTerminalHistory?.text ?? ""}`;
       if (this.activeTurnCleanup === cleanupTurn) this.activeTurnCleanup = void 0;
       if (interruption.cancel === cancelCurrentTurn) interruption.cancel = void 0;
       if (interruption.detach === cleanupTurn) interruption.detach = void 0;
+      if (this.resumeMainAfterSide === resumeMainCallback) this.resumeMainAfterSide = void 0;
       wake?.();
     };
-    this.activeTurnCleanup?.();
-    this.activeTurnCleanup = cleanupTurn;
+    let resumeMainCallback;
+    if (!concurrentSide) {
+      this.activeTurnCleanup?.();
+      this.activeTurnCleanup = cleanupTurn;
+      resumeMainCallback = (event) => {
+        if (done) return;
+        this.pendingMainResumeOutput = void 0;
+        onData(event);
+        if (!finishDeferredUntilMainResumes || done) return;
+        finishDeferredUntilMainResumes = false;
+        const terminalText = event.terminalText ?? event.text;
+        if (!timer && !isLiveTerminalBusy(terminalText) && !isLiveTerminalInteraction(terminalText)) {
+          arm(idleMs);
+        }
+      };
+      this.resumeMainAfterSide = resumeMainCallback;
+    }
     interruption.cancel = cancelCurrentTurn;
     interruption.detach = cleanupTurn;
     this.emitter.on("data", onData);
@@ -8037,6 +8111,23 @@ ${this.lastTerminalHistory?.text ?? ""}`;
         if (event) yield event;
       }
     } finally {
+      if (concurrentSide) {
+        this.concurrentSideDepth = Math.max(0, this.concurrentSideDepth - 1);
+        if (this.concurrentSideDepth === 0) {
+          const terminalText = this.lastTerminalSnapshot;
+          const mainFrame = this.pendingMainResumeOutput ?? (isLiveMainConversation(terminalText) ? {
+            mode: "snapshot",
+            text: "",
+            terminalText,
+            ...this.lastTerminalHistory ? { history: this.lastTerminalHistory } : {}
+          } : void 0);
+          if (mainFrame && isLiveMainConversation(terminalText)) {
+            this.pendingMainResumeOutput = void 0;
+            this.resumeMainAfterSide?.(mainFrame);
+          }
+        }
+        this.turnPhase = previousPhase;
+      }
       if (this.activeTurnCleanup === cleanupTurn) {
         this.turnPhase = "idle";
         this.turnPromptPreview = void 0;
@@ -8595,7 +8686,8 @@ function sendBracketedPaste(text) {
 }
 
 function sendInput(input) {
-  if (input !== '\x03' && !ensureLivePane()) return;
+  const paneReady = input === '\x03' || ensureLivePane();
+  if (!paneReady) return;
   if (input === '\x03') {
     sendKeys(['C-c']);
     return;
@@ -10401,10 +10493,13 @@ var ClaudeAdapter = class {
       }
     };
   }
+  runSide(opts) {
+    return this.runLive(opts, true);
+  }
   async shutdown() {
     await this.liveSessions.detachAll();
   }
-  runLive(opts) {
+  runLive(opts, side = false) {
     if (!opts.cwd) {
       throw new Error("cwd is required for ClaudeAdapter.run");
     }
@@ -10446,6 +10541,9 @@ var ClaudeAdapter = class {
         });
       }
     });
+    if (side && (opts.liveInputMode === "side" || opts.liveInputMode === "side-exit")) {
+      return session.runSide(opts.runId, opts.prompt, opts.cwd, opts.liveInputMode);
+    }
     return session.run(opts.runId, opts.prompt, opts.cwd, opts.liveInputMode);
   }
 };
@@ -11052,10 +11150,13 @@ var CodexAdapter = class {
       }
     };
   }
+  runSide(opts) {
+    return this.runLive(opts, true);
+  }
   async shutdown() {
     await this.liveSessions.detachAll();
   }
-  runLive(opts) {
+  runLive(opts, side = false) {
     if (!opts.cwd) {
       throw new Error("cwd is required for CodexAdapter.run");
     }
@@ -11107,6 +11208,9 @@ var CodexAdapter = class {
         });
       }
     });
+    if (side && (opts.liveInputMode === "side" || opts.liveInputMode === "side-exit")) {
+      return session.runSide(opts.runId, opts.prompt, opts.cwd, opts.liveInputMode);
+    }
     return session.run(opts.runId, opts.prompt, opts.cwd, opts.liveInputMode);
   }
 };
@@ -17842,11 +17946,14 @@ var RunExecutor = class {
         this.activeRuns.newRunsPauseReason() ?? "new runs are temporarily paused"
       );
     }
-    const releaseScope = this.activeRuns.reserve(input.scopeId);
+    const concurrentSide = (input.liveInputMode === "side" || input.liveInputMode === "side-exit") && Boolean(this.activeRuns.get(input.scopeId)) && typeof this.agent.runSide === "function";
+    const releaseScope = concurrentSide ? () => {
+    } : this.activeRuns.reserve(input.scopeId);
     if (!releaseScope) {
       throw new RunRejected("run-already-active", "another run is already active for this scope");
     }
-    const release = input.nowait ? this.pool.tryAcquire() : await this.pool.acquire();
+    const release = concurrentSide ? () => {
+    } : input.nowait ? this.pool.tryAcquire() : await this.pool.acquire();
     if (!release) {
       releaseScope();
       throw new RunRejected("pool-full", "process pool is full");
@@ -17897,7 +18004,7 @@ var RunExecutor = class {
       );
     }
     try {
-      run = this.agent.run(runOptions);
+      run = concurrentSide ? this.agent.runSide(runOptions) : this.agent.run(runOptions);
     } catch (err) {
       release();
       releaseScope();
@@ -17919,23 +18026,32 @@ var RunExecutor = class {
       permissionMode: input.policy.permissionMode
     });
     let handle;
-    try {
-      handle = this.activeRuns.register(input.scopeId, run);
-    } catch (err) {
-      releaseScope();
-      release();
-      await run.stop().catch(() => {
-      });
-      throw new RunRejected(
-        "run-already-active",
-        err instanceof Error ? err.message : "another run is already active for this scope"
-      );
+    if (concurrentSide) {
+      handle = {
+        run,
+        interrupted: false,
+        detached: false,
+        stopRequested: false
+      };
+    } else {
+      try {
+        handle = this.activeRuns.register(input.scopeId, run);
+      } catch (err) {
+        releaseScope();
+        release();
+        await run.stop().catch(() => {
+        });
+        throw new RunRejected(
+          "run-already-active",
+          err instanceof Error ? err.message : "another run is already active for this scope"
+        );
+      }
     }
     let cleaned = false;
     const cleanup = async (waitForExit) => {
       if (cleaned) return;
       cleaned = true;
-      this.activeRuns.unregister(input.scopeId, run);
+      if (!concurrentSide) this.activeRuns.unregister(input.scopeId, run);
       release();
       if (handle.detached) return;
       if (waitForExit) {
@@ -18946,6 +19062,7 @@ var DEFAULT_BUSY_ACK_COOLDOWN_MS = 3e4;
 var PendingQueue = class {
   map = /* @__PURE__ */ new Map();
   blocked = /* @__PURE__ */ new Set();
+  blockDepth = /* @__PURE__ */ new Map();
   flushImmediatelyOnUnblock = /* @__PURE__ */ new Set();
   deferredUntilFront = /* @__PURE__ */ new Map();
   // Last "run in progress, your message is queued" acknowledgement per scope.
@@ -18992,6 +19109,7 @@ var PendingQueue = class {
     if (deferred.length > 0) {
       this.deferredUntilFront.delete(scope);
       this.blocked.delete(scope);
+      this.blockDepth.delete(scope);
       this.flushImmediatelyOnUnblock.delete(scope);
       this.busyAckedAt.delete(scope);
       log.info("queue", "interaction-released", { scope, deferred: deferred.length });
@@ -19004,12 +19122,12 @@ var PendingQueue = class {
     if (existing) {
       if (existing.timer) clearTimeout(existing.timer);
       existing.messages.unshift(...incoming);
-      existing.timer = this.blocked.has(scope) ? void 0 : this.armTimer(scope, options.immediate ? 0 : void 0);
+      existing.timer = this.blocked.has(scope) && !options.preempt ? void 0 : this.armTimer(scope, options.immediate ? 0 : void 0);
       return existing.messages.length;
     }
     this.map.set(scope, {
       messages: incoming,
-      timer: this.blocked.has(scope) ? void 0 : this.armTimer(scope, options.immediate ? 0 : void 0)
+      timer: this.blocked.has(scope) && !options.preempt ? void 0 : this.armTimer(scope, options.immediate ? 0 : void 0)
     });
     return incoming.length;
   }
@@ -19032,6 +19150,7 @@ var PendingQueue = class {
     this.flushImmediatelyOnUnblock.delete(scope);
     if (deferred.length > 0) {
       this.blocked.delete(scope);
+      this.blockDepth.delete(scope);
       this.busyAckedAt.delete(scope);
     }
     return [...deferred, ...entry?.messages ?? []];
@@ -19044,6 +19163,7 @@ var PendingQueue = class {
     this.deferredUntilFront.clear();
     this.flushImmediatelyOnUnblock.clear();
     this.blocked.clear();
+    this.blockDepth.clear();
     this.busyAckedAt.clear();
   }
   /** True while a run is active on this scope (debounce timer paused). */
@@ -19078,7 +19198,9 @@ var PendingQueue = class {
   }
   /** Pause the debounce timer; pushed messages keep accumulating. */
   block(scope) {
-    if (this.blocked.has(scope)) return;
+    const depth = this.blockDepth.get(scope) ?? 0;
+    this.blockDepth.set(scope, depth + 1);
+    if (depth > 0) return;
     this.blocked.add(scope);
     const entry = this.map.get(scope);
     if (entry?.timer) {
@@ -19090,6 +19212,13 @@ var PendingQueue = class {
   /** Resume the debounce timer; arms a fresh quiet window if anything queued. */
   unblock(scope) {
     if (!this.blocked.has(scope)) return;
+    const depth = this.blockDepth.get(scope) ?? 1;
+    if (depth > 1) {
+      this.blockDepth.set(scope, depth - 1);
+      log.info("queue", "nested-unblock", { scope, depth: depth - 1 });
+      return;
+    }
+    this.blockDepth.delete(scope);
     if ((this.deferredUntilFront.get(scope)?.length ?? 0) > 0) {
       log.info("queue", "interaction-wait", { scope });
       return;
@@ -20260,6 +20389,7 @@ async function startChannel(deps) {
           await runAgentBatch({
             channel,
             agent,
+            activeRuns,
             executor,
             bridgeAgent,
             sessions,
@@ -20658,7 +20788,7 @@ async function intakeMessage(deps) {
       command: agentMsg.content.trim().slice(0, 120)
     });
     if (nativeInputMode === "side" || nativeInputMode === "side-exit") {
-      activeRuns.detach(scope);
+      log.info("intake", "native-side-coexists-with-main", { scope, inputMode: nativeInputMode });
     } else {
       activeRuns.interrupt(scope);
     }
@@ -20797,6 +20927,7 @@ async function runAgentBatch(deps) {
   const {
     channel,
     agent,
+    activeRuns,
     executor,
     bridgeAgent,
     sessions,
@@ -20818,6 +20949,16 @@ async function runAgentBatch(deps) {
   const firstMsg = batch[0];
   const lastMsg = batch[batch.length - 1];
   if (!firstMsg || !lastMsg) return;
+  const firstInputMode = liveInputModeForMessage(firstMsg);
+  const isSideBatch = firstInputMode === "side" || firstInputMode === "side-exit";
+  if (!isSideBatch && activeRuns.get(scope)) {
+    for (const message of batch) pending.push(scope, message);
+    log.info("flush", "ordinary-batch-deferred-during-side", {
+      scope,
+      batchSize: batch.length
+    });
+    return;
+  }
   const chatId = firstMsg.chatId;
   const threadId = firstMsg.threadId;
   const resourceItems = batch.flatMap(
@@ -20977,6 +21118,7 @@ async function runAgentBatch(deps) {
   const outputModeAtStart = sessions.getOutputMode(scope);
   const currentOutputMode = () => sessions.getOutputMode(scope);
   log.info("delivery", "run-policy", { scope, mode: outputModeAtStart });
+  const previousActivePolicyFingerprint = activePolicyFingerprints.get(scope);
   activePolicyFingerprints.set(scope, flow.policy.policyFingerprint);
   const handle = execution.handle;
   const eventStream = execution.subscribe();
@@ -21423,12 +21565,15 @@ ${delta}`.slice(-64e3);
           await deliverLongReply();
           return;
         }
-        await channel.send(
-          chatId,
-          {
-            card: renderLiveAwareReplyCard(replyState, cardRenderOptions, useLiveSession ? "live" : "agent")
-          },
-          sendOpts
+        await sendWithRetry(
+          () => channel.send(
+            chatId,
+            {
+              card: renderLiveAwareReplyCard(replyState, cardRenderOptions, useLiveSession ? "live" : "agent")
+            },
+            sendOpts
+          ),
+          { scope, chunk: 0, total: 0, warning: true }
         );
       };
       let lastSentCardSerialized;
@@ -21617,7 +21762,10 @@ ${delta}`.slice(-64e3);
         }
         const body = renderText(replyState, { activityMode: "summary" });
         if (body.trim()) {
-          await channel.send(chatId, { markdown: body }, sendOpts);
+          await sendWithRetry(
+            () => channel.send(chatId, { markdown: body }, sendOpts),
+            { scope, chunk: 0, total: 0, warning: true }
+          );
         }
       };
       let lastSentMarkdownText;
@@ -21793,7 +21941,11 @@ ${delta}`.slice(-64e3);
         log.info("agent-live", "picker-advance", { scope, input: nativeCommand });
       }
     }
-    activePolicyFingerprints.delete(scope);
+    if (previousActivePolicyFingerprint) {
+      activePolicyFingerprints.set(scope, previousActivePolicyFingerprint);
+    } else {
+      activePolicyFingerprints.delete(scope);
+    }
     scheduleWorkingReactionCleanup(channel, lastMsg.messageId, reactionPromise);
   }
 }
@@ -21935,6 +22087,11 @@ async function processAgentStream(handle, events, scope, idleTimeoutMs, progress
     if (handle.detached) return Promise.resolve();
     return delivery.enqueue(async () => {
       if (!handle.detached) await flush(snapshot);
+    }).catch((err) => {
+      log.warn("stream", "flush-rejected", {
+        scope,
+        err: err instanceof Error ? err.message : String(err)
+      });
     });
   };
   let streamFailure;
@@ -22185,6 +22342,7 @@ async function runRollingReplyStream(input) {
             });
           }
         });
+        await runFallbackReply(input.mode, first.state, input.fallback);
         return;
       }
       if (!terminal.ok) throw terminal.err;
@@ -22596,12 +22754,20 @@ async function sendCompleteReplyChunks(input) {
   if (promoteToCards) {
     const chunks2 = splitAnswerForDelivery(input.text, LONG_REPLY_CHUNK_BYTES);
     if (chunks2.length === 0) return;
+    const failedChunks2 = [];
     for (const [index, chunk] of chunks2.entries()) {
-      await input.channel.send(
-        input.chatId,
-        { card: answerCard(chunk, index + 1, chunks2.length) },
-        input.sendOpts
-      );
+      try {
+        await sendWithRetry(
+          () => input.channel.send(
+            input.chatId,
+            { card: answerCard(chunk, index + 1, chunks2.length) },
+            input.sendOpts
+          ),
+          { scope: input.scope, chunk: index + 1, total: chunks2.length }
+        );
+      } catch {
+        failedChunks2.push(index + 1);
+      }
     }
     await ensureDeliveredTail({
       channel: input.channel,
@@ -22611,6 +22777,16 @@ async function sendCompleteReplyChunks(input) {
       delivered: chunks2.flat().map((block) => block.content).join("\n"),
       scope: input.scope
     });
+    if (failedChunks2.length > 0) {
+      await sendWithRetry(
+        () => input.channel.send(
+          input.chatId,
+          { markdown: `\u26A0\uFE0F \u90E8\u5206\u957F\u6D88\u606F\u6295\u9012\u5931\u8D25\uFF08\u5206\u6BB5 ${failedChunks2.join("\u3001")}\uFF09\uFF0C\u5DF2\u5B8C\u6210\u81EA\u52A8\u91CD\u8BD5\u3002\u8BF7\u53D1\u9001 /tmux tail \u67E5\u770B\u539F\u59CB\u8F93\u51FA\u3002` },
+          input.sendOpts
+        ),
+        { scope: input.scope, chunk: 0, total: chunks2.length, warning: true }
+      ).catch(() => void 0);
+    }
     log.info("outbound", "long-reply-split", {
       scope: input.scope,
       chunks: chunks2.length,
@@ -22622,11 +22798,19 @@ async function sendCompleteReplyChunks(input) {
   }
   const chunks = splitTextForDelivery(input.text, LONG_REPLY_CHUNK_BYTES);
   if (chunks.length === 0) return;
+  const failedChunks = [];
   for (const [index, chunk] of chunks.entries()) {
     const content = chunks.length > 1 ? `\uFF08${index + 1}/${chunks.length}\uFF09
 
 ${chunk}` : chunk;
-    await input.channel.send(input.chatId, { markdown: content }, input.sendOpts);
+    try {
+      await sendWithRetry(
+        () => input.channel.send(input.chatId, { markdown: content }, input.sendOpts),
+        { scope: input.scope, chunk: index + 1, total: chunks.length }
+      );
+    } catch {
+      failedChunks.push(index + 1);
+    }
   }
   await ensureDeliveredTail({
     channel: input.channel,
@@ -22636,12 +22820,43 @@ ${chunk}` : chunk;
     delivered: chunks.join("\n"),
     scope: input.scope
   });
+  if (failedChunks.length > 0) {
+    await sendWithRetry(
+      () => input.channel.send(
+        input.chatId,
+        { markdown: `\u26A0\uFE0F \u90E8\u5206\u957F\u6D88\u606F\u6295\u9012\u5931\u8D25\uFF08\u5206\u6BB5 ${failedChunks.join("\u3001")}\uFF09\uFF0C\u5DF2\u5B8C\u6210\u81EA\u52A8\u91CD\u8BD5\u3002\u8BF7\u53D1\u9001 /tmux tail \u67E5\u770B\u539F\u59CB\u8F93\u51FA\u3002` },
+        input.sendOpts
+      ),
+      { scope: input.scope, chunk: 0, total: chunks.length, warning: true }
+    ).catch(() => void 0);
+  }
   log.info("outbound", "long-reply-split", {
     scope: input.scope,
     chunks: chunks.length,
     mode: "markdown",
     bytes: Buffer.byteLength(input.text, "utf8")
   });
+}
+async function sendWithRetry(send, meta) {
+  const maxAttempts = 3;
+  let lastError;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      await send();
+      if (attempt > 1) log.info("outbound", "chunk-recovered", { ...meta, attempt });
+      return;
+    } catch (err) {
+      lastError = err;
+      log.warn("outbound", "chunk-send-retry", {
+        ...meta,
+        attempt,
+        maxAttempts,
+        err: err instanceof Error ? err.message : String(err)
+      });
+      if (attempt < maxAttempts) await delay2(250 * attempt);
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError ?? "message send failed"));
 }
 async function ensureDeliveredTail(input) {
   const sourceLines = input.source.replace(/\r\n?/gu, "\n").split("\n").filter((line) => line.trim());
@@ -22665,14 +22880,17 @@ async function ensureDeliveredTail(input) {
     tailCovered: covered
   });
   if (covered) return;
-  await input.channel.send(
-    input.chatId,
-    {
-      markdown: `\u26A0\uFE0F \u6B63\u6587\u5C3E\u90E8\u5B8C\u6574\u6027\u6821\u9A8C\u53D1\u73B0\u7F3A\u5931\uFF0C\u8865\u53D1\u6700\u540E\u5185\u5BB9\uFF1A
+  await sendWithRetry(
+    () => input.channel.send(
+      input.chatId,
+      {
+        markdown: `\u26A0\uFE0F \u6B63\u6587\u5C3E\u90E8\u5B8C\u6574\u6027\u6821\u9A8C\u53D1\u73B0\u7F3A\u5931\uFF0C\u8865\u53D1\u6700\u540E\u5185\u5BB9\uFF1A
 
 ${tail.slice(-8e3)}`
-    },
-    input.sendOpts
+      },
+      input.sendOpts
+    ),
+    { scope: input.scope, chunk: 0, total: 0, warning: true }
   );
   log.warn("outbound", "delivery-tail-recovered", { scope: input.scope, tailLines: Math.min(8, sourceLines.length) });
 }

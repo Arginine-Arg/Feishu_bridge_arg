@@ -25,6 +25,7 @@ const DEFAULT_BUSY_ACK_COOLDOWN_MS = 30_000;
 export class PendingQueue {
   private readonly map = new Map<string, PendingEntry>();
   private readonly blocked = new Set<string>();
+  private readonly blockDepth = new Map<string, number>();
   private readonly flushImmediatelyOnUnblock = new Set<string>();
   private readonly deferredUntilFront = new Map<string, NormalizedMessage[]>();
   // Last "run in progress, your message is queued" acknowledgement per scope.
@@ -83,6 +84,7 @@ export class PendingQueue {
     if (deferred.length > 0) {
       this.deferredUntilFront.delete(scope);
       this.blocked.delete(scope);
+      this.blockDepth.delete(scope);
       this.flushImmediatelyOnUnblock.delete(scope);
       this.busyAckedAt.delete(scope);
       log.info('queue', 'interaction-released', { scope, deferred: deferred.length });
@@ -95,14 +97,14 @@ export class PendingQueue {
     if (existing) {
       if (existing.timer) clearTimeout(existing.timer);
       existing.messages.unshift(...incoming);
-      existing.timer = this.blocked.has(scope)
+      existing.timer = this.blocked.has(scope) && !options.preempt
         ? undefined
         : this.armTimer(scope, options.immediate ? 0 : undefined);
       return existing.messages.length;
     }
     this.map.set(scope, {
       messages: incoming,
-      timer: this.blocked.has(scope)
+      timer: this.blocked.has(scope) && !options.preempt
         ? undefined
         : this.armTimer(scope, options.immediate ? 0 : undefined),
     });
@@ -129,6 +131,7 @@ export class PendingQueue {
     this.flushImmediatelyOnUnblock.delete(scope);
     if (deferred.length > 0) {
       this.blocked.delete(scope);
+      this.blockDepth.delete(scope);
       this.busyAckedAt.delete(scope);
     }
     return [...deferred, ...(entry?.messages ?? [])];
@@ -142,6 +145,7 @@ export class PendingQueue {
     this.deferredUntilFront.clear();
     this.flushImmediatelyOnUnblock.clear();
     this.blocked.clear();
+    this.blockDepth.clear();
     this.busyAckedAt.clear();
   }
 
@@ -180,7 +184,9 @@ export class PendingQueue {
 
   /** Pause the debounce timer; pushed messages keep accumulating. */
   block(scope: string): void {
-    if (this.blocked.has(scope)) return;
+    const depth = this.blockDepth.get(scope) ?? 0;
+    this.blockDepth.set(scope, depth + 1);
+    if (depth > 0) return;
     this.blocked.add(scope);
     const entry = this.map.get(scope);
     if (entry?.timer) {
@@ -193,6 +199,13 @@ export class PendingQueue {
   /** Resume the debounce timer; arms a fresh quiet window if anything queued. */
   unblock(scope: string): void {
     if (!this.blocked.has(scope)) return;
+    const depth = this.blockDepth.get(scope) ?? 1;
+    if (depth > 1) {
+      this.blockDepth.set(scope, depth - 1);
+      log.info('queue', 'nested-unblock', { scope, depth: depth - 1 });
+      return;
+    }
+    this.blockDepth.delete(scope);
     if ((this.deferredUntilFront.get(scope)?.length ?? 0) > 0) {
       log.info('queue', 'interaction-wait', { scope });
       return;

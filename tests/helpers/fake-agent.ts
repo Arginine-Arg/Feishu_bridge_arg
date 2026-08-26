@@ -66,6 +66,7 @@ export class FakeAgentAdapter implements AgentAdapter {
   readonly displayName: string;
   readonly runs: FakeAgentRun[] = [];
   readonly runOptions: AgentRunOptions[] = [];
+  readonly sideRunOptions: AgentRunOptions[] = [];
   botIdentity: AgentBotIdentity | undefined;
   tmux: AgentTmuxControl | undefined;
   #available: boolean;
@@ -97,6 +98,16 @@ export class FakeAgentAdapter implements AgentAdapter {
   }
 
   run(opts: AgentRunOptions): AgentRun {
+    this.runOptions.push(opts);
+    const events = this.#eventRuns.shift() ?? [];
+    const waitForExitResult = this.#waitForExitResults.shift() ?? true;
+    const run = new FakeRun(opts, events, waitForExitResult);
+    this.runs.push(run);
+    return run;
+  }
+
+  runSide(opts: AgentRunOptions): AgentRun {
+    this.sideRunOptions.push(opts);
     this.runOptions.push(opts);
     const events = this.#eventRuns.shift() ?? [];
     const waitForExitResult = this.#waitForExitResults.shift() ?? true;

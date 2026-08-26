@@ -133,6 +133,12 @@ export interface AgentAdapter {
   checkAvailability?(): Promise<AgentAvailability>;
   prepareRun?(opts: AgentRunOptions): Promise<void>;
   run(opts: AgentRunOptions): AgentRun;
+  /**
+   * Run a native side conversation against an already-running live session.
+   * This is deliberately separate from `run`: it must not replace the main
+   * terminal observer or unregister the main scope from ActiveRuns.
+   */
+  runSide?(opts: AgentRunOptions): AgentRun;
   tmux?: AgentTmuxControl;
   /**
    * Late-bound identity injection: the adapter is constructed before the
