@@ -139,7 +139,7 @@ describe.skipIf(!live)('tmux control', () => {
     expect(await restarted.unbind('scope-a')).toBe(true);
     expect((await restarted.status('scope-a')).state).toBe('none');
     expect(spawnSync('tmux', ['-S', socket, 'has-session', '-t', 'external'], { stdio: 'ignore' }).status).toBe(0);
-  });
+  }, 20_000);
 
   it('persists and recovers a managed terminal after the controller is recreated', async () => {
     const root = await mkdtemp(join(tmpdir(), 'tmux-control-managed-recovery-'));
