@@ -1,6 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import type { AgentAdapter, AgentEvent, AgentRun } from '../agent/types';
-import { ActiveRuns, requestRunStop, type RunHandle } from '../bot/active-runs';
+import {
+  ActiveRuns,
+  requestRunStop,
+  type RunHandle,
+  type RunInterruptTarget,
+} from '../bot/active-runs';
 import { ProcessPool } from '../bot/process-pool';
 import type { CodexReasoningEffort } from '../config/schema';
 import type { RunPolicyAllow } from '../policy/run-policy';
@@ -18,9 +23,14 @@ export interface RunExecutorDeps {
 
 export interface SubmitRunInput {
   scopeId: string;
+  /** Generation captured when the inbound message entered the flush. */
+  stopGeneration?: number;
+  /** Cancellation generation namespace for the submitted run. */
+  stopGenerationTarget?: RunInterruptTarget;
   policy: RunPolicyAllow;
   sessionMode?: 'turn' | 'live';
   liveInputMode?: 'command' | 'control' | 'side' | 'side-exit';
+  sideConversationConfirmed?: boolean;
   sessionId?: string;
   threadId?: string;
   model?: string;
@@ -67,6 +77,19 @@ export class RunExecutor {
 
   async submit(input: SubmitRunInput): Promise<RunExecution> {
     const submittedAt = this.now();
+    const stopRequested = (): boolean =>
+      input.stopGeneration !== undefined &&
+      !this.activeRuns.isStopGenerationCurrent(
+        input.scopeId,
+        input.stopGeneration,
+        input.stopGenerationTarget,
+      );
+    const rejectIfStopped = (): void => {
+      if (stopRequested()) {
+        throw new RunRejected('stop-requested', 'run was cancelled before spawn');
+      }
+    };
+    rejectIfStopped();
     if (input.policy.expiresAt <= this.now()) {
       throw new RunRejected('policy-expired', 'run policy expired before spawn');
     }
@@ -76,10 +99,39 @@ export class RunExecutor {
         this.activeRuns.newRunsPauseReason() ?? 'new runs are temporarily paused',
       );
     }
-    const concurrentSide =
-      (input.liveInputMode === 'side' || input.liveInputMode === 'side-exit') &&
-      Boolean(this.activeRuns.get(input.scopeId)) &&
-      typeof this.agent.runSide === 'function';
+    const sideInputMode =
+      input.liveInputMode === 'side' || input.liveInputMode === 'side-exit'
+        ? input.liveInputMode
+        : undefined;
+    const concurrentSide = sideInputMode !== undefined && typeof this.agent.runSide === 'function';
+    if (concurrentSide) {
+      // `/btw out` is an explicit terminal lifecycle command. If a previous
+      // side body is still waiting for a slow redraw, release only that relay
+      // so the guarded exit can run immediately. Never detach another
+      // in-flight side-exit: two exit commands must not race and emit two
+      // Ctrl-C bytes.
+      const existingSide = this.activeRuns.getSide(input.scopeId);
+      if (
+        input.liveInputMode === 'side-exit' &&
+        input.sideConversationConfirmed === true &&
+        existingSide &&
+        existingSide.sideInputMode !== 'side-exit'
+      ) {
+        await this.activeRuns.detachSideAndWait(input.scopeId);
+      }
+      // A side operation is a second observer on one shared terminal. Wait
+      // for the previous side observer to finish before writing another
+      // command, otherwise `/btw out` can race a body submit and lose the
+      // guarded transition.
+      const sideAvailable = await this.activeRuns.waitForSideAvailable(input.scopeId);
+      if (!sideAvailable) {
+        throw new RunRejected(
+          'run-already-active',
+          'another side run is still active for this scope',
+        );
+      }
+      rejectIfStopped();
+    }
     const releaseScope = concurrentSide ? () => {} : this.activeRuns.reserve(input.scopeId);
     if (!releaseScope) {
       throw new RunRejected('run-already-active', 'another run is already active for this scope');
@@ -96,9 +148,12 @@ export class RunExecutor {
       releaseScope();
       throw new RunRejected('pool-full', 'process pool is full');
     }
-    if (this.activeRuns.newRunsPaused()) {
+    if (this.activeRuns.newRunsPaused() || stopRequested()) {
       release();
       releaseScope();
+      if (stopRequested()) {
+        throw new RunRejected('stop-requested', 'run was cancelled before spawn');
+      }
       throw new RunRejected(
         'reconnect-in-progress',
         this.activeRuns.newRunsPauseReason() ?? 'new runs are temporarily paused',
@@ -113,6 +168,7 @@ export class RunExecutor {
       scopeId: input.scopeId,
       sessionMode: input.sessionMode,
       liveInputMode: input.liveInputMode,
+      sideConversationConfirmed: input.sideConversationConfirmed,
       prompt: input.policy.prompt,
       cwd: input.policy.cwdRealpath,
       sessionId: input.sessionId,
@@ -134,13 +190,21 @@ export class RunExecutor {
       if (err instanceof SpawnFailed) throw err;
       throw new SpawnFailed('agent prepare failed', err, 'agent-prepare-failed');
     }
-    if (this.activeRuns.newRunsPaused()) {
+    if (this.activeRuns.newRunsPaused() || stopRequested()) {
       release();
       releaseScope();
+      if (stopRequested()) {
+        throw new RunRejected('stop-requested', 'run was cancelled before spawn');
+      }
       throw new RunRejected(
         'reconnect-in-progress',
         this.activeRuns.newRunsPauseReason() ?? 'new runs are temporarily paused',
       );
+    }
+    if (stopRequested()) {
+      release();
+      releaseScope();
+      throw new RunRejected('stop-requested', 'run was cancelled before spawn');
     }
     try {
       run = concurrentSide ? this.agent.runSide!(runOptions) : this.agent.run(runOptions);
@@ -148,6 +212,12 @@ export class RunExecutor {
       release();
       releaseScope();
       throw new SpawnFailed('agent spawn failed', err);
+    }
+    if (stopRequested()) {
+      release();
+      releaseScope();
+      await run.stop({ force: true }).catch(() => {});
+      throw new RunRejected('stop-requested', 'run was cancelled before registration');
     }
     const dimensions = {
       runId,
@@ -167,12 +237,16 @@ export class RunExecutor {
 
     let handle: RunHandle;
     if (concurrentSide) {
-      handle = {
-        run,
-        interrupted: false,
-        detached: false,
-        stopRequested: false,
-      };
+      try {
+        handle = this.activeRuns.registerSide(input.scopeId, run, sideInputMode);
+      } catch (err) {
+        release();
+        await run.stop().catch(() => {});
+        throw new RunRejected(
+          'run-already-active',
+          err instanceof Error ? err.message : 'another side run is already active for this scope',
+        );
+      }
     } else {
       try {
         handle = this.activeRuns.register(input.scopeId, run);
@@ -190,7 +264,8 @@ export class RunExecutor {
     const cleanup = async (waitForExit: boolean): Promise<void> => {
       if (cleaned) return;
       cleaned = true;
-      if (!concurrentSide) this.activeRuns.unregister(input.scopeId, run);
+      if (concurrentSide) this.activeRuns.unregisterSide(input.scopeId, run);
+      else this.activeRuns.unregister(input.scopeId, run);
       release();
       if (handle.detached) return;
       if (waitForExit) {
@@ -225,7 +300,7 @@ export class RunExecutor {
       subscribe: () => fanout.subscribe(),
       stop: async () => {
         handle.interrupted = true;
-        await requestRunStop(handle);
+        await requestRunStop(handle, { force: true });
         await run.waitForExit(this.postDoneExitGraceMs);
         await cleanup(false);
       },
@@ -297,6 +372,7 @@ class EventFanout {
   private activeSubscribers = 0;
   private cancelRequested = false;
   private closeSourcePromise: Promise<void> | undefined;
+  private cleanupStarted = false;
 
   constructor(source: AsyncIterable<AgentEvent>, onDone: () => Promise<void>) {
     this.source = source;
@@ -324,6 +400,7 @@ class EventFanout {
             if (this.activeSubscribers === 0 && !this.done) {
               this.requestCancel();
             }
+            this.maybeCleanup();
           }
         };
         return {
@@ -337,8 +414,14 @@ class EventFanout {
             if (index < this.buffer.length) {
               return { done: false, value: this.buffer[index++]! };
             }
-            if (this.error) throw this.error;
-            if (this.done) return { done: true, value: undefined };
+            if (this.error) {
+              release();
+              throw this.error;
+            }
+            if (this.done) {
+              release();
+              return { done: true, value: undefined };
+            }
             await new Promise<void>((resolve) => {
               waiter = (): void => {
                 if (waiter) this.waiters.delete(waiter);
@@ -351,7 +434,11 @@ class EventFanout {
             if (index < this.buffer.length) {
               return { done: false, value: this.buffer[index++]! };
             }
-            if (this.error) throw this.error;
+            if (this.error) {
+              release();
+              throw this.error;
+            }
+            release();
             return { done: true, value: undefined };
           },
           return: async (): Promise<IteratorResult<AgentEvent>> => {
@@ -391,10 +478,9 @@ class EventFanout {
     } catch (err) {
       if (!this.cancelRequested) this.error = err;
     } finally {
-      await this.closeSource();
-      await this.onDone();
       this.done = true;
       this.wakeAll();
+      this.maybeCleanup();
     }
   }
 
@@ -402,6 +488,18 @@ class EventFanout {
     this.cancelRequested = true;
     void this.closeSource();
     this.wakeAll();
+  }
+
+  /**
+   * Keep the ActiveRuns handle registered until every subscriber has drained
+   * the terminal event. `runAgentBatch` can still be sending the final Feishu
+   * card after the native stream reports done; unregistering at that point
+   * makes a concurrent `/stop` appear to do nothing.
+   */
+  private maybeCleanup(): void {
+    if (!this.done || this.cleanupStarted || this.activeSubscribers > 0) return;
+    this.cleanupStarted = true;
+    void this.onDone();
   }
 
   private closeSource(): Promise<void> {

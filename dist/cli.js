@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.2.3",
+  version: "1.2.4",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -6669,6 +6669,17 @@ var TmuxBindingController = class {
     }
     return { state: "none" };
   }
+  /**
+   * Return persisted managed scope ids for one chat. The records are only
+   * candidates; callers must still validate each scope with `diagnostics()`
+   * before sending lifecycle keys.
+   */
+  async managedScopesForChat(chatId) {
+    const prefix = `${chatId}:`;
+    return Object.keys(this.managedTerminals).filter(
+      (scopeId) => scopeId === chatId || scopeId.startsWith(prefix)
+    );
+  }
   /** Stable identity used by a new bridge process to reconnect to a managed session. */
   managedTerminalFor(scopeId, cwd, launchSignature) {
     let saved = this.managedTerminals[scopeId];
@@ -6722,6 +6733,45 @@ var TmuxBindingController = class {
       if (result.status !== 0) return false;
     }
     return true;
+  }
+  /**
+   * Interrupt a durable terminal after bridge-side ownership has been lost
+   * (for example, after a reconnect). This path is deliberately evidence
+   * gated: a recommendation, empty editor, or picker is not enough to send a
+   * destructive key. Managed terminals prefer the currently selected
+   * same-family pane, matching the live helper's adoption behavior.
+   */
+  async interrupt(scopeId, cwd, options = {}) {
+    let status = await this.status(scopeId);
+    if (status.state === "none" && cwd) status = await this.managedStatus(scopeId, cwd);
+    if (status.state !== "managed" && status.state !== "external") return false;
+    const target = status.target;
+    const terminal = status.terminal ?? (target ? {
+      socketPath: target.socketPath,
+      target: target.paneId,
+      attachCommand: target.attachCommand,
+      ownership: target.ownership
+    } : void 0);
+    if (!terminal) return false;
+    const resolved = target ? target.paneId : interruptPaneTarget(terminal.socketPath, terminal.target, this.agentKind);
+    if (!resolved) return false;
+    let tail;
+    try {
+      tail = captureTmuxPaneTail(
+        { ...terminal, target: resolved },
+        24
+      );
+    } catch {
+      return false;
+    }
+    const evidence = interruptEvidence(tail.text);
+    if (options.sideOnly ? !evidence.side : !evidence.side && !evidence.busy) return false;
+    const result = spawnProcessSync(
+      "tmux",
+      ["-S", terminal.socketPath, "send-keys", "-t", resolved, "C-c"],
+      { stdio: "ignore" }
+    );
+    return result.status === 0;
   }
   bindingFor(scopeId, cwd) {
     const saved = this.bindings[scopeId];
@@ -6856,6 +6906,57 @@ function captureTmuxPaneTail(terminal, requestedLines) {
     requestedLines,
     text: normalizeTmuxTail(output, requestedLines)
   };
+}
+function interruptPaneTarget(socketPath, terminalTarget, expectedAgent) {
+  const sessionName = terminalTarget.split(":", 1)[0]?.trim();
+  if (!sessionName) return void 0;
+  const panes = listPanesOnSocket(socketPath).filter(
+    (pane) => pane.sessionName === sessionName && pane.agentKind === expectedAgent
+  );
+  if (panes.length === 0) return void 0;
+  const selected = spawnProcessSync(
+    "tmux",
+    ["-S", socketPath, "display-message", "-p", "-t", sessionName, "#{session_name}:#{window_index}.#{pane_index}"],
+    { encoding: "utf8" }
+  );
+  const selectedTarget = selected.status === 0 && typeof selected.stdout === "string" ? selected.stdout.trim() : "";
+  const selectedPane = panes.find(
+    (pane) => `${pane.sessionName}:${pane.windowIndex}.${pane.paneIndex}` === selectedTarget
+  );
+  if (selectedPane) return selectedPane.paneId;
+  const persisted = panes.find(
+    (pane) => `${pane.sessionName}:${pane.windowIndex}.${pane.paneIndex}` === terminalTarget || pane.paneId === terminalTarget
+  );
+  return persisted?.paneId;
+}
+function interruptEvidence(text) {
+  const cleaned = normalizeTmuxTail(text, 24);
+  const lines = cleaned.split("\n").slice(-24);
+  const recent = lines.join("\n");
+  const footer = latestConversationFooter(lines);
+  const side = footer?.kind === "side";
+  const stateLines = footer ? lines.slice(Math.max(0, footer.index - 6)) : lines;
+  const ready = stateLines.some(
+    (line) => /^[›❯]\s*$/.test(line.trim()) || /^›\s*(?:Ask Codex to do anything|How many files have been modified\?|Check recently modified functions for compatibility)\s*$/iu.test(line.trim())
+  );
+  const busy = !ready && /(?:working|waiting\s+for\s+background\s+terminal)\s*\([^)]*(?:esc|escape)\s+to\s+interrupt|compacting(?:\s+context)?|^\s*[•◦]\s+running\b/imu.test(stateLines.join("\n"));
+  return { side, busy };
+}
+function latestConversationFooter(lines) {
+  let latest;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]?.trim() ?? "";
+    if (!/^(?:gpt|codex|claude)[\w.-]*\b.*\s·\s+/iu.test(line)) continue;
+    const window = lines.slice(index, Math.min(lines.length, index + 5)).join(" ").replace(/\s+/gu, " ").trim();
+    if (/\bside\s+from\s+main\s+thread\b/iu.test(window)) {
+      latest = { kind: "side", index };
+      continue;
+    }
+    if (/\bmain\s*\[[^\]]+\]/iu.test(window) || /^(?:gpt|codex|claude)[\w.-]*\b.*\s·\s+(?:[A-Za-z]:[\\/]|\/|~\/)/iu.test(window)) {
+      latest = { kind: "main", index };
+    }
+  }
+  return latest;
 }
 function normalizeTmuxTail(output, requestedLines) {
   const cleaned = output.replace(/\r/g, "").replace(/\x1B(?:\][\s\S]*?(?:\x07|\x1B\\)|\[[0-?]*[ -/]*[@-~]|[@-_])/gu, "").replace(/[\u0000-\u0008\u000B-\u001F\u007F]/gu, "");
@@ -7163,8 +7264,8 @@ var SIDE_COMMAND_SETTLE_MS = 450;
 var SIDE_SWITCH_TIMEOUT_MS = 12e4;
 var SIDE_ENTRY_RETRY_POLL_MS = 160;
 var SIDE_ENTRY_RETRY_INTERVAL_MS = 900;
-var SIDE_ENTRY_MAX_RETRIES = 8;
 var SIDE_BODY_TIMEOUT_MS = 12e4;
+var SIDE_EVIDENCE_GRACE_MS = 5e3;
 var COMMAND_ESCAPE_SETTLE_MS = 250;
 var COMMAND_CLEAR_SETTLE_MS = 500;
 var COMMAND_STARTUP_TIMEOUT_MS = 25e3;
@@ -7252,6 +7353,18 @@ var LiveTerminalSession = class {
   pendingTerminalOutput = [];
   lastTerminalSnapshot = "";
   lastTerminalHistory;
+  // A tmux capture can deliver a visible snapshot and positioned history in
+  // separate frames. Keep their arrival order so a stale history footer cannot
+  // override a newer main-thread snapshot (or hide a newer side footer).
+  lastTerminalSnapshotAt = 0;
+  lastTerminalHistoryAt = 0;
+  lastTerminalHistoryFingerprint = "";
+  // Side mode is a terminal-level state. Keep a small amount of memory across
+  // observer turns so a delayed/partial tmux frame cannot make `/btw out`
+  // fail before the footer is repainted.
+  sideConversationConfirmed = false;
+  lastSideConversationAt = 0;
+  lastMainConversationAt = 0;
   terminalReady = Promise.resolve();
   resolveTerminalReady;
   firstTerminalOutput = Promise.resolve();
@@ -7277,12 +7390,11 @@ var LiveTerminalSession = class {
     return this.terminalInfo ? { ...this.terminalInfo } : void 0;
   }
   getDiagnostics() {
-    const snapshot = `${this.lastTerminalSnapshot}
-${this.lastTerminalHistory?.text ?? ""}`;
+    const snapshot = this.latestTerminalState();
     const inputState = this.turnPromptPreview ? isLiveTerminalReady(snapshot) ? "empty" : isPendingLivePromptDraft(snapshot, this.turnPromptPreview) ? "draft" : this.turnPhase === "submitted" || this.turnPhase === "busy" || this.turnPhase === "streaming" ? "submitted" : "unknown" : "unknown";
     return {
       phase: this.turnPhase,
-      sideConversation: isLiveSideConversation(snapshot),
+      sideConversation: this.hasSideConversationEvidence(snapshot),
       ...this.turnGeneration ? { generation: this.turnGeneration } : {},
       ...this.turnPromptPreview ? { promptPreview: previewLiveText(this.turnPromptPreview) } : {},
       inputState,
@@ -7316,7 +7428,8 @@ ${this.lastTerminalHistory?.text ?? ""}`;
     this.primed = true;
     return true;
   }
-  run(runId, prompt, cwd, inputMode) {
+  run(runId, prompt, cwd, inputMode, sideConversationConfirmed = false) {
+    if (sideConversationConfirmed) this.markSideConversationSeen(Date.now());
     this.turnGeneration = runId;
     this.turnPromptPreview = prompt;
     this.turnRetryCount = 0;
@@ -7324,14 +7437,15 @@ ${this.lastTerminalHistory?.text ?? ""}`;
     this.turnPhase = "starting";
     void this.start();
     const interruption = { requested: false, detached: false };
-    const events = this.turnEvents(prompt, cwd, inputMode, interruption, false);
+    const events = this.turnEvents(prompt, cwd, inputMode, interruption, false, sideConversationConfirmed);
     return {
       runId,
       events,
-      stop: async () => {
+      stop: async (options = {}) => {
         if (interruption.requested) return;
         interruption.requested = true;
-        interruption.cancel?.();
+        interruption.forceRequested = options.force === true;
+        interruption.cancel?.(interruption.forceRequested);
       },
       detach: async () => {
         if (interruption.detached) return;
@@ -7342,17 +7456,19 @@ ${this.lastTerminalHistory?.text ?? ""}`;
     };
   }
   /** Observe a side conversation without replacing the main live turn. */
-  runSide(runId, prompt, cwd, inputMode) {
+  runSide(runId, prompt, cwd, inputMode, sideConversationConfirmed = false) {
+    if (sideConversationConfirmed) this.markSideConversationSeen(Date.now());
     void this.start();
     const interruption = { requested: false, detached: false };
-    const events = this.turnEvents(prompt, cwd, inputMode, interruption, true);
+    const events = this.turnEvents(prompt, cwd, inputMode, interruption, true, sideConversationConfirmed);
     return {
       runId,
       events,
-      stop: async () => {
+      stop: async (options = {}) => {
         if (interruption.requested) return;
         interruption.requested = true;
-        interruption.cancel?.();
+        interruption.forceRequested = options.force === true;
+        interruption.cancel?.(interruption.forceRequested);
       },
       detach: async () => {
         if (interruption.detached) return;
@@ -7485,10 +7601,21 @@ ${this.lastTerminalHistory?.text ?? ""}`;
     }
     const output = this.cleaner.push(raw);
     const terminalSnapshot = output.terminalText ?? output.text;
-    if (output.mode === "snapshot" && terminalSnapshot.trim()) {
+    const observedAt = Date.now();
+    if ((output.mode === "snapshot" || this.terminalInfo?.backend === "pipe") && terminalSnapshot.trim()) {
       this.lastTerminalSnapshot = terminalSnapshot;
+      this.lastTerminalSnapshotAt = observedAt;
     }
-    if (output.history?.text.trim()) this.lastTerminalHistory = output.history;
+    if (output.history?.text.trim()) {
+      const fingerprint = liveHistoryFingerprint(output.history);
+      if (fingerprint !== this.lastTerminalHistoryFingerprint) {
+        this.lastTerminalHistory = output.history;
+        this.lastTerminalHistoryFingerprint = fingerprint;
+        this.lastTerminalHistoryAt = observedAt;
+        this.observeConversationEvidence(output.history.text, observedAt);
+      }
+    }
+    if (terminalSnapshot.trim()) this.observeConversationEvidence(terminalSnapshot, observedAt);
     if (!output.text.trim() && !output.terminalText?.trim() && !output.history?.text.trim()) return;
     if (this.emitter.listenerCount("data") === 0) {
       this.pendingTerminalOutput.push(output);
@@ -7502,15 +7629,59 @@ ${this.lastTerminalHistory?.text ?? ""}`;
     }
     this.emitter.emit("data", output);
   }
-  write(input) {
+  write(input, trackTurn = true) {
     const child = this.child;
     if (!child || child.exitCode !== null || child.signalCode !== null) return;
-    this.turnLastInputAt = Date.now();
+    if (trackTurn) this.turnLastInputAt = Date.now();
     child.stdin.write(
       this.terminalInfo?.backend === "tmux" ? encodeTmuxInputFrame(input) : input
     );
   }
-  async *turnEvents(prompt, cwd, inputMode, interruption = { requested: false, detached: false }, concurrentSide = false) {
+  latestTerminalState() {
+    const snapshot = this.lastTerminalSnapshot;
+    const history = this.lastTerminalHistory?.text ?? "";
+    const snapshotKind = classifyLiveConversation(snapshot);
+    const historyKind = classifyLiveConversation(history);
+    if (snapshotKind !== "unknown" && historyKind === "unknown") return snapshot;
+    if (historyKind !== "unknown" && snapshotKind === "unknown") return history;
+    if (snapshot.trim() && this.lastTerminalSnapshotAt >= this.lastTerminalHistoryAt) {
+      return snapshot;
+    }
+    if (history.trim()) return history;
+    return snapshot;
+  }
+  observeConversationEvidence(text, observedAt) {
+    if (isLiveSideConversation(text)) this.markSideConversationSeen(observedAt);
+    if (isLiveMainConversation(text)) this.lastMainConversationAt = observedAt;
+  }
+  markSideConversationSeen(observedAt) {
+    this.sideConversationConfirmed = true;
+    this.lastSideConversationAt = Math.max(this.lastSideConversationAt, observedAt);
+  }
+  /**
+   * Return side authorization only while there is no authoritative main
+   * surface. A recently captured side footer may live in history while the
+   * visible snapshot is still one repaint behind; retain that evidence for a
+   * short grace period, but never send Ctrl-C into a clearly main editor.
+   */
+  hasSideConversationEvidence(current = this.latestTerminalState()) {
+    if (isLiveSideConversation(current)) {
+      this.markSideConversationSeen(Date.now());
+      return true;
+    }
+    const snapshot = this.lastTerminalSnapshot;
+    const history = this.lastTerminalHistory?.text ?? "";
+    const sideInHistory = isLiveSideConversation(history);
+    const mainInSnapshot = isLiveMainConversation(snapshot);
+    if (this.sideConversationConfirmed && sideInHistory && mainInSnapshot) {
+      const sideIsRecent = this.lastTerminalHistoryAt + SIDE_EVIDENCE_GRACE_MS >= this.lastTerminalSnapshotAt;
+      if (sideIsRecent) return true;
+    }
+    if (isLiveMainConversation(current)) return false;
+    if (!this.sideConversationConfirmed) return false;
+    return this.lastMainConversationAt <= this.lastSideConversationAt;
+  }
+  async *turnEvents(prompt, cwd, inputMode, interruption = { requested: false, detached: false }, concurrentSide = false, sideOwnershipConfirmed = false) {
     yield { type: "system", cwd };
     await this.start();
     const sideMode = inputMode === "side";
@@ -7522,16 +7693,28 @@ ${this.lastTerminalHistory?.text ?? ""}`;
       return;
     }
     const turnPrompt = sideMode ? sidePrompt ?? "" : prompt;
-    const previousPhase = this.turnPhase;
     let finishDeferredUntilMainResumes = false;
+    let done = false;
     if (concurrentSide) this.concurrentSideDepth += 1;
-    this.turnPhase = "awaiting-input";
+    const setPhase = (phase) => {
+      if (!concurrentSide) this.turnPhase = phase;
+    };
+    const setLastError = (message) => {
+      if (!concurrentSide) this.turnLastError = message;
+    };
+    const markInput = () => {
+      if (!concurrentSide) this.turnLastInputAt = Date.now();
+    };
+    const writeTurn = (input, allowAfterCancel = false) => {
+      if (!allowAfterCancel && (done || interruption.requested || interruption.detached)) return;
+      this.write(input, !concurrentSide);
+    };
+    setPhase("awaiting-input");
     const idleMs = commandMode ? Math.max(this.opts.idleMs ?? DEFAULT_IDLE_MS, COMMAND_IDLE_MS) : this.opts.idleMs ?? DEFAULT_IDLE_MS;
     const outputFlushMs = this.opts.outputFlushMs ?? DEFAULT_OUTPUT_FLUSH_MS;
     const startupTimeoutMs = commandMode ? Math.max(this.opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS, COMMAND_STARTUP_TIMEOUT_MS) : this.opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
     const output = new TurnOutputBuffer(MAX_TURN_OUTPUT_CHARS, turnPrompt, commandMode || inputMode === "control");
     const queue = [];
-    let done = false;
     let wake;
     let timer;
     let outputTimer;
@@ -7610,14 +7793,14 @@ ${this.lastTerminalHistory?.text ?? ""}`;
       sawNormalSubmitProgress = true;
       if (this.terminalInfo?.backend !== "tmux") cancelNormalSubmitRetry();
     };
-    const finalize = (failureMessage) => {
+    const finalize = (failureMessage, terminationReason = "normal") => {
       if (done) return;
       done = true;
       settling = false;
       if (settlingTimer) clearTimeout(settlingTimer);
       settlingTimer = void 0;
-      this.turnPhase = failureMessage ? "failed" : "settling";
-      if (failureMessage) this.turnLastError = failureMessage;
+      setPhase(failureMessage ? "failed" : "settling");
+      if (failureMessage) setLastError(failureMessage);
       if (commandMode) {
         log.info("agent-live", "command-finish", {
           reason: failureMessage ? "terminal-failure" : "idle-or-startup"
@@ -7639,7 +7822,7 @@ ${this.lastTerminalHistory?.text ?? ""}`;
       if (failureMessage) {
         push({ type: "error", message: failureMessage, terminationReason: "failed" });
       } else {
-        push({ type: "done", terminationReason: "normal" });
+        push({ type: "done", terminationReason });
       }
     };
     const finish = (failureMessage) => {
@@ -7655,7 +7838,7 @@ ${this.lastTerminalHistory?.text ?? ""}`;
       if (settling) return;
       settling = true;
       settlingStartedAt = Date.now();
-      this.turnPhase = "settling";
+      setPhase("settling");
       if (timer) clearTimeout(timer);
       timer = void 0;
       flushOutput();
@@ -7687,27 +7870,31 @@ ${this.lastTerminalHistory?.text ?? ""}`;
       if (settlingTimer) clearTimeout(settlingTimer);
       settlingTimer = void 0;
     };
-    const cancelCurrentTurn = () => {
+    const cancelCurrentTurn = (force = false) => {
       if (done) return;
       if (sideExitMode) {
-        finish();
+        finalize(void 0, "interrupted");
         return;
       }
       const terminal = this.terminalInfo;
-      const terminalBusy = isLiveTerminalBusy(this.lastTerminalSnapshot) || isLiveTerminalBusy(this.lastTerminalHistory?.text ?? "");
-      if (terminal?.backend !== "tmux" || terminalBusy) {
-        this.write("");
+      const terminalBusy = isLiveTerminalBusy(this.latestTerminalState()) || isLiveTerminalBusy(this.lastTerminalSnapshot) || isLiveTerminalBusy(this.lastTerminalHistory?.text ?? "");
+      const sideActive = sideMode && (sideOwnershipConfirmed || this.sideConversationConfirmed || this.hasSideConversationEvidence(this.latestTerminalState()));
+      const sideInterruptAuthorized = !sideMode || sideActive;
+      if (sideInterruptAuthorized && (force || terminal?.backend !== "tmux" || terminalBusy || sideActive)) {
+        writeTurn("", true);
         log.info("agent-live", "turn-interrupt-sent", {
           backend: terminal?.backend ?? "unknown",
-          terminalBusy
+          terminalBusy,
+          sideActive,
+          force
         });
       } else {
         log.warn("agent-live", "turn-interrupt-withheld", {
           backend: terminal?.backend ?? "unknown",
-          reason: "terminal-not-confirmed-busy"
+          reason: sideMode ? "side-not-confirmed" : "terminal-not-confirmed-busy"
         });
       }
-      finish();
+      finalize(void 0, "interrupted");
     };
     const arm = (ms) => {
       if (timer) clearTimeout(timer);
@@ -7723,12 +7910,13 @@ ${this.lastTerminalHistory?.text ?? ""}`;
       if (!isPendingLiveCommandDraft(latestCommandTerminalText, turnPrompt)) return;
       slashConfirmTimer = setTimeout(() => {
         slashConfirmTimer = void 0;
-        if (done || sawCommandResultOutput || slashConfirmRetried || !isPendingLiveCommandDraft(latestCommandTerminalText, turnPrompt)) {
+        if (done || interruption.requested || interruption.detached || sawCommandResultOutput || slashConfirmRetried || !isPendingLiveCommandDraft(latestCommandTerminalText, turnPrompt)) {
           return;
         }
         slashConfirmRetried = true;
         log.info("agent-live", "command-confirm-draft", { commandText: turnPrompt });
-        this.write("\r");
+        if (done || interruption.requested || interruption.detached) return;
+        writeTurn("\r");
         if (isStatusLiveCommand(turnPrompt)) arm(idleMs);
       }, COMMAND_DRAFT_CONFIRM_DELAY_MS);
     };
@@ -7737,23 +7925,22 @@ ${this.lastTerminalHistory?.text ?? ""}`;
       if (!normalSubmitRetryStartedAt) normalSubmitRetryStartedAt = Date.now();
       const retryIfDraftAppears = () => {
         normalSubmitRetryTimer = void 0;
-        if (done || sawNormalSubmitProgress && this.terminalInfo?.backend !== "tmux") {
+        if (done || interruption.requested || interruption.detached || sawNormalSubmitProgress && this.terminalInfo?.backend !== "tmux") {
           return;
         }
         if (sideMode || this.terminalInfo?.backend === "tmux") {
-          const terminal = `${this.lastTerminalSnapshot}
-${this.lastTerminalHistory?.text ?? ""}`;
+          const terminal = this.latestTerminalState();
           const draftPending = isPendingLivePromptDraft(terminal, turnPrompt);
           if (draftPending) {
             if (sideMode) suspendIdle();
             if (normalSubmitRetryAttempts < NORMAL_SUBMIT_RETRY_MAX_ATTEMPTS) {
               normalSubmitRetryAttempts += 1;
-              this.turnRetryCount += 1;
+              if (!concurrentSide) this.turnRetryCount += 1;
               log.warn("agent-live", "normal-submit-retry", {
                 promptPreview: previewLiveText(turnPrompt),
                 attempt: normalSubmitRetryAttempts
               });
-              this.write("\r");
+              if (!done && !interruption.requested && !interruption.detached) writeTurn("\r");
             }
             normalSubmitRetryTimer = setTimeout(retryIfDraftAppears, NORMAL_SUBMIT_RETRY_POLL_MS);
             return;
@@ -7776,16 +7963,17 @@ ${this.lastTerminalHistory?.text ?? ""}`;
         }
         if (normalSubmitRetryAttempts > 0) return;
         normalSubmitRetryAttempts = 1;
-        this.turnRetryCount += 1;
+        if (!concurrentSide) this.turnRetryCount += 1;
         log.warn("agent-live", "normal-submit-retry", {
           promptPreview: previewLiveText(turnPrompt),
           attempt: normalSubmitRetryAttempts
         });
-        this.write("\r");
+        if (!done && !interruption.requested && !interruption.detached) writeTurn("\r");
       };
       normalSubmitRetryTimer = setTimeout(retryIfDraftAppears, NORMAL_SUBMIT_RETRY_DELAY_MS);
     };
     const onData = (event) => {
+      if (done || interruption.requested || interruption.detached) return;
       if (this.concurrentSideDepth > 0 && !concurrentSide) {
         const terminalText = event.terminalText ?? event.text;
         if (terminalText && isLiveMainConversation(terminalText)) {
@@ -7793,7 +7981,7 @@ ${this.lastTerminalHistory?.text ?? ""}`;
         }
         return;
       }
-      this.turnLastOutputAt = Date.now();
+      if (!concurrentSide) this.turnLastOutputAt = Date.now();
       if (!acceptingOutput) {
         const terminalText = event.terminalText ?? event.text;
         if (terminalText && isLiveTerminalInteraction(terminalText)) {
@@ -7834,7 +8022,7 @@ ${this.lastTerminalHistory?.text ?? ""}`;
         markNormalSubmitProgress();
       }
       if (terminalBusy) {
-        this.turnPhase = "busy";
+        setPhase("busy");
         terminalWasBusy = true;
         suspendIdle();
       } else if (terminalWasBusy) {
@@ -7882,7 +8070,7 @@ ${this.lastTerminalHistory?.text ?? ""}`;
         });
       }
       if (accepted) {
-        this.turnPhase = isLiveTerminalInteraction(terminalState ?? event.text) ? "picker" : "streaming";
+        setPhase(isLiveTerminalInteraction(terminalState ?? event.text) ? "picker" : "streaming");
         if (!normalPromptDraftPending) markNormalSubmitProgress();
         const resultOutput = isLiveCommandResultOutput(text, turnPrompt);
         const statusSurfaceOutput = !isStatusLiveCommand(turnPrompt) || this.terminalInfo?.backend !== "tmux" || isLiveStatusPanelOutput(output.lastAcceptedText());
@@ -7926,17 +8114,21 @@ ${this.lastTerminalHistory?.text ?? ""}`;
       const detail = evt.signal ? `signal ${evt.signal}` : `code ${evt.code ?? 0}`;
       push({
         type: evt.code && evt.code !== 0 ? "error" : "done",
-        ...evt.code && evt.code !== 0 ? { message: `live agent exited with ${detail}`, terminationReason: "failed" } : { terminationReason: "normal" }
+        ...evt.code && evt.code !== 0 ? { message: `live agent exited with ${detail}`, terminationReason: "failed" } : { terminationReason: interruption.requested ? "interrupted" : "normal" }
       });
     };
     const onError = (err) => {
       if (done) return;
-      this.turnPhase = "failed";
-      this.turnLastError = err.message;
+      setPhase("failed");
+      setLastError(err.message);
       done = true;
       if (timer) clearTimeout(timer);
       flushOutput();
-      push({ type: "error", message: `live agent failed: ${err.message}`, terminationReason: "failed" });
+      push({
+        type: "error",
+        message: `live agent failed: ${err.message}`,
+        terminationReason: interruption.requested ? "interrupted" : "failed"
+      });
     };
     let turnCleaned = false;
     const cleanupTurn = () => {
@@ -7985,120 +8177,144 @@ ${this.lastTerminalHistory?.text ?? ""}`;
     for (const event of this.pendingTerminalOutput.splice(0)) onData(event);
     try {
       if (interruption.detached) cleanupTurn();
-      else if (interruption.requested) cancelCurrentTurn();
-      await this.waitForInputReady(
-        inputGraceMs,
-        !commandMode && inputMode !== "control" && !turnPrompt.trim().startsWith("/")
-      );
-      if (!done) {
-        if (startupInteractionText && inputMode !== "control" && !sideMode && !sideExitMode) {
-          log.info("agent-live", "startup-interaction-dismiss", {
-            inputMode: inputMode ?? "task"
-          });
-          this.write("\x1B");
-          await delay(COMMAND_ESCAPE_SETTLE_MS);
-          startupInteractionText = void 0;
-        }
-        this.cleaner.resetTurn();
-        output.setSnapshotBaseline(this.lastTerminalSnapshot);
-        output.setHistoryBaseline(this.lastTerminalHistory);
-        if (commandMode) {
-          if (isLiveTerminalReady(this.lastTerminalSnapshot)) {
-            log.info("agent-live", "command-fast-submit", { reason: "ready-prompt" });
-          } else if (sideMode && isPendingLiveCommandDraft(this.lastTerminalSnapshot, "/btw", { allowBusy: true })) {
-            log.info("agent-live", "side-command-draft-no-clear");
-          } else if (sideMode && isLiveTerminalBusy(this.lastTerminalSnapshot)) {
-            log.info("agent-live", "side-command-busy-no-clear");
-          } else if (sideMode || sideExitMode) {
-            log.info("agent-live", "side-command-no-clear", {
-              mode: sideExitMode ? "side-exit" : "side"
-            });
-          } else {
-            log.info("agent-live", "command-clear", { sequence: "esc ctrl-a ctrl-k" });
-            await this.clearPendingInput();
-            this.cleaner.resetTurn();
-          }
-        }
-        acceptingOutput = true;
-        this.turnPhase = "submitted";
-        if (sideExitMode) {
-          const exitedSideConversation = await this.exitSideConversation();
-          if (exitedSideConversation) {
-            push({
-              type: "text",
-              delta: "\u5DF2\u9000\u51FA Codex btw side conversation\uFF0C\u4E3B\u7EBF\u7A0B\u7EE7\u7EED\u8FD0\u884C\u3002\n",
-              source: "live-terminal",
-              sequence: ++liveTextSequence
-            });
-          } else {
-            push({
-              type: "text",
-              delta: "\u5F53\u524D\u672A\u786E\u8BA4\u5904\u4E8E Codex btw side conversation\uFF0C\u672A\u53D1\u9001\u4EFB\u4F55\u9000\u51FA\u6309\u952E\u3002\n",
-              source: "live-terminal",
-              sequence: ++liveTextSequence
-            });
-          }
-          finish();
-        } else if (sideMode) {
-          const enteredSideConversation = await this.enterSideConversation();
-          if (!enteredSideConversation) {
-            finish("\u672A\u786E\u8BA4 Codex \u5DF2\u8FDB\u5165 side conversation\uFF0C/btw \u6B63\u6587\u672A\u53D1\u9001\u3002\u8BF7\u5148\u56DE\u5230\u4E3B\u7EBF\u7A0B\u540E\u91CD\u8BD5\u3002");
-          } else if (turnPrompt) {
-            this.turnLastInputAt = Date.now();
-            this.write(`${turnPrompt}\r`);
-            sideBodyAwaitingSubmit = true;
-            suspendIdle();
-            scheduleNormalSubmitRetry();
-          } else {
-            push({
-              type: "text",
-              delta: "\u5DF2\u8FDB\u5165 Codex btw side conversation\uFF0C\u8BF7\u53D1\u9001\u6B63\u6587\u3002\n",
-              source: "live-terminal",
-              sequence: ++liveTextSequence
-            });
-            finish();
-          }
-        } else {
-          const controlKeys = inputMode === "control" ? parseLiveControlSequence(turnPrompt) : null;
-          if (controlKeys) {
-            for (let i = 0; i < controlKeys.length; i++) {
-              if (i > 0) await delay(CONTROL_KEY_GAP_MS);
-              this.write(controlKeys[i]);
-              this.turnLastInputAt = Date.now();
-            }
-          } else {
-            if (commandMode) log.info("agent-live", "command-submit", { commandText: turnPrompt });
-            if (inputMode === "control" && isNumericControlLiteral(turnPrompt)) {
-              log.info("agent-live", "control-literal-type", { input: turnPrompt });
-              this.write(turnPrompt);
-              this.turnLastInputAt = Date.now();
-            } else if (inputMode === "control" && shouldDeferControlLiteralSubmit(turnPrompt)) {
-              log.info("agent-live", "control-literal-type", { input: turnPrompt });
-              this.write(turnPrompt);
-              this.turnLastInputAt = Date.now();
-              controlLiteralConfirmTimer = setTimeout(() => {
-                controlLiteralConfirmTimer = void 0;
-                if (done || sawAcceptedOutput) return;
-                log.info("agent-live", "control-literal-confirm", { input: turnPrompt });
-                this.write("\r");
-              }, CONTROL_LITERAL_CONFIRM_DELAY_MS);
-            } else {
-              this.write(`${turnPrompt}\r`);
-              this.turnLastInputAt = Date.now();
-              scheduleNormalSubmitRetry();
-            }
-          }
-        }
-        if (sideBodyAwaitingSubmit) {
-          arm(SIDE_BODY_TIMEOUT_MS);
-        } else if (commandMode && isStatusLiveCommand(turnPrompt)) {
-          arm(
-            this.terminalInfo?.backend === "tmux" ? noOutputIdleMs(turnPrompt, idleMs) : idleMs
+      else if (interruption.requested) cancelCurrentTurn(interruption.forceRequested === true);
+      submitTurn: {
+        if (!done) {
+          await this.waitForInputReady(
+            inputGraceMs,
+            !commandMode && inputMode !== "control" && !turnPrompt.trim().startsWith("/")
           );
-        } else if (commandMode && isKnownSilentLiveCommand(turnPrompt)) arm(idleMs);
-        else if (commandMode && isSlowSilentLiveCommand(turnPrompt)) {
-          arm(noOutputIdleMs(turnPrompt, idleMs));
-        } else arm(startupTimeoutMs);
+        }
+        if (!done) {
+          if (startupInteractionText && inputMode !== "control" && !sideMode && !sideExitMode) {
+            log.info("agent-live", "startup-interaction-dismiss", {
+              inputMode: inputMode ?? "task"
+            });
+            writeTurn("\x1B");
+            await delay(COMMAND_ESCAPE_SETTLE_MS);
+            if (done || interruption.requested || interruption.detached) break submitTurn;
+            startupInteractionText = void 0;
+          }
+          if (!concurrentSide) this.cleaner.resetTurn();
+          output.setSnapshotBaseline(this.lastTerminalSnapshot);
+          output.setHistoryBaseline(this.lastTerminalHistory);
+          if (commandMode) {
+            const currentTerminalState = this.latestTerminalState();
+            if (isLiveTerminalReady(currentTerminalState)) {
+              log.info("agent-live", "command-fast-submit", { reason: "ready-prompt" });
+            } else if (sideMode && isPendingLiveCommandDraft(currentTerminalState, "/btw", { allowBusy: true })) {
+              log.info("agent-live", "side-command-draft-no-clear");
+            } else if (sideMode && isLiveTerminalBusy(currentTerminalState)) {
+              log.info("agent-live", "side-command-busy-no-clear");
+            } else if (sideMode || sideExitMode) {
+              log.info("agent-live", "side-command-no-clear", {
+                mode: sideExitMode ? "side-exit" : "side"
+              });
+            } else {
+              log.info("agent-live", "command-clear", { sequence: "esc ctrl-a ctrl-k" });
+              const cleared = await this.clearPendingInput(
+                writeTurn,
+                () => !done && !interruption.requested && !interruption.detached
+              );
+              if (!cleared) break submitTurn;
+              this.cleaner.resetTurn();
+            }
+          }
+          acceptingOutput = true;
+          setPhase("submitted");
+          if (sideExitMode) {
+            const exitedSideConversation = await this.exitSideConversation(
+              writeTurn,
+              () => !done && !interruption.requested && !interruption.detached,
+              sideOwnershipConfirmed
+            );
+            if (done || interruption.requested || interruption.detached) break submitTurn;
+            if (exitedSideConversation) {
+              push({ type: "system", cwd, sideConversation: "exited" });
+              push({
+                type: "text",
+                delta: "\u5DF2\u9000\u51FA Codex btw side conversation\uFF0C\u4E3B\u7EBF\u7A0B\u7EE7\u7EED\u8FD0\u884C\u3002\n",
+                source: "live-terminal",
+                sequence: ++liveTextSequence
+              });
+            } else {
+              push({
+                type: "text",
+                delta: "\u5F53\u524D\u672A\u786E\u8BA4\u5904\u4E8E Codex btw side conversation\uFF0C\u672A\u53D1\u9001\u4EFB\u4F55\u9000\u51FA\u6309\u952E\u3002\n",
+                source: "live-terminal",
+                sequence: ++liveTextSequence
+              });
+            }
+            finish();
+          } else if (sideMode) {
+            const enteredSideConversation = await this.enterSideConversation(
+              writeTurn,
+              () => !done && !interruption.requested && !interruption.detached
+            );
+            if (done || interruption.requested || interruption.detached) break submitTurn;
+            if (!enteredSideConversation) {
+              finish("\u672A\u786E\u8BA4 Codex \u5DF2\u8FDB\u5165 side conversation\uFF0C/btw \u6B63\u6587\u672A\u53D1\u9001\u3002\u8BF7\u5148\u56DE\u5230\u4E3B\u7EBF\u7A0B\u540E\u91CD\u8BD5\u3002");
+            } else if (turnPrompt) {
+              push({ type: "system", cwd, sideConversation: "entered" });
+              if (done || interruption.requested || interruption.detached) break submitTurn;
+              markInput();
+              writeTurn(`${turnPrompt}\r`);
+              sideBodyAwaitingSubmit = true;
+              suspendIdle();
+              scheduleNormalSubmitRetry();
+            } else {
+              push({ type: "system", cwd, sideConversation: "entered" });
+              push({
+                type: "text",
+                delta: "\u5DF2\u8FDB\u5165 Codex btw side conversation\uFF0C\u8BF7\u53D1\u9001\u6B63\u6587\u3002\n",
+                source: "live-terminal",
+                sequence: ++liveTextSequence
+              });
+              finish();
+            }
+          } else {
+            const controlKeys = inputMode === "control" ? parseLiveControlSequence(turnPrompt) : null;
+            if (controlKeys) {
+              for (let i = 0; i < controlKeys.length; i++) {
+                if (i > 0) await delay(CONTROL_KEY_GAP_MS);
+                if (done || interruption.requested || interruption.detached) break submitTurn;
+                writeTurn(controlKeys[i]);
+                markInput();
+              }
+            } else {
+              if (commandMode) log.info("agent-live", "command-submit", { commandText: turnPrompt });
+              if (inputMode === "control" && isNumericControlLiteral(turnPrompt)) {
+                log.info("agent-live", "control-literal-type", { input: turnPrompt });
+                writeTurn(turnPrompt);
+                markInput();
+              } else if (inputMode === "control" && shouldDeferControlLiteralSubmit(turnPrompt)) {
+                log.info("agent-live", "control-literal-type", { input: turnPrompt });
+                writeTurn(turnPrompt);
+                markInput();
+                controlLiteralConfirmTimer = setTimeout(() => {
+                  controlLiteralConfirmTimer = void 0;
+                  if (done || interruption.requested || interruption.detached || sawAcceptedOutput) return;
+                  log.info("agent-live", "control-literal-confirm", { input: turnPrompt });
+                  writeTurn("\r");
+                }, CONTROL_LITERAL_CONFIRM_DELAY_MS);
+              } else {
+                writeTurn(`${turnPrompt}\r`);
+                markInput();
+                scheduleNormalSubmitRetry();
+              }
+            }
+          }
+          if (sideBodyAwaitingSubmit) {
+            arm(SIDE_BODY_TIMEOUT_MS);
+          } else if (commandMode && isStatusLiveCommand(turnPrompt)) {
+            arm(
+              this.terminalInfo?.backend === "tmux" ? noOutputIdleMs(turnPrompt, idleMs) : idleMs
+            );
+          } else if (commandMode && isKnownSilentLiveCommand(turnPrompt)) arm(idleMs);
+          else if (commandMode && isSlowSilentLiveCommand(turnPrompt)) {
+            arm(noOutputIdleMs(turnPrompt, idleMs));
+          } else arm(startupTimeoutMs);
+        }
       }
       while (!done || queue.length > 0) {
         if (queue.length === 0) {
@@ -8115,7 +8331,7 @@ ${this.lastTerminalHistory?.text ?? ""}`;
       if (concurrentSide) {
         this.concurrentSideDepth = Math.max(0, this.concurrentSideDepth - 1);
         if (this.concurrentSideDepth === 0) {
-          const terminalText = this.lastTerminalSnapshot;
+          const terminalText = this.latestTerminalState();
           const mainFrame = this.pendingMainResumeOutput ?? (isLiveMainConversation(terminalText) ? {
             mode: "snapshot",
             text: "",
@@ -8127,7 +8343,6 @@ ${this.lastTerminalHistory?.text ?? ""}`;
             this.resumeMainAfterSide?.(mainFrame);
           }
         }
-        this.turnPhase = previousPhase;
       }
       if (this.activeTurnCleanup === cleanupTurn) {
         this.turnPhase = "idle";
@@ -8136,21 +8351,27 @@ ${this.lastTerminalHistory?.text ?? ""}`;
       cleanupTurn();
     }
   }
-  async clearPendingInput() {
-    this.write("\x1B");
+  async clearPendingInput(writeInput = (input) => this.write(input), shouldContinue = () => true) {
+    if (!shouldContinue()) return false;
+    writeInput("\x1B");
     await delay(COMMAND_ESCAPE_SETTLE_MS);
-    this.write("");
+    if (!shouldContinue()) return false;
+    writeInput("");
     await delay(CONTROL_KEY_GAP_MS);
-    this.write("\v");
+    if (!shouldContinue()) return false;
+    writeInput("\v");
     await delay(COMMAND_CLEAR_SETTLE_MS);
+    return shouldContinue();
   }
-  async enterSideConversation() {
-    const terminal = this.lastTerminalSnapshot;
-    if (isLiveSideConversation(terminal)) {
+  async enterSideConversation(writeInput = (input) => this.write(input), shouldContinue = () => true) {
+    if (!shouldContinue()) return false;
+    const terminal = this.latestTerminalState();
+    if (this.hasSideConversationEvidence(terminal)) {
+      this.markSideConversationSeen(Date.now());
       log.info("agent-live", "side-conversation-reuse");
       return true;
     }
-    const beforeSide = this.lastTerminalSnapshot;
+    const beforeSide = this.latestTerminalState();
     const hasPendingEntryDraft = isPendingLiveCommandDraft(terminal, "/btw", {
       allowBusy: true
     });
@@ -8159,19 +8380,22 @@ ${this.lastTerminalHistory?.text ?? ""}`;
         reason: "picker-is-active"
       });
     } else {
-      this.write(hasPendingEntryDraft ? "\r" : "/btw\r");
+      if (!shouldContinue()) return false;
+      writeInput(hasPendingEntryDraft ? "\r" : "/btw\r");
     }
     const deadline = Date.now() + (this.opts.sideSwitchTimeoutMs ?? SIDE_SWITCH_TIMEOUT_MS);
     let lastDraftRetryAt = hasPendingEntryDraft ? Date.now() : 0;
     let entryRetries = 0;
     let entrySent = !isStructuredLiveInteraction(terminal);
     while (Date.now() < deadline) {
-      const current = this.lastTerminalSnapshot;
+      if (!shouldContinue()) return false;
+      const current = this.latestTerminalState();
       if (isLiveSideConversation(current) && (current !== beforeSide || isLiveSideConversation(beforeSide))) {
+        this.markSideConversationSeen(Date.now());
         await delay(SIDE_COMMAND_SETTLE_MS);
         return true;
       }
-      if (!isStructuredLiveInteraction(current) && Date.now() - lastDraftRetryAt >= SIDE_ENTRY_RETRY_INTERVAL_MS && entryRetries < SIDE_ENTRY_MAX_RETRIES && isPendingLiveCommandDraft(current, "/btw", { allowBusy: true })) {
+      if (!isStructuredLiveInteraction(current) && Date.now() - lastDraftRetryAt >= SIDE_ENTRY_RETRY_INTERVAL_MS && isPendingLiveCommandDraft(current, "/btw", { allowBusy: true })) {
         lastDraftRetryAt = Date.now();
         entryRetries += 1;
         log.warn("agent-live", "side-command-confirm-draft", {
@@ -8179,26 +8403,38 @@ ${this.lastTerminalHistory?.text ?? ""}`;
           terminalBusy: isLiveTerminalBusy(current),
           attempt: entryRetries
         });
-        this.write("\r");
+        if (!shouldContinue()) return false;
+        writeInput("\r");
       }
       if (!entrySent && !isStructuredLiveInteraction(current) && !isPendingLiveCommandDraft(current, "/btw", { allowBusy: true }) && (current === beforeSide || isLiveMainConversation(current))) {
         entrySent = true;
-        this.write("/btw\r");
+        if (!shouldContinue()) return false;
+        writeInput("/btw\r");
       }
       await delay(Math.min(SIDE_ENTRY_RETRY_POLL_MS, Math.max(1, deadline - Date.now())));
     }
     return false;
   }
-  async exitSideConversation() {
-    const before = this.lastTerminalSnapshot;
-    if (!isLiveSideConversation(before)) return false;
-    this.write("");
-    log.info("agent-live", "side-conversation-exit-sent");
+  async exitSideConversation(writeInput = (input) => this.write(input), shouldContinue = () => true, sideOwnershipConfirmed = false) {
     const deadline = Date.now() + (this.opts.sideSwitchTimeoutMs ?? SIDE_SWITCH_TIMEOUT_MS);
+    let exitSent = false;
+    let mainObservationBeforeExit = this.lastMainConversationAt;
     while (Date.now() < deadline) {
-      const current = this.lastTerminalSnapshot;
-      if (!isLiveSideConversation(current) && isLiveMainConversation(current)) {
+      if (!shouldContinue()) return false;
+      const current = this.latestTerminalState();
+      if (!exitSent && (sideOwnershipConfirmed || this.sideConversationConfirmed || this.hasSideConversationEvidence(current))) {
+        if (!shouldContinue()) return false;
+        mainObservationBeforeExit = this.lastMainConversationAt;
+        writeInput("");
+        exitSent = true;
+        log.info("agent-live", "side-conversation-exit-sent");
+      }
+      if (exitSent && !isLiveSideConversation(current) && isLiveMainConversation(current) && this.lastMainConversationAt > mainObservationBeforeExit) {
+        this.sideConversationConfirmed = false;
+        this.lastSideConversationAt = 0;
+        this.lastMainConversationAt = 0;
         await delay(SIDE_COMMAND_SETTLE_MS);
+        if (!shouldContinue()) return false;
         return true;
       }
       await delay(SIDE_ENTRY_RETRY_POLL_MS);
@@ -8687,6 +8923,13 @@ function sendBracketedPaste(text) {
 }
 
 function sendInput(input) {
+  // Ctrl-C is a lifecycle command, but it still has to reach the pane the
+  // user currently selected. Normal text goes through ensureLivePane(),
+  // whereas the old Ctrl-C fast path deliberately skipped it; after a manual
+  // resume that left stop/side-exit targeting the retired pane. Refresh only
+  // by adopting an existing same-family pane here: never create a new pane for
+  // a stop request.
+  if (input === '\x03' && managed) adoptSelectedLivePane();
   const paneReady = input === '\x03' || ensureLivePane();
   if (!paneReady) return;
   if (input === '\x03') {
@@ -9224,6 +9467,9 @@ function parseLiveHistorySnapshot(payload) {
   const lineCount = payload ? payload.split("\n").length : 0;
   return { paneId: "", startLine: 0, endLine: lineCount, text: payload };
 }
+function liveHistoryFingerprint(history) {
+  return createHash2("sha256").update(history.paneId).update("\0").update(String(history.startLine)).update("\0").update(String(history.endLine)).update("\0").update(history.text).digest("hex");
+}
 function matchingPrefixSuffixLength(input, prefix) {
   const max = Math.min(input.length, prefix.length - 1);
   for (let length = max; length > 0; length -= 1) {
@@ -9503,7 +9749,8 @@ var TurnOutputBuffer = class {
       if (part === "\n") {
         const comparable = currentLine.trim();
         const repeatsLastLine = comparable && comparable === this.lastCompleteLine;
-        if (!repeatsLastLine || preserveSnapshotDuplicates && !firstCompleteLine) {
+        const preservePendingFirstLine = preserveSnapshotDuplicates && firstCompleteLine && this.deliveredTail.length === 0 && this.pending.length > 0;
+        if (!repeatsLastLine || preserveSnapshotDuplicates && (!firstCompleteLine || preservePendingFirstLine)) {
           out += `${currentLine}
 `;
         }
@@ -10097,6 +10344,12 @@ function isLiveSideConversation(input) {
   const recent = cleanTerminalOutput(input).split("\n").slice(-20).join("\n");
   return /\bside\s+from\s+main\s+thread\b/iu.test(recent);
 }
+function classifyLiveConversation(input) {
+  if (!input.trim()) return "unknown";
+  if (isLiveSideConversation(input)) return "side";
+  if (isLiveMainConversation(input)) return "main";
+  return "unknown";
+}
 function isLiveMainConversation(input) {
   const recent = cleanTerminalOutput(input).split("\n").slice(-20).join(" ").replace(/\s+/gu, " ").trim();
   if (!recent || /\bside\s+from\s+main\s+thread\b/iu.test(recent)) return false;
@@ -10336,6 +10589,7 @@ var ClaudeAdapter = class {
         return removed;
       },
       status: (scopeId, cwd) => this.tmuxStatus(scopeId, cwd),
+      managedScopesForChat: (chatId) => this.tmuxBindings.managedScopesForChat(chatId),
       tail: async (scopeId, lineCount, cwd) => {
         const terminal = tmuxTerminalForStatus(await this.tmuxStatus(scopeId, cwd));
         return captureTmuxPaneTail(terminal, lineCount);
@@ -10354,6 +10608,7 @@ var ClaudeAdapter = class {
           ...terminal ? { terminal: { backend: "tmux", ...terminal } } : {}
         };
       },
+      interrupt: (scopeId, cwd, options) => this.tmuxBindings.interrupt(scopeId, cwd, options),
       restoreArtifactDelivery: (scopeId, artifact) => this.tmuxBindings.restoreManagedArtifactDelivery(scopeId, artifact)
     };
   }
@@ -10543,9 +10798,21 @@ var ClaudeAdapter = class {
       }
     });
     if (side && (opts.liveInputMode === "side" || opts.liveInputMode === "side-exit")) {
-      return session.runSide(opts.runId, opts.prompt, opts.cwd, opts.liveInputMode);
+      return session.runSide(
+        opts.runId,
+        opts.prompt,
+        opts.cwd,
+        opts.liveInputMode,
+        opts.sideConversationConfirmed
+      );
     }
-    return session.run(opts.runId, opts.prompt, opts.cwd, opts.liveInputMode);
+    return session.run(
+      opts.runId,
+      opts.prompt,
+      opts.cwd,
+      opts.liveInputMode,
+      opts.sideConversationConfirmed
+    );
   }
 };
 function tmuxTerminalForStatus(status) {
@@ -10970,6 +11237,7 @@ var CodexAdapter = class {
         return removed;
       },
       status: (scopeId, cwd) => this.tmuxStatus(scopeId, cwd),
+      managedScopesForChat: (chatId) => this.tmuxBindings.managedScopesForChat(chatId),
       tail: async (scopeId, lineCount, cwd) => {
         const terminal = tmuxTerminalForStatus2(await this.tmuxStatus(scopeId, cwd));
         return captureTmuxPaneTail(terminal, lineCount);
@@ -10988,6 +11256,7 @@ var CodexAdapter = class {
           ...terminal ? { terminal: { backend: "tmux", ...terminal } } : {}
         };
       },
+      interrupt: (scopeId, cwd, options) => this.tmuxBindings.interrupt(scopeId, cwd, options),
       restoreArtifactDelivery: (scopeId, artifact) => this.tmuxBindings.restoreManagedArtifactDelivery(scopeId, artifact)
     };
   }
@@ -11210,9 +11479,21 @@ var CodexAdapter = class {
       }
     });
     if (side && (opts.liveInputMode === "side" || opts.liveInputMode === "side-exit")) {
-      return session.runSide(opts.runId, opts.prompt, opts.cwd, opts.liveInputMode);
+      return session.runSide(
+        opts.runId,
+        opts.prompt,
+        opts.cwd,
+        opts.liveInputMode,
+        opts.sideConversationConfirmed
+      );
     }
-    return session.run(opts.runId, opts.prompt, opts.cwd, opts.liveInputMode);
+    return session.run(
+      opts.runId,
+      opts.prompt,
+      opts.cwd,
+      opts.liveInputMode,
+      opts.sideConversationConfirmed
+    );
   }
 };
 function tmuxTerminalForStatus2(status) {
@@ -14357,6 +14638,7 @@ async function handleNew(args, ctx) {
     const rawName = trimmed === "chat" ? "" : trimmed.slice(5).trim();
     return handleNewChat(rawName, ctx);
   }
+  ctx.activeRuns.advanceStopGeneration(ctx.scope);
   const wasRunning = ctx.activeRuns.interrupt(ctx.scope);
   if (ctx.sessionCatalog && ctx.sessionCatalogIdentity) {
     ctx.sessionCatalog.archiveActive({
@@ -14416,6 +14698,7 @@ async function handleCd(args, ctx) {
     await reply(ctx, workspace.userVisible);
     return;
   }
+  ctx.activeRuns.advanceStopGeneration(ctx.scope);
   ctx.activeRuns.interrupt(ctx.scope);
   ctx.workspaces.setCwd(ctx.scope, workspace.cwdRealpath);
   ctx.sessions.clear(ctx.scope);
@@ -14478,6 +14761,7 @@ async function handleWsUse(name, ctx) {
     await reply(ctx, workspace.userVisible);
     return;
   }
+  ctx.activeRuns.advanceStopGeneration(ctx.scope);
   ctx.activeRuns.interrupt(ctx.scope);
   ctx.workspaces.setCwd(ctx.scope, workspace.cwdRealpath);
   ctx.sessions.clear(ctx.scope);
@@ -14609,6 +14893,7 @@ async function applyResume(sessionId, ctx) {
     const entry = ctx.sessionCatalog.activeFor(ctx.sessionCatalogIdentity);
     const resolved = consumeResumeCandidate(sessionId, ctx.sessionCatalogIdentity);
     if (resolved) {
+      ctx.activeRuns.advanceStopGeneration(ctx.scope);
       ctx.activeRuns.interrupt(ctx.scope);
       if (ctx.sessionCatalogIdentity.agentId === "codex") {
         ctx.sessionCatalog.upsertActive({
@@ -14640,6 +14925,7 @@ async function applyResume(sessionId, ctx) {
       await reply(ctx, "\u5F53\u524D\u4E0A\u4E0B\u6587\u4E0D\u53EF\u6062\u590D\u8FD9\u4E2A\u4F1A\u8BDD\uFF0C\u8BF7\u91CD\u65B0\u9009\u62E9\u5F53\u524D\u5DE5\u4F5C\u533A\u548C\u6743\u9650\u7B56\u7565\u4E0B\u7684\u4F1A\u8BDD\u3002");
       return;
     }
+    ctx.activeRuns.advanceStopGeneration(ctx.scope);
     ctx.activeRuns.interrupt(ctx.scope);
     if (ctx.sessionCatalogIdentity.agentId === "claude") {
       ctx.sessions.set(ctx.scope, sessionId, ctx.sessionCatalogIdentity.cwdRealpath);
@@ -14656,6 +14942,7 @@ async function applyResume(sessionId, ctx) {
     await reply(ctx, "\u8BF7\u5148\u4F7F\u7528 /cd <path> \u9009\u62E9\u5DE5\u4F5C\u76EE\u5F55\uFF0C\u518D\u67E5\u770B\u6216\u6062\u590D\u4F1A\u8BDD\u3002");
     return;
   }
+  ctx.activeRuns.advanceStopGeneration(ctx.scope);
   ctx.activeRuns.interrupt(ctx.scope);
   ctx.sessions.set(ctx.scope, sessionId, cwd);
   await reply(ctx, RESUME_APPLIED_REPLY);
@@ -14771,7 +15058,7 @@ async function handleStatus(_args, ctx) {
     agentName: ctx.agent.displayName,
     runtimeAccess: runtimeAccessStatus(ctx.controls.profileConfig),
     larkCliStatus: await larkCliStatus(ctx),
-    activeRun: Boolean(ctx.activeRuns.get(ctx.scope)),
+    activeRun: ctx.activeRuns.hasAny(ctx.scope),
     activeScopes: ctx.activeRuns.scopes().filter((scope) => !scope.startsWith("comment:")),
     activeCommentScopes: ctx.activeRuns.scopes().filter((scope) => scope.startsWith("comment:")),
     queue: ctx.processPool?.snapshot(),
@@ -14815,17 +15102,115 @@ async function handleStop(args, ctx) {
     return;
   }
   const scope = targetScope || ctx.scope;
-  const ok = ctx.activeRuns.interrupt(scope);
-  log.info("command", "stop", {
-    scope,
-    targeted: Boolean(targetScope),
-    interrupted: ok
-  });
-  if (targetScope) {
-    await reply(
-      ctx,
-      ok ? `\u5DF2\u8BF7\u6C42\u505C\u6B62 \`${scope}\`\u3002` : `\u672A\u627E\u5230\u6B63\u5728\u8FD0\u884C\u7684\u4EFB\u52A1\uFF1A\`${scope}\`\u3002`
+  const candidateScopes = targetScope ? [scope] : [
+    .../* @__PURE__ */ new Set([
+      scope,
+      ...ctx.activeRuns.scopesForChat(ctx.msg.chatId),
+      ...ctx.lifecycleScopes ?? []
+    ])
+  ];
+  const sideOnly = ctx.lifecycleTarget === "side" && (candidateScopes.some((candidate) => Boolean(ctx.activeRuns.getSide(candidate))) || (ctx.lifecycleScopes?.length ?? 0) > 0);
+  let stoppedSide = false;
+  let stoppedMain = false;
+  let effectiveScope = scope;
+  let generationAdvanced = false;
+  let preSpawnCancellation = false;
+  let stoppedDurableTerminal = false;
+  let durableStopAlreadyRequested = false;
+  let durableSideDetected = false;
+  const selectCandidate = (predicate) => {
+    if (predicate(scope)) return scope;
+    const matches = candidateScopes.filter(predicate);
+    return matches.length === 1 ? matches[0] : void 0;
+  };
+  if (sideOnly) {
+    const sideScope = selectCandidate(
+      (candidate) => Boolean(ctx.activeRuns.getSide(candidate)) || (ctx.lifecycleScopes?.includes(candidate) ?? false)
     );
+    if (sideScope) {
+      ctx.activeRuns.advanceStopGeneration(sideScope, "side");
+      generationAdvanced = true;
+      effectiveScope = sideScope;
+      stoppedSide = ctx.activeRuns.interruptSide(sideScope);
+      preSpawnCancellation = stoppedSide || (ctx.lifecycleScopes?.includes(sideScope) ?? false);
+    }
+  } else {
+    const sideScope = selectCandidate((candidate) => Boolean(ctx.activeRuns.getSide(candidate)));
+    if (sideScope) {
+      ctx.activeRuns.advanceStopGeneration(sideScope, "side");
+      generationAdvanced = true;
+      stoppedSide = ctx.activeRuns.interruptSide(sideScope);
+      effectiveScope = sideScope;
+    }
+    if (!stoppedSide) {
+      const mainScope = selectCandidate((candidate) => Boolean(ctx.activeRuns.get(candidate)));
+      if (mainScope) {
+        ctx.activeRuns.advanceStopGeneration(mainScope, "main");
+        generationAdvanced = true;
+        stoppedMain = ctx.activeRuns.interruptMain(mainScope);
+        effectiveScope = mainScope;
+      }
+    }
+  }
+  if (!generationAdvanced && !stoppedSide && !stoppedMain && candidateScopes.length > 0) {
+    ctx.activeRuns.advanceStopGeneration(scope, sideOnly ? "side" : "main");
+    generationAdvanced = true;
+  }
+  if (!stoppedSide && !stoppedMain && !preSpawnCancellation && ctx.agent.tmux?.interrupt) {
+    const fallbackScope = targetScope ? scope : effectiveScope;
+    const fallbackCwd = ctx.workspaces.cwdFor(fallbackScope) ?? ctx.controls.profileConfig.workspaces.default;
+    if (!sideOnly && ctx.lifecycleTarget !== "side" && ctx.agent.tmux.diagnostics) {
+      durableSideDetected = await boundedStopSideDiagnostic(
+        ctx.agent.tmux.diagnostics(fallbackScope, fallbackCwd)
+      );
+    }
+    const durableTarget = sideOnly || ctx.lifecycleTarget === "side" || durableSideDetected ? "side" : "main";
+    if (!ctx.activeRuns.beginDurableInterrupt(fallbackScope, durableTarget)) {
+      durableStopAlreadyRequested = true;
+    } else {
+      try {
+        stoppedDurableTerminal = await ctx.agent.tmux.interrupt(fallbackScope, fallbackCwd, {
+          sideOnly: durableTarget === "side"
+        });
+        if (stoppedDurableTerminal) {
+          effectiveScope = fallbackScope;
+          if (durableTarget === "side") stoppedSide = true;
+          else stoppedMain = true;
+        }
+      } catch (err) {
+        log.info("command", "durable-stop-fallback-failed", {
+          scope: fallbackScope,
+          err: err instanceof Error ? err.message : String(err)
+        });
+      } finally {
+        ctx.activeRuns.finishDurableInterrupt(fallbackScope, durableTarget, stoppedDurableTerminal);
+      }
+    }
+  }
+  const ok = stoppedSide || stoppedMain || stoppedDurableTerminal || preSpawnCancellation || durableStopAlreadyRequested;
+  log.info("command", "stop", {
+    scope: effectiveScope,
+    targeted: Boolean(targetScope),
+    interrupted: ok,
+    side: stoppedSide
+  });
+  await reply(
+    ctx,
+    ok ? stoppedSide ? "\u23F9 \u5DF2\u8BF7\u6C42\u505C\u6B62\u5F53\u524D side conversation\uFF0C\u4E3B\u7EBF\u7A0B\u7EE7\u7EED\u8FD0\u884C\u3002" : durableStopAlreadyRequested && !stoppedDurableTerminal && !stoppedMain ? "\u23F9 \u5DF2\u786E\u8BA4\u505C\u6B62\u8BF7\u6C42\u6B63\u5728\u5904\u7406\uFF0C\u4E0D\u4F1A\u91CD\u590D\u53D1\u9001\u4E2D\u65AD\u6309\u952E\u3002" : "\u23F9 \u5DF2\u8BF7\u6C42\u505C\u6B62\u5F53\u524D\u4EFB\u52A1\u3002" : targetScope ? `\u672A\u627E\u5230\u6B63\u5728\u8FD0\u884C\u7684\u4EFB\u52A1\uFF1A\`${scope}\`\u3002` : "\u5F53\u524D\u6CA1\u6709\u53EF\u505C\u6B62\u7684\u8FD0\u884C\u3002"
+  );
+}
+async function boundedStopSideDiagnostic(operation) {
+  let timer;
+  try {
+    const diagnostics = await Promise.race([
+      operation.catch(() => void 0),
+      new Promise((resolve5) => {
+        timer = setTimeout(() => resolve5(void 0), 1500);
+      })
+    ]);
+    return diagnostics?.sideConversation === true;
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 async function handleSession(args, ctx) {
@@ -14833,7 +15218,7 @@ async function handleSession(args, ctx) {
   const current = getAgentSessionMode(ctx.controls.cfg);
   if (!action || action === "status") {
     const label = current === "live" ? "live\uFF08\u540E\u53F0\u5E38\u9A7B CLI\uFF09" : "turn\uFF08\u6BCF\u8F6E\u77ED\u4EFB\u52A1\uFF09";
-    const active2 = ctx.activeRuns.get(ctx.scope);
+    const active2 = ctx.activeRuns.get(ctx.scope) ?? ctx.activeRuns.getSide(ctx.scope);
     const runStatus = active2 ? `\u8FD0\u884C\u4E2D\uFF08run \`${active2.run.runId.slice(0, 8)}\u2026\`\uFF09` : "\u65E0\u8FD0\u884C\u4EFB\u52A1";
     const terminal = await ctx.agent.tmux?.status(ctx.scope, effectiveWorkspaceCwd(ctx));
     const terminalText = formatTmuxStatus(terminal);
@@ -17747,10 +18132,14 @@ async function fetchOwnerId(source) {
 import { randomUUID as randomUUID2 } from "crypto";
 
 // src/bot/active-runs.ts
-function requestRunStop(handle) {
+function requestRunStop(handle, options = {}) {
+  if (options.force) handle.forceStopRequested = true;
   if (handle.stopPromise) return handle.stopPromise;
   handle.stopRequested = true;
-  handle.stopPromise = Promise.resolve().then(() => handle.run.stop());
+  handle.stopPromise = Promise.resolve().then(() => {
+    handle.stopStarted = true;
+    return handle.run.stop(handle.forceStopRequested ? { force: true } : void 0);
+  });
   return handle.stopPromise;
 }
 function requestRunDetach(handle) {
@@ -17760,11 +18149,29 @@ function requestRunDetach(handle) {
 }
 var ActiveRuns = class {
   handles = /* @__PURE__ */ new Map();
+  // A live side conversation multiplexes the same terminal as the main run,
+  // so it must not occupy the main scope slot. It still needs its own handle
+  // so /stop can cancel the side observer without touching the main task.
+  sideHandles = /* @__PURE__ */ new Map();
+  sideReleaseWaiters = /* @__PURE__ */ new Map();
   reservations = /* @__PURE__ */ new Set();
+  // Lifecycle commands can arrive while run-flow/executor is still awaiting
+  // media, policy, or a process-pool slot. A generation lets those commands
+  // cancel work before an ActiveRuns handle exists without cancelling future
+  // messages that arrive after the command.
+  // Main and side turns share a terminal but have independent cancellation
+  // generations. A side lifecycle command must not invalidate a main turn
+  // that is still preparing or streaming in the same scope.
+  stopGenerations = /* @__PURE__ */ new Map();
+  sideStopGenerations = /* @__PURE__ */ new Map();
+  // Durable tmux interrupts can outlive bridge-side handles. Keep a small
+  // per-scope claim so concurrent/repeated `/stop` commands cannot inject
+  // duplicate Ctrl-C bytes while the first fallback is still in flight.
+  durableStops = /* @__PURE__ */ new Map();
   pauseDepth = 0;
   pauseReason;
   reserve(chatId) {
-    if (this.handles.has(chatId) || this.reservations.has(chatId)) return void 0;
+    if (this.hasAny(chatId) || this.reservations.has(chatId)) return void 0;
     this.reservations.add(chatId);
     let released = false;
     return () => {
@@ -17778,13 +18185,18 @@ var ActiveRuns = class {
       throw new Error(`run already active for scope: ${chatId}`);
     }
     this.reservations.delete(chatId);
-    const handle = {
-      run,
-      interrupted: false,
-      detached: false,
-      stopRequested: false
-    };
+    this.durableStops.delete(this.durableStopKey(chatId, "main"));
+    const handle = createRunHandle(run);
     this.handles.set(chatId, handle);
+    return handle;
+  }
+  registerSide(chatId, run, sideInputMode) {
+    if (this.sideHandles.has(chatId)) {
+      throw new Error(`side run already active for scope: ${chatId}`);
+    }
+    const handle = createRunHandle(run, sideInputMode);
+    this.durableStops.delete(this.durableStopKey(chatId, "side"));
+    this.sideHandles.set(chatId, handle);
     return handle;
   }
   pauseNewRuns(reason) {
@@ -17804,33 +18216,122 @@ var ActiveRuns = class {
   newRunsPauseReason() {
     return this.pauseReason;
   }
+  currentStopGeneration(chatId, target = "main") {
+    const generations = target === "side" ? this.sideStopGenerations : this.stopGenerations;
+    return generations.get(chatId) ?? 0;
+  }
+  advanceStopGeneration(chatId, target = "main") {
+    const generations = target === "side" ? this.sideStopGenerations : this.stopGenerations;
+    const next = this.currentStopGeneration(chatId, target) + 1;
+    generations.set(chatId, next);
+    return next;
+  }
+  isStopGenerationCurrent(chatId, generation, target = "main") {
+    return this.currentStopGeneration(chatId, target) === generation;
+  }
+  /** Claim one durable tmux interrupt for a scope/plane. */
+  beginDurableInterrupt(chatId, target = "main") {
+    const key = this.durableStopKey(chatId, target);
+    if (this.durableStops.has(key)) return false;
+    this.durableStops.set(key, "in-flight");
+    return true;
+  }
+  /** Complete a durable interrupt claim; unsuccessful evidence remains retryable. */
+  finishDurableInterrupt(chatId, target, sent) {
+    const key = this.durableStopKey(chatId, target);
+    if (this.durableStops.get(key) !== "in-flight") return;
+    if (sent) this.durableStops.set(key, "requested");
+    else this.durableStops.delete(key);
+  }
   get(chatId) {
     return this.handles.get(chatId);
+  }
+  getSide(chatId) {
+    return this.sideHandles.get(chatId);
+  }
+  hasAny(chatId) {
+    return this.handles.has(chatId) || this.sideHandles.has(chatId);
   }
   unregister(chatId, run) {
     const existing = this.handles.get(chatId);
     if (existing?.run === run) this.handles.delete(chatId);
   }
+  unregisterSide(chatId, run) {
+    const existing = this.sideHandles.get(chatId);
+    if (existing?.run !== run) return;
+    this.sideHandles.delete(chatId);
+    this.notifySideReleased(chatId);
+  }
+  /** Wait until no side observer owns the shared terminal for this scope. */
+  async waitForSideAvailable(chatId, timeoutMs = 12e4) {
+    if (!this.sideHandles.has(chatId)) return true;
+    const waiters = this.sideReleaseWaiters.get(chatId) ?? /* @__PURE__ */ new Set();
+    this.sideReleaseWaiters.set(chatId, waiters);
+    return new Promise((resolve5) => {
+      let settled = false;
+      let timer;
+      const onRelease = () => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        waiters.delete(onRelease);
+        if (waiters.size === 0) this.sideReleaseWaiters.delete(chatId);
+        resolve5(!this.sideHandles.has(chatId));
+      };
+      timer = setTimeout(onRelease, Math.max(0, timeoutMs));
+      waiters.add(onRelease);
+      if (!this.sideHandles.has(chatId)) onRelease();
+    });
+  }
   snapshot() {
-    return [...this.handles.values()];
+    return this.allHandles();
   }
   scopes() {
-    return [...this.handles.keys()];
+    return [.../* @__PURE__ */ new Set([...this.handles.keys(), ...this.sideHandles.keys()])];
+  }
+  /**
+   * Topic scopes are represented as `${chatId}:${threadId}`. When Feishu
+   * drops a thread id from a lifecycle event, allow the command layer to
+   * recover an unambiguous active scope instead of reporting a false idle.
+   */
+  scopesForChat(chatId) {
+    const prefix = `${chatId}:`;
+    return this.scopes().filter((scope) => scope === chatId || scope.startsWith(prefix));
   }
   /**
    * Interrupt the current run for this chat, if any. Returns true if an
    * interrupt was issued. Delivery is one-shot so a persistent live terminal
    * cannot receive duplicate Ctrl-C bytes from cleanup races.
    */
-  interrupt(chatId) {
-    const h = this.handles.get(chatId);
+  interrupt(chatId, target = "main", options = { force: true }) {
+    const h = target === "side" ? this.sideHandles.get(chatId) : target === "auto" ? this.sideHandles.get(chatId) ?? this.handles.get(chatId) : this.handles.get(chatId);
     if (!h) return false;
+    if (h.stopRequested) {
+      if (options.force) {
+        void requestRunStop(h, options).catch(() => {
+        });
+      }
+      return true;
+    }
     this.reservations.delete(chatId);
     h.interrupted = true;
-    this.handles.delete(chatId);
-    void requestRunStop(h).catch(() => {
+    const isSide = this.sideHandles.get(chatId) === h;
+    const stopPromise = requestRunStop(h, options);
+    if (isSide) {
+      void stopPromise.then(
+        () => void 0,
+        () => void 0
+      );
+    }
+    void stopPromise.catch(() => {
     });
     return true;
+  }
+  interruptMain(chatId) {
+    return this.interrupt(chatId, "main");
+  }
+  interruptSide(chatId) {
+    return this.interrupt(chatId, "side");
   }
   detach(chatId) {
     const h = this.handles.get(chatId);
@@ -17843,9 +18344,41 @@ var ActiveRuns = class {
     });
     return true;
   }
+  detachSide(chatId) {
+    const h = this.sideHandles.get(chatId);
+    if (!h) return false;
+    h.interrupted = true;
+    h.detached = true;
+    this.sideHandles.delete(chatId);
+    this.notifySideReleased(chatId);
+    void requestRunDetach(h).catch(() => {
+    });
+    return true;
+  }
+  /**
+   * Release a side relay before a guarded `/btw out` starts. A body relay can
+   * be waiting on a slow redraw for a long time; waiting for its normal
+   * timeout would make the exit command look stuck. Detach only the bridge
+   * observer, never the shared agent process or its main run.
+   */
+  async detachSideAndWait(chatId) {
+    const handle = this.sideHandles.get(chatId);
+    if (!handle) return false;
+    const detached = this.detachSide(chatId);
+    if (!detached) return false;
+    await handle.detachPromise;
+    return true;
+  }
   async stopAll() {
-    const all = [...this.handles.values()];
+    const all = this.allHandles();
+    for (const scope of this.scopes()) {
+      this.advanceStopGeneration(scope, "main");
+      this.advanceStopGeneration(scope, "side");
+    }
     this.handles.clear();
+    this.sideHandles.clear();
+    this.durableStops.clear();
+    for (const scope of this.sideReleaseWaiters.keys()) this.notifySideReleased(scope);
     this.reservations.clear();
     for (const h of all) h.interrupted = true;
     await Promise.allSettled(all.map((h) => requestRunStop(h)));
@@ -17857,8 +18390,11 @@ var ActiveRuns = class {
    * Feishu websocket or bridge binary was restarted.
    */
   async detachAll() {
-    const all = [...this.handles.values()];
+    const all = this.allHandles();
     this.handles.clear();
+    this.sideHandles.clear();
+    this.durableStops.clear();
+    for (const scope of this.sideReleaseWaiters.keys()) this.notifySideReleased(scope);
     this.reservations.clear();
     for (const h of all) {
       h.interrupted = true;
@@ -17867,10 +18403,30 @@ var ActiveRuns = class {
     await Promise.allSettled(all.map((h) => requestRunDetach(h)));
   }
   async waitForAll(timeoutMs = 3e5) {
-    const all = [...this.handles.values()];
+    const all = this.allHandles();
     await Promise.allSettled(all.map((h) => h.run.waitForExit(timeoutMs)));
   }
+  allHandles() {
+    return [.../* @__PURE__ */ new Set([...this.handles.values(), ...this.sideHandles.values()])];
+  }
+  notifySideReleased(chatId) {
+    const waiters = this.sideReleaseWaiters.get(chatId);
+    if (!waiters) return;
+    for (const resolve5 of [...waiters]) resolve5();
+  }
+  durableStopKey(chatId, target) {
+    return `${target}:${chatId}`;
+  }
 };
+function createRunHandle(run, sideInputMode) {
+  return {
+    run,
+    ...sideInputMode ? { sideInputMode } : {},
+    interrupted: false,
+    detached: false,
+    stopRequested: false
+  };
+}
 
 // src/bot/process-pool.ts
 var ProcessPool = class {
@@ -17938,6 +18494,17 @@ var RunExecutor = class {
   }
   async submit(input) {
     const submittedAt = this.now();
+    const stopRequested = () => input.stopGeneration !== void 0 && !this.activeRuns.isStopGenerationCurrent(
+      input.scopeId,
+      input.stopGeneration,
+      input.stopGenerationTarget
+    );
+    const rejectIfStopped = () => {
+      if (stopRequested()) {
+        throw new RunRejected("stop-requested", "run was cancelled before spawn");
+      }
+    };
+    rejectIfStopped();
     if (input.policy.expiresAt <= this.now()) {
       throw new RunRejected("policy-expired", "run policy expired before spawn");
     }
@@ -17947,7 +18514,22 @@ var RunExecutor = class {
         this.activeRuns.newRunsPauseReason() ?? "new runs are temporarily paused"
       );
     }
-    const concurrentSide = (input.liveInputMode === "side" || input.liveInputMode === "side-exit") && Boolean(this.activeRuns.get(input.scopeId)) && typeof this.agent.runSide === "function";
+    const sideInputMode = input.liveInputMode === "side" || input.liveInputMode === "side-exit" ? input.liveInputMode : void 0;
+    const concurrentSide = sideInputMode !== void 0 && typeof this.agent.runSide === "function";
+    if (concurrentSide) {
+      const existingSide = this.activeRuns.getSide(input.scopeId);
+      if (input.liveInputMode === "side-exit" && input.sideConversationConfirmed === true && existingSide && existingSide.sideInputMode !== "side-exit") {
+        await this.activeRuns.detachSideAndWait(input.scopeId);
+      }
+      const sideAvailable = await this.activeRuns.waitForSideAvailable(input.scopeId);
+      if (!sideAvailable) {
+        throw new RunRejected(
+          "run-already-active",
+          "another side run is still active for this scope"
+        );
+      }
+      rejectIfStopped();
+    }
     const releaseScope = concurrentSide ? () => {
     } : this.activeRuns.reserve(input.scopeId);
     if (!releaseScope) {
@@ -17959,9 +18541,12 @@ var RunExecutor = class {
       releaseScope();
       throw new RunRejected("pool-full", "process pool is full");
     }
-    if (this.activeRuns.newRunsPaused()) {
+    if (this.activeRuns.newRunsPaused() || stopRequested()) {
       release();
       releaseScope();
+      if (stopRequested()) {
+        throw new RunRejected("stop-requested", "run was cancelled before spawn");
+      }
       throw new RunRejected(
         "reconnect-in-progress",
         this.activeRuns.newRunsPauseReason() ?? "new runs are temporarily paused"
@@ -17975,6 +18560,7 @@ var RunExecutor = class {
       scopeId: input.scopeId,
       sessionMode: input.sessionMode,
       liveInputMode: input.liveInputMode,
+      sideConversationConfirmed: input.sideConversationConfirmed,
       prompt: input.policy.prompt,
       cwd: input.policy.cwdRealpath,
       sessionId: input.sessionId,
@@ -17996,13 +18582,21 @@ var RunExecutor = class {
       if (err instanceof SpawnFailed) throw err;
       throw new SpawnFailed("agent prepare failed", err, "agent-prepare-failed");
     }
-    if (this.activeRuns.newRunsPaused()) {
+    if (this.activeRuns.newRunsPaused() || stopRequested()) {
       release();
       releaseScope();
+      if (stopRequested()) {
+        throw new RunRejected("stop-requested", "run was cancelled before spawn");
+      }
       throw new RunRejected(
         "reconnect-in-progress",
         this.activeRuns.newRunsPauseReason() ?? "new runs are temporarily paused"
       );
+    }
+    if (stopRequested()) {
+      release();
+      releaseScope();
+      throw new RunRejected("stop-requested", "run was cancelled before spawn");
     }
     try {
       run = concurrentSide ? this.agent.runSide(runOptions) : this.agent.run(runOptions);
@@ -18010,6 +18604,13 @@ var RunExecutor = class {
       release();
       releaseScope();
       throw new SpawnFailed("agent spawn failed", err);
+    }
+    if (stopRequested()) {
+      release();
+      releaseScope();
+      await run.stop({ force: true }).catch(() => {
+      });
+      throw new RunRejected("stop-requested", "run was cancelled before registration");
     }
     const dimensions = {
       runId,
@@ -18028,12 +18629,17 @@ var RunExecutor = class {
     });
     let handle;
     if (concurrentSide) {
-      handle = {
-        run,
-        interrupted: false,
-        detached: false,
-        stopRequested: false
-      };
+      try {
+        handle = this.activeRuns.registerSide(input.scopeId, run, sideInputMode);
+      } catch (err) {
+        release();
+        await run.stop().catch(() => {
+        });
+        throw new RunRejected(
+          "run-already-active",
+          err instanceof Error ? err.message : "another side run is already active for this scope"
+        );
+      }
     } else {
       try {
         handle = this.activeRuns.register(input.scopeId, run);
@@ -18052,7 +18658,8 @@ var RunExecutor = class {
     const cleanup = async (waitForExit) => {
       if (cleaned) return;
       cleaned = true;
-      if (!concurrentSide) this.activeRuns.unregister(input.scopeId, run);
+      if (concurrentSide) this.activeRuns.unregisterSide(input.scopeId, run);
+      else this.activeRuns.unregister(input.scopeId, run);
       release();
       if (handle.detached) return;
       if (waitForExit) {
@@ -18086,7 +18693,7 @@ var RunExecutor = class {
       subscribe: () => fanout.subscribe(),
       stop: async () => {
         handle.interrupted = true;
-        await requestRunStop(handle);
+        await requestRunStop(handle, { force: true });
         await run.waitForExit(this.postDoneExitGraceMs);
         await cleanup(false);
       }
@@ -18149,6 +18756,7 @@ var EventFanout = class {
   activeSubscribers = 0;
   cancelRequested = false;
   closeSourcePromise;
+  cleanupStarted = false;
   constructor(source, onDone) {
     this.source = source;
     this.onDone = onDone;
@@ -18174,6 +18782,7 @@ var EventFanout = class {
             if (this.activeSubscribers === 0 && !this.done) {
               this.requestCancel();
             }
+            this.maybeCleanup();
           }
         };
         return {
@@ -18187,8 +18796,14 @@ var EventFanout = class {
             if (index < this.buffer.length) {
               return { done: false, value: this.buffer[index++] };
             }
-            if (this.error) throw this.error;
-            if (this.done) return { done: true, value: void 0 };
+            if (this.error) {
+              release();
+              throw this.error;
+            }
+            if (this.done) {
+              release();
+              return { done: true, value: void 0 };
+            }
             await new Promise((resolve5) => {
               waiter = () => {
                 if (waiter) this.waiters.delete(waiter);
@@ -18201,7 +18816,11 @@ var EventFanout = class {
             if (index < this.buffer.length) {
               return { done: false, value: this.buffer[index++] };
             }
-            if (this.error) throw this.error;
+            if (this.error) {
+              release();
+              throw this.error;
+            }
+            release();
             return { done: true, value: void 0 };
           },
           return: async () => {
@@ -18239,16 +18858,26 @@ var EventFanout = class {
     } catch (err) {
       if (!this.cancelRequested) this.error = err;
     } finally {
-      await this.closeSource();
-      await this.onDone();
       this.done = true;
       this.wakeAll();
+      this.maybeCleanup();
     }
   }
   requestCancel() {
     this.cancelRequested = true;
     void this.closeSource();
     this.wakeAll();
+  }
+  /**
+   * Keep the ActiveRuns handle registered until every subscriber has drained
+   * the terminal event. `runAgentBatch` can still be sending the final Feishu
+   * card after the native stream reports done; unregistering at that point
+   * makes a concurrent `/stop` appear to do nothing.
+   */
+  maybeCleanup() {
+    if (!this.done || this.cleanupStarted || this.activeSubscribers > 0) return;
+    this.cleanupStarted = true;
+    void this.onDone();
   }
   closeSource() {
     if (this.closeSourcePromise) return this.closeSourcePromise;
@@ -18360,9 +18989,12 @@ async function startRunFlow(input) {
   try {
     execution = await input.executor.submit({
       scopeId: input.scopeId,
+      stopGeneration: input.stopGeneration,
+      stopGenerationTarget: input.stopGenerationTarget,
       policy,
       sessionMode: input.sessionMode,
       liveInputMode: input.liveInputMode,
+      sideConversationConfirmed: input.sideConversationConfirmed,
       sessionId,
       threadId,
       model: resolveModelArg(
@@ -18381,7 +19013,7 @@ async function startRunFlow(input) {
         ok: false,
         rejectReason: {
           code: err.code,
-          userVisible: err.code === "reconnect-in-progress" ? "\u5F53\u524D bot \u6B63\u5728\u91CD\u8FDE\uFF0C\u7A0D\u540E\u4F1A\u7EE7\u7EED\u5904\u7406\u65B0\u6D88\u606F\u3002" : err.code === "run-already-active" ? "\u5F53\u524D\u4F1A\u8BDD\u5DF2\u6709\u8FD0\u884C\u5728\u6267\u884C\uFF0C\u8BF7\u7A0D\u540E\u518D\u8BD5\u6216\u5148\u505C\u6B62\u5F53\u524D\u8FD0\u884C\u3002" : "\u5F53\u524D\u65E0\u6CD5\u53D1\u8D77\u8FD0\u884C\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5\u3002"
+          userVisible: err.code === "stop-requested" ? "\u8FD0\u884C\u5DF2\u88AB\u505C\u6B62\u8BF7\u6C42\u53D6\u6D88\u3002" : err.code === "reconnect-in-progress" ? "\u5F53\u524D bot \u6B63\u5728\u91CD\u8FDE\uFF0C\u7A0D\u540E\u4F1A\u7EE7\u7EED\u5904\u7406\u65B0\u6D88\u606F\u3002" : err.code === "run-already-active" ? "\u5F53\u524D\u4F1A\u8BDD\u5DF2\u6709\u8FD0\u884C\u5728\u6267\u884C\uFF0C\u8BF7\u7A0D\u540E\u518D\u8BD5\u6216\u5148\u505C\u6B62\u5F53\u524D\u8FD0\u884C\u3002" : "\u5F53\u524D\u65E0\u6CD5\u53D1\u8D77\u8FD0\u884C\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5\u3002"
         },
         workspace
       };
@@ -19123,12 +19755,12 @@ var PendingQueue = class {
     if (existing) {
       if (existing.timer) clearTimeout(existing.timer);
       existing.messages.unshift(...incoming);
-      existing.timer = this.blocked.has(scope) && !options.preempt ? void 0 : this.armTimer(scope, options.immediate ? 0 : void 0);
+      existing.timer = this.blocked.has(scope) && !options.preempt && !options.bypassBlock ? void 0 : this.armTimer(scope, options.immediate ? 0 : void 0);
       return existing.messages.length;
     }
     this.map.set(scope, {
       messages: incoming,
-      timer: this.blocked.has(scope) && !options.preempt ? void 0 : this.armTimer(scope, options.immediate ? 0 : void 0)
+      timer: this.blocked.has(scope) && !options.preempt && !options.bypassBlock ? void 0 : this.armTimer(scope, options.immediate ? 0 : void 0)
     });
     return incoming.length;
   }
@@ -19712,8 +20344,14 @@ var InboundMessageLedger = class {
       if (err.code !== "ENOENT") throw err;
     }
   }
-  /** Returns true exactly once for a message id within the retention window. */
-  async claim(messageId) {
+  /**
+   * Returns true exactly once for a message id within the retention window.
+   * Lifecycle commands may opt out of waiting for the filesystem flush: the
+   * in-memory claim is still installed synchronously, while persistence is
+   * queued in the background so a slow/networked state directory cannot make
+   * /stop appear unresponsive.
+   */
+  async claim(messageId, options = {}) {
     if (!messageId) return true;
     const now = this.now();
     this.prune(now);
@@ -19721,7 +20359,7 @@ var InboundMessageLedger = class {
     this.entries.set(messageId, now);
     this.prune(now);
     this.schedulePersist();
-    await this.flush();
+    if (options.waitForPersist !== false) await this.flush();
     return true;
   }
   async flush() {
@@ -20361,7 +20999,8 @@ async function startChannel(deps) {
   const pending = new PendingQueue(DEBOUNCE_MS, (scope, batch) => {
     const firstMsg = batch[0];
     if (!firstMsg) return;
-    pending.block(scope);
+    const ownsQueueBlock = !pending.isBlocked(scope);
+    if (ownsQueueBlock) pending.block(scope);
     void withTrace({ chatId: firstMsg.chatId }, async () => {
       log.info("flush", "start", {
         scope,
@@ -20393,6 +21032,9 @@ async function startChannel(deps) {
           });
         }
         for (const runBatch of runBatches) {
+          const runInputMode = liveInputModeForMessage(runBatch[0]);
+          const runStopGenerationTarget = runInputMode === "side" || runInputMode === "side-exit" ? "side" : "main";
+          const runStopGeneration = activeRuns.currentStopGeneration(scope, runStopGenerationTarget);
           await runAgentBatch({
             channel,
             agent,
@@ -20413,13 +21055,15 @@ async function startChannel(deps) {
             artifactBroker,
             pending,
             scope,
-            mode
+            mode,
+            stopGeneration: runStopGeneration,
+            stopGenerationTarget: runStopGenerationTarget
           });
         }
       } catch (err) {
         log.fail("flush", err);
       } finally {
-        pending.unblock(scope);
+        if (ownsQueueBlock) pending.unblock(scope);
         log.info("flush", "end");
       }
     });
@@ -20475,7 +21119,7 @@ async function startChannel(deps) {
             const live = await agent.tmux?.diagnostics?.(scope, cwd);
             const tmux = await agent.tmux?.status(scope, cwd);
             const queued = pending.snapshot(scope)[0];
-            const active2 = activeRuns.get(scope);
+            const active2 = activeRuns.get(scope) ?? activeRuns.getSide(scope);
             const picker = liveInteractionState(sessions, liveInteractionByScope, scope);
             return {
               ...active2 ? { runId: active2.run.runId } : {},
@@ -20651,12 +21295,14 @@ async function intakeMessage(deps) {
     allowLocalFileRoot,
     inboundMessages
   } = deps;
-  if (!await inboundMessages.claim(msg.messageId)) {
+  const earlyRoute = rewriteAgentCommandMessage(msg, controls.profileConfig.agentKind);
+  const isImmediateStop = /^\/stop(?:\s|$)/iu.test(earlyRoute.msg.content.trim());
+  if (!await inboundMessages.claim(msg.messageId, { waitForPersist: !isImmediateStop })) {
     log.info("intake", "duplicate-message-suppressed", { msgId: msg.messageId, chatId: msg.chatId });
     return;
   }
   const preview2 = msg.content.length > 80 ? `${msg.content.slice(0, 80)}\u2026` : msg.content;
-  const resolvedMode = await chatModeCache.resolve(channel, msg.chatId);
+  const resolvedMode = isImmediateStop ? msg.chatType === "p2p" ? "p2p" : msg.threadId ? "topic" : "group" : await chatModeCache.resolve(channel, msg.chatId);
   let threadId = msg.threadId;
   if (!threadId && resolvedMode === "topic") {
     threadId = await lookupMessageThreadId(channel, msg.messageId);
@@ -20668,8 +21314,8 @@ async function intakeMessage(deps) {
       });
     }
   }
-  const emsg = threadId === msg.threadId ? msg : { ...msg, threadId };
-  const chatMode = threadId ? "topic" : resolvedMode;
+  let emsg = threadId === msg.threadId ? msg : { ...msg, threadId };
+  let chatMode = threadId ? "topic" : resolvedMode;
   if (threadId && resolvedMode !== "topic") {
     chatModeCache.invalidate(msg.chatId);
     logThreadModeOverride({
@@ -20678,7 +21324,7 @@ async function intakeMessage(deps) {
       threadId
     });
   }
-  const scope = chatMode === "topic" && threadId ? `${msg.chatId}:${threadId}` : msg.chatId;
+  let scope = chatMode === "topic" && threadId ? `${msg.chatId}:${threadId}` : msg.chatId;
   log.info("intake", "enter", {
     scope,
     chatType: msg.chatType,
@@ -20709,8 +21355,50 @@ async function intakeMessage(deps) {
     return;
   }
   const route = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
+  const sideExitRequested = route.nativeMode === "side-exit";
+  if (sideExitRequested) {
+    const requestedScope = scope;
+    const recovery = await recoverSideConversationScope({
+      map: sideConversationByScope,
+      requestedScope: scope,
+      chatId: msg.chatId,
+      agent,
+      activeRuns,
+      sessionCatalog,
+      workspaces,
+      controls
+    });
+    if (recovery.ambiguous && recovery.ambiguous.length > 0) {
+      const labels = recovery.ambiguous.map((candidate) => `\`${candidate}\``).join("\u3001");
+      await channel.send(
+        msg.chatId,
+        { markdown: `\u26A0\uFE0F \u68C0\u6D4B\u5230\u591A\u4E2A\u53EF\u80FD\u7684 side conversation\uFF08${labels}\uFF09\uFF0C\u672A\u731C\u6D4B\u9000\u51FA\u76EE\u6807\u3002\u8BF7\u5728\u539F\u8BDD\u9898\u4E2D\u91CD\u8BD5 /btw out\u3002` },
+        {
+          replyTo: msg.messageId,
+          ...threadId ? { replyInThread: true } : {}
+        }
+      );
+      return;
+    }
+    if (recovery.scope && recovery.scope !== scope) {
+      scope = recovery.scope;
+      const recoveredThreadId = threadIdForChatScope(msg.chatId, scope);
+      if (!threadId && recoveredThreadId) {
+        threadId = recoveredThreadId;
+        emsg = { ...emsg, threadId };
+        route.msg = { ...route.msg, threadId };
+        chatMode = "topic";
+      }
+      log.info("agent-live", "side-scope-recovered", {
+        requestedScope,
+        scope,
+        threadId
+      });
+    }
+  }
   const pickerActive = Boolean(liveInteractionState(sessions, liveInteractionByScope, scope));
-  const existingSideState = await refreshSideConversationState(
+  const fastLifecycleCommand = /^\/stop(?:\s|$)/iu.test(route.msg.content.trim()) || route.nativeMode === "side" || route.nativeMode === "side-exit";
+  const existingSideState = fastLifecycleCommand ? sideConversationState(sideConversationByScope, scope) : await refreshSideConversationState(
     sideConversationByScope,
     scope,
     agent,
@@ -20719,10 +21407,9 @@ async function intakeMessage(deps) {
   );
   const pickerFollowup = pickerActive ? normalizeLivePickerFollowup(route.msg.content) : void 0;
   const sideCommandRequested = route.nativeMode === "side";
-  const sideExitRequested = route.nativeMode === "side-exit";
   if (sideCommandRequested) {
     saveSideConversationState(sideConversationByScope, scope, "opening");
-  } else if (sideExitRequested && existingSideState) {
+  } else if (sideExitRequested && existingSideState && existingSideState.phase !== "closed") {
     saveSideConversationState(sideConversationByScope, scope, "closing", existingSideState.generation);
   }
   const sideFollowup = !pickerActive && !pickerFollowup && !route.forceNative && !isSlashCommandText(route.msg.content) && Boolean(existingSideState && (existingSideState.phase === "opening" || existingSideState.phase === "active"));
@@ -20737,6 +21424,7 @@ async function intakeMessage(deps) {
       preview: route.msg.content.slice(0, 120)
     });
   }
+  const lifecycleScopes = /^\/stop(?:\s|$)/iu.test(routedMsg.content.trim()) ? sideConversationScopesForChat(sideConversationByScope, msg.chatId, ["opening", "closing"]) : [];
   const nativeModelCommand = routedMsg.content.trim() === "/model";
   if (nativeModelCommand && !canRunAdminCommand(controls.profileConfig, controls, msg.senderId).ok) {
     log.info("command", "admin-deny", {
@@ -20754,6 +21442,12 @@ async function intakeMessage(deps) {
     return;
   }
   if (!route.forceNative && !nativeModelCommand && !pickerFollowup) {
+    const stopCommand = /^\/stop(?:\s|$)/iu.test(routedMsg.content.trim());
+    const sideTransitionPending = existingSideState?.phase === "opening" || existingSideState?.phase === "closing";
+    const lifecycleTarget = stopCommand && (Boolean(activeRuns.getSide(scope)) || sideTransitionPending || activeRuns.scopesForChat(msg.chatId).some((candidate) => Boolean(activeRuns.getSide(candidate))) || lifecycleScopes.some((candidate) => {
+      const state = sideConversationState(sideConversationByScope, candidate);
+      return state?.phase === "opening" || state?.phase === "closing";
+    })) ? "side" : void 0;
     const handled = await tryHandleCommand({
       channel,
       msg: routedMsg,
@@ -20764,24 +21458,28 @@ async function intakeMessage(deps) {
       agent,
       activeRuns,
       sessionCatalog,
-      sessionCatalogIdentity: await commandSessionCatalogIdentity({
-        msg: emsg,
-        scope,
-        mode: chatMode,
-        workspaces,
-        controls,
-        access: accessDecision
-      }),
+      ...stopCommand ? { sessionCatalogIdentity: void 0 } : {
+        sessionCatalogIdentity: await commandSessionCatalogIdentity({
+          msg: emsg,
+          scope,
+          mode: chatMode,
+          workspaces,
+          controls,
+          access: accessDecision
+        })
+      },
       runExecutor: executor,
       processPool: pool,
       controls,
+      ...lifecycleTarget ? { lifecycleTarget } : {},
+      ...lifecycleScopes.length > 0 ? { lifecycleScopes } : {},
       allowLocalFileRoot,
       liveDiagnostics: async () => {
         const cwd = workspaces.cwdFor(scope) ?? controls.profileConfig.workspaces.default;
         const live = await agent.tmux?.diagnostics?.(scope, cwd);
         const tmux = await agent.tmux?.status(scope, cwd);
         const queued = pending.snapshot(scope)[0];
-        const active2 = activeRuns.get(scope);
+        const active2 = activeRuns.get(scope) ?? activeRuns.getSide(scope);
         const picker = liveInteractionState(sessions, liveInteractionByScope, scope);
         return {
           ...active2 ? { runId: active2.run.runId } : {},
@@ -20824,7 +21522,7 @@ async function intakeMessage(deps) {
   const priorityLiveControl = liveInputModeForMessage(agentMsg) === "control" && (isLiveInterruptInput(agentMsg.content) || pickerActive);
   const nativeInputMode = liveInputModeForMessage(agentMsg);
   const priorityNativeCommand = isForceLiveAgentCommandMessage(agentMsg) && (nativeInputMode === "command" || nativeInputMode === "side" || nativeInputMode === "side-exit");
-  if (priorityNativeCommand && activeRuns.get(scope)) {
+  if (priorityNativeCommand && activeRuns.hasAny(scope)) {
     log.info("intake", "native-command-preempt", {
       scope,
       inputMode: nativeInputMode,
@@ -20833,13 +21531,15 @@ async function intakeMessage(deps) {
     if (nativeInputMode === "side" || nativeInputMode === "side-exit") {
       log.info("intake", "native-side-coexists-with-main", { scope, inputMode: nativeInputMode });
     } else {
+      activeRuns.advanceStopGeneration(scope);
       activeRuns.interrupt(scope);
     }
   }
   const priorityLiveInput = priorityLiveControl || priorityNativeCommand;
   const size = priorityLiveInput ? pending.pushFront(scope, agentMsg, {
     immediate: true,
-    ...priorityNativeCommand ? { preempt: true } : {}
+    ...priorityNativeCommand ? { preempt: true } : {},
+    ...priorityNativeCommand && (nativeInputMode === "side" || nativeInputMode === "side-exit") ? { bypassBlock: true } : {}
   }) : pending.push(scope, agentMsg);
   log.info("intake", "queued", { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
   if (!priorityNativeCommand && pending.shouldAckBusy(scope)) {
@@ -20893,6 +21593,11 @@ function normalizeAgentPrefixedNativeInput(input) {
       nativeMode: /^\/btw\s+out\s*$/iu.test(trimmed) ? "side-exit" : "side"
     };
   }
+  const stopMatch = /^\/?stop(?:\s+([\s\S]+))?$/iu.exec(trimmed);
+  if (stopMatch) {
+    const target = stopMatch[1]?.trim();
+    return { text: target ? `/stop ${target}` : "/stop", forceNative: false };
+  }
   const slashless = /^\/([A-Za-z0-9_-]+)$/u.exec(trimmed)?.[1];
   const controlText = slashless && isLivePickerInput(slashless) ? slashless : trimmed;
   if (isLivePickerInput(controlText) || isLiveControlInput(controlText)) {
@@ -20912,6 +21617,7 @@ function clearsSideConversationOnCommand(content) {
   return /^(?:\/new|\/reset|\/cd|\/resume)(?:\s|$)/u.test(command);
 }
 function isNativeAgentInputText(text, pickerActive) {
+  if (/^\/stop(?:\s|$)/iu.test(text.trim())) return false;
   if (isSlashCommandText(text)) return true;
   return pickerActive && isLivePickerInput(text);
 }
@@ -20953,6 +21659,105 @@ function sideConversationState(map, scope) {
     return void 0;
   }
   return state;
+}
+function sideConversationScopesForChat(map, chatId, phases = ["active", "opening", "closing"]) {
+  const prefix = `${chatId}:`;
+  const scopes = [];
+  const allowed = new Set(phases);
+  for (const candidate of map.keys()) {
+    if (candidate !== chatId && !candidate.startsWith(prefix)) continue;
+    const state = sideConversationState(map, candidate);
+    if (state && allowed.has(state.phase)) scopes.push(candidate);
+  }
+  return scopes;
+}
+function threadIdForChatScope(chatId, scope) {
+  const prefix = `${chatId}:`;
+  return scope.startsWith(prefix) ? scope.slice(prefix.length) || void 0 : void 0;
+}
+async function recoverSideConversationScope(input) {
+  const prefix = `${input.chatId}:`;
+  const candidates = /* @__PURE__ */ new Set([
+    input.requestedScope,
+    ...sideConversationScopesForChat(input.map, input.chatId),
+    ...input.activeRuns.scopesForChat(input.chatId)
+  ]);
+  const cwdByScope = /* @__PURE__ */ new Map();
+  const managedCandidates = /* @__PURE__ */ new Set();
+  for (const [scopeId, cwd] of Object.entries(input.workspaces.listCwds(input.chatId))) {
+    if (scopeId === input.chatId || scopeId.startsWith(prefix)) {
+      candidates.add(scopeId);
+      cwdByScope.set(scopeId, cwd);
+    }
+  }
+  for (const entry of input.sessionCatalog?.entries() ?? []) {
+    if (entry.status !== "active" || entry.agentId !== input.controls.profileConfig.agentKind) continue;
+    if (entry.scopeId !== input.chatId && !entry.scopeId.startsWith(prefix)) continue;
+    candidates.add(entry.scopeId);
+    cwdByScope.set(entry.scopeId, entry.cwdRealpath);
+  }
+  try {
+    const managedScopes = await input.agent.tmux?.managedScopesForChat?.(input.chatId);
+    for (const candidate of managedScopes ?? []) {
+      if (candidate === input.chatId || candidate.startsWith(prefix)) {
+        managedCandidates.add(candidate);
+        candidates.add(candidate);
+      }
+    }
+  } catch (err) {
+    log.info("agent-live", "side-scope-managed-scan-failed", {
+      chatId: input.chatId,
+      err: String(err)
+    });
+  }
+  const scoped = [...candidates].filter(
+    (candidate) => candidate === input.chatId || candidate.startsWith(prefix)
+  );
+  if (scoped.length === 0) return {};
+  const results = await Promise.all(
+    scoped.map(async (candidate) => {
+      const remembered2 = sideConversationState(input.map, candidate);
+      const cwd = cwdByScope.get(candidate) ?? input.workspaces.cwdFor(candidate) ?? input.controls.profileConfig.workspaces.default;
+      let diagnostics;
+      if (input.agent.tmux?.diagnostics && cwd) {
+        diagnostics = await withBoundedSideDiagnostic(
+          input.agent.tmux.diagnostics(candidate, cwd),
+          5e3
+        );
+      }
+      const rememberedSide = Boolean(
+        remembered2 && (remembered2.phase === "active" || remembered2.phase === "closing")
+      );
+      const side = diagnostics?.sideConversation === true || rememberedSide;
+      return { candidate, remembered: remembered2, diagnostics, side };
+    })
+  );
+  const positives = results.filter((result) => result.side).map((result) => result.candidate);
+  if (positives.length > 1) return { ambiguous: positives.sort() };
+  const selected = positives[0];
+  if (!selected) {
+    const onlyManaged = [...managedCandidates].filter((candidate) => candidate !== input.chatId);
+    if (onlyManaged.length === 1) return { scope: onlyManaged[0] };
+    return {};
+  }
+  const remembered = results.find((result) => result.candidate === selected)?.remembered;
+  if (remembered?.phase !== "closed") {
+    saveSideConversationState(input.map, selected, "active", remembered?.generation);
+  }
+  return { scope: selected };
+}
+async function withBoundedSideDiagnostic(operation, timeoutMs) {
+  let timer;
+  try {
+    return await Promise.race([
+      operation.catch(() => void 0),
+      new Promise((resolve5) => {
+        timer = setTimeout(() => resolve5(void 0), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 function saveSideConversationState(map, scope, phase, generation) {
   const now = Date.now();
@@ -21006,13 +21811,14 @@ async function reconcileSideConversationState(input) {
     return void 0;
   });
   if (input.inputMode === "side-exit") {
-    if (input.exitConfirmed === true || diagnostics?.sideConversation === false) {
+    if (input.exitConfirmed === true) {
       saveSideConversationState(input.map, input.scope, "closed", before?.generation);
       log.info("agent-live", "side-state-closed-exit", { scope: input.scope });
       return;
     }
-    if (diagnostics?.sideConversation === true || input.exitConfirmed === false || before) {
-      saveSideConversationState(input.map, input.scope, "active", before?.generation);
+    if (before || diagnostics?.sideConversation === true || input.exitConfirmed === false) {
+      saveSideConversationState(input.map, input.scope, "closing", before?.generation);
+      log.info("agent-live", "side-state-kept-exit-retryable", { scope: input.scope });
     }
     return;
   }
@@ -21021,7 +21827,7 @@ async function reconcileSideConversationState(input) {
       saveSideConversationState(input.map, input.scope, "active", before.generation);
       return;
     }
-    if (input.inputMode === "side" && before?.phase === "opening" && !input.failed) {
+    if (input.inputMode === "side" && before?.phase === "opening" && !input.failed && input.entryConfirmed === true) {
       saveSideConversationState(input.map, input.scope, "active", before.generation);
       return;
     }
@@ -21029,9 +21835,17 @@ async function reconcileSideConversationState(input) {
     log.info("agent-live", "side-state-cleared-main", { scope: input.scope });
     return;
   }
+  if (input.inputMode === "side" && input.entryConfirmed === true) {
+    saveSideConversationState(input.map, input.scope, "active", before?.generation);
+    return;
+  }
   if (input.failed && before?.phase !== "active") {
     clearSideConversationState(input.map, input.scope);
     log.info("agent-live", "side-state-cleared-failed-entry", { scope: input.scope });
+    return;
+  }
+  if (input.inputMode === "side" && !input.failed && !input.agent.tmux?.diagnostics) {
+    saveSideConversationState(input.map, input.scope, "active", before?.generation);
     return;
   }
   saveSideConversationState(input.map, input.scope, "active", before?.generation);
@@ -21082,7 +21896,9 @@ async function runAgentBatch(deps) {
     artifactBroker,
     pending,
     scope,
-    mode
+    mode,
+    stopGeneration,
+    stopGenerationTarget
   } = deps;
   if (batch.length === 0) return;
   const firstMsg = batch[0];
@@ -21090,7 +21906,14 @@ async function runAgentBatch(deps) {
   if (!firstMsg || !lastMsg) return;
   const firstInputMode = liveInputModeForMessage(firstMsg);
   const isSideBatch = firstInputMode === "side" || firstInputMode === "side-exit";
-  if (!isSideBatch && activeRuns.get(scope)) {
+  const stopRequested = (stage) => {
+    if (activeRuns.isStopGenerationCurrent(scope, stopGeneration, stopGenerationTarget)) return false;
+    if (firstInputMode === "side") clearSideConversationState(sideConversationByScope, scope);
+    log.info("flush", "cancelled-before-spawn", { scope, stage, stopGeneration });
+    return true;
+  };
+  if (stopRequested("batch-start")) return;
+  if (!isSideBatch && activeRuns.hasAny(scope)) {
     for (const message of batch) pending.push(scope, message);
     log.info("flush", "ordinary-batch-deferred-during-side", {
       scope,
@@ -21104,6 +21927,7 @@ async function runAgentBatch(deps) {
     (m) => m.resources.map((r) => ({ messageId: m.messageId, resource: r }))
   );
   const attachments = await media.resolve(resourceItems, controls.profileConfig.attachments);
+  if (stopRequested("media")) return;
   if (attachments.length > 0) {
     log.info("media", "resolved", { count: attachments.length });
     for (const attachment of attachments) {
@@ -21134,6 +21958,7 @@ async function runAgentBatch(deps) {
         contentChars: q.content.length
       });
     }
+    if (stopRequested("quote")) return;
   }
   let topicContext = [];
   if (mode === "topic" && threadId && !sessions.getRaw(scope)) {
@@ -21142,6 +21967,7 @@ async function runAgentBatch(deps) {
       maxMessages: 40,
       excludeIds: exclude
     });
+    if (stopRequested("topic-context")) return;
     if (topicContext.length > 0) {
       log.info("topic", "context-fetched", {
         scope,
@@ -21159,6 +21985,10 @@ async function runAgentBatch(deps) {
   const useLiveSession = forceLiveSession || getAgentSessionMode(controls.cfg) === "live";
   const nativeInputMode = nativeCommand ? liveInputModeForBatch(batch, nativeCommand) : void 0;
   const sideInputMode = nativeInputMode === "side" || nativeInputMode === "side-exit";
+  const sideStateBeforeRun = sideConversationState(sideConversationByScope, scope);
+  const sideConversationConfirmed = sideInputMode && Boolean(
+    sideStateBeforeRun && (sideStateBeforeRun.phase === "active" || sideStateBeforeRun.phase === "closing")
+  );
   if (useLiveSession && (nativeInputMode === "side" || nativeInputMode === "side-exit") && clearLiveInteractionState(sessions, liveInteractionByScope, scope)) {
     log.info("agent-live", "picker-dismissed-for-side-conversation", { scope });
   }
@@ -21175,6 +22005,7 @@ async function runAgentBatch(deps) {
     userInput: nativeCommand ?? structuredPrompt,
     ...nativeCommand && nativeInputMode ? { inputMode: nativeInputMode } : {}
   }) : void 0;
+  if (stopRequested("route")) return;
   const liveInputMode = bridgeRoute?.inputMode;
   const prompt = bridgeRoute?.stdin ?? structuredPrompt;
   log.info("prompt", "built", {
@@ -21215,10 +22046,13 @@ async function runAgentBatch(deps) {
   });
   const flow = await startRunFlow({
     scopeId: scope,
+    stopGeneration,
     scope: scopeContext,
     prompt,
     sessionMode: useLiveSession ? "live" : "turn",
+    stopGenerationTarget,
     liveInputMode,
+    ...sideInputMode && sideConversationConfirmed ? { sideConversationConfirmed: true } : {},
     attachments: attachments.map(toPolicyAttachment),
     access: accessDecision,
     capability,
@@ -21238,6 +22072,11 @@ async function runAgentBatch(deps) {
     }
   });
   if (!flow.ok) {
+    if (flow.rejectReason.code === "stop-requested" || stopRequested("flow-rejected")) {
+      if (firstInputMode === "side") clearSideConversationState(sideConversationByScope, scope);
+      artifactBroker.revoke(artifactGrant.token);
+      return;
+    }
     if (sideInputMode) {
       clearSideConversationState(sideConversationByScope, scope);
     }
@@ -21266,6 +22105,7 @@ async function runAgentBatch(deps) {
   const handle = execution.handle;
   const eventStream = execution.subscribe();
   let sideRunFailed = false;
+  let sideEntryConfirmed;
   let sideExitConfirmed;
   if (flow.resumeFrom) {
     log.info("session", "resume", { sessionId: flow.resumeFrom, cwd });
@@ -21292,6 +22132,12 @@ async function runAgentBatch(deps) {
     }
     if (evt.type === "system" && evt.threadId) {
       log.info("session", "set-thread", { threadId: evt.threadId });
+    }
+    if (evt.type === "system" && evt.sideConversation === "entered") {
+      sideEntryConfirmed = true;
+    }
+    if (evt.type === "system" && evt.sideConversation === "exited") {
+      sideExitConfirmed = true;
     }
   };
   const sentInteractionSignatures = /* @__PURE__ */ new Set();
@@ -22099,6 +22945,7 @@ ${delta}`.slice(-64e3);
         agent,
         inputMode: nativeInputMode,
         failed: sideRunFailed,
+        entryConfirmed: sideEntryConfirmed,
         exitConfirmed: sideExitConfirmed,
         cwd
       });

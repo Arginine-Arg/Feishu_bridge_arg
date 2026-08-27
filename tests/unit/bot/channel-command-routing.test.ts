@@ -115,6 +115,17 @@ describe('agent command routing aliases', () => {
     });
   });
 
+  it('keeps agent-prefixed /stop on the bridge lifecycle command plane', () => {
+    expect(rewriteAgentCommandMessage(message('/codex /stop'), 'codex')).toMatchObject({
+      msg: { content: '/stop' },
+      forceNative: false,
+    });
+    expect(rewriteAgentCommandMessage(message('/codex stop chat-2'), 'codex')).toMatchObject({
+      msg: { content: '/stop chat-2' },
+      forceNative: false,
+    });
+  });
+
   it('leaves non-matching agent aliases untouched', () => {
     expect(rewriteAgentCommandMessage(message('/claude /resume'), 'codex')).toMatchObject({
       msg: { content: '/claude /resume' },

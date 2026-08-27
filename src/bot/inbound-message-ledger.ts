@@ -45,8 +45,14 @@ export class InboundMessageLedger {
     }
   }
 
-  /** Returns true exactly once for a message id within the retention window. */
-  async claim(messageId: string): Promise<boolean> {
+  /**
+   * Returns true exactly once for a message id within the retention window.
+   * Lifecycle commands may opt out of waiting for the filesystem flush: the
+   * in-memory claim is still installed synchronously, while persistence is
+   * queued in the background so a slow/networked state directory cannot make
+   * /stop appear unresponsive.
+   */
+  async claim(messageId: string, options: { waitForPersist?: boolean } = {}): Promise<boolean> {
     if (!messageId) return true;
     const now = this.now();
     this.prune(now);
@@ -56,7 +62,7 @@ export class InboundMessageLedger {
     this.schedulePersist();
     // Durably record the claim before the caller can enqueue agent work. A
     // restart after this point can therefore never re-run the same message.
-    await this.flush();
+    if (options.waitForPersist !== false) await this.flush();
     return true;
   }
 

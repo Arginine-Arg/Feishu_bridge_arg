@@ -4,6 +4,8 @@ type AgentEvent = {
     threadId?: string;
     cwd?: string;
     model?: string;
+    /** Internal live-terminal lifecycle evidence; never rendered as text. */
+    sideConversation?: 'entered' | 'exited';
 } | {
     type: 'text';
     delta: string;

@@ -16,6 +16,13 @@ export type LiveTurnPhase =
   | 'settling'
   | 'failed';
 
+/** Options for stopping one agent run. Explicit user stops may force a
+ * terminal interrupt even when the last screen frame did not contain a busy
+ * marker; watchdog and cleanup paths intentionally use the safe default. */
+export interface AgentRunStopOptions {
+  force?: boolean;
+}
+
 export interface LiveSessionDiagnostics {
   phase: LiveTurnPhase;
   /** True when the persistent terminal is currently in a side conversation. */
@@ -39,7 +46,15 @@ export interface LiveSessionDiagnostics {
 }
 
 export type AgentEvent =
-  | { type: 'system'; sessionId?: string; threadId?: string; cwd?: string; model?: string }
+  | {
+      type: 'system';
+      sessionId?: string;
+      threadId?: string;
+      cwd?: string;
+      model?: string;
+      /** Internal live-terminal lifecycle evidence; never rendered as text. */
+      sideConversation?: 'entered' | 'exited';
+    }
   | {
       type: 'text';
       delta: string;
@@ -75,6 +90,8 @@ export interface AgentRunOptions {
   scopeId?: string;
   sessionMode?: 'turn' | 'live';
   liveInputMode?: 'command' | 'control' | 'side' | 'side-exit';
+  /** Bridge-side evidence that this live terminal is already in side mode. */
+  sideConversationConfirmed?: boolean;
   prompt: string;
   cwd?: string;
   sessionId?: string;
@@ -102,7 +119,7 @@ export interface AgentRunOptions {
 export interface AgentRun {
   readonly runId: string;
   readonly events: AsyncIterable<AgentEvent>;
-  stop(): Promise<void>;
+  stop(options?: AgentRunStopOptions): Promise<void>;
   detach?(): Promise<void>;
   /**
    * Wait up to `timeoutMs` for the agent process to exit on its own.

@@ -42,6 +42,11 @@ export interface TmuxPaneTail {
   text: string;
 }
 
+export interface TmuxInterruptOptions {
+  /** Only interrupt when the pane visibly confirms a side conversation. */
+  sideOnly?: boolean;
+}
+
 export interface TmuxBindingStatus {
   state: 'managed' | 'external' | 'none' | 'invalid';
   target?: TmuxPaneTarget;
@@ -54,9 +59,13 @@ export interface AgentTmuxControl {
   bind(scopeId: string, selector: string): Promise<TmuxPaneTarget>;
   unbind(scopeId: string): Promise<boolean>;
   status(scopeId: string, cwd?: string): Promise<TmuxBindingStatus>;
+  /** Lists persisted bridge-managed scopes sharing a chat id. */
+  managedScopesForChat?(chatId: string): Promise<string[]>;
   /** Captures only the current scope's active or bound pane. */
   tail?(scopeId: string, lineCount: number, cwd?: string): Promise<TmuxPaneTail>;
   diagnostics?(scopeId: string, cwd?: string): Promise<LiveSessionDiagnostics>;
+  /** Sends one guarded Ctrl-C to a durable terminal when no live handle exists. */
+  interrupt?(scopeId: string, cwd?: string, options?: TmuxInterruptOptions): Promise<boolean>;
   /** Restores a persistent artifact grant to one bridge-managed tmux session. */
   restoreArtifactDelivery?(scopeId: string, artifact: ArtifactDeliveryEnv): Promise<boolean>;
 }
@@ -223,6 +232,18 @@ export class TmuxBindingController {
     return { state: 'none' };
   }
 
+  /**
+   * Return persisted managed scope ids for one chat. The records are only
+   * candidates; callers must still validate each scope with `diagnostics()`
+   * before sending lifecycle keys.
+   */
+  async managedScopesForChat(chatId: string): Promise<string[]> {
+    const prefix = `${chatId}:`;
+    return Object.keys(this.managedTerminals).filter(
+      (scopeId) => scopeId === chatId || scopeId.startsWith(prefix),
+    );
+  }
+
   /** Stable identity used by a new bridge process to reconnect to a managed session. */
   managedTerminalFor(scopeId: string, cwd: string, launchSignature: string): ManagedTmuxTerminal | undefined {
     let saved = this.managedTerminals[scopeId];
@@ -285,6 +306,55 @@ export class TmuxBindingController {
       if (result.status !== 0) return false;
     }
     return true;
+  }
+
+  /**
+   * Interrupt a durable terminal after bridge-side ownership has been lost
+   * (for example, after a reconnect). This path is deliberately evidence
+   * gated: a recommendation, empty editor, or picker is not enough to send a
+   * destructive key. Managed terminals prefer the currently selected
+   * same-family pane, matching the live helper's adoption behavior.
+   */
+  async interrupt(
+    scopeId: string,
+    cwd?: string,
+    options: TmuxInterruptOptions = {},
+  ): Promise<boolean> {
+    let status = await this.status(scopeId);
+    if (status.state === 'none' && cwd) status = await this.managedStatus(scopeId, cwd);
+    if (status.state !== 'managed' && status.state !== 'external') return false;
+    const target = status.target;
+    const terminal = status.terminal ?? (target
+      ? {
+          socketPath: target.socketPath,
+          target: target.paneId,
+          attachCommand: target.attachCommand,
+          ownership: target.ownership,
+        }
+      : undefined);
+    if (!terminal) return false;
+
+    const resolved = target
+      ? target.paneId
+      : interruptPaneTarget(terminal.socketPath, terminal.target, this.agentKind);
+    if (!resolved) return false;
+    let tail: TmuxPaneTail;
+    try {
+      tail = captureTmuxPaneTail(
+        { ...terminal, target: resolved },
+        24,
+      );
+    } catch {
+      return false;
+    }
+    const evidence = interruptEvidence(tail.text);
+    if (options.sideOnly ? !evidence.side : !evidence.side && !evidence.busy) return false;
+    const result = spawnProcessSync(
+      'tmux',
+      ['-S', terminal.socketPath, 'send-keys', '-t', resolved, 'C-c'],
+      { stdio: 'ignore' },
+    );
+    return result.status === 0;
   }
 
   bindingFor(scopeId: string, cwd: string): TmuxPaneTarget | undefined {
@@ -449,6 +519,87 @@ export function captureTmuxPaneTail(
     requestedLines,
     text: normalizeTmuxTail(output, requestedLines),
   };
+}
+
+function interruptPaneTarget(
+  socketPath: string,
+  terminalTarget: string,
+  expectedAgent: TmuxAgentKind,
+): string | undefined {
+  const sessionName = terminalTarget.split(':', 1)[0]?.trim();
+  if (!sessionName) return undefined;
+  const panes = listPanesOnSocket(socketPath).filter(
+    (pane) => pane.sessionName === sessionName && pane.agentKind === expectedAgent,
+  );
+  if (panes.length === 0) return undefined;
+
+  // A user may have resumed the native conversation in a new window. Prefer
+  // that selected pane, but fall back to the persisted target if it is still
+  // a live same-family pane.
+  const selected = spawnProcessSync(
+    'tmux',
+    ['-S', socketPath, 'display-message', '-p', '-t', sessionName, '#{session_name}:#{window_index}.#{pane_index}'],
+    { encoding: 'utf8' },
+  );
+  const selectedTarget =
+    selected.status === 0 && typeof selected.stdout === 'string' ? selected.stdout.trim() : '';
+  const selectedPane = panes.find(
+    (pane) => `${pane.sessionName}:${pane.windowIndex}.${pane.paneIndex}` === selectedTarget,
+  );
+  if (selectedPane) return selectedPane.paneId;
+  const persisted = panes.find(
+    (pane) =>
+      `${pane.sessionName}:${pane.windowIndex}.${pane.paneIndex}` === terminalTarget ||
+      pane.paneId === terminalTarget,
+  );
+  return persisted?.paneId;
+}
+
+/** @internal Evidence classifier kept exported for deterministic lifecycle tests. */
+export function interruptEvidence(text: string): { side: boolean; busy: boolean } {
+  const cleaned = normalizeTmuxTail(text, 24);
+  const lines = cleaned.split('\n').slice(-24);
+  const recent = lines.join('\n');
+  // Scrollback can contain a side footer from an earlier turn while the
+  // visible pane is back in the main conversation. Match only the latest
+  // model/path footer window, then classify that footer; a historical phrase
+  // must never authorize a destructive Ctrl-C for `/btw out`.
+  const footer = latestConversationFooter(lines);
+  const side = footer?.kind === 'side';
+  // Busy rows are normally immediately above the current footer. Restrict
+  // their search to that local window so an old `Working` row in scrollback
+  // cannot keep a completed main prompt looking active.
+  const stateLines = footer
+    ? lines.slice(Math.max(0, footer.index - 6))
+    : lines;
+  const ready = stateLines.some((line) =>
+    /^[›❯]\s*$/.test(line.trim()) ||
+    /^›\s*(?:Ask Codex to do anything|How many files have been modified\?|Check recently modified functions for compatibility)\s*$/iu.test(line.trim()),
+  );
+  const busy = !ready && /(?:working|waiting\s+for\s+background\s+terminal)\s*\([^)]*(?:esc|escape)\s+to\s+interrupt|compacting(?:\s+context)?|^\s*[•◦]\s+running\b/imu.test(stateLines.join('\n'));
+  return { side, busy };
+}
+
+function latestConversationFooter(
+  lines: string[],
+): { kind: 'side' | 'main'; index: number } | undefined {
+  let latest: { kind: 'side' | 'main'; index: number } | undefined;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]?.trim() ?? '';
+    if (!/^(?:gpt|codex|claude)[\w.-]*\b.*\s·\s+/iu.test(line)) continue;
+    const window = lines.slice(index, Math.min(lines.length, index + 5)).join(' ').replace(/\s+/gu, ' ').trim();
+    if (/\bside\s+from\s+main\s+thread\b/iu.test(window)) {
+      latest = { kind: 'side', index };
+      continue;
+    }
+    if (
+      /\bmain\s*\[[^\]]+\]/iu.test(window) ||
+      /^(?:gpt|codex|claude)[\w.-]*\b.*\s·\s+(?:[A-Za-z]:[\\/]|\/|~\/)/iu.test(window)
+    ) {
+      latest = { kind: 'main', index };
+    }
+  }
+  return latest;
 }
 
 function normalizeTmuxTail(output: string, requestedLines: number): string {

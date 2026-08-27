@@ -10,7 +10,13 @@ import {
   spawnProcessSync,
   type SpawnedProcessByStdio,
 } from '../platform/spawn';
-import type { AgentEvent, AgentRun, LiveSessionDiagnostics, LiveTurnPhase } from './types';
+import type {
+  AgentEvent,
+  AgentRun,
+  AgentRunStopOptions,
+  LiveSessionDiagnostics,
+  LiveTurnPhase,
+} from './types';
 import {
   novelTerminalTextSuffix,
   stripReplayedTerminalSegments,
@@ -49,7 +55,8 @@ type LiveOutput = {
 type LiveTurnInterrupt = {
   requested: boolean;
   detached: boolean;
-  cancel?: () => void;
+  forceRequested?: boolean;
+  cancel?: (force?: boolean) => void;
   detach?: () => void;
 };
 export type LiveTerminalBackend = 'auto' | 'tmux' | 'pty' | 'pipe';
@@ -102,8 +109,8 @@ const SIDE_COMMAND_SETTLE_MS = 450;
 const SIDE_SWITCH_TIMEOUT_MS = 120_000;
 const SIDE_ENTRY_RETRY_POLL_MS = 160;
 const SIDE_ENTRY_RETRY_INTERVAL_MS = 900;
-const SIDE_ENTRY_MAX_RETRIES = 8;
 const SIDE_BODY_TIMEOUT_MS = 120_000;
+const SIDE_EVIDENCE_GRACE_MS = 5_000;
 const COMMAND_ESCAPE_SETTLE_MS = 250;
 const COMMAND_CLEAR_SETTLE_MS = 500;
 const COMMAND_STARTUP_TIMEOUT_MS = 25_000;
@@ -210,6 +217,18 @@ export class LiveTerminalSession {
   private readonly pendingTerminalOutput: LiveOutput[] = [];
   private lastTerminalSnapshot = '';
   private lastTerminalHistory: LiveHistorySnapshot | undefined;
+  // A tmux capture can deliver a visible snapshot and positioned history in
+  // separate frames. Keep their arrival order so a stale history footer cannot
+  // override a newer main-thread snapshot (or hide a newer side footer).
+  private lastTerminalSnapshotAt = 0;
+  private lastTerminalHistoryAt = 0;
+  private lastTerminalHistoryFingerprint = '';
+  // Side mode is a terminal-level state. Keep a small amount of memory across
+  // observer turns so a delayed/partial tmux frame cannot make `/btw out`
+  // fail before the footer is repainted.
+  private sideConversationConfirmed = false;
+  private lastSideConversationAt = 0;
+  private lastMainConversationAt = 0;
   private terminalReady: Promise<void> = Promise.resolve();
   private resolveTerminalReady: (() => void) | undefined;
   private firstTerminalOutput: Promise<void> = Promise.resolve();
@@ -238,7 +257,7 @@ export class LiveTerminalSession {
   }
 
   getDiagnostics(): LiveSessionDiagnostics {
-    const snapshot = `${this.lastTerminalSnapshot}\n${this.lastTerminalHistory?.text ?? ''}`;
+    const snapshot = this.latestTerminalState();
     const inputState = this.turnPromptPreview
       ? isLiveTerminalReady(snapshot)
         ? 'empty'
@@ -250,7 +269,7 @@ export class LiveTerminalSession {
       : 'unknown';
     return {
       phase: this.turnPhase,
-      sideConversation: isLiveSideConversation(snapshot),
+      sideConversation: this.hasSideConversationEvidence(snapshot),
       ...(this.turnGeneration ? { generation: this.turnGeneration } : {}),
       ...(this.turnPromptPreview ? { promptPreview: previewLiveText(this.turnPromptPreview) } : {}),
       inputState,
@@ -286,7 +305,14 @@ export class LiveTerminalSession {
     return true;
   }
 
-  run(runId: string, prompt: string, cwd: string, inputMode?: LiveTerminalInputMode): AgentRun {
+  run(
+    runId: string,
+    prompt: string,
+    cwd: string,
+    inputMode?: LiveTerminalInputMode,
+    sideConversationConfirmed = false,
+  ): AgentRun {
+    if (sideConversationConfirmed) this.markSideConversationSeen(Date.now());
     this.turnGeneration = runId;
     this.turnPromptPreview = prompt;
     this.turnRetryCount = 0;
@@ -294,14 +320,15 @@ export class LiveTerminalSession {
     this.turnPhase = 'starting';
     void this.start();
     const interruption: LiveTurnInterrupt = { requested: false, detached: false };
-    const events = this.turnEvents(prompt, cwd, inputMode, interruption, false);
+    const events = this.turnEvents(prompt, cwd, inputMode, interruption, false, sideConversationConfirmed);
     return {
       runId,
       events,
-      stop: async () => {
+      stop: async (options: AgentRunStopOptions = {}) => {
         if (interruption.requested) return;
         interruption.requested = true;
-        interruption.cancel?.();
+        interruption.forceRequested = options.force === true;
+        interruption.cancel?.(interruption.forceRequested);
       },
       detach: async () => {
         if (interruption.detached) return;
@@ -313,17 +340,25 @@ export class LiveTerminalSession {
   }
 
   /** Observe a side conversation without replacing the main live turn. */
-  runSide(runId: string, prompt: string, cwd: string, inputMode: 'side' | 'side-exit'): AgentRun {
+  runSide(
+    runId: string,
+    prompt: string,
+    cwd: string,
+    inputMode: 'side' | 'side-exit',
+    sideConversationConfirmed = false,
+  ): AgentRun {
+    if (sideConversationConfirmed) this.markSideConversationSeen(Date.now());
     void this.start();
     const interruption: LiveTurnInterrupt = { requested: false, detached: false };
-    const events = this.turnEvents(prompt, cwd, inputMode, interruption, true);
+    const events = this.turnEvents(prompt, cwd, inputMode, interruption, true, sideConversationConfirmed);
     return {
       runId,
       events,
-      stop: async () => {
+      stop: async (options: AgentRunStopOptions = {}) => {
         if (interruption.requested) return;
         interruption.requested = true;
-        interruption.cancel?.();
+        interruption.forceRequested = options.force === true;
+        interruption.cancel?.(interruption.forceRequested);
       },
       detach: async () => {
         if (interruption.detached) return;
@@ -475,13 +510,36 @@ export class LiveTerminalSession {
     }
     const output = this.cleaner.push(raw);
     const terminalSnapshot = output.terminalText ?? output.text;
-    if (output.mode === 'snapshot' && terminalSnapshot.trim()) {
+    const observedAt = Date.now();
+    if (
+      (output.mode === 'snapshot' || this.terminalInfo?.backend === 'pipe') &&
+      terminalSnapshot.trim()
+    ) {
       // Keep lifecycle state before presentation filtering. Busy chrome is
       // intentionally hidden from Feishu, but it is the evidence required to
       // decide whether an interrupt can safely reach the active CLI turn.
       this.lastTerminalSnapshot = terminalSnapshot;
+      this.lastTerminalSnapshotAt = observedAt;
     }
-    if (output.history?.text.trim()) this.lastTerminalHistory = output.history;
+    // `TerminalOutputCleaner` includes the last positioned history object on
+    // every snapshot. Only advance its timestamp when a new history frame was
+    // actually parsed; otherwise a repeated stale history copy would always
+    // win over a newer visible main-thread snapshot.
+    if (output.history?.text.trim()) {
+      // The tmux helper emits the positioned history envelope with every
+      // changed viewport, so the parsed object is usually a new allocation
+      // even when its contents are unchanged. Compare its position and text,
+      // otherwise a stale history copy keeps winning `latestTerminalState()`
+      // over a newer visible frame.
+      const fingerprint = liveHistoryFingerprint(output.history);
+      if (fingerprint !== this.lastTerminalHistoryFingerprint) {
+        this.lastTerminalHistory = output.history;
+        this.lastTerminalHistoryFingerprint = fingerprint;
+        this.lastTerminalHistoryAt = observedAt;
+        this.observeConversationEvidence(output.history.text, observedAt);
+      }
+    }
+    if (terminalSnapshot.trim()) this.observeConversationEvidence(terminalSnapshot, observedAt);
     if (!output.text.trim() && !output.terminalText?.trim() && !output.history?.text.trim()) return;
     if (this.emitter.listenerCount('data') === 0) {
       this.pendingTerminalOutput.push(output);
@@ -496,13 +554,62 @@ export class LiveTerminalSession {
     this.emitter.emit('data', output);
   }
 
-  private write(input: string): void {
+  private write(input: string, trackTurn = true): void {
     const child = this.child;
     if (!child || child.exitCode !== null || child.signalCode !== null) return;
-    this.turnLastInputAt = Date.now();
+    if (trackTurn) this.turnLastInputAt = Date.now();
     child.stdin.write(
       this.terminalInfo?.backend === 'tmux' ? encodeTmuxInputFrame(input) : input,
     );
+  }
+
+  private latestTerminalState(): string {
+    const snapshot = this.lastTerminalSnapshot;
+    const history = this.lastTerminalHistory?.text ?? '';
+    const snapshotKind = classifyLiveConversation(snapshot);
+    const historyKind = classifyLiveConversation(history);
+    if (snapshotKind !== 'unknown' && historyKind === 'unknown') return snapshot;
+    if (historyKind !== 'unknown' && snapshotKind === 'unknown') return history;
+    if (snapshot.trim() && this.lastTerminalSnapshotAt >= this.lastTerminalHistoryAt) {
+      return snapshot;
+    }
+    if (history.trim()) return history;
+    return snapshot;
+  }
+
+  private observeConversationEvidence(text: string, observedAt: number): void {
+    if (isLiveSideConversation(text)) this.markSideConversationSeen(observedAt);
+    if (isLiveMainConversation(text)) this.lastMainConversationAt = observedAt;
+  }
+
+  private markSideConversationSeen(observedAt: number): void {
+    this.sideConversationConfirmed = true;
+    this.lastSideConversationAt = Math.max(this.lastSideConversationAt, observedAt);
+  }
+
+  /**
+   * Return side authorization only while there is no authoritative main
+   * surface. A recently captured side footer may live in history while the
+   * visible snapshot is still one repaint behind; retain that evidence for a
+   * short grace period, but never send Ctrl-C into a clearly main editor.
+   */
+  private hasSideConversationEvidence(current = this.latestTerminalState()): boolean {
+    if (isLiveSideConversation(current)) {
+      this.markSideConversationSeen(Date.now());
+      return true;
+    }
+    const snapshot = this.lastTerminalSnapshot;
+    const history = this.lastTerminalHistory?.text ?? '';
+    const sideInHistory = isLiveSideConversation(history);
+    const mainInSnapshot = isLiveMainConversation(snapshot);
+    if (this.sideConversationConfirmed && sideInHistory && mainInSnapshot) {
+      const sideIsRecent =
+        this.lastTerminalHistoryAt + SIDE_EVIDENCE_GRACE_MS >= this.lastTerminalSnapshotAt;
+      if (sideIsRecent) return true;
+    }
+    if (isLiveMainConversation(current)) return false;
+    if (!this.sideConversationConfirmed) return false;
+    return this.lastMainConversationAt <= this.lastSideConversationAt;
   }
 
   private async *turnEvents(
@@ -511,6 +618,7 @@ export class LiveTerminalSession {
     inputMode?: LiveTerminalInputMode,
     interruption: LiveTurnInterrupt = { requested: false, detached: false },
     concurrentSide = false,
+    sideOwnershipConfirmed = false,
   ): AsyncGenerator<AgentEvent> {
     yield { type: 'system', cwd };
     await this.start();
@@ -524,10 +632,23 @@ export class LiveTerminalSession {
       return;
     }
     const turnPrompt = sideMode ? sidePrompt ?? '' : prompt;
-    const previousPhase = this.turnPhase;
     let finishDeferredUntilMainResumes = false;
+    let done = false;
     if (concurrentSide) this.concurrentSideDepth += 1;
-    this.turnPhase = 'awaiting-input';
+    const setPhase = (phase: LiveTurnPhase): void => {
+      if (!concurrentSide) this.turnPhase = phase;
+    };
+    const setLastError = (message: string): void => {
+      if (!concurrentSide) this.turnLastError = message;
+    };
+    const markInput = (): void => {
+      if (!concurrentSide) this.turnLastInputAt = Date.now();
+    };
+    const writeTurn = (input: string, allowAfterCancel = false): void => {
+      if (!allowAfterCancel && (done || interruption.requested || interruption.detached)) return;
+      this.write(input, !concurrentSide);
+    };
+    setPhase('awaiting-input');
     const idleMs =
       commandMode
         ? Math.max(this.opts.idleMs ?? DEFAULT_IDLE_MS, COMMAND_IDLE_MS)
@@ -539,7 +660,6 @@ export class LiveTerminalSession {
         : (this.opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS);
     const output = new TurnOutputBuffer(MAX_TURN_OUTPUT_CHARS, turnPrompt, commandMode || inputMode === 'control');
     const queue: AgentEvent[] = [];
-    let done = false;
     let wake: (() => void) | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let outputTimer: ReturnType<typeof setTimeout> | undefined;
@@ -623,14 +743,17 @@ export class LiveTerminalSession {
       // draft is in the editor instead of trusting this progress marker.
       if (this.terminalInfo?.backend !== 'tmux') cancelNormalSubmitRetry();
     };
-    const finalize = (failureMessage?: string): void => {
+    const finalize = (
+      failureMessage?: string,
+      terminationReason: 'normal' | 'interrupted' = 'normal',
+    ): void => {
       if (done) return;
       done = true;
       settling = false;
       if (settlingTimer) clearTimeout(settlingTimer);
       settlingTimer = undefined;
-      this.turnPhase = failureMessage ? 'failed' : 'settling';
-      if (failureMessage) this.turnLastError = failureMessage;
+      setPhase(failureMessage ? 'failed' : 'settling');
+      if (failureMessage) setLastError(failureMessage);
       if (commandMode) {
         log.info('agent-live', 'command-finish', {
           reason: failureMessage ? 'terminal-failure' : 'idle-or-startup',
@@ -654,7 +777,7 @@ export class LiveTerminalSession {
       if (failureMessage) {
         push({ type: 'error', message: failureMessage, terminationReason: 'failed' });
       } else {
-        push({ type: 'done', terminationReason: 'normal' });
+        push({ type: 'done', terminationReason });
       }
     };
     const finish = (failureMessage?: string): void => {
@@ -674,7 +797,7 @@ export class LiveTerminalSession {
       if (settling) return;
       settling = true;
       settlingStartedAt = Date.now();
-      this.turnPhase = 'settling';
+      setPhase('settling');
       if (timer) clearTimeout(timer);
       timer = undefined;
       // Make already-rendered output visible immediately, then leave the
@@ -710,12 +833,12 @@ export class LiveTerminalSession {
       if (settlingTimer) clearTimeout(settlingTimer);
       settlingTimer = undefined;
     };
-    const cancelCurrentTurn = (): void => {
+    const cancelCurrentTurn = (force = false): void => {
       if (done) return;
       if (sideExitMode) {
         // `/btw out` owns at most one guarded close key. A later lifecycle
         // cleanup must never send a second Ctrl-C into the shared pane.
-        finish();
+        finalize(undefined, 'interrupted');
         return;
       }
       // A repeated Ctrl-C can close a CLI that is the pane's only process.
@@ -724,21 +847,36 @@ export class LiveTerminalSession {
       // guessing at the focused TUI surface.
       const terminal = this.terminalInfo;
       const terminalBusy =
+        isLiveTerminalBusy(this.latestTerminalState()) ||
         isLiveTerminalBusy(this.lastTerminalSnapshot) ||
         isLiveTerminalBusy(this.lastTerminalHistory?.text ?? '');
-      if (terminal?.backend !== 'tmux' || terminalBusy) {
-        this.write('\x03');
+      const sideActive =
+        sideMode &&
+        (sideOwnershipConfirmed ||
+          this.sideConversationConfirmed ||
+          this.hasSideConversationEvidence(this.latestTerminalState()));
+      // A side observer owns the terminal only after the side footer has been
+      // confirmed. During the opening wait, sending Ctrl-C would hit the main
+      // pursuing goal and is precisely the data-loss bug `/stop` must avoid.
+      const sideInterruptAuthorized = !sideMode || sideActive;
+      if (sideInterruptAuthorized && (force || terminal?.backend !== 'tmux' || terminalBusy || sideActive)) {
+        writeTurn('\x03', true);
         log.info('agent-live', 'turn-interrupt-sent', {
           backend: terminal?.backend ?? 'unknown',
           terminalBusy,
+          sideActive,
+          force,
         });
       } else {
         log.warn('agent-live', 'turn-interrupt-withheld', {
           backend: terminal?.backend ?? 'unknown',
-          reason: 'terminal-not-confirmed-busy',
+          reason: sideMode ? 'side-not-confirmed' : 'terminal-not-confirmed-busy',
         });
       }
-      finish();
+      // Explicit lifecycle stops must complete the bridge turn immediately.
+      // tmux settlement is for passive idle detection only; waiting for it
+      // leaves `/stop` apparently hung and permits delayed helpers to write.
+      finalize(undefined, 'interrupted');
     };
     const arm = (ms: number): void => {
       if (timer) clearTimeout(timer);
@@ -756,6 +894,8 @@ export class LiveTerminalSession {
         slashConfirmTimer = undefined;
         if (
           done ||
+          interruption.requested ||
+          interruption.detached ||
           sawCommandResultOutput ||
           slashConfirmRetried ||
           !isPendingLiveCommandDraft(latestCommandTerminalText, turnPrompt)
@@ -764,7 +904,8 @@ export class LiveTerminalSession {
         }
         slashConfirmRetried = true;
         log.info('agent-live', 'command-confirm-draft', { commandText: turnPrompt });
-        this.write('\r');
+        if (done || interruption.requested || interruption.detached) return;
+        writeTurn('\r');
         if (isStatusLiveCommand(turnPrompt)) arm(idleMs);
       }, COMMAND_DRAFT_CONFIRM_DELAY_MS);
     };
@@ -773,25 +914,30 @@ export class LiveTerminalSession {
       if (!normalSubmitRetryStartedAt) normalSubmitRetryStartedAt = Date.now();
       const retryIfDraftAppears = (): void => {
         normalSubmitRetryTimer = undefined;
-        if (done || (sawNormalSubmitProgress && this.terminalInfo?.backend !== 'tmux')) {
+        if (
+          done ||
+          interruption.requested ||
+          interruption.detached ||
+          (sawNormalSubmitProgress && this.terminalInfo?.backend !== 'tmux')
+        ) {
           return;
         }
         // /btw has always required proof that its body is still in the
         // editor. Ordinary tmux turns need that same proof because a redraw
         // can otherwise show stale activity from the previous turn.
         if (sideMode || this.terminalInfo?.backend === 'tmux') {
-          const terminal = `${this.lastTerminalSnapshot}\n${this.lastTerminalHistory?.text ?? ''}`;
+          const terminal = this.latestTerminalState();
           const draftPending = isPendingLivePromptDraft(terminal, turnPrompt);
           if (draftPending) {
             if (sideMode) suspendIdle();
             if (normalSubmitRetryAttempts < NORMAL_SUBMIT_RETRY_MAX_ATTEMPTS) {
               normalSubmitRetryAttempts += 1;
-              this.turnRetryCount += 1;
+              if (!concurrentSide) this.turnRetryCount += 1;
               log.warn('agent-live', 'normal-submit-retry', {
                 promptPreview: previewLiveText(turnPrompt),
                 attempt: normalSubmitRetryAttempts,
               });
-              this.write('\r');
+              if (!done && !interruption.requested && !interruption.detached) writeTurn('\r');
             }
             normalSubmitRetryTimer = setTimeout(retryIfDraftAppears, NORMAL_SUBMIT_RETRY_POLL_MS);
             return;
@@ -822,17 +968,18 @@ export class LiveTerminalSession {
         }
         if (normalSubmitRetryAttempts > 0) return;
         normalSubmitRetryAttempts = 1;
-        this.turnRetryCount += 1;
+        if (!concurrentSide) this.turnRetryCount += 1;
         log.warn('agent-live', 'normal-submit-retry', {
           promptPreview: previewLiveText(turnPrompt),
           attempt: normalSubmitRetryAttempts,
         });
-        this.write('\r');
+        if (!done && !interruption.requested && !interruption.detached) writeTurn('\r');
       };
       normalSubmitRetryTimer = setTimeout(retryIfDraftAppears, NORMAL_SUBMIT_RETRY_DELAY_MS);
     };
 
     const onData = (event: LiveOutput): void => {
+      if (done || interruption.requested || interruption.detached) return;
       if (this.concurrentSideDepth > 0 && !concurrentSide) {
         // Side output belongs to the side subscriber. Remember only a frame
         // that proves the TUI has returned to the main conversation; replaying
@@ -844,7 +991,7 @@ export class LiveTerminalSession {
         }
         return;
       }
-      this.turnLastOutputAt = Date.now();
+      if (!concurrentSide) this.turnLastOutputAt = Date.now();
       if (!acceptingOutput) {
         const terminalText = event.terminalText ?? event.text;
         if (terminalText && isLiveTerminalInteraction(terminalText)) {
@@ -903,7 +1050,7 @@ export class LiveTerminalSession {
         markNormalSubmitProgress();
       }
       if (terminalBusy) {
-        this.turnPhase = 'busy';
+        setPhase('busy');
         terminalWasBusy = true;
         suspendIdle();
       } else if (terminalWasBusy) {
@@ -981,7 +1128,7 @@ export class LiveTerminalSession {
         });
       }
       if (accepted) {
-        this.turnPhase = isLiveTerminalInteraction(terminalState ?? event.text) ? 'picker' : 'streaming';
+        setPhase(isLiveTerminalInteraction(terminalState ?? event.text) ? 'picker' : 'streaming');
         if (!normalPromptDraftPending) markNormalSubmitProgress();
         const resultOutput = isLiveCommandResultOutput(text, turnPrompt);
         const statusSurfaceOutput =
@@ -1039,17 +1186,21 @@ export class LiveTerminalSession {
         type: evt.code && evt.code !== 0 ? 'error' : 'done',
         ...(evt.code && evt.code !== 0
           ? { message: `live agent exited with ${detail}`, terminationReason: 'failed' as const }
-          : { terminationReason: 'normal' as const }),
+          : { terminationReason: interruption.requested ? 'interrupted' as const : 'normal' as const }),
       } as AgentEvent);
     };
     const onError = (err: Error): void => {
       if (done) return;
-      this.turnPhase = 'failed';
-      this.turnLastError = err.message;
+      setPhase('failed');
+      setLastError(err.message);
       done = true;
       if (timer) clearTimeout(timer);
       flushOutput();
-      push({ type: 'error', message: `live agent failed: ${err.message}`, terminationReason: 'failed' });
+      push({
+        type: 'error',
+        message: `live agent failed: ${err.message}`,
+        terminationReason: interruption.requested ? 'interrupted' : 'failed',
+      });
     };
 
     let turnCleaned = false;
@@ -1104,32 +1255,42 @@ export class LiveTerminalSession {
     for (const event of this.pendingTerminalOutput.splice(0)) onData(event);
     try {
       if (interruption.detached) cleanupTurn();
-      else if (interruption.requested) cancelCurrentTurn();
-      await this.waitForInputReady(
-        inputGraceMs,
-        !commandMode && inputMode !== 'control' && !turnPrompt.trim().startsWith('/'),
-      );
+      else if (interruption.requested) cancelCurrentTurn(interruption.forceRequested === true);
+      submitTurn: {
+      if (!done) {
+        await this.waitForInputReady(
+          inputGraceMs,
+          !commandMode && inputMode !== 'control' && !turnPrompt.trim().startsWith('/'),
+        );
+      }
       if (!done) {
         if (startupInteractionText && inputMode !== 'control' && !sideMode && !sideExitMode) {
           log.info('agent-live', 'startup-interaction-dismiss', {
             inputMode: inputMode ?? 'task',
           });
-          this.write('\x1B');
+          writeTurn('\x1B');
           await delay(COMMAND_ESCAPE_SETTLE_MS);
+          if (done || interruption.requested || interruption.detached) break submitTurn;
           startupInteractionText = undefined;
         }
-        this.cleaner.resetTurn();
+        // The main and side observers share one terminal cleaner. Resetting it
+        // from a concurrent side turn clears the main observer's virtual
+        // screen and can make the pursuing goal appear complete. The side
+        // output buffer still receives a baseline below, so it does not need a
+        // cleaner reset of its own.
+        if (!concurrentSide) this.cleaner.resetTurn();
         output.setSnapshotBaseline(this.lastTerminalSnapshot);
         output.setHistoryBaseline(this.lastTerminalHistory);
         if (commandMode) {
-          if (isLiveTerminalReady(this.lastTerminalSnapshot)) {
+          const currentTerminalState = this.latestTerminalState();
+          if (isLiveTerminalReady(currentTerminalState)) {
             log.info('agent-live', 'command-fast-submit', { reason: 'ready-prompt' });
           } else if (
             sideMode &&
-            isPendingLiveCommandDraft(this.lastTerminalSnapshot, '/btw', { allowBusy: true })
+            isPendingLiveCommandDraft(currentTerminalState, '/btw', { allowBusy: true })
           ) {
             log.info('agent-live', 'side-command-draft-no-clear');
-          } else if (sideMode && isLiveTerminalBusy(this.lastTerminalSnapshot)) {
+          } else if (sideMode && isLiveTerminalBusy(currentTerminalState)) {
             log.info('agent-live', 'side-command-busy-no-clear');
           } else if (sideMode || sideExitMode) {
             // Side entry/exit must never clear the shared editor. Esc/Ctrl-A/
@@ -1140,15 +1301,25 @@ export class LiveTerminalSession {
             });
           } else {
             log.info('agent-live', 'command-clear', { sequence: 'esc ctrl-a ctrl-k' });
-            await this.clearPendingInput();
+            const cleared = await this.clearPendingInput(
+              writeTurn,
+              () => !done && !interruption.requested && !interruption.detached,
+            );
+            if (!cleared) break submitTurn;
             this.cleaner.resetTurn();
           }
         }
         acceptingOutput = true;
-        this.turnPhase = 'submitted';
+        setPhase('submitted');
         if (sideExitMode) {
-          const exitedSideConversation = await this.exitSideConversation();
+          const exitedSideConversation = await this.exitSideConversation(
+            writeTurn,
+            () => !done && !interruption.requested && !interruption.detached,
+            sideOwnershipConfirmed,
+          );
+          if (done || interruption.requested || interruption.detached) break submitTurn;
           if (exitedSideConversation) {
+            push({ type: 'system', cwd, sideConversation: 'exited' });
             push({
               type: 'text',
               delta: '已退出 Codex btw side conversation，主线程继续运行。\n',
@@ -1165,16 +1336,23 @@ export class LiveTerminalSession {
           }
           finish();
         } else if (sideMode) {
-          const enteredSideConversation = await this.enterSideConversation();
+          const enteredSideConversation = await this.enterSideConversation(
+            writeTurn,
+            () => !done && !interruption.requested && !interruption.detached,
+          );
+          if (done || interruption.requested || interruption.detached) break submitTurn;
           if (!enteredSideConversation) {
-            finish('未确认 Codex 已进入 side conversation，/btw 正文未发送。请先回到主线程后重试。');
+          finish('未确认 Codex 已进入 side conversation，/btw 正文未发送。请先回到主线程后重试。');
           } else if (turnPrompt) {
-            this.turnLastInputAt = Date.now();
-            this.write(`${turnPrompt}\r`);
+            push({ type: 'system', cwd, sideConversation: 'entered' });
+            if (done || interruption.requested || interruption.detached) break submitTurn;
+            markInput();
+            writeTurn(`${turnPrompt}\r`);
             sideBodyAwaitingSubmit = true;
             suspendIdle();
             scheduleNormalSubmitRetry();
           } else {
+            push({ type: 'system', cwd, sideConversation: 'entered' });
             push({
               type: 'text',
               delta: '已进入 Codex btw side conversation，请发送正文。\n',
@@ -1191,8 +1369,9 @@ export class LiveTerminalSession {
           // the writes from coalescing into one unrecognized chunk.
             for (let i = 0; i < controlKeys.length; i++) {
               if (i > 0) await delay(CONTROL_KEY_GAP_MS);
-              this.write(controlKeys[i]!);
-              this.turnLastInputAt = Date.now();
+              if (done || interruption.requested || interruption.detached) break submitTurn;
+              writeTurn(controlKeys[i]!);
+              markInput();
             }
           } else {
             if (commandMode) log.info('agent-live', 'command-submit', { commandText: turnPrompt });
@@ -1203,21 +1382,21 @@ export class LiveTerminalSession {
             // when this menu is meant to be confirmed. This prevents a delayed
             // fallback key from selecting the nested menu's default option.
               log.info('agent-live', 'control-literal-type', { input: turnPrompt });
-              this.write(turnPrompt);
-              this.turnLastInputAt = Date.now();
+              writeTurn(turnPrompt);
+              markInput();
             } else if (inputMode === 'control' && shouldDeferControlLiteralSubmit(turnPrompt)) {
               log.info('agent-live', 'control-literal-type', { input: turnPrompt });
-              this.write(turnPrompt);
-              this.turnLastInputAt = Date.now();
+              writeTurn(turnPrompt);
+              markInput();
               controlLiteralConfirmTimer = setTimeout(() => {
                 controlLiteralConfirmTimer = undefined;
-                if (done || sawAcceptedOutput) return;
+                if (done || interruption.requested || interruption.detached || sawAcceptedOutput) return;
                 log.info('agent-live', 'control-literal-confirm', { input: turnPrompt });
-                this.write('\r');
+                writeTurn('\r');
               }, CONTROL_LITERAL_CONFIRM_DELAY_MS);
             } else {
-              this.write(`${turnPrompt}\r`);
-              this.turnLastInputAt = Date.now();
+              writeTurn(`${turnPrompt}\r`);
+              markInput();
               scheduleNormalSubmitRetry();
             }
           }
@@ -1236,6 +1415,7 @@ export class LiveTerminalSession {
           arm(noOutputIdleMs(turnPrompt, idleMs));
         } else arm(startupTimeoutMs);
       }
+      }
 
       while (!done || queue.length > 0) {
         if (queue.length === 0) {
@@ -1252,7 +1432,7 @@ export class LiveTerminalSession {
       if (concurrentSide) {
         this.concurrentSideDepth = Math.max(0, this.concurrentSideDepth - 1);
         if (this.concurrentSideDepth === 0) {
-          const terminalText = this.lastTerminalSnapshot;
+          const terminalText = this.latestTerminalState();
           const mainFrame =
             this.pendingMainResumeOutput ??
             (isLiveMainConversation(terminalText)
@@ -1268,7 +1448,6 @@ export class LiveTerminalSession {
             this.resumeMainAfterSide?.(mainFrame);
           }
         }
-        this.turnPhase = previousPhase;
       }
       if (this.activeTurnCleanup === cleanupTurn) {
         this.turnPhase = 'idle';
@@ -1278,27 +1457,39 @@ export class LiveTerminalSession {
     }
   }
 
-  private async clearPendingInput(): Promise<void> {
-    this.write('\x1B');
+  private async clearPendingInput(
+    writeInput: (input: string) => void = (input) => this.write(input),
+    shouldContinue: () => boolean = () => true,
+  ): Promise<boolean> {
+    if (!shouldContinue()) return false;
+    writeInput('\x1B');
     await delay(COMMAND_ESCAPE_SETTLE_MS);
-    this.write('\x01');
+    if (!shouldContinue()) return false;
+    writeInput('\x01');
     await delay(CONTROL_KEY_GAP_MS);
-    this.write('\x0B');
+    if (!shouldContinue()) return false;
+    writeInput('\x0B');
     await delay(COMMAND_CLEAR_SETTLE_MS);
+    return shouldContinue();
   }
 
-  private async enterSideConversation(): Promise<boolean> {
-    const terminal = this.lastTerminalSnapshot;
-    if (isLiveSideConversation(terminal)) {
+  private async enterSideConversation(
+    writeInput: (input: string) => void = (input) => this.write(input),
+    shouldContinue: () => boolean = () => true,
+  ): Promise<boolean> {
+    if (!shouldContinue()) return false;
+    const terminal = this.latestTerminalState();
+    if (this.hasSideConversationEvidence(terminal)) {
       // `/btw` is unavailable once Codex is already inside a side
       // conversation. Reusing the confirmed side is both safer and more
       // useful than closing it and trying to open another one: the latter
       // races the Goal/side redraw and leaves the literal `/btw` in the side
       // editor. The caller clears a stale editor draft before reaching here.
+      this.markSideConversationSeen(Date.now());
       log.info('agent-live', 'side-conversation-reuse');
       return true;
     }
-    const beforeSide = this.lastTerminalSnapshot;
+    const beforeSide = this.latestTerminalState();
     const hasPendingEntryDraft = isPendingLiveCommandDraft(terminal, '/btw', {
       allowBusy: true,
     });
@@ -1307,22 +1498,24 @@ export class LiveTerminalSession {
         reason: 'picker-is-active',
       });
     } else {
-      this.write(hasPendingEntryDraft ? '\r' : '/btw\r');
+      if (!shouldContinue()) return false;
+      writeInput(hasPendingEntryDraft ? '\r' : '/btw\r');
     }
     const deadline = Date.now() + (this.opts.sideSwitchTimeoutMs ?? SIDE_SWITCH_TIMEOUT_MS);
     let lastDraftRetryAt = hasPendingEntryDraft ? Date.now() : 0;
     let entryRetries = 0;
     let entrySent = !isStructuredLiveInteraction(terminal);
     while (Date.now() < deadline) {
-      const current = this.lastTerminalSnapshot;
+      if (!shouldContinue()) return false;
+      const current = this.latestTerminalState();
       if (isLiveSideConversation(current) && (current !== beforeSide || isLiveSideConversation(beforeSide))) {
+        this.markSideConversationSeen(Date.now());
         await delay(SIDE_COMMAND_SETTLE_MS);
         return true;
       }
       if (
         !isStructuredLiveInteraction(current) &&
         Date.now() - lastDraftRetryAt >= SIDE_ENTRY_RETRY_INTERVAL_MS &&
-        entryRetries < SIDE_ENTRY_MAX_RETRIES &&
         isPendingLiveCommandDraft(current, '/btw', { allowBusy: true })
       ) {
         lastDraftRetryAt = Date.now();
@@ -1332,7 +1525,8 @@ export class LiveTerminalSession {
           terminalBusy: isLiveTerminalBusy(current),
           attempt: entryRetries,
         });
-        this.write('\r');
+        if (!shouldContinue()) return false;
+        writeInput('\r');
       }
       if (
         !entrySent &&
@@ -1344,28 +1538,57 @@ export class LiveTerminalSession {
         // operation starts. Send the command once after a fresh snapshot, but
         // never repeat it against a picker or unknown editor surface.
         entrySent = true;
-        this.write('/btw\r');
+        if (!shouldContinue()) return false;
+        writeInput('/btw\r');
       }
       await delay(Math.min(SIDE_ENTRY_RETRY_POLL_MS, Math.max(1, deadline - Date.now())));
     }
     return false;
   }
 
-  private async exitSideConversation(): Promise<boolean> {
-    const before = this.lastTerminalSnapshot;
-    if (!isLiveSideConversation(before)) return false;
-    // A side session is the only state in which this key is safe. It is sent
-    // exactly once; unlike ordinary stop handling there is deliberately no
-    // retry path and no Esc/Ctrl-A/Ctrl-K cleanup.
-    this.write('\x03');
-    log.info('agent-live', 'side-conversation-exit-sent');
+  private async exitSideConversation(
+    writeInput: (input: string) => void = (input) => this.write(input),
+    shouldContinue: () => boolean = () => true,
+    sideOwnershipConfirmed = false,
+  ): Promise<boolean> {
     const deadline = Date.now() + (this.opts.sideSwitchTimeoutMs ?? SIDE_SWITCH_TIMEOUT_MS);
+    let exitSent = false;
+    let mainObservationBeforeExit = this.lastMainConversationAt;
     while (Date.now() < deadline) {
-      const current = this.lastTerminalSnapshot;
-      if (!isLiveSideConversation(current) && isLiveMainConversation(current)) {
+      if (!shouldContinue()) return false;
+      const current = this.latestTerminalState();
+      if (
+        !exitSent &&
+        (sideOwnershipConfirmed ||
+          this.sideConversationConfirmed ||
+          this.hasSideConversationEvidence(current))
+      ) {
+        // A side session is the only state in which this key is safe. It is
+        // sent exactly once; unlike ordinary stop handling there is no retry
+        // path and no Esc/Ctrl-A/Ctrl-K cleanup.
+        if (!shouldContinue()) return false;
+        mainObservationBeforeExit = this.lastMainConversationAt;
+        writeInput('\x03');
+        exitSent = true;
+        log.info('agent-live', 'side-conversation-exit-sent');
+      }
+      if (
+        exitSent &&
+        !isLiveSideConversation(current) &&
+        isLiveMainConversation(current) &&
+        this.lastMainConversationAt > mainObservationBeforeExit
+      ) {
+        this.sideConversationConfirmed = false;
+        this.lastSideConversationAt = 0;
+        this.lastMainConversationAt = 0;
         await delay(SIDE_COMMAND_SETTLE_MS);
+        if (!shouldContinue()) return false;
         return true;
       }
+      // A main-looking frame can still be the capture immediately preceding a
+      // side transition. Keep waiting for the authoritative side footer rather
+      // than failing before Codex has had a chance to repaint it. The timeout
+      // remains the hard bound when the user invokes /btw out outside side.
       await delay(SIDE_ENTRY_RETRY_POLL_MS);
     }
     return false;
@@ -1927,6 +2150,13 @@ function sendBracketedPaste(text) {
 }
 
 function sendInput(input) {
+  // Ctrl-C is a lifecycle command, but it still has to reach the pane the
+  // user currently selected. Normal text goes through ensureLivePane(),
+  // whereas the old Ctrl-C fast path deliberately skipped it; after a manual
+  // resume that left stop/side-exit targeting the retired pane. Refresh only
+  // by adopting an existing same-family pane here: never create a new pane for
+  // a stop request.
+  if (input === '\x03' && managed) adoptSelectedLivePane();
   const paneReady = input === '\x03' || ensureLivePane();
   if (!paneReady) return;
   if (input === '\x03') {
@@ -2591,6 +2821,18 @@ function parseLiveHistorySnapshot(payload: string): LiveHistorySnapshot {
   return { paneId: '', startLine: 0, endLine: lineCount, text: payload };
 }
 
+function liveHistoryFingerprint(history: LiveHistorySnapshot): string {
+  return createHash('sha256')
+    .update(history.paneId)
+    .update('\0')
+    .update(String(history.startLine))
+    .update('\0')
+    .update(String(history.endLine))
+    .update('\0')
+    .update(history.text)
+    .digest('hex');
+}
+
 function matchingPrefixSuffixLength(input: string, prefix: string): number {
   const max = Math.min(input.length, prefix.length - 1);
   for (let length = max; length > 0; length -= 1) {
@@ -2912,7 +3154,21 @@ class TurnOutputBuffer {
       if (part === '\n') {
         const comparable = currentLine.trim();
         const repeatsLastLine = comparable && comparable === this.lastCompleteLine;
-        if (!repeatsLastLine || (preserveSnapshotDuplicates && !firstCompleteLine)) {
+        // A second snapshot can arrive before the first one is flushed. In
+        // that narrow window `pending` is the only copy of the first line;
+        // suppressing the repeated first line would replace the pending full
+        // snapshot with only its newest tail (for example `48 120` followed
+        // by `48x120`). Once anything has been delivered, keep the historical
+        // de-duplication behavior so a full redraw cannot replay old output.
+        const preservePendingFirstLine =
+          preserveSnapshotDuplicates &&
+          firstCompleteLine &&
+          this.deliveredTail.length === 0 &&
+          this.pending.length > 0;
+        if (
+          !repeatsLastLine ||
+          (preserveSnapshotDuplicates && (!firstCompleteLine || preservePendingFirstLine))
+        ) {
           out += `${currentLine}\n`;
         }
         if (comparable) this.lastCompleteLine = comparable;
@@ -3758,6 +4014,15 @@ export function isLiveTerminalBusy(input: string): boolean {
 export function isLiveSideConversation(input: string): boolean {
   const recent = cleanTerminalOutput(input).split('\n').slice(-20).join('\n');
   return /\bside\s+from\s+main\s+thread\b/iu.test(recent);
+}
+
+type LiveConversationKind = 'side' | 'main' | 'unknown';
+
+function classifyLiveConversation(input: string): LiveConversationKind {
+  if (!input.trim()) return 'unknown';
+  if (isLiveSideConversation(input)) return 'side';
+  if (isLiveMainConversation(input)) return 'main';
+  return 'unknown';
 }
 
 function isLiveMainConversation(input: string): boolean {

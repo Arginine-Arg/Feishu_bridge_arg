@@ -75,7 +75,7 @@ export class PendingQueue {
   pushFront(
     scope: string,
     messages: NormalizedMessage | readonly NormalizedMessage[],
-    options: { immediate?: boolean; preempt?: boolean } = {},
+    options: { immediate?: boolean; preempt?: boolean; bypassBlock?: boolean } = {},
   ): number {
     const priority = Array.isArray(messages) ? [...messages] : [messages];
     const deferred = this.deferredUntilFront.get(scope) ?? [];
@@ -97,14 +97,14 @@ export class PendingQueue {
     if (existing) {
       if (existing.timer) clearTimeout(existing.timer);
       existing.messages.unshift(...incoming);
-      existing.timer = this.blocked.has(scope) && !options.preempt
+      existing.timer = this.blocked.has(scope) && !options.preempt && !options.bypassBlock
         ? undefined
         : this.armTimer(scope, options.immediate ? 0 : undefined);
       return existing.messages.length;
     }
     this.map.set(scope, {
       messages: incoming,
-      timer: this.blocked.has(scope) && !options.preempt
+      timer: this.blocked.has(scope) && !options.preempt && !options.bypassBlock
         ? undefined
         : this.armTimer(scope, options.immediate ? 0 : undefined),
     });

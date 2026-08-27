@@ -269,15 +269,53 @@ describe('Claude slash command visible behavior', () => {
     expect(lastMarkdown(h.channel)).toContain('`final`');
   });
 
-  it('handles /stop without sending a new reply', async () => {
+  it('handles /stop with an immediate acknowledgement', async () => {
     const h = await createHarness();
     const activeRun = h.agent.run({ runId: 'run-active', prompt: 'running' }) as FakeAgentRun;
     h.activeRuns.register('chat-1', activeRun);
 
     await expect(h.run('/stop')).resolves.toBe(true);
 
-    expect(h.channel.sent).toEqual([]);
+    expect(lastMarkdown(h.channel)).toContain('已请求停止当前任务');
     expect(activeRun.stopped).toBe(true);
+  });
+
+  it('stops a side run without interrupting the main run', async () => {
+    const h = await createHarness();
+    const mainRun = h.agent.run({ runId: 'run-main', prompt: 'goal' }) as FakeAgentRun;
+    const sideRun = h.agent.run({ runId: 'run-side', prompt: '/btw question' }) as FakeAgentRun;
+    h.activeRuns.register('chat-1', mainRun);
+    h.activeRuns.registerSide('chat-1', sideRun);
+
+    await expect(h.run('/stop')).resolves.toBe(true);
+
+    expect(sideRun.stopped).toBe(true);
+    expect(mainRun.stopped).toBe(false);
+    expect(lastMarkdown(h.channel)).toContain('side conversation');
+  });
+
+  it('falls back to the main run when a stale side hint has no side handle', async () => {
+    const h = await createHarness();
+    const mainRun = h.agent.run({ runId: 'run-main-stale-side', prompt: 'goal' }) as FakeAgentRun;
+    h.activeRuns.register('chat-1', mainRun);
+
+    await expect(
+      tryHandleCommand({
+        channel: h.channel as unknown as CommandContext['channel'],
+        msg: message('/stop'),
+        scope: 'chat-1',
+        chatMode: 'p2p',
+        sessions: h.sessions,
+        workspaces: h.workspaces,
+        agent: h.agent,
+        activeRuns: h.activeRuns,
+        controls: h.controls,
+        lifecycleTarget: 'side',
+      }),
+    ).resolves.toBe(true);
+
+    expect(mainRun.stopped).toBe(true);
+    expect(lastMarkdown(h.channel)).toContain('已请求停止当前任务');
   });
 
   it('lets admins stop and configure comment scopes explicitly', async () => {

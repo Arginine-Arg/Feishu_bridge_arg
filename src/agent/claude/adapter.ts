@@ -82,6 +82,7 @@ export class ClaudeAdapter implements AgentAdapter {
         return removed;
       },
       status: (scopeId, cwd) => this.tmuxStatus(scopeId, cwd),
+      managedScopesForChat: (chatId) => this.tmuxBindings.managedScopesForChat(chatId),
       tail: async (scopeId, lineCount, cwd) => {
         const terminal = tmuxTerminalForStatus(await this.tmuxStatus(scopeId, cwd));
         return captureTmuxPaneTail(terminal, lineCount);
@@ -102,6 +103,7 @@ export class ClaudeAdapter implements AgentAdapter {
           ...(terminal ? { terminal: { backend: 'tmux' as const, ...terminal } } : {}),
         };
       },
+      interrupt: (scopeId, cwd, options) => this.tmuxBindings.interrupt(scopeId, cwd, options),
       restoreArtifactDelivery: (scopeId, artifact) =>
         this.tmuxBindings.restoreManagedArtifactDelivery(scopeId, artifact),
     };
@@ -335,9 +337,21 @@ export class ClaudeAdapter implements AgentAdapter {
       },
     });
     if (side && (opts.liveInputMode === 'side' || opts.liveInputMode === 'side-exit')) {
-      return session.runSide(opts.runId, opts.prompt, opts.cwd, opts.liveInputMode);
+      return session.runSide(
+        opts.runId,
+        opts.prompt,
+        opts.cwd,
+        opts.liveInputMode,
+        opts.sideConversationConfirmed,
+      );
     }
-    return session.run(opts.runId, opts.prompt, opts.cwd, opts.liveInputMode);
+    return session.run(
+      opts.runId,
+      opts.prompt,
+      opts.cwd,
+      opts.liveInputMode,
+      opts.sideConversationConfirmed,
+    );
   }
 }
 

@@ -4,7 +4,8 @@ export type RunRejectedCode =
   | 'pool-full'
   | 'policy-expired'
   | 'reconnect-in-progress'
-  | 'run-already-active';
+  | 'run-already-active'
+  | 'stop-requested';
 export type SpawnFailedCode =
   | 'agent-spawn-failed'
   | 'agent-prepare-failed'

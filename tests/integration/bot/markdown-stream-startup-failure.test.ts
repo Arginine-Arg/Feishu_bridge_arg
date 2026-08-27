@@ -1141,6 +1141,218 @@ describe('markdown stream startup failures', () => {
     expect(h.agent.runs[0]?.stopped).toBe(false);
   }, 10_000);
 
+  it('handles /stop before a slow side-state diagnostic can block intake', async () => {
+    const h = await createHarness();
+    h.profileConfig.preferences = {
+      ...(h.profileConfig.preferences ?? {}),
+      agentSessionMode: 'live',
+      messageReply: 'text',
+      messageReplyMigrated: true,
+    };
+    h.controls.profileConfig.preferences = h.profileConfig.preferences;
+    h.controls.cfg.preferences = h.profileConfig.preferences;
+    h.agent.setEvents([
+      [{ type: 'text', delta: 'long task started\n' }],
+    ]);
+    delayFakeAgentEvents(h.agent, 2_000);
+    let diagnosticsCalls = 0;
+    const gate = deferred<void>();
+    h.agent.tmux = {
+      list: async () => [],
+      bind: async () => { throw new Error('not used'); },
+      unbind: async () => false,
+      status: async () => ({ state: 'none' as const }),
+      diagnostics: async () => {
+        diagnosticsCalls += 1;
+        if (diagnosticsCalls > 1) await gate.promise;
+        return {
+          phase: 'idle' as const,
+          inputState: 'unknown' as const,
+          retryCount: 0,
+          sideConversation: false,
+        };
+      },
+    } as never;
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_stop_slow_task', 'start a long task'));
+    await waitFor(() => h.agent.runOptions.length === 1, 4_000);
+    const stopPromise = h.channel.handlers.message?.(message('om_stop_slow_diag', '/stop'));
+    await waitFor(() => Boolean(h.agent.runs[0]?.stopped), 1_000);
+    gate.resolve();
+    await stopPromise;
+
+    expect(h.agent.runs[0]?.stopped).toBe(true);
+    expect(JSON.stringify(h.channel.sent)).toContain('已请求停止当前任务');
+  }, 10_000);
+
+  it('routes /codex /stop to bridge lifecycle handling in live mode', async () => {
+    const h = await createHarness();
+    h.profileConfig.preferences = {
+      ...(h.profileConfig.preferences ?? {}),
+      agentSessionMode: 'live',
+      messageReply: 'text',
+      messageReplyMigrated: true,
+    };
+    h.controls.profileConfig.preferences = h.profileConfig.preferences;
+    h.controls.cfg.preferences = h.profileConfig.preferences;
+    h.agent.setEvents([[{ type: 'text', delta: 'long task started\n' }]]);
+    delayFakeAgentEvents(h.agent, 2_000);
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_prefixed_stop_task', 'start a long task'));
+    await waitFor(() => h.agent.runOptions.length === 1, 4_000);
+    await h.channel.handlers.message?.(message('om_prefixed_stop', '/codex /stop'));
+    await waitFor(() => Boolean(h.agent.runs[0]?.stopped), 1_000);
+
+    expect(h.agent.runs[0]?.stopped).toBe(true);
+    expect(JSON.stringify(h.channel.sent)).toContain('已请求停止当前任务');
+  }, 10_000);
+
+  it('stops an active side relay without interrupting the main run', async () => {
+    const h = await createHarness();
+    h.profileConfig.preferences = {
+      ...(h.profileConfig.preferences ?? {}),
+      agentSessionMode: 'live',
+      messageReply: 'text',
+      messageReplyMigrated: true,
+    };
+    h.controls.profileConfig.preferences = h.profileConfig.preferences;
+    h.controls.cfg.preferences = h.profileConfig.preferences;
+    h.agent.setEvents([
+      [{ type: 'text', delta: 'main goal still running\n' }, { type: 'done', terminationReason: 'normal' }],
+      [{ type: 'system', sideConversation: 'entered' }, { type: 'text', delta: 'side opened\n' }, { type: 'done', terminationReason: 'normal' }],
+    ]);
+    delayFakeAgentEvents(h.agent, 2_000);
+    const runSide = h.agent.runSide.bind(h.agent);
+    h.agent.runSide = (opts) => {
+      const result = runSide(opts);
+      return {
+        runId: result.runId,
+        stop: (options) => result.stop(options),
+        waitForExit: (timeoutMs) => result.waitForExit(timeoutMs),
+        events: (async function* () {
+          await new Promise((resolve) => setTimeout(resolve, 2_000));
+          for await (const event of result.events) yield event;
+        })(),
+      };
+    };
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_stop_side_main', 'start the main goal'));
+    await waitFor(() => h.agent.runOptions.length === 1, 4_000);
+    await h.channel.handlers.message?.(message('om_stop_side_open', '/codex /btw'));
+    await waitFor(() => h.agent.sideRunOptions.length === 1, 4_000);
+    await h.channel.handlers.message?.(message('om_stop_side', '/stop'));
+    await waitFor(() => Boolean(h.agent.runs[1]?.stopped), 1_000);
+
+    expect(h.agent.runs[1]?.stopped).toBe(true);
+    expect(h.agent.runs[0]?.stopped).toBe(false);
+    expect(JSON.stringify(h.channel.sent)).toContain('已请求停止当前 side conversation');
+  }, 10_000);
+
+  it('uses the durable tmux interrupt when bridge-side handles are missing', async () => {
+    const h = await createHarness();
+    h.profileConfig.preferences = {
+      ...(h.profileConfig.preferences ?? {}),
+      agentSessionMode: 'live',
+      messageReply: 'text',
+      messageReplyMigrated: true,
+    };
+    h.controls.profileConfig.preferences = h.profileConfig.preferences;
+    h.controls.cfg.preferences = h.profileConfig.preferences;
+    const interrupt = vi.fn(async () => true);
+    h.agent.tmux = {
+      list: async () => [],
+      bind: async () => { throw new Error('not used'); },
+      unbind: async () => false,
+      status: async () => ({ state: 'none' as const }),
+      interrupt,
+    };
+    await startTestBridge(h);
+
+    // No ActiveRuns handle exists here. A reconnect can still leave the
+    // managed Codex pane alive, so /stop must use the guarded adapter path.
+    await h.channel.handlers.message?.(message('om_durable_stop', '/stop'));
+
+    expect(interrupt).toHaveBeenCalledWith(
+      'oc_dm',
+      expect.any(String),
+      { sideOnly: false },
+    );
+    expect(JSON.stringify(h.channel.sent)).toContain('已请求停止当前任务');
+  }, 10_000);
+
+  it('sends only one durable interrupt for concurrent /stop commands', async () => {
+    const h = await createHarness();
+    h.profileConfig.preferences = {
+      ...(h.profileConfig.preferences ?? {}),
+      agentSessionMode: 'live',
+      messageReply: 'text',
+      messageReplyMigrated: true,
+    };
+    h.controls.profileConfig.preferences = h.profileConfig.preferences;
+    h.controls.cfg.preferences = h.profileConfig.preferences;
+    const gate = deferred<void>();
+    const interrupt = vi.fn(async () => {
+      await gate.promise;
+      return true;
+    });
+    h.agent.tmux = {
+      list: async () => [],
+      bind: async () => { throw new Error('not used'); },
+      unbind: async () => false,
+      status: async () => ({ state: 'none' as const }),
+      interrupt,
+    };
+    await startTestBridge(h);
+
+    const first = h.channel.handlers.message?.(message('om_durable_stop_1', '/stop'));
+    const second = h.channel.handlers.message?.(message('om_durable_stop_2', '/stop'));
+    await waitFor(() => interrupt.mock.calls.length === 1, 2_000);
+    gate.resolve();
+    await Promise.all([first, second]);
+
+    expect(interrupt).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(h.channel.sent)).toContain('不会重复发送中断按键');
+  }, 10_000);
+
+  it('detects a durable side pane before applying a handle-less /stop', async () => {
+    const h = await createHarness();
+    h.profileConfig.preferences = {
+      ...(h.profileConfig.preferences ?? {}),
+      agentSessionMode: 'live',
+      messageReply: 'text',
+      messageReplyMigrated: true,
+    };
+    h.controls.profileConfig.preferences = h.profileConfig.preferences;
+    h.controls.cfg.preferences = h.profileConfig.preferences;
+    const interrupt = vi.fn(async () => true);
+    h.agent.tmux = {
+      list: async () => [],
+      bind: async () => { throw new Error('not used'); },
+      unbind: async () => false,
+      status: async () => ({ state: 'none' as const }),
+      diagnostics: async () => ({
+        phase: 'idle' as const,
+        inputState: 'unknown' as const,
+        retryCount: 0,
+        sideConversation: true,
+      }),
+      interrupt,
+    };
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_durable_side_stop', '/stop'));
+
+    expect(interrupt).toHaveBeenCalledWith(
+      'oc_dm',
+      expect.any(String),
+      { sideOnly: true },
+    );
+    expect(JSON.stringify(h.channel.sent)).toContain('已请求停止当前 side conversation');
+  }, 10_000);
+
   it('keeps an opening side relay when a stale main diagnostic arrives before the footer', async () => {
     const h = await createHarness();
     h.profileConfig.preferences = {
@@ -1167,7 +1379,7 @@ describe('markdown stream startup failures', () => {
     } as never;
     h.agent.setEvents([
       [{ type: 'text', delta: 'goal remains active\n' }, { type: 'done', terminationReason: 'normal' }],
-      [{ type: 'text', delta: 'side opened\n' }, { type: 'done', terminationReason: 'normal' }],
+      [{ type: 'system', sideConversation: 'entered' }, { type: 'text', delta: 'side opened\n' }, { type: 'done', terminationReason: 'normal' }],
       [{ type: 'text', delta: 'side body answer\n' }, { type: 'done', terminationReason: 'normal' }],
     ]);
     // Keep the main run and side entry alive long enough for the body to race
@@ -1234,7 +1446,7 @@ describe('markdown stream startup failures', () => {
       },
     } as never;
     h.agent.setEvents([
-      [{ type: 'text', delta: 'side conversation ready\n' }, { type: 'done', terminationReason: 'normal' }],
+      [{ type: 'system', sideConversation: 'entered' }, { type: 'text', delta: 'side conversation ready\n' }, { type: 'done', terminationReason: 'normal' }],
       [{ type: 'text', delta: 'side answer\n' }, { type: 'done', terminationReason: 'normal' }],
     ]);
     await startTestBridge(h);
@@ -1295,7 +1507,7 @@ describe('markdown stream startup failures', () => {
     h.controls.profileConfig.preferences = h.profileConfig.preferences;
     h.controls.cfg.preferences = h.profileConfig.preferences;
     h.agent.setEvents([
-      [{ type: 'text', delta: 'side opened\n' }, { type: 'done', terminationReason: 'normal' }],
+      [{ type: 'system', sideConversation: 'entered' }, { type: 'text', delta: 'side opened\n' }, { type: 'done', terminationReason: 'normal' }],
       [{ type: 'text', delta: '已退出 Codex btw side conversation，主线程继续运行。\n' }, { type: 'done', terminationReason: 'normal' }],
       [{ type: 'text', delta: 'main reply\n' }, { type: 'done', terminationReason: 'normal' }],
     ]);
@@ -1315,6 +1527,125 @@ describe('markdown stream startup failures', () => {
     ]);
     expect(h.agent.runOptions[2]?.prompt).toContain('退出后发送主线程消息');
     expect(JSON.stringify(h.channel.sent)).toContain('已退出 Codex btw side conversation');
+  }, 10_000);
+
+  it('keeps an unconfirmed side exit retryable without routing ordinary text into side', async () => {
+    const h = await createHarness();
+    h.profileConfig.preferences = {
+      ...(h.profileConfig.preferences ?? {}),
+      agentSessionMode: 'live',
+      messageReply: 'text',
+      messageReplyMigrated: true,
+    };
+    h.controls.profileConfig.preferences = h.profileConfig.preferences;
+    h.controls.cfg.preferences = h.profileConfig.preferences;
+    h.agent.tmux = {
+      list: async () => [],
+      bind: async () => { throw new Error('not used'); },
+      unbind: async () => false,
+      status: async () => ({ state: 'none' as const }),
+      diagnostics: async () => ({
+        phase: 'idle' as const,
+        inputState: 'unknown' as const,
+        retryCount: 0,
+        sideConversation: false,
+      }),
+    } as never;
+    h.agent.setEvents([
+      [{ type: 'system', sideConversation: 'entered' }, { type: 'text', delta: 'side opened\n' }, { type: 'done', terminationReason: 'normal' }],
+      [{ type: 'text', delta: '当前未确认处于 Codex btw side conversation，未发送任何退出按键。\n' }, { type: 'done', terminationReason: 'normal' }],
+      [{ type: 'text', delta: 'retry exit\n' }, { type: 'done', terminationReason: 'normal' }],
+      [{ type: 'text', delta: 'ordinary main\n' }, { type: 'done', terminationReason: 'normal' }],
+    ]);
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_retry_side_open', '/codex /btw'));
+    await waitFor(() => h.agent.runOptions.length === 1, 4_000);
+    await h.channel.handlers.message?.(message('om_retry_side_out_1', '/btw out'));
+    await waitFor(() => h.agent.runOptions.length === 2, 4_000);
+    await waitFor(() => JSON.stringify(h.channel.sent).includes('未确认处于 Codex btw side conversation'), 4_000);
+
+    await h.channel.handlers.message?.(message('om_retry_side_out_2', '/btw out'));
+    await waitFor(() => h.agent.runOptions.length === 3, 4_000);
+    expect(h.agent.runOptions[2]).toMatchObject({
+      liveInputMode: 'side-exit',
+      sideConversationConfirmed: true,
+    });
+
+    await h.channel.handlers.message?.(message('om_retry_main_text', 'ordinary main text'));
+    await waitFor(() => h.agent.runOptions.length === 4, 4_000);
+    expect(h.agent.runOptions[3]?.liveInputMode).toBeUndefined();
+  }, 14_000);
+
+  it('recovers /btw out to the sole persisted side scope when threadId is missing', async () => {
+    const h = await createHarness();
+    h.profileConfig.preferences = {
+      ...(h.profileConfig.preferences ?? {}),
+      agentSessionMode: 'live',
+      messageReply: 'text',
+      messageReplyMigrated: true,
+    };
+    h.controls.profileConfig.preferences = h.profileConfig.preferences;
+    h.controls.cfg.preferences = h.profileConfig.preferences;
+    h.agent.tmux = {
+      list: async () => [],
+      bind: async () => { throw new Error('not used'); },
+      unbind: async () => false,
+      status: async () => ({ state: 'none' as const }),
+      managedScopesForChat: async () => ['oc_dm:topic-side'],
+      diagnostics: async (scope: string) => ({
+        phase: 'idle' as const,
+        inputState: 'unknown' as const,
+        retryCount: 0,
+        sideConversation: scope === 'oc_dm:topic-side',
+      }),
+    } as never;
+    h.agent.setEvents([
+      [{ type: 'text', delta: '已退出 Codex btw side conversation，主线程继续运行。\n' }, { type: 'done', terminationReason: 'normal' }],
+    ]);
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_recover_side_out', '/btw out'));
+    await waitFor(() => h.agent.runOptions.length === 1 && h.channel.sent.length >= 1, 4_000);
+
+    expect(h.agent.runOptions[0]).toMatchObject({
+      scopeId: 'oc_dm:topic-side',
+      liveInputMode: 'side-exit',
+      sideConversationConfirmed: true,
+    });
+    expect(JSON.stringify(h.channel.sent)).toContain('已退出 Codex btw side conversation');
+  }, 10_000);
+
+  it('does not guess a side target when multiple persisted topic scopes are active', async () => {
+    const h = await createHarness();
+    h.profileConfig.preferences = {
+      ...(h.profileConfig.preferences ?? {}),
+      agentSessionMode: 'live',
+      messageReply: 'text',
+      messageReplyMigrated: true,
+    };
+    h.controls.profileConfig.preferences = h.profileConfig.preferences;
+    h.controls.cfg.preferences = h.profileConfig.preferences;
+    h.agent.tmux = {
+      list: async () => [],
+      bind: async () => { throw new Error('not used'); },
+      unbind: async () => false,
+      status: async () => ({ state: 'none' as const }),
+      managedScopesForChat: async () => ['oc_dm:topic-a', 'oc_dm:topic-b'],
+      diagnostics: async (scope: string) => ({
+        phase: 'idle' as const,
+        inputState: 'unknown' as const,
+        retryCount: 0,
+        sideConversation: scope !== 'oc_dm',
+      }),
+    } as never;
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_ambiguous_side_out', '/btw out'));
+    await waitFor(() => h.channel.sent.length >= 1, 4_000);
+
+    expect(h.agent.runOptions).toHaveLength(0);
+    expect(JSON.stringify(h.channel.sent)).toContain('多个可能的 side conversation');
   }, 10_000);
 
   it('drains a muted live run without sending output and resumes delivery later', async () => {
@@ -1801,7 +2132,7 @@ function delayFakeAgentEvents(agent: FakeAgentAdapter, delayMs: number): void {
     const result = run(opts);
     return {
       runId: result.runId,
-      stop: () => result.stop(),
+      stop: (options) => result.stop(options),
       waitForExit: (timeoutMs) => result.waitForExit(timeoutMs),
       events: (async function* () {
         for await (const event of result.events) {

@@ -8,7 +8,7 @@ import { DEFAULT_MODEL, normalizeModelSelection, supportedModels } from '../agen
 import type { AgentAdapter } from '../agent/types';
 import type { LiveSessionDiagnostics } from '../agent/types';
 import { tmuxTargetKey, type TmuxBindingStatus, type TmuxPaneTarget } from '../agent/tmux-control';
-import type { ActiveRuns } from '../bot/active-runs';
+import type { ActiveRuns, RunInterruptTarget } from '../bot/active-runs';
 import {
   accountCurrentCard,
   accountFailureCard,
@@ -140,6 +140,18 @@ export interface CommandContext {
   workspaces: WorkspaceStore;
   agent: AgentAdapter;
   activeRuns: ActiveRuns;
+  /**
+   * Intake may know that the terminal lifecycle is side-scoped even while the
+   * side run is still opening and has not registered a handle. `/stop` uses
+   * this hint instead of falling back to the main pursuing goal.
+   */
+  lifecycleTarget?: RunInterruptTarget;
+  /**
+   * Additional active scopes recovered from a chat-level lifecycle event when
+   * Feishu omitted the topic thread id. The command handler only uses a scope
+   * when it is the current scope or the sole unambiguous candidate.
+   */
+  lifecycleScopes?: readonly string[];
   processPool?: ProcessPool;
   runExecutor?: RunExecutor;
   liveDiagnostics?: () => Promise<{
@@ -451,6 +463,7 @@ async function handleNew(args: string, ctx: CommandContext): Promise<void> {
     return handleNewChat(rawName, ctx);
   }
 
+  ctx.activeRuns.advanceStopGeneration(ctx.scope);
   const wasRunning = ctx.activeRuns.interrupt(ctx.scope);
   if (ctx.sessionCatalog && ctx.sessionCatalogIdentity) {
     ctx.sessionCatalog.archiveActive({
@@ -517,6 +530,7 @@ async function handleCd(args: string, ctx: CommandContext): Promise<void> {
     await reply(ctx, workspace.userVisible);
     return;
   }
+  ctx.activeRuns.advanceStopGeneration(ctx.scope);
   ctx.activeRuns.interrupt(ctx.scope);
   ctx.workspaces.setCwd(ctx.scope, workspace.cwdRealpath);
   ctx.sessions.clear(ctx.scope);
@@ -582,6 +596,7 @@ async function handleWsUse(name: string, ctx: CommandContext): Promise<void> {
     await reply(ctx, workspace.userVisible);
     return;
   }
+  ctx.activeRuns.advanceStopGeneration(ctx.scope);
   ctx.activeRuns.interrupt(ctx.scope);
   ctx.workspaces.setCwd(ctx.scope, workspace.cwdRealpath);
   ctx.sessions.clear(ctx.scope);
@@ -734,6 +749,7 @@ async function applyResume(sessionId: string, ctx: CommandContext): Promise<void
     const entry = ctx.sessionCatalog.activeFor(ctx.sessionCatalogIdentity);
     const resolved = consumeResumeCandidate(sessionId, ctx.sessionCatalogIdentity);
     if (resolved) {
+      ctx.activeRuns.advanceStopGeneration(ctx.scope);
       ctx.activeRuns.interrupt(ctx.scope);
       if (ctx.sessionCatalogIdentity.agentId === 'codex') {
         ctx.sessionCatalog.upsertActive({
@@ -765,6 +781,7 @@ async function applyResume(sessionId: string, ctx: CommandContext): Promise<void
       await reply(ctx, '当前上下文不可恢复这个会话，请重新选择当前工作区和权限策略下的会话。');
       return;
     }
+    ctx.activeRuns.advanceStopGeneration(ctx.scope);
     ctx.activeRuns.interrupt(ctx.scope);
     if (ctx.sessionCatalogIdentity.agentId === 'claude') {
       ctx.sessions.set(ctx.scope, sessionId, ctx.sessionCatalogIdentity.cwdRealpath);
@@ -783,6 +800,7 @@ async function applyResume(sessionId: string, ctx: CommandContext): Promise<void
     await reply(ctx, '请先使用 /cd <path> 选择工作目录，再查看或恢复会话。');
     return;
   }
+  ctx.activeRuns.advanceStopGeneration(ctx.scope);
   ctx.activeRuns.interrupt(ctx.scope);
   ctx.sessions.set(ctx.scope, sessionId, cwd);
   await reply(ctx, RESUME_APPLIED_REPLY);
@@ -950,7 +968,7 @@ async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {
     agentName: ctx.agent.displayName,
     runtimeAccess: runtimeAccessStatus(ctx.controls.profileConfig),
     larkCliStatus: await larkCliStatus(ctx),
-    activeRun: Boolean(ctx.activeRuns.get(ctx.scope)),
+    activeRun: ctx.activeRuns.hasAny(ctx.scope),
     activeScopes: ctx.activeRuns.scopes().filter((scope) => !scope.startsWith('comment:')),
     activeCommentScopes: ctx.activeRuns.scopes().filter((scope) => scope.startsWith('comment:')),
     queue: ctx.processPool?.snapshot(),
@@ -998,22 +1016,169 @@ async function handleStop(args: string, ctx: CommandContext): Promise<void> {
     return;
   }
   const scope = targetScope || ctx.scope;
-  const ok = ctx.activeRuns.interrupt(scope);
+  const candidateScopes = targetScope
+    ? [scope]
+    : [
+        ...new Set([
+          scope,
+          ...ctx.activeRuns.scopesForChat(ctx.msg.chatId),
+          ...(ctx.lifecycleScopes ?? []),
+        ]),
+      ];
+  // Intake supplies `side` for an actual side handle or a pending
+  // opening/closing transition. A bare remembered `active` marker is only
+  // panel state; when no side handle/transition remains, `/stop` must fall
+  // back to the main run instead of appearing to do nothing.
+  const sideOnly =
+    ctx.lifecycleTarget === 'side' &&
+    (candidateScopes.some((candidate) => Boolean(ctx.activeRuns.getSide(candidate))) ||
+      (ctx.lifecycleScopes?.length ?? 0) > 0);
+  let stoppedSide = false;
+  let stoppedMain = false;
+  let effectiveScope = scope;
+  let generationAdvanced = false;
+  let preSpawnCancellation = false;
+  let stoppedDurableTerminal = false;
+  let durableStopAlreadyRequested = false;
+  let durableSideDetected = false;
+  const selectCandidate = (
+    predicate: (candidate: string) => boolean,
+  ): string | undefined => {
+    if (predicate(scope)) return scope;
+    const matches = candidateScopes.filter(predicate);
+    return matches.length === 1 ? matches[0] : undefined;
+  };
+  if (sideOnly) {
+    const sideScope = selectCandidate(
+      (candidate) =>
+        Boolean(ctx.activeRuns.getSide(candidate)) ||
+        (ctx.lifecycleScopes?.includes(candidate) ?? false),
+    );
+    if (sideScope) {
+      ctx.activeRuns.advanceStopGeneration(sideScope, 'side');
+      generationAdvanced = true;
+      effectiveScope = sideScope;
+      stoppedSide = ctx.activeRuns.interruptSide(sideScope);
+      preSpawnCancellation = stoppedSide || (ctx.lifecycleScopes?.includes(sideScope) ?? false);
+    }
+  } else {
+    // Preserve the historical convenience that `/stop` cancels a concurrent
+    // side observer first, while still allowing a topic scope to be recovered
+    // when Feishu omitted its thread id.
+    const sideScope = selectCandidate((candidate) => Boolean(ctx.activeRuns.getSide(candidate)));
+    if (sideScope) {
+      ctx.activeRuns.advanceStopGeneration(sideScope, 'side');
+      generationAdvanced = true;
+      stoppedSide = ctx.activeRuns.interruptSide(sideScope);
+      effectiveScope = sideScope;
+    }
+    if (!stoppedSide) {
+      const mainScope = selectCandidate((candidate) => Boolean(ctx.activeRuns.get(candidate)));
+      if (mainScope) {
+        ctx.activeRuns.advanceStopGeneration(mainScope, 'main');
+        generationAdvanced = true;
+        stoppedMain = ctx.activeRuns.interruptMain(mainScope);
+        effectiveScope = mainScope;
+      }
+    }
+  }
+  // A generation is still advanced for the requested exact scope when no
+  // handle was visible. That cancels a run which is between async preparation
+  // stages and prevents it from registering after the stop command.
+  if (!generationAdvanced && !stoppedSide && !stoppedMain && candidateScopes.length > 0) {
+    ctx.activeRuns.advanceStopGeneration(scope, sideOnly ? 'side' : 'main');
+    generationAdvanced = true;
+  }
+  // A managed live terminal can outlive bridge-side handles across a
+  // reconnect/restart. If no run was visible, ask the adapter to perform one
+  // evidence-gated Ctrl-C against that durable pane. The adapter refuses an
+  // idle prompt, recommendation, or picker, and side-only transitions never
+  // fall through to the main thread.
+  if (
+    !stoppedSide &&
+    !stoppedMain &&
+    !preSpawnCancellation &&
+    ctx.agent.tmux?.interrupt
+  ) {
+    const fallbackScope = targetScope ? scope : effectiveScope;
+    const fallbackCwd =
+      ctx.workspaces.cwdFor(fallbackScope) ?? ctx.controls.profileConfig.workspaces.default;
+    if (!sideOnly && ctx.lifecycleTarget !== 'side' && ctx.agent.tmux.diagnostics) {
+      durableSideDetected = await boundedStopSideDiagnostic(
+        ctx.agent.tmux.diagnostics(fallbackScope, fallbackCwd),
+      );
+    }
+    const durableTarget =
+      sideOnly || ctx.lifecycleTarget === 'side' || durableSideDetected
+        ? 'side' as const
+        : 'main' as const;
+    if (!ctx.activeRuns.beginDurableInterrupt(fallbackScope, durableTarget)) {
+      // The first fallback is still running or already sent its one guarded
+      // Ctrl-C. A repeated `/stop` is an idempotent acknowledgement and must
+      // never issue a second durable interrupt.
+      durableStopAlreadyRequested = true;
+    } else {
+      try {
+        stoppedDurableTerminal = await ctx.agent.tmux.interrupt(fallbackScope, fallbackCwd, {
+          sideOnly: durableTarget === 'side',
+        });
+        if (stoppedDurableTerminal) {
+          effectiveScope = fallbackScope;
+          if (durableTarget === 'side') stoppedSide = true;
+          else stoppedMain = true;
+        }
+      } catch (err) {
+        log.info('command', 'durable-stop-fallback-failed', {
+          scope: fallbackScope,
+          err: err instanceof Error ? err.message : String(err),
+        });
+      } finally {
+        ctx.activeRuns.finishDurableInterrupt(fallbackScope, durableTarget, stoppedDurableTerminal);
+      }
+    }
+  }
+  const ok =
+    stoppedSide ||
+    stoppedMain ||
+    stoppedDurableTerminal ||
+    preSpawnCancellation ||
+    durableStopAlreadyRequested;
   log.info('command', 'stop', {
-    scope,
+    scope: effectiveScope,
     targeted: Boolean(targetScope),
     interrupted: ok,
+    side: stoppedSide,
   });
-  if (targetScope) {
-    await reply(
-      ctx,
-      ok
-        ? `已请求停止 \`${scope}\`。`
-        : `未找到正在运行的任务：\`${scope}\`。`,
-    );
+  // Always acknowledge the current scope. Previously this path relied on the
+  // in-flight card to re-render, which is invisible when the stream is stuck
+  // or when the stop request races a slow live-terminal capture.
+  await reply(
+    ctx,
+    ok
+      ? stoppedSide
+        ? '⏹ 已请求停止当前 side conversation，主线程继续运行。'
+        : durableStopAlreadyRequested && !stoppedDurableTerminal && !stoppedMain
+          ? '⏹ 已确认停止请求正在处理，不会重复发送中断按键。'
+        : '⏹ 已请求停止当前任务。'
+      : targetScope
+        ? `未找到正在运行的任务：\`${scope}\`。`
+        : '当前没有可停止的运行。',
+  );
+}
+
+async function boundedStopSideDiagnostic(operation: Promise<LiveSessionDiagnostics>): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const diagnostics = await Promise.race([
+      operation.catch(() => undefined),
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), 1_500);
+      }),
+    ]);
+    return diagnostics?.sideConversation === true;
+  } finally {
+    if (timer) clearTimeout(timer);
   }
-  // No reply for the current IM scope: if there was a run, its in-flight
-  // render loop will mark the card as interrupted and re-render.
 }
 
 async function handleSession(args: string, ctx: CommandContext): Promise<void> {
@@ -1021,7 +1186,7 @@ async function handleSession(args: string, ctx: CommandContext): Promise<void> {
   const current = getAgentSessionMode(ctx.controls.cfg);
   if (!action || action === 'status') {
     const label = current === 'live' ? 'live（后台常驻 CLI）' : 'turn（每轮短任务）';
-    const active = ctx.activeRuns.get(ctx.scope);
+    const active = ctx.activeRuns.get(ctx.scope) ?? ctx.activeRuns.getSide(ctx.scope);
     const runStatus = active
       ? `运行中（run \`${active.run.runId.slice(0, 8)}…\`）`
       : '无运行任务';

@@ -13,6 +13,7 @@ import {
   isSafeTmuxSocket,
   listTmuxAgentPanes,
   discoverTmuxSockets,
+  interruptEvidence,
   tmuxTargetKey,
 } from '../../../src/agent/tmux-control.js';
 import { LiveSessionPool, liveTmuxIdentity } from '../../../src/agent/live-session.js';
@@ -20,6 +21,35 @@ import type { AgentAdapter, AgentEvent } from '../../../src/agent/types.js';
 
 const live = process.platform === 'linux' && spawnSync('tmux', ['-V'], { stdio: 'ignore' }).status === 0;
 const cleanup: Array<() => Promise<void>> = [];
+
+describe('tmux interrupt evidence', () => {
+  it('uses the latest conversation footer instead of a stale side phrase in scrollback', () => {
+    const side = 'gpt-5.6-terra xhigh · /tmp · Side from main thread · ctrl + / to switch · ctrl + c to close';
+    const main = 'gpt-5.6-terra xhigh · /tmp · Agent';
+    expect(interruptEvidence(`${side}\nold side answer\n${main}\n›`)).toEqual({
+      side: false,
+      busy: false,
+    });
+  });
+
+  it('recognizes a wrapped current side footer after older main output', () => {
+    const main = 'gpt-5.6-terra xhigh · /tmp · Main [default]';
+    const wrappedSide = [
+      'gpt-5.6-terra xhigh · /tmp · Side from main thread · ctrl + / to switch · ctrl + c',
+      'to close',
+    ].join('\n');
+    expect(interruptEvidence(`${main}\n›\n${wrappedSide}\n›`)).toMatchObject({ side: true });
+  });
+
+  it('does not reuse a historical Working row after the main prompt is ready', () => {
+    const main = 'gpt-5.6-terra xhigh · /tmp · Agent';
+    expect(interruptEvidence(`• Working (30s • esc to interrupt)\n${main}\n› Ask Codex to do anything`)).toEqual({
+      side: false,
+      busy: false,
+    });
+  });
+
+});
 
 describe.skipIf(!live)('tmux control', () => {
   afterEach(async () => {
@@ -316,6 +346,76 @@ describe.skipIf(!live)('tmux control', () => {
       terminals: { [scope]: { socketPath: defaultSocket } },
     });
   });
+
+  it('interrupts a durable managed pane only with active-task evidence', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'tmux-control-interrupt-'));
+    const profileStateDir = join(root, 'profile');
+    const scope = 'interrupt-scope';
+    const signature = 'interrupt-signature';
+    const sessionName = new TmuxBindingController(profileStateDir, 'codex-profile', 'codex').managedSessionName(scope);
+    const { socketPath } = liveTmuxIdentity(root, scope, signature, sessionName);
+    const binary = join(root, 'codex');
+    const script = join(root, 'fake-agent.mjs');
+    const trace = join(root, 'trace.txt');
+    await symlink(process.execPath, binary);
+    await writeFile(
+      script,
+      `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs';
+const trace = ${JSON.stringify(trace)};
+process.stdin.setEncoding('utf8');
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+function screen(lines) { process.stdout.write('\\x1b[2J\\x1b[H' + lines.join('\\n') + '\\n'); }
+appendFileSync(trace, 'ready\\n');
+screen(['• Working (30s • esc to interrupt)', 'gpt-5.6-terra xhigh · /tmp · Main [default]']);
+process.stdin.on('data', (chunk) => {
+  if (!chunk.includes('\\x03')) return;
+  appendFileSync(trace, 'ctrl-c\\n');
+  screen(['› Ask Codex to do anything']);
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(script, 0o755);
+    cleanup.push(async () => {
+      spawnSync('tmux', ['-S', socketPath, 'kill-server'], { stdio: 'ignore' });
+      await rm(root, { recursive: true, force: true });
+    });
+    expect(
+      spawnSync('tmux', [
+        '-S', socketPath,
+        '-f', '/dev/null',
+        'new-session', '-d', '-x', '120', '-y', '48', '-s', sessionName, '-c', root,
+        binary, script,
+      ]).status,
+    ).toBe(0);
+    for (const [key, value] of [
+      ['@argbridge_managed', '1'],
+      ['@argbridge_profile', 'codex-profile'],
+      ['@argbridge_scope', scope],
+      ['@argbridge_agent', 'codex'],
+      ['@argbridge_cwd', root],
+    ] as const) {
+      expect(spawnSync('tmux', ['-S', socketPath, 'set-option', '-t', sessionName, key, value]).status).toBe(0);
+    }
+    const controller = new TmuxBindingController(profileStateDir, 'codex-profile', 'codex');
+    await controller.rememberManaged(scope, root, signature, {
+      socketPath,
+      sessionName,
+      attachCommand: `tmux -S ${socketPath} attach -t ${sessionName}`,
+    });
+
+    expect(await controller.interrupt(scope, root)).toBe(true);
+    const deadline = Date.now() + 2_000;
+    while (!(await readFile(trace, 'utf8').catch(() => '')).includes('ctrl-c\n') && Date.now() < deadline) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    }
+    expect(await readFile(trace, 'utf8')).toContain('ctrl-c\n');
+    // The post-stop recommendation is not active work and must not receive a
+    // second lifecycle key when no bridge handle exists.
+    expect(await controller.interrupt(scope, root)).toBe(false);
+  }, 20_000);
 
   it('restores Codex and Claude managed terminals after bridge recreation', async () => {
     for (const agent of ['codex', 'claude'] as const) {

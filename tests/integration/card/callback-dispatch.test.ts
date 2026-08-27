@@ -38,6 +38,11 @@ describe('signed card callback dispatch', () => {
     });
 
     expect(activeRun.stopped).toBe(true);
+    // A manually registered run has no RunExecutor/EventFanout to perform
+    // the normal terminal cleanup. Mirror that lifecycle before registering
+    // the replacement run; production cleanup unregisters it after draining
+    // the final event so repeated /stop remains idempotent during that gap.
+    h.activeRuns.unregister('oc_group', activeRun);
 
     const deniedRun = h.agent.run({ runId: 'run-active', prompt: 'running' }) as FakeAgentRun;
     h.activeRuns.register('oc_group', deniedRun);

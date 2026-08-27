@@ -34,6 +34,43 @@ beforeAll(async () => {
 });
 
 describe('parseLiveControlSequence', () => {
+  it('uses the newest terminal source when classifying side state', () => {
+    const session = new LiveTerminalSession({
+      command: process.execPath,
+      args: [],
+      cwd: tmpdir(),
+      signature: 'diagnostics-source-order',
+      backend: 'tmux',
+    });
+    const internals = session as unknown as {
+      lastTerminalSnapshot: string;
+      lastTerminalSnapshotAt: number;
+      lastTerminalHistory: { paneId: string; startLine: number; endLine: number; text: string };
+      lastTerminalHistoryAt: number;
+    };
+    internals.lastTerminalSnapshot = 'gpt-5.6-terra · /tmp · Main [default]\n›';
+    internals.lastTerminalSnapshotAt = 20;
+    internals.lastTerminalHistory = {
+      paneId: '%0',
+      startLine: 0,
+      endLine: 2,
+      text: 'gpt-5.6-terra · /tmp · Side from main thread · ctrl + / to switch · ctrl + c to close\n›',
+    };
+    internals.lastTerminalHistoryAt = 10;
+    expect(session.getDiagnostics().sideConversation).toBe(false);
+
+    internals.lastTerminalHistoryAt = 30;
+    expect(session.getDiagnostics().sideConversation).toBe(true);
+
+    // A capture can contain only the prompt chrome while the positioned
+    // history frame carries the authoritative side footer. Conversation-kind
+    // evidence must win over timestamp ordering for an unknown snapshot.
+    internals.lastTerminalSnapshot = '› Ask Codex to do anything';
+    internals.lastTerminalSnapshotAt = 40;
+    internals.lastTerminalHistoryAt = 30;
+    expect(session.getDiagnostics().sideConversation).toBe(true);
+  });
+
   it('maps single and multi-key navigation words to terminal keys', () => {
     expect(parseLiveControlSequence('up')).toEqual(['\x1B[A']);
     expect(parseLiveControlSequence('down')).toEqual(['\x1B[B']);
@@ -1605,6 +1642,150 @@ setInterval(() => {}, 1000);
     }
   }, 20_000);
 
+  tmuxIt('force-stops a live turn even when the screen only shows a recommendation', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-force-stop-test-'));
+    const bin = join(dir, 'fake-tmux-force-stop-agent.mjs');
+    const inputTrace = join(dir, 'input-trace.txt');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs';
+process.stdin.setEncoding('utf8');
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+process.stdout.write('\\x1b[2J\\x1b[H› Ask Codex to do anything\\n');
+process.stdin.on('data', (chunk) => appendFileSync(${JSON.stringify(inputTrace)}, chunk));
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-force-stop-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-force-stop',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 250,
+      outputFlushMs: 30,
+      startupTimeoutMs: 2_000,
+    });
+    try {
+      const turn = session.run('tmux-force-stop-run', 'a task that should stop', dir);
+      const iterator = turn.events[Symbol.asyncIterator]();
+      expect((await iterator.next()).value).toMatchObject({ type: 'system' });
+      await turn.stop({ force: true });
+      expect((await iterator.next()).value).toMatchObject({ type: 'done' });
+      await waitForFileText(inputTrace, '\u0003', 2_000);
+      expect(await readFile(inputTrace, 'utf8')).toContain('\u0003');
+      await iterator.return?.();
+    } finally {
+      await pool.closeAll();
+    }
+  }, 20_000);
+
+  it('stops during input readiness without submitting the pending prompt', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-stop-input-ready-test-'));
+    const bin = join(dir, 'fake-stop-input-ready-agent.mjs');
+    const trace = join(dir, 'input-trace.txt');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs';
+process.stdin.setEncoding('utf8');
+process.stdout.write('gpt-5.6-terra xhigh · /tmp · Main [default]\\n›\\n');
+process.stdin.on('data', (chunk) => appendFileSync(${JSON.stringify(trace)}, chunk));
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('stop-input-ready-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'stop-input-ready',
+      usePty: false,
+      backend: 'pipe',
+      idleMs: 5_000,
+      outputFlushMs: 20,
+      startupTimeoutMs: 5_000,
+    });
+    try {
+      const turn = session.run('stop-input-ready-run', 'must not be submitted', dir);
+      const iterator = turn.events[Symbol.asyncIterator]();
+      expect((await iterator.next()).value).toMatchObject({ type: 'system' });
+      const pending = iterator.next();
+      await testDelay(5);
+      await turn.stop({ force: true });
+      expect((await pending).value).toMatchObject({ type: 'done', terminationReason: 'interrupted' });
+      await waitForFileText(trace, '\u0003', 2_000);
+      const input = await readFile(trace, 'utf8');
+      expect(input).toBe('\u0003');
+      expect(input).not.toContain('must not be submitted');
+      await iterator.return?.();
+    } finally {
+      await pool.closeAll();
+    }
+  }, 10_000);
+
+  it('stops side entry without interrupting the main terminal before side confirmation', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-stop-side-entry-test-'));
+    const bin = join(dir, 'fake-stop-side-entry-agent.mjs');
+    const trace = join(dir, 'input-trace.txt');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs';
+process.stdin.setEncoding('utf8');
+process.stdout.write('gpt-5.6-terra xhigh · /tmp · Main [default]\\n›\\n');
+process.stdin.on('data', (chunk) => appendFileSync(${JSON.stringify(trace)}, chunk));
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('stop-side-entry-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'stop-side-entry',
+      usePty: false,
+      backend: 'pipe',
+      idleMs: 5_000,
+      outputFlushMs: 20,
+      startupTimeoutMs: 5_000,
+      sideSwitchTimeoutMs: 10_000,
+    });
+    try {
+      const turn = session.runSide(
+        'stop-side-entry-run',
+        '/btw side body must not be sent',
+        dir,
+        'side',
+      );
+      const iterator = turn.events[Symbol.asyncIterator]();
+      expect((await iterator.next()).value).toMatchObject({ type: 'system' });
+      const pending = iterator.next();
+      await waitForFileText(trace, '/btw', 2_000);
+      await turn.stop({ force: true });
+      expect((await pending).value).toMatchObject({ type: 'done', terminationReason: 'interrupted' });
+      const input = await readFile(trace, 'utf8');
+      expect(input).toContain('/btw\r');
+      expect(input).not.toContain('side body must not be sent');
+      expect(input).not.toContain('\u0003');
+      await iterator.return?.();
+    } finally {
+      await pool.closeAll();
+    }
+  }, 10_000);
+
   tmuxIt('detaches an active bridge relay without sending Ctrl-C to the managed agent', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-detach-active-test-'));
     const bin = join(dir, 'fake-tmux-detach-agent.mjs');
@@ -2544,6 +2725,184 @@ setInterval(() => {}, 1000);
       );
       expect(resumedPane.status).toBe(0);
       expect(resumedPane.stdout).toContain('second agent reply');
+    } finally {
+      await pool.closeAll();
+      spawnSync('tmux', ['-S', socketPath, 'kill-server'], { stdio: 'ignore' });
+    }
+  }, 20_000);
+
+  tmuxIt('routes an immediate force-stop to a newly selected resume pane', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-stop-resume-race-test-'));
+    const oldBin = join(dir, 'old-agent.mjs');
+    const newBin = join(dir, 'new-agent.mjs');
+    const agentBin = join(dir, 'codex');
+    const oldTrace = join(dir, 'old-trace.txt');
+    const newTrace = join(dir, 'new-trace.txt');
+    const scopeKey = 'stop-resume-race-scope';
+    const signature = 'stop-resume-race-signature';
+    const { socketPath, sessionName } = liveTmuxIdentity(dir, scopeKey, signature);
+    const source = (trace: string, label: string) => `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs';
+const trace = ${JSON.stringify(trace)};
+const label = ${JSON.stringify(label)};
+const footer = 'gpt-5.6-terra xhigh · /tmp · Main [default]';
+function screen(lines) { process.stdout.write('\\x1b[2J\\x1b[H' + lines.join('\\n') + '\\n'); }
+appendFileSync(trace, 'ready\\n');
+process.stdin.setEncoding('utf8');
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+let draft = '';
+screen([footer, '›']);
+process.stdin.on('data', (chunk) => {
+  for (const char of chunk) {
+    if (char === '\\x03') {
+      appendFileSync(trace, 'ctrl-c\\n');
+      screen(['• stopped-' + label, footer, '›']);
+      continue;
+    }
+    if (char !== '\\r' && char !== '\\n') { draft += char; continue; }
+    const line = draft;
+    draft = '';
+    if (line === 'long running task') {
+      appendFileSync(trace, 'prompt\\n');
+      screen(['• Working (30s • esc to interrupt)', footer]);
+    }
+  }
+});
+setInterval(() => {}, 1000);
+`;
+    await writeFile(oldBin, source(oldTrace, 'old'), 'utf8');
+    await writeFile(newBin, source(newTrace, 'new'), 'utf8');
+    await chmod(oldBin, 0o755);
+    await chmod(newBin, 0o755);
+    await symlink(process.execPath, agentBin);
+
+    const pool = new LiveSessionPool();
+    try {
+      const session = pool.getOrCreate(scopeKey, {
+        command: agentBin,
+        args: [oldBin],
+        cwd: dir,
+        signature,
+        tmuxScopeId: scopeKey,
+        tmuxAgentKind: 'codex',
+        usePty: true,
+        backend: 'tmux',
+        idleMs: 500,
+        outputFlushMs: 20,
+        startupTimeoutMs: 3_000,
+      });
+      const run = session.run('stop-resume-race-run', 'long running task', dir);
+      const events = collect(run.events);
+      await waitForFileText(oldTrace, 'prompt\n', 5_000);
+
+      const resumed = spawnSync(
+        'tmux',
+        [
+          '-S', socketPath,
+          'new-window', '-d', '-P', '-F', '#{session_name}:#{window_index}.#{pane_index}',
+          '-t', sessionName, '-n', 'resumed', '-c', dir,
+          agentBin, newBin,
+        ],
+        { encoding: 'utf8' },
+      );
+      expect(resumed.status).toBe(0);
+      await waitForFileText(newTrace, 'ready\n', 5_000);
+      expect(
+        spawnSync('tmux', ['-S', socketPath, 'select-window', '-t', resumed.stdout.trim()]).status,
+      ).toBe(0);
+
+      // The selected pane changes immediately before the lifecycle key. The
+      // helper's periodic capture has not had a chance to adopt it yet.
+      await run.stop({ force: true });
+      await events;
+      await waitForFileText(newTrace, 'ctrl-c\n', 2_000);
+
+      expect(await readFile(oldTrace, 'utf8')).not.toContain('ctrl-c\n');
+      expect(await readFile(newTrace, 'utf8')).toContain('ctrl-c\n');
+    } finally {
+      await pool.closeAll();
+      spawnSync('tmux', ['-S', socketPath, 'kill-server'], { stdio: 'ignore' });
+    }
+  }, 20_000);
+
+  tmuxIt('routes immediate side exit to a newly selected side pane', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-side-exit-resume-race-test-'));
+    const oldBin = join(dir, 'old-side-agent.mjs');
+    const newBin = join(dir, 'new-side-agent.mjs');
+    const agentBin = join(dir, 'codex');
+    const oldTrace = join(dir, 'old-side-trace.txt');
+    const newTrace = join(dir, 'new-side-trace.txt');
+    const scopeKey = 'side-exit-resume-race-scope';
+    const signature = 'side-exit-resume-race-signature';
+    const { socketPath, sessionName } = liveTmuxIdentity(dir, scopeKey, signature);
+    const source = (trace: string) => `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs';
+const trace = ${JSON.stringify(trace)};
+const sideFooter = 'gpt-5.6-terra xhigh · /tmp · Side from main thread · ctrl + / to switch · ctrl + c to close';
+function screen(lines) { process.stdout.write('\\x1b[2J\\x1b[H' + lines.join('\\n') + '\\n'); }
+appendFileSync(trace, 'ready\\n');
+process.stdin.setEncoding('utf8');
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+screen([sideFooter, '›']);
+process.stdin.on('data', (chunk) => {
+  if (chunk.includes('\\x03')) {
+    appendFileSync(trace, 'ctrl-c\\n');
+    screen(['gpt-5.6-terra xhigh · /tmp · Main [default]', '›']);
+  }
+});
+setInterval(() => {}, 1000);
+`;
+    await writeFile(oldBin, source(oldTrace), 'utf8');
+    await writeFile(newBin, source(newTrace), 'utf8');
+    await chmod(oldBin, 0o755);
+    await chmod(newBin, 0o755);
+    await symlink(process.execPath, agentBin);
+
+    const pool = new LiveSessionPool();
+    try {
+      const session = pool.getOrCreate(scopeKey, {
+        command: agentBin,
+        args: [oldBin],
+        cwd: dir,
+        signature,
+        tmuxScopeId: scopeKey,
+        tmuxAgentKind: 'codex',
+        usePty: true,
+        backend: 'tmux',
+        idleMs: 500,
+        outputFlushMs: 20,
+        startupTimeoutMs: 3_000,
+      });
+      // `run()` starts the persistent helper before its event iterator is
+      // consumed. Use a harmless empty seed turn to bring up the old side
+      // pane without sending any lifecycle key into it.
+      session.run('side-exit-resume-race-seed', '', dir);
+      await waitForFileText(oldTrace, 'ready\n', 5_000);
+      await testDelay(300);
+
+      const resumed = spawnSync(
+        'tmux',
+        [
+          '-S', socketPath,
+          'new-window', '-d', '-P', '-F', '#{session_name}:#{window_index}.#{pane_index}',
+          '-t', sessionName, '-n', 'resumed-side', '-c', dir,
+          agentBin, newBin,
+        ],
+        { encoding: 'utf8' },
+      );
+      expect(resumed.status).toBe(0);
+      await waitForFileText(newTrace, 'ready\n', 5_000);
+      expect(
+        spawnSync('tmux', ['-S', socketPath, 'select-window', '-t', resumed.stdout.trim()]).status,
+      ).toBe(0);
+
+      const events = collect(
+        session.run('side-exit-resume-race-run', '/btw out', dir, 'side-exit', true).events,
+      );
+      await events;
+      await waitForFileText(newTrace, 'ctrl-c\n', 2_000);
+      expect(await readFile(oldTrace, 'utf8')).not.toContain('ctrl-c\n');
+      expect(await readFile(newTrace, 'utf8')).toContain('ctrl-c\n');
     } finally {
       await pool.closeAll();
       spawnSync('tmux', ['-S', socketPath, 'kill-server'], { stdio: 'ignore' });
@@ -3825,6 +4184,96 @@ setInterval(() => {}, 1000);
     expect(textOf(second)).not.toContain('side unavailable');
   }, 20_000);
 
+  tmuxIt('keeps concurrent main and side turns isolated and submits side body', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-concurrent-btw-test-'));
+    const bin = join(dir, 'fake-tmux-concurrent-btw-agent.mjs');
+    const trace = join(dir, 'input-trace.txt');
+    const body = 'side body must arrive';
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs';
+process.stdin.setEncoding('utf8');
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+let draft = '';
+let side = false;
+let bodyAttempts = 0;
+function footer() {
+  return side
+    ? 'gpt-5.6-terra xhigh · /tmp · Side from main thread · ctrl + / to switch · ctrl + c to close'
+    : 'gpt-5.6-terra xhigh · /tmp · Main [default]';
+}
+function screen(lines) { process.stdout.write('\\x1b[2J\\x1b[H' + lines.join('\\n') + '\\n'); }
+screen([footer(), '›']);
+process.stdin.on('data', (chunk) => {
+  appendFileSync(${JSON.stringify(trace)}, JSON.stringify(chunk) + '\\n');
+  for (const char of chunk) {
+    if (char === '\\x03') {
+      appendFileSync(${JSON.stringify(trace)}, 'ctrl-c\\n');
+      if (side) { side = false; draft = ''; screen([footer(), '›']); }
+      continue;
+    }
+    if (char !== '\\r' && char !== '\\n') { draft += char; continue; }
+    const line = draft;
+    appendFileSync(${JSON.stringify(trace)}, 'line:' + line + '\\n');
+    if (!side && line === 'long main task') {
+      screen(['• Working (30s • esc to interrupt)', footer(), '›']);
+      continue;
+    }
+    if (!side && line === '/btw') {
+      side = true;
+      draft = '';
+      screen([footer(), '›']);
+      continue;
+    }
+    if (side && line === ${JSON.stringify(body)}) {
+      bodyAttempts += 1;
+      if (bodyAttempts === 1) {
+        screen(['› ' + line, footer()]);
+      } else {
+        draft = '';
+        screen(['• side-body-confirmed', footer(), '›']);
+      }
+      continue;
+    }
+    draft = '';
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-concurrent-btw-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-concurrent-btw',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 180,
+      outputFlushMs: 20,
+      startupTimeoutMs: 4_000,
+    });
+    const mainRun = session.run('concurrent-main', 'long main task', dir);
+    const mainPromise = collect(mainRun.events);
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    const side = await collect(session.run('concurrent-side', `/btw ${body}`, dir, 'side').events);
+    const exited = await collect(session.run('concurrent-side-out', '/btw out', dir, 'side-exit').events);
+    await mainRun.stop();
+    await mainPromise;
+    await pool.closeAll();
+
+    expect(textOf(side)).toContain('• side-body-confirmed');
+    expect(textOf(exited)).toContain('已退出 Codex btw side conversation');
+    const inputTrace = await readFile(trace, 'utf8');
+    expect(inputTrace).toContain('line:/btw');
+    expect(inputTrace).toContain(`line:${body}`);
+    expect(inputTrace).toContain('ctrl-c');
+  }, 30_000);
+
   tmuxIt('waits for a slow side redraw before sending the buffered body', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-btw-slow-entry-test-'));
     const bin = join(dir, 'fake-tmux-btw-slow-entry-agent.mjs');
@@ -3952,6 +4401,227 @@ setInterval(() => {}, 1000);
       await pool.closeAll();
     }
   }, 20_000);
+
+  tmuxIt('waits for a delayed side footer before sending /btw out', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-btw-out-delayed-test-'));
+    const bin = join(dir, 'fake-tmux-btw-out-delayed-agent.mjs');
+    const trace = join(dir, 'input-trace.txt');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs';
+process.stdin.setEncoding('utf8');
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+const main = 'gpt-5.6-terra xhigh · /tmp · Main [default]';
+const side = 'gpt-5.6-terra xhigh · /tmp · Side from main thread · ctrl + / to switch · ctrl + c to close';
+function screen(lines) { process.stdout.write('\\x1b[2J\\x1b[H' + lines.join('\\n') + '\\n'); }
+screen([main, '›']);
+setTimeout(() => screen([side, '›']), 300);
+process.stdin.on('data', (chunk) => {
+  if (chunk.includes('\\x03')) {
+    appendFileSync(${JSON.stringify(trace)}, 'ctrl-c\\n');
+    screen([main, '›']);
+  }
+  if (chunk.includes('\\x1b') || chunk.includes('\\x01') || chunk.includes('\\x0b')) {
+    appendFileSync(${JSON.stringify(trace)}, 'unsafe-key\\n');
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-btw-out-delayed-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-btw-out-delayed',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 250,
+      outputFlushMs: 20,
+      startupTimeoutMs: 2_000,
+      sideSwitchTimeoutMs: 2_000,
+    });
+    try {
+      const events = await collect(session.run('btw-out-delayed', '/btw out', dir, 'side-exit').events);
+      expect(textOf(events)).toContain('已退出 Codex btw side conversation');
+      expect(await readFile(trace, 'utf8')).toBe('ctrl-c\n');
+    } finally {
+      await pool.closeAll();
+    }
+  }, 20_000);
+
+  it('uses confirmed side state when the exit turn starts on a blank redraw', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-side-exit-confirmed-state-test-'));
+    const bin = join(dir, 'fake-side-exit-confirmed-state-agent.mjs');
+    const trace = join(dir, 'input-trace.txt');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs';
+process.stdin.setEncoding('utf8');
+process.stdout.write('›\\n');
+process.stdin.on('data', (chunk) => {
+  if (!chunk.includes('\\x03')) return;
+  appendFileSync(${JSON.stringify(trace)}, 'ctrl-c\\n');
+  process.stdout.write('gpt-5.6-terra xhigh · /tmp · Main [default]\\n›\\n');
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('side-exit-confirmed-state-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'side-exit-confirmed-state',
+      usePty: false,
+      backend: 'pipe',
+      idleMs: 250,
+      outputFlushMs: 20,
+      startupTimeoutMs: 2_000,
+    });
+    try {
+      const events = await collect(
+        session.runSide(
+          'side-exit-confirmed-state',
+          '/btw out',
+          dir,
+          'side-exit',
+          true,
+        ).events,
+      );
+      expect(textOf(events)).toContain('已退出 Codex btw side conversation');
+      expect(await readFile(trace, 'utf8')).toBe('ctrl-c\n');
+    } finally {
+      await pool.closeAll();
+    }
+  }, 10_000);
+
+  it('waits for a fresh main redraw after side exit instead of trusting a stale main frame', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-side-exit-stale-main-test-'));
+    const bin = join(dir, 'fake-side-exit-stale-main-agent.mjs');
+    const trace = join(dir, 'input-trace.txt');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs';
+process.stdin.setEncoding('utf8');
+const main = 'gpt-5.6-terra xhigh · /tmp · Main [default]';
+process.stdout.write(main + '\\n›\\n');
+process.stdin.on('data', (chunk) => {
+  if (!chunk.includes('\\x03')) return;
+  appendFileSync(${JSON.stringify(trace)}, 'ctrl-c\\n');
+  setTimeout(() => process.stdout.write(main + '\\n›\\n'), 220);
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('side-exit-stale-main-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'side-exit-stale-main',
+      usePty: false,
+      backend: 'pipe',
+      idleMs: 250,
+      outputFlushMs: 20,
+      startupTimeoutMs: 2_000,
+      sideSwitchTimeoutMs: 2_000,
+    });
+    try {
+      const started = Date.now();
+      const events = await collect(
+        session.runSide('side-exit-stale-main', '/btw out', dir, 'side-exit', true).events,
+      );
+      expect(textOf(events)).toContain('已退出 Codex btw side conversation');
+      expect(Date.now() - started).toBeGreaterThanOrEqual(180);
+      expect(await readFile(trace, 'utf8')).toBe('ctrl-c\n');
+    } finally {
+      await pool.closeAll();
+    }
+  }, 10_000);
+
+  it('stops a confirmed side turn even when the latest redraw temporarily looks like main', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-side-stop-stale-main-test-'));
+    const bin = join(dir, 'fake-side-stop-stale-main-agent.mjs');
+    const trace = join(dir, 'input-trace.txt');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs';
+process.stdin.setEncoding('utf8');
+const side = 'gpt-5.6-terra xhigh · /tmp · Side from main thread · ctrl + / to switch · ctrl + c to close';
+const main = 'gpt-5.6-terra xhigh · /tmp · Main [default]';
+let draft = '';
+let inSide = true;
+process.stdout.write(side + '\\n›\\n');
+process.stdin.on('data', (chunk) => {
+  for (const char of chunk) {
+    if (char === '\\x03') {
+      appendFileSync(${JSON.stringify(trace)}, 'ctrl-c\\n');
+      inSide = false;
+      draft = '';
+      process.stdout.write(main + '\\n›\\n');
+      continue;
+    }
+    if (char !== '\\r' && char !== '\\n') { draft += char; continue; }
+    const line = draft;
+    draft = '';
+    if (inSide && line === 'side work') {
+      appendFileSync(${JSON.stringify(trace)}, 'body\\n');
+      // Simulate a partial/stale redraw that temporarily loses the side
+      // footer while the side turn is still the terminal owner.
+      process.stdout.write(main + '\\n');
+    }
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('side-stop-stale-main-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'side-stop-stale-main',
+      usePty: false,
+      backend: 'pipe',
+      idleMs: 250,
+      outputFlushMs: 20,
+      startupTimeoutMs: 2_000,
+    });
+    try {
+      const run = session.runSide('side-stop-stale-main', '/btw side work', dir, 'side', true);
+      const iterator = run.events[Symbol.asyncIterator]();
+      await iterator.next();
+      const pendingEvent = iterator.next();
+      await waitForFileText(trace, 'body\n', 2_000);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      await run.stop();
+      await pendingEvent;
+      const rest = await collect({
+        [Symbol.asyncIterator]: () => iterator,
+      });
+      expect(rest.some((event) => event.type === 'done' && event.terminationReason === 'interrupted')).toBe(true);
+      expect(await readFile(trace, 'utf8')).toContain('ctrl-c\n');
+    } finally {
+      await pool.closeAll();
+    }
+  }, 10_000);
 
   tmuxIt('accepts an empty /btw and recovers a slow pre-existing draft before later text', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-btw-empty-slow-test-'));

@@ -21,13 +21,19 @@ import { RunRejected, type RunRejectedCode } from '../runtime/errors';
 import type { SessionCatalog } from '../session/catalog';
 import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
+import type { RunInterruptTarget } from './active-runs';
 
 export interface StartRunFlowInput {
   scopeId: string;
+  /** Generation captured before asynchronous intake work began. */
+  stopGeneration?: number;
+  /** Cancellation generation namespace for the submitted run. */
+  stopGenerationTarget?: RunInterruptTarget;
   scope: ScopeContext;
   prompt: string;
   sessionMode?: 'turn' | 'live';
   liveInputMode?: 'command' | 'control' | 'side' | 'side-exit';
+  sideConversationConfirmed?: boolean;
   attachments: AgentAttachment[];
   access: AccessDecision;
   capability: AgentCapability;
@@ -147,9 +153,12 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
   try {
     execution = await input.executor.submit({
       scopeId: input.scopeId,
+      stopGeneration: input.stopGeneration,
+      stopGenerationTarget: input.stopGenerationTarget,
       policy,
       sessionMode: input.sessionMode,
       liveInputMode: input.liveInputMode,
+      sideConversationConfirmed: input.sideConversationConfirmed,
       sessionId,
       threadId,
       model: resolveModelArg(
@@ -178,7 +187,9 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
         rejectReason: {
           code: err.code,
           userVisible:
-            err.code === 'reconnect-in-progress'
+            err.code === 'stop-requested'
+              ? '运行已被停止请求取消。'
+              : err.code === 'reconnect-in-progress'
               ? '当前 bot 正在重连，稍后会继续处理新消息。'
               : err.code === 'run-already-active'
                 ? '当前会话已有运行在执行，请稍后再试或先停止当前运行。'

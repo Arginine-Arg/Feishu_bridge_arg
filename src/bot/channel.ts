@@ -19,7 +19,7 @@ import {
   type BridgePromptQuotedMessage,
   type BridgePromptTopicMessage,
 } from '../agent/prompt';
-import type { AgentAdapter, AgentEvent } from '../agent/types';
+import type { AgentAdapter, AgentEvent, LiveSessionDiagnostics } from '../agent/types';
 import {
   AGENT_INPUT_CALLBACK_ACTION,
   BRIDGE_CALLBACK_MARKER,
@@ -397,7 +397,19 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   const pending = new PendingQueue(DEBOUNCE_MS, (scope, batch) => {
     const firstMsg = batch[0];
     if (!firstMsg) return;
-    pending.block(scope);
+    // Capture this before any asynchronous handoff. A lifecycle command can
+    // arrive while the batch is resolving media/policy and before the
+    // executor has registered an ActiveRuns handle. Main and side batches use
+    // independent generations so stopping a side relay never cancels a main
+    // goal that is still preparing.
+    // A priority native command (notably /btw) may flush while the scope is
+    // already blocked by the pursuing main run.  Queue blocking has depth
+    // semantics, so only the flush that acquired the block may release it.
+    // Re-entering block here and unconditionally unblocking in finally leaves
+    // a stale depth after the side relay finishes, which makes later /stop and
+    // ordinary messages appear to do nothing.
+    const ownsQueueBlock = !pending.isBlocked(scope);
+    if (ownsQueueBlock) pending.block(scope);
     void withTrace({ chatId: firstMsg.chatId }, async () => {
       log.info('flush', 'start', {
         scope,
@@ -437,6 +449,10 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           });
         }
         for (const runBatch of runBatches) {
+          const runInputMode = liveInputModeForMessage(runBatch[0]!);
+          const runStopGenerationTarget =
+            runInputMode === 'side' || runInputMode === 'side-exit' ? 'side' : 'main';
+          const runStopGeneration = activeRuns.currentStopGeneration(scope, runStopGenerationTarget);
           await runAgentBatch({
             channel,
             agent,
@@ -458,12 +474,14 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
             pending,
             scope,
             mode,
+            stopGeneration: runStopGeneration,
+            stopGenerationTarget: runStopGenerationTarget,
           });
         }
       } catch (err) {
         log.fail('flush', err);
       } finally {
-        pending.unblock(scope);
+        if (ownsQueueBlock) pending.unblock(scope);
         log.info('flush', 'end');
       }
     });
@@ -521,7 +539,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
             const live = await agent.tmux?.diagnostics?.(scope, cwd);
             const tmux = await agent.tmux?.status(scope, cwd);
             const queued = pending.snapshot(scope)[0];
-            const active = activeRuns.get(scope);
+            const active = activeRuns.get(scope) ?? activeRuns.getSide(scope);
             const picker = liveInteractionState(sessions, liveInteractionByScope, scope);
             return {
               ...(active ? { runId: active.run.runId } : {}),
@@ -750,14 +768,28 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     allowLocalFileRoot,
     inboundMessages,
   } = deps;
-  if (!(await inboundMessages.claim(msg.messageId))) {
+  // `/stop` is an emergency control path. Install its duplicate claim in
+  // memory immediately, but do not wait for a potentially slow network-file
+  // persistence flush before handling the command.
+  const earlyRoute = rewriteAgentCommandMessage(msg, controls.profileConfig.agentKind);
+  const isImmediateStop = /^\/stop(?:\s|$)/iu.test(earlyRoute.msg.content.trim());
+  if (!(await inboundMessages.claim(msg.messageId, { waitForPersist: !isImmediateStop }))) {
     log.info('intake', 'duplicate-message-suppressed', { msgId: msg.messageId, chatId: msg.chatId });
     return;
   }
   const preview = msg.content.length > 80 ? `${msg.content.slice(0, 80)}…` : msg.content;
   // Resolve scope (and underlying chat mode) once at intake — every
   // downstream consumer keys off these.
-  const resolvedMode = await chatModeCache.resolve(channel, msg.chatId);
+  // A stop command must not wait for chat metadata. If the event contains a
+  // thread id it still gets the correct topic scope; otherwise ActiveRuns can
+  // recover an unambiguous topic scope by chat id below.
+  const resolvedMode = isImmediateStop
+    ? msg.chatType === 'p2p'
+      ? 'p2p' as const
+      : msg.threadId
+        ? 'topic' as const
+        : 'group' as const
+    : await chatModeCache.resolve(channel, msg.chatId);
   // Feishu delivers a sizable fraction of topic-group message events without a
   // `thread_id` (notably the message that opens a new topic). We route topic
   // replies (`replyInThread`) and isolate per-topic session scope off it, so a
@@ -778,11 +810,11 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   }
   // Carry the (possibly backfilled) threadId on the message so the batched
   // flush — which reads `firstMsg.threadId` for reply routing and CoT — sees it.
-  const emsg: NormalizedMessage = threadId === msg.threadId ? msg : { ...msg, threadId };
+  let emsg: NormalizedMessage = threadId === msg.threadId ? msg : { ...msg, threadId };
   // Some groups are converted into topic groups after creation. In that state
   // getChatMode can lag behind the message event shape, so threadId is the
   // stronger signal for topic-scoped sessions and reply routing.
-  const chatMode = threadId ? 'topic' : resolvedMode;
+  let chatMode = threadId ? 'topic' : resolvedMode;
   if (threadId && resolvedMode !== 'topic') {
     chatModeCache.invalidate(msg.chatId);
     logThreadModeOverride({
@@ -791,7 +823,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
       threadId,
     });
   }
-  const scope = chatMode === 'topic' && threadId
+  let scope = chatMode === 'topic' && threadId
     ? `${msg.chatId}:${threadId}`
     : msg.chatId;
   log.info('intake', 'enter', {
@@ -840,22 +872,72 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   }
 
   const route = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
+  const sideExitRequested = route.nativeMode === 'side-exit';
+  if (sideExitRequested) {
+    const requestedScope = scope;
+    const recovery = await recoverSideConversationScope({
+      map: sideConversationByScope,
+      requestedScope: scope,
+      chatId: msg.chatId,
+      agent,
+      activeRuns,
+      sessionCatalog,
+      workspaces,
+      controls,
+    });
+    if (recovery.ambiguous && recovery.ambiguous.length > 0) {
+      const labels = recovery.ambiguous.map((candidate) => `\`${candidate}\``).join('、');
+      await channel.send(
+        msg.chatId,
+        { markdown: `⚠️ 检测到多个可能的 side conversation（${labels}），未猜测退出目标。请在原话题中重试 /btw out。` },
+        {
+          replyTo: msg.messageId,
+          ...(threadId ? { replyInThread: true } : {}),
+        },
+      );
+      return;
+    }
+    if (recovery.scope && recovery.scope !== scope) {
+      scope = recovery.scope;
+      const recoveredThreadId = threadIdForChatScope(msg.chatId, scope);
+      if (!threadId && recoveredThreadId) {
+        threadId = recoveredThreadId;
+        emsg = { ...emsg, threadId };
+        route.msg = { ...route.msg, threadId };
+        chatMode = 'topic';
+      }
+      log.info('agent-live', 'side-scope-recovered', {
+        requestedScope,
+        scope,
+        threadId,
+      });
+    }
+  }
   const pickerActive = Boolean(liveInteractionState(sessions, liveInteractionByScope, scope));
-  const existingSideState = await refreshSideConversationState(
-    sideConversationByScope,
-    scope,
-    agent,
-    workspaces,
-    controls,
-  );
+  // Lifecycle controls must not wait for a potentially slow tmux capture. In
+  // particular, /stop is the escape hatch for a stuck run and /btw out must be
+  // able to reach the live terminal while Codex is still repainting its side
+  // footer. The live session performs its own authoritative state wait.
+  const fastLifecycleCommand =
+    /^\/stop(?:\s|$)/iu.test(route.msg.content.trim()) ||
+    route.nativeMode === 'side' ||
+    route.nativeMode === 'side-exit';
+  const existingSideState = fastLifecycleCommand
+    ? sideConversationState(sideConversationByScope, scope)
+    : await refreshSideConversationState(
+        sideConversationByScope,
+        scope,
+        agent,
+        workspaces,
+        controls,
+      );
   const pickerFollowup = pickerActive
     ? normalizeLivePickerFollowup(route.msg.content)
     : undefined;
   const sideCommandRequested = route.nativeMode === 'side';
-  const sideExitRequested = route.nativeMode === 'side-exit';
   if (sideCommandRequested) {
     saveSideConversationState(sideConversationByScope, scope, 'opening');
-  } else if (sideExitRequested && existingSideState) {
+  } else if (sideExitRequested && existingSideState && existingSideState.phase !== 'closed') {
     saveSideConversationState(sideConversationByScope, scope, 'closing', existingSideState.generation);
   }
   const sideFollowup =
@@ -879,6 +961,9 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
       preview: route.msg.content.slice(0, 120),
     });
   }
+  const lifecycleScopes = /^\/stop(?:\s|$)/iu.test(routedMsg.content.trim())
+    ? sideConversationScopesForChat(sideConversationByScope, msg.chatId, ['opening', 'closing'])
+    : [];
   const nativeModelCommand = routedMsg.content.trim() === '/model';
 
   if (
@@ -901,6 +986,25 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   }
 
   if (!route.forceNative && !nativeModelCommand && !pickerFollowup) {
+    const stopCommand = /^\/stop(?:\s|$)/iu.test(routedMsg.content.trim());
+    // A remembered `active` side marker describes the terminal panel, not an
+    // in-flight side operation. If its side handle has already drained, a
+    // plain `/stop` must still be able to stop the main pursuing run. Only an
+    // opening/closing transition (which may legitimately have no handle while
+    // media/policy preparation is pending) is side-only.
+    const sideTransitionPending =
+      existingSideState?.phase === 'opening' || existingSideState?.phase === 'closing';
+    const lifecycleTarget = stopCommand && (
+      Boolean(activeRuns.getSide(scope)) ||
+      sideTransitionPending ||
+      activeRuns
+        .scopesForChat(msg.chatId)
+        .some((candidate) => Boolean(activeRuns.getSide(candidate))) ||
+      lifecycleScopes.some((candidate) => {
+        const state = sideConversationState(sideConversationByScope, candidate);
+        return state?.phase === 'opening' || state?.phase === 'closing';
+      })
+    ) ? 'side' as const : undefined;
     const handled = await tryHandleCommand({
       channel,
       msg: routedMsg,
@@ -911,24 +1015,30 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
       agent,
       activeRuns,
       sessionCatalog,
-      sessionCatalogIdentity: await commandSessionCatalogIdentity({
-        msg: emsg,
-        scope,
-        mode: chatMode,
-        workspaces,
-        controls,
-        access: accessDecision,
-      }),
+      ...(stopCommand
+        ? { sessionCatalogIdentity: undefined }
+        : {
+            sessionCatalogIdentity: await commandSessionCatalogIdentity({
+              msg: emsg,
+              scope,
+              mode: chatMode,
+              workspaces,
+              controls,
+              access: accessDecision,
+            }),
+          }),
       runExecutor: executor,
       processPool: pool,
       controls,
+      ...(lifecycleTarget ? { lifecycleTarget } : {}),
+      ...(lifecycleScopes.length > 0 ? { lifecycleScopes } : {}),
       allowLocalFileRoot,
       liveDiagnostics: async () => {
         const cwd = workspaces.cwdFor(scope) ?? controls.profileConfig.workspaces.default;
         const live = await agent.tmux?.diagnostics?.(scope, cwd);
         const tmux = await agent.tmux?.status(scope, cwd);
         const queued = pending.snapshot(scope)[0];
-        const active = activeRuns.get(scope);
+        const active = activeRuns.get(scope) ?? activeRuns.getSide(scope);
         const picker = liveInteractionState(sessions, liveInteractionByScope, scope);
         return {
           ...(active ? { runId: active.run.runId } : {}),
@@ -1008,7 +1118,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   const priorityNativeCommand =
     isForceLiveAgentCommandMessage(agentMsg) &&
     (nativeInputMode === 'command' || nativeInputMode === 'side' || nativeInputMode === 'side-exit');
-  if (priorityNativeCommand && activeRuns.get(scope)) {
+  if (priorityNativeCommand && activeRuns.hasAny(scope)) {
     log.info('intake', 'native-command-preempt', {
       scope,
       inputMode: nativeInputMode,
@@ -1020,6 +1130,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
       // its EventFanout listener and makes the pursuing goal appear to stop.
       log.info('intake', 'native-side-coexists-with-main', { scope, inputMode: nativeInputMode });
     } else {
+      activeRuns.advanceStopGeneration(scope);
       activeRuns.interrupt(scope);
     }
   }
@@ -1028,6 +1139,9 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     ? pending.pushFront(scope, agentMsg, {
         immediate: true,
         ...(priorityNativeCommand ? { preempt: true } : {}),
+        ...(priorityNativeCommand && (nativeInputMode === 'side' || nativeInputMode === 'side-exit')
+          ? { bypassBlock: true }
+          : {}),
       })
     : pending.push(scope, agentMsg);
   log.info('intake', 'queued', { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
@@ -1115,6 +1229,14 @@ function normalizeAgentPrefixedNativeInput(input: string): {
       nativeMode: /^\/btw\s+out\s*$/iu.test(trimmed) ? 'side-exit' : 'side',
     };
   }
+  // Keep the agent-prefixed lifecycle command on the bridge control plane.
+  // Sending `/codex /stop` to the native TUI is a no-op and can also strand
+  // the bridge's active-run handle.
+  const stopMatch = /^\/?stop(?:\s+([\s\S]+))?$/iu.exec(trimmed);
+  if (stopMatch) {
+    const target = stopMatch[1]?.trim();
+    return { text: target ? `/stop ${target}` : '/stop', forceNative: false };
+  }
   const slashless = /^\/([A-Za-z0-9_-]+)$/u.exec(trimmed)?.[1];
   const controlText = slashless && isLivePickerInput(slashless) ? slashless : trimmed;
   if (isLivePickerInput(controlText) || isLiveControlInput(controlText)) {
@@ -1137,6 +1259,10 @@ function clearsSideConversationOnCommand(content: string): boolean {
 }
 
 function isNativeAgentInputText(text: string, pickerActive: boolean): boolean {
+  // `/stop` is owned by the bridge lifecycle command even in live mode. If it
+  // is marked as a native TUI command, intake preempts the run and then types
+  // the literal slash command into Codex where it has no effect.
+  if (/^\/stop(?:\s|$)/iu.test(text.trim())) return false;
   if (isSlashCommandText(text)) return true;
   return pickerActive && isLivePickerInput(text);
 }
@@ -1206,6 +1332,152 @@ function sideConversationState(
     return undefined;
   }
   return state;
+}
+
+/** Recover pending side-transition scopes when Feishu omits a topic thread id. */
+function sideConversationScopesForChat(
+  map: Map<string, SideConversationState>,
+  chatId: string,
+  phases: readonly SideConversationPhase[] = ['active', 'opening', 'closing'],
+): string[] {
+  const prefix = `${chatId}:`;
+  const scopes: string[] = [];
+  const allowed = new Set(phases);
+  for (const candidate of map.keys()) {
+    if (candidate !== chatId && !candidate.startsWith(prefix)) continue;
+    const state = sideConversationState(map, candidate);
+    if (state && allowed.has(state.phase)) scopes.push(candidate);
+  }
+  return scopes;
+}
+
+function threadIdForChatScope(chatId: string, scope: string): string | undefined {
+  const prefix = `${chatId}:`;
+  return scope.startsWith(prefix) ? scope.slice(prefix.length) || undefined : undefined;
+}
+
+interface SideConversationScopeRecovery {
+  scope?: string;
+  ambiguous?: string[];
+}
+
+/**
+ * Recover the durable side target before `/btw out` enters RunExecutor.
+ *
+ * Topic events occasionally omit `threadId`, and the in-memory marker is lost
+ * when the bridge restarts. Managed terminal records and live diagnostics are
+ * the only durable bridge-owned evidence in that case. We inspect candidates
+ * in parallel and only select a single positive side footer; a multi-topic
+ * chat is deliberately rejected instead of sending Ctrl-C to a guessed pane.
+ */
+async function recoverSideConversationScope(input: {
+  map: Map<string, SideConversationState>;
+  requestedScope: string;
+  chatId: string;
+  agent: AgentAdapter;
+  activeRuns: ActiveRuns;
+  sessionCatalog?: SessionCatalog;
+  workspaces: WorkspaceStore;
+  controls: Controls;
+}): Promise<SideConversationScopeRecovery> {
+  const prefix = `${input.chatId}:`;
+  const candidates = new Set<string>([
+    input.requestedScope,
+    ...sideConversationScopesForChat(input.map, input.chatId),
+    ...input.activeRuns.scopesForChat(input.chatId),
+  ]);
+  const cwdByScope = new Map<string, string>();
+  const managedCandidates = new Set<string>();
+  for (const [scopeId, cwd] of Object.entries(input.workspaces.listCwds(input.chatId))) {
+    if (scopeId === input.chatId || scopeId.startsWith(prefix)) {
+      candidates.add(scopeId);
+      cwdByScope.set(scopeId, cwd);
+    }
+  }
+  for (const entry of input.sessionCatalog?.entries() ?? []) {
+    if (entry.status !== 'active' || entry.agentId !== input.controls.profileConfig.agentKind) continue;
+    if (entry.scopeId !== input.chatId && !entry.scopeId.startsWith(prefix)) continue;
+    candidates.add(entry.scopeId);
+    cwdByScope.set(entry.scopeId, entry.cwdRealpath);
+  }
+  try {
+    const managedScopes = await input.agent.tmux?.managedScopesForChat?.(input.chatId);
+    for (const candidate of managedScopes ?? []) {
+      if (candidate === input.chatId || candidate.startsWith(prefix)) {
+        managedCandidates.add(candidate);
+        candidates.add(candidate);
+      }
+    }
+  } catch (err) {
+    log.info('agent-live', 'side-scope-managed-scan-failed', {
+      chatId: input.chatId,
+      err: String(err),
+    });
+  }
+
+  const scoped = [...candidates].filter(
+    (candidate) => candidate === input.chatId || candidate.startsWith(prefix),
+  );
+  if (scoped.length === 0) return {};
+  const results = await Promise.all(
+    scoped.map(async (candidate) => {
+      const remembered = sideConversationState(input.map, candidate);
+      const cwd =
+        cwdByScope.get(candidate) ??
+        input.workspaces.cwdFor(candidate) ??
+        input.controls.profileConfig.workspaces.default;
+      let diagnostics: LiveSessionDiagnostics | undefined;
+      if (input.agent.tmux?.diagnostics && cwd) {
+        diagnostics = await withBoundedSideDiagnostic(
+          input.agent.tmux.diagnostics(candidate, cwd),
+          5_000,
+        );
+      }
+      // An in-memory active/closing marker is the same evidence already used
+      // by the exact-scope `/btw out` path. Keep it as a fallback when a single
+      // diagnostic capture is a stale main frame; if several remembered topic
+      // scopes exist, the ambiguity check below still refuses to guess.
+      const rememberedSide = Boolean(
+        remembered && (remembered.phase === 'active' || remembered.phase === 'closing'),
+      );
+      const side = diagnostics?.sideConversation === true || rememberedSide;
+      return { candidate, remembered, diagnostics, side };
+    }),
+  );
+  const positives = results.filter((result) => result.side).map((result) => result.candidate);
+  if (positives.length > 1) return { ambiguous: positives.sort() };
+  const selected = positives[0];
+  if (!selected) {
+    // A managed topic with a temporarily stale/blank diagnostic is still a
+    // useful scope target: run the guarded side-exit there and let the live
+    // session wait for a delayed side footer. It never receives Ctrl-C until
+    // that footer (or prior bridge evidence) confirms side ownership.
+    const onlyManaged = [...managedCandidates].filter((candidate) => candidate !== input.chatId);
+    if (onlyManaged.length === 1) return { scope: onlyManaged[0] };
+    return {};
+  }
+  const remembered = results.find((result) => result.candidate === selected)?.remembered;
+  if (remembered?.phase !== 'closed') {
+    saveSideConversationState(input.map, selected, 'active', remembered?.generation);
+  }
+  return { scope: selected };
+}
+
+async function withBoundedSideDiagnostic(
+  operation: Promise<LiveSessionDiagnostics>,
+  timeoutMs: number,
+): Promise<LiveSessionDiagnostics | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation.catch(() => undefined),
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function saveSideConversationState(
@@ -1292,6 +1564,7 @@ async function reconcileSideConversationState(input: {
   agent: AgentAdapter;
   inputMode: 'side' | 'side-exit';
   failed: boolean;
+  entryConfirmed?: boolean;
   exitConfirmed?: boolean;
   cwd: string;
 }): Promise<void> {
@@ -1304,13 +1577,20 @@ async function reconcileSideConversationState(input: {
     return undefined;
   });
   if (input.inputMode === 'side-exit') {
-    if (input.exitConfirmed === true || diagnostics?.sideConversation === false) {
+    if (input.exitConfirmed === true) {
       saveSideConversationState(input.map, input.scope, 'closed', before?.generation);
       log.info('agent-live', 'side-state-closed-exit', { scope: input.scope });
       return;
     }
-    if (diagnostics?.sideConversation === true || input.exitConfirmed === false || before) {
-      saveSideConversationState(input.map, input.scope, 'active', before?.generation);
+    // A failed/ambiguous exit must remain retryable. The diagnostic captured at
+    // this boundary can still be the pre-transition main frame, so treating
+    // `sideConversation: false` as proof of closure loses the only bridge hint
+    // that authorizes the next `/btw out`. Keep a closing tombstone: ordinary
+    // text is not routed into it, while a later explicit out can retry. Only a
+    // positive exit acknowledgement above is allowed to write `closed`.
+    if (before || diagnostics?.sideConversation === true || input.exitConfirmed === false) {
+      saveSideConversationState(input.map, input.scope, 'closing', before?.generation);
+      log.info('agent-live', 'side-state-kept-exit-retryable', { scope: input.scope });
     }
     return;
   }
@@ -1325,7 +1605,12 @@ async function reconcileSideConversationState(input: {
       saveSideConversationState(input.map, input.scope, 'active', before.generation);
       return;
     }
-    if (input.inputMode === 'side' && before?.phase === 'opening' && !input.failed) {
+    if (
+      input.inputMode === 'side' &&
+      before?.phase === 'opening' &&
+      !input.failed &&
+      input.entryConfirmed === true
+    ) {
       saveSideConversationState(input.map, input.scope, 'active', before.generation);
       return;
     }
@@ -1335,9 +1620,21 @@ async function reconcileSideConversationState(input: {
     log.info('agent-live', 'side-state-cleared-main', { scope: input.scope });
     return;
   }
+  if (input.inputMode === 'side' && input.entryConfirmed === true) {
+    saveSideConversationState(input.map, input.scope, 'active', before?.generation);
+    return;
+  }
   if (input.failed && before?.phase !== 'active') {
     clearSideConversationState(input.map, input.scope);
     log.info('agent-live', 'side-state-cleared-failed-entry', { scope: input.scope });
+    return;
+  }
+  // Adapters predating explicit side lifecycle evidence may not expose a
+  // diagnostics hook. Preserve their successful side turn as the fallback;
+  // Codex live sessions emit `entryConfirmed` above and take the stricter
+  // path when diagnostics is available.
+  if (input.inputMode === 'side' && !input.failed && !input.agent.tmux?.diagnostics) {
+    saveSideConversationState(input.map, input.scope, 'active', before?.generation);
     return;
   }
   // A successful side entry/body leaves Codex in side mode. When an older
@@ -1409,6 +1706,8 @@ interface RunBatchDeps {
   pending: PendingQueue;
   scope: string;
   mode: ChatMode;
+  stopGeneration: number;
+  stopGenerationTarget: 'main' | 'side';
 }
 
 async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
@@ -1433,6 +1732,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     pending,
     scope,
     mode,
+    stopGeneration,
+    stopGenerationTarget,
   } = deps;
   if (batch.length === 0) return;
   const firstMsg = batch[0];
@@ -1444,7 +1745,16 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   // behind it; put them back and let the main run release the scope normally.
   const firstInputMode = liveInputModeForMessage(firstMsg);
   const isSideBatch = firstInputMode === 'side' || firstInputMode === 'side-exit';
-  if (!isSideBatch && activeRuns.get(scope)) {
+  const stopRequested = (stage: string): boolean => {
+    if (activeRuns.isStopGenerationCurrent(scope, stopGeneration, stopGenerationTarget)) return false;
+    // A queued /btw that was stopped before it spawned must not leave an
+    // `opening` marker that reroutes the next ordinary message into side.
+    if (firstInputMode === 'side') clearSideConversationState(sideConversationByScope, scope);
+    log.info('flush', 'cancelled-before-spawn', { scope, stage, stopGeneration });
+    return true;
+  };
+  if (stopRequested('batch-start')) return;
+  if (!isSideBatch && activeRuns.hasAny(scope)) {
     for (const message of batch) pending.push(scope, message);
     log.info('flush', 'ordinary-batch-deferred-during-side', {
       scope,
@@ -1460,6 +1770,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     m.resources.map((r) => ({ messageId: m.messageId, resource: r })),
   );
   const attachments = await media.resolve(resourceItems, controls.profileConfig.attachments);
+  if (stopRequested('media')) return;
   if (attachments.length > 0) {
     log.info('media', 'resolved', { count: attachments.length });
     for (const attachment of attachments) {
@@ -1496,6 +1807,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         contentChars: q.content.length,
       });
     }
+    if (stopRequested('quote')) return;
   }
 
   // Topic upstream context. When the bot is pulled into a topic for the FIRST
@@ -1511,6 +1823,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       maxMessages: 40,
       excludeIds: exclude,
     });
+    if (stopRequested('topic-context')) return;
     if (topicContext.length > 0) {
       log.info('topic', 'context-fetched', {
         scope,
@@ -1532,6 +1845,13 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     ? liveInputModeForBatch(batch, nativeCommand)
     : undefined;
   const sideInputMode = nativeInputMode === 'side' || nativeInputMode === 'side-exit';
+  const sideStateBeforeRun = sideConversationState(sideConversationByScope, scope);
+  const sideConversationConfirmed =
+    sideInputMode &&
+    Boolean(
+      sideStateBeforeRun &&
+        (sideStateBeforeRun.phase === 'active' || sideStateBeforeRun.phase === 'closing'),
+    );
   if (
     useLiveSession &&
     (nativeInputMode === 'side' || nativeInputMode === 'side-exit') &&
@@ -1561,6 +1881,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         ...(nativeCommand && nativeInputMode ? { inputMode: nativeInputMode } : {}),
       })
     : undefined;
+  if (stopRequested('route')) return;
   const liveInputMode = bridgeRoute?.inputMode;
   const prompt = bridgeRoute?.stdin ?? structuredPrompt;
   log.info('prompt', 'built', {
@@ -1615,10 +1936,13 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   });
   const flow = await startRunFlow({
     scopeId: scope,
+    stopGeneration,
     scope: scopeContext,
     prompt,
     sessionMode: useLiveSession ? 'live' : 'turn',
+    stopGenerationTarget,
     liveInputMode,
+    ...(sideInputMode && sideConversationConfirmed ? { sideConversationConfirmed: true } : {}),
     attachments: attachments.map(toPolicyAttachment),
     access: accessDecision,
     capability,
@@ -1638,6 +1962,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     },
   });
   if (!flow.ok) {
+    if (flow.rejectReason.code === 'stop-requested' || stopRequested('flow-rejected')) {
+      if (firstInputMode === 'side') clearSideConversationState(sideConversationByScope, scope);
+      artifactBroker.revoke(artifactGrant.token);
+      return;
+    }
     if (sideInputMode) {
       clearSideConversationState(sideConversationByScope, scope);
     }
@@ -1676,6 +2005,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const handle = execution.handle;
   const eventStream = execution.subscribe();
   let sideRunFailed = false;
+  let sideEntryConfirmed: boolean | undefined;
   let sideExitConfirmed: boolean | undefined;
   if (flow.resumeFrom) {
     log.info('session', 'resume', { sessionId: flow.resumeFrom, cwd });
@@ -1706,6 +2036,12 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     }
     if (evt.type === 'system' && evt.threadId) {
       log.info('session', 'set-thread', { threadId: evt.threadId });
+    }
+    if (evt.type === 'system' && evt.sideConversation === 'entered') {
+      sideEntryConfirmed = true;
+    }
+    if (evt.type === 'system' && evt.sideConversation === 'exited') {
+      sideExitConfirmed = true;
     }
   };
   const sentInteractionSignatures = new Set<string>();
@@ -2709,6 +3045,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         agent,
         inputMode: nativeInputMode!,
         failed: sideRunFailed,
+        entryConfirmed: sideEntryConfirmed,
         exitConfirmed: sideExitConfirmed,
         cwd,
       });
