@@ -1773,7 +1773,11 @@ setInterval(() => {}, 1000);
       const iterator = turn.events[Symbol.asyncIterator]();
       expect((await iterator.next()).value).toMatchObject({ type: 'system' });
       const pending = iterator.next();
-      await waitForFileText(trace, '/btw', 2_000);
+      // Windows runners can take a few seconds to start a fresh Node child
+      // while the full live-session suite is running in parallel. The
+      // production path still writes the command immediately after startup;
+      // keep this assertion focused on delivery rather than host scheduling.
+      await waitForFileText(trace, '/btw', 5_000);
       await turn.stop({ force: true });
       expect((await pending).value).toMatchObject({ type: 'done', terminationReason: 'interrupted' });
       const input = await readFile(trace, 'utf8');
@@ -1784,7 +1788,7 @@ setInterval(() => {}, 1000);
     } finally {
       await pool.closeAll();
     }
-  }, 10_000);
+  }, 20_000);
 
   tmuxIt('detaches an active bridge relay without sending Ctrl-C to the managed agent', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-detach-active-test-'));
