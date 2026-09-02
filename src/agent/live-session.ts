@@ -1337,6 +1337,7 @@ export class LiveTerminalSession {
           finish();
         } else if (sideMode) {
           const enteredSideConversation = await this.enterSideConversation(
+            turnPrompt,
             writeTurn,
             () => !done && !interruption.requested && !interruption.detached,
           );
@@ -1345,12 +1346,17 @@ export class LiveTerminalSession {
           finish('未确认 Codex 已进入 side conversation，/btw 正文未发送。请先回到主线程后重试。');
           } else if (turnPrompt) {
             push({ type: 'system', cwd, sideConversation: 'entered' });
-            if (done || interruption.requested || interruption.detached) break submitTurn;
             markInput();
-            writeTurn(`${turnPrompt}\r`);
             sideBodyAwaitingSubmit = true;
             suspendIdle();
-            scheduleNormalSubmitRetry();
+            if (!enteredSideConversation.bodySubmitted) {
+              // We were already in a side conversation, or recovered a bare
+              // `/btw` draft left by an older bridge. In those two proven-side
+              // states the body is intentionally submitted as a separate turn.
+              if (done || interruption.requested || interruption.detached) break submitTurn;
+              writeTurn(`${turnPrompt}\r`);
+              scheduleNormalSubmitRetry();
+            }
           } else {
             push({ type: 'system', cwd, sideConversation: 'entered' });
             push({
@@ -1402,7 +1408,10 @@ export class LiveTerminalSession {
           }
         }
         if (sideBodyAwaitingSubmit) {
-          arm(SIDE_BODY_TIMEOUT_MS);
+          // An atomic inline /btw can produce its first answer before the side
+          // footer confirmation loop returns. Do not replace the short idle
+          // timer armed by that accepted output with the long submit timeout.
+          arm(sawAcceptedOutput && !terminalWasBusy ? idleMs : SIDE_BODY_TIMEOUT_MS);
         } else if (commandMode && isStatusLiveCommand(turnPrompt)) {
           arm(
             this.terminalInfo?.backend === 'tmux'
@@ -1474,9 +1483,10 @@ export class LiveTerminalSession {
   }
 
   private async enterSideConversation(
+    sidePrompt: string,
     writeInput: (input: string) => void = (input) => this.write(input),
     shouldContinue: () => boolean = () => true,
-  ): Promise<boolean> {
+  ): Promise<{ bodySubmitted: boolean } | false> {
     if (!shouldContinue()) return false;
     const terminal = this.latestTerminalState();
     if (this.hasSideConversationEvidence(terminal)) {
@@ -1487,22 +1497,31 @@ export class LiveTerminalSession {
       // editor. The caller clears a stale editor draft before reaching here.
       this.markSideConversationSeen(Date.now());
       log.info('agent-live', 'side-conversation-reuse');
-      return true;
+      return { bodySubmitted: false };
     }
     const beforeSide = this.latestTerminalState();
-    const hasPendingEntryDraft = isPendingLiveCommandDraft(terminal, '/btw', {
-      allowBusy: true,
-    });
+    // Codex natively accepts `/btw <question>` while the main task is still
+    // running. Submit that complete command as one editor transaction instead
+    // of opening an empty side and racing a second body/Enter pair against its
+    // redraw. A bare `/btw` already left by an older bridge is the sole
+    // exception: confirm that exact draft first, then let the caller submit the
+    // body only after the side footer is visible.
+    const inlineCommand = sidePrompt ? `/btw ${sidePrompt}` : '/btw';
+    const hasPendingInlineDraft = isPendingSideEntryDraft(terminal, inlineCommand);
+    const hasPendingBareDraft =
+      inlineCommand !== '/btw' && isPendingSideEntryDraft(terminal, '/btw');
+    const entryCommand = hasPendingBareDraft ? '/btw' : inlineCommand;
+    const bodySubmittedWithEntry = Boolean(sidePrompt) && entryCommand === inlineCommand;
     if (isStructuredLiveInteraction(terminal)) {
       log.warn('agent-live', 'side-entry-blocked-picker', {
         reason: 'picker-is-active',
       });
     } else {
       if (!shouldContinue()) return false;
-      writeInput(hasPendingEntryDraft ? '\r' : '/btw\r');
+      writeInput(hasPendingInlineDraft || hasPendingBareDraft ? '\r' : `${entryCommand}\r`);
     }
     const deadline = Date.now() + (this.opts.sideSwitchTimeoutMs ?? SIDE_SWITCH_TIMEOUT_MS);
-    let lastDraftRetryAt = hasPendingEntryDraft ? Date.now() : 0;
+    let lastDraftRetryAt = hasPendingInlineDraft || hasPendingBareDraft ? Date.now() : 0;
     let entryRetries = 0;
     let entrySent = !isStructuredLiveInteraction(terminal);
     while (Date.now() < deadline) {
@@ -1511,17 +1530,17 @@ export class LiveTerminalSession {
       if (isLiveSideConversation(current) && (current !== beforeSide || isLiveSideConversation(beforeSide))) {
         this.markSideConversationSeen(Date.now());
         await delay(SIDE_COMMAND_SETTLE_MS);
-        return true;
+        return { bodySubmitted: bodySubmittedWithEntry };
       }
       if (
         !isStructuredLiveInteraction(current) &&
         Date.now() - lastDraftRetryAt >= SIDE_ENTRY_RETRY_INTERVAL_MS &&
-        isPendingLiveCommandDraft(current, '/btw', { allowBusy: true })
+        isPendingSideEntryDraft(current, entryCommand)
       ) {
         lastDraftRetryAt = Date.now();
         entryRetries += 1;
         log.warn('agent-live', 'side-command-confirm-draft', {
-          commandText: '/btw',
+          commandText: entryCommand,
           terminalBusy: isLiveTerminalBusy(current),
           attempt: entryRetries,
         });
@@ -1531,7 +1550,7 @@ export class LiveTerminalSession {
       if (
         !entrySent &&
         !isStructuredLiveInteraction(current) &&
-        !isPendingLiveCommandDraft(current, '/btw', { allowBusy: true }) &&
+        !isPendingSideEntryDraft(current, entryCommand) &&
         (current === beforeSide || isLiveMainConversation(current))
       ) {
         // A slow helper may not have delivered the initial frame when the
@@ -1539,7 +1558,7 @@ export class LiveTerminalSession {
         // never repeat it against a picker or unknown editor surface.
         entrySent = true;
         if (!shouldContinue()) return false;
-        writeInput('/btw\r');
+        writeInput(`${entryCommand}\r`);
       }
       await delay(Math.min(SIDE_ENTRY_RETRY_POLL_MS, Math.max(1, deadline - Date.now())));
     }
@@ -1867,6 +1886,7 @@ let lastHistoryPane = '';
 let lastHistoryEnd = -1;
 let lastHistoryFingerprint = '';
 let inputBuffer = '';
+let pasteSequence = 0;
 
 process.on('uncaughtException', (error) => {
   process.stderr.write('tmux live helper crashed: ' + (error && error.stack ? error.stack : String(error)) + '\n');
@@ -2144,9 +2164,33 @@ function sendLiteral(text) {
   sendKeys(['-l', text]);
 }
 
-function sendBracketedPaste(text) {
-  if (!text) return;
-  sendKeys(['-l', '\x1b[200~' + text + '\x1b[201~']);
+function sendPaste(text) {
+  if (!text) return true;
+  const bufferName = 'argbridge-' + process.pid + '-' + (++pasteSequence);
+  const loaded = tmux(['load-buffer', '-b', bufferName, '-'], { input: text });
+  if (loaded.status !== 0) {
+    writeError('failed to load tmux input buffer', loaded);
+    return false;
+  }
+  // -p asks tmux to add bracketed-paste framing only when the target
+  // application enabled it. Codex then receives one Paste event, clears its
+  // non-bracketed paste-burst Enter suppression, and interprets the following
+  // Enter as submit even when the machine is slow. -r preserves multiline
+  // prompts and -d makes the per-write buffer one-shot.
+  const pasted = tmux([
+    'paste-buffer',
+    '-p',
+    '-r',
+    '-d',
+    '-b',
+    bufferName,
+    '-t',
+    target,
+  ]);
+  if (pasted.status === 0) return true;
+  writeError('failed to paste tmux input buffer', pasted);
+  tmux(['delete-buffer', '-b', bufferName], { stdio: 'ignore' });
+  return false;
 }
 
 function sendInput(input) {
@@ -2207,8 +2251,10 @@ function sendInput(input) {
   const shouldSubmit = input.endsWith('\r') || input.endsWith('\n');
   const body = shouldSubmit ? input.replace(/[\r\n]+$/u, '') : input;
   const normalized = body.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-  if (normalized.includes('\n')) sendBracketedPaste(normalized);
-  else sendLiteral(normalized);
+  // Do not synthesize bracket markers with send-keys. tmux's native paste
+  // transaction is aware of the pane's negotiated terminal mode and avoids
+  // the Codex race where a rapid literal stream plus Enter becomes a newline.
+  if (normalized && !sendPaste(normalized)) sendLiteral(normalized);
   if (shouldSubmit) sendKeys(['Enter']);
 }
 
@@ -2438,6 +2484,19 @@ export function isPendingLiveCommandDraft(
     .split('\n')
     .slice(-12)
     .some((line) => draft.test(line.trim()));
+}
+
+/**
+ * Match an exact `/btw` entry draft even when Codex soft-wraps or preserves
+ * multiline inline arguments. Command matching covers stale busy chrome;
+ * ordinary draft matching covers wrapped editor content and requires a native
+ * editor footer. Both reject picker surfaces before authorizing another Enter.
+ */
+function isPendingSideEntryDraft(input: string, command: string): boolean {
+  return (
+    isPendingLiveCommandDraft(input, command, { allowBusy: true }) ||
+    isPendingLivePromptDraft(input, command)
+  );
 }
 
 /**

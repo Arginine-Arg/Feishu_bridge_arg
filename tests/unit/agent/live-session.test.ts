@@ -1733,7 +1733,7 @@ setInterval(() => {}, 1000);
     }
   }, 10_000);
 
-  it('stops side entry without interrupting the main terminal before side confirmation', async () => {
+  it('stops atomic side entry without interrupting the main terminal before side confirmation', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-stop-side-entry-test-'));
     const bin = join(dir, 'fake-stop-side-entry-agent.mjs');
     const trace = join(dir, 'input-trace.txt');
@@ -1781,8 +1781,7 @@ setInterval(() => {}, 1000);
       await turn.stop({ force: true });
       expect((await pending).value).toMatchObject({ type: 'done', terminationReason: 'interrupted' });
       const input = await readFile(trace, 'utf8');
-      expect(input).toContain('/btw\r');
-      expect(input).not.toContain('side body must not be sent');
+      expect(input).toContain('/btw side body must not be sent\r');
       expect(input).not.toContain('\u0003');
       await iterator.return?.();
     } finally {
@@ -4118,7 +4117,7 @@ setInterval(() => {}, 1000);
     expect(textOf(selected)).toContain('• Approval accepted.');
   }, 20_000);
 
-  tmuxIt('submits /btw in two phases and leaves the body in the side conversation', async () => {
+  tmuxIt('submits /btw with inline body atomically and reuses the resulting side', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-btw-test-'));
     const bin = join(dir, 'fake-tmux-btw-agent.mjs');
     await writeFile(
@@ -4149,7 +4148,10 @@ process.stdin.on('data', (chunk) => {
     }
     const line = draft;
     draft = '';
-    if (line === '/btw') {
+    if (!side && line.startsWith('/btw ')) {
+      side = true;
+      screen(['side-answer: ' + line.slice('/btw '.length), 'gpt-5.6-terra xhigh · /tmp · Side from main thread', '›']);
+    } else if (line === '/btw') {
       side = true;
       draw();
     } else if (side && line) {
@@ -4224,20 +4226,11 @@ process.stdin.on('data', (chunk) => {
       screen(['• Working (30s • esc to interrupt)', footer(), '›']);
       continue;
     }
-    if (!side && line === '/btw') {
+    if (!side && line === '/btw ' + ${JSON.stringify(body)}) {
       side = true;
       draft = '';
-      screen([footer(), '›']);
-      continue;
-    }
-    if (side && line === ${JSON.stringify(body)}) {
       bodyAttempts += 1;
-      if (bodyAttempts === 1) {
-        screen(['› ' + line, footer()]);
-      } else {
-        draft = '';
-        screen(['• side-body-confirmed', footer(), '›']);
-      }
+      screen(['• side-body-confirmed', footer(), '›']);
       continue;
     }
     draft = '';
@@ -4273,12 +4266,11 @@ setInterval(() => {}, 1000);
     expect(textOf(side)).toContain('• side-body-confirmed');
     expect(textOf(exited)).toContain('已退出 Codex btw side conversation');
     const inputTrace = await readFile(trace, 'utf8');
-    expect(inputTrace).toContain('line:/btw');
-    expect(inputTrace).toContain(`line:${body}`);
+    expect(inputTrace).toContain(`line:/btw ${body}`);
     expect(inputTrace).toContain('ctrl-c');
   }, 30_000);
 
-  tmuxIt('waits for a slow side redraw before sending the buffered body', async () => {
+  tmuxIt('keeps an atomic inline /btw alive through a slow side redraw', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-btw-slow-entry-test-'));
     const bin = join(dir, 'fake-tmux-btw-slow-entry-agent.mjs');
     const trace = join(dir, 'input-trace.txt');
@@ -4306,9 +4298,9 @@ process.stdin.on('data', (chunk) => {
     }
     if (char !== '\\r' && char !== '\\n') { draft += char; continue; }
     const line = draft;
-    if (!side && line === '/btw') {
+    if (!side && line === '/btw ' + ${JSON.stringify(body)}) {
       appendFileSync(${JSON.stringify(trace)}, 'entry\\n');
-      setTimeout(() => { side = true; draft = ''; screen([footer(), '›']); }, 13_000);
+      setTimeout(() => { side = true; draft = ''; screen(['• slow-side-body-confirmed', footer(), '›']); }, 13_000);
       continue;
     }
     if (side && line === ${JSON.stringify(body)}) {
@@ -4340,7 +4332,7 @@ setInterval(() => {}, 1000);
       const events = await collect(session.run('btw-slow-entry', `/btw ${body}`, dir, 'side').events);
       expect(textOf(events)).toContain('• slow-side-body-confirmed');
       expect(textOf(events)).not.toContain('未确认 Codex 已进入 side conversation');
-      expect(await readFile(trace, 'utf8')).toBe('entry\nbody\n');
+      expect(await readFile(trace, 'utf8')).toBe('entry\n');
     } finally {
       await pool.closeAll();
     }
@@ -4748,15 +4740,15 @@ process.stdin.on('data', (chunk) => {
       continue;
     }
     const line = draft;
-    if (line === '/btw' && !side) {
+    if (line === '/btw ' + ${JSON.stringify(body)} && !side) {
       entryAttempts += 1;
       if (entryAttempts === 1) {
-        screen(['› /btw', mainFooter()]);
+        screen(['› ' + line, mainFooter()]);
         continue;
       }
       draft = '';
       side = true;
-      screen([sideFooter(), '›']);
+      screen(['• side-body-confirmed', sideFooter(), '›']);
       continue;
     }
     draft = '';
@@ -4825,19 +4817,19 @@ process.stdin.on('data', (chunk) => {
       continue;
     }
     const line = draft;
-    if (line === '/btw' && !side) {
+    if (line === '/btw ' + ${JSON.stringify(body)} && !side) {
       entryAttempts += 1;
       if (entryAttempts === 1) {
         screen([
           '• Working (4s • esc to interrupt)',
-          '› /btw',
+          '› ' + line,
           'tab to queue message 38% context left',
         ]);
         continue;
       }
       draft = '';
       side = true;
-      screen([sideFooter(), '›']);
+      screen(['• side-body-confirmed', sideFooter(), '›']);
       continue;
     }
     draft = '';
@@ -4943,7 +4935,7 @@ setInterval(() => {}, 1000);
     expect(textOf(events)).not.toContain('unavailable in side conversations');
   }, 20_000);
 
-  tmuxIt('retries a dropped /btw body only after seeing the matching side draft', async () => {
+  tmuxIt('retries a dropped atomic /btw only after seeing its exact draft', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-btw-draft-retry-test-'));
     const bin = join(dir, 'fake-tmux-btw-draft-retry-agent.mjs');
     const body = 'summarize the pending change';
@@ -4974,23 +4966,18 @@ process.stdin.on('data', (chunk) => {
       draft += char;
       continue;
     }
-    if (draft === '/btw') {
+    if (!side && draft === '/btw ' + ${JSON.stringify(body)}) {
+      bodySubmits += 1;
+      if (bodySubmits === 1) {
+        // The first Enter became a newline: Codex leaves the exact inline
+        // command in its main editor. Only that draft authorizes one retry.
+        screen(['› ' + draft, 'gpt-5.6-terra xhigh · /tmp']);
+        continue;
+      }
       draft = '';
       side = true;
-      screen([footer(), '›']);
-      continue;
-    }
-    if (!side || !draft) continue;
-    bodySubmits += 1;
-    if (bodySubmits === 1) {
-      // The first Enter was dropped: Codex leaves the exact body in its editor.
-      screen(['› ' + draft, footer()]);
-      continue;
-    }
-    if (draft === ${JSON.stringify(body)}) {
       screen(['• side-body-retry-confirmed', footer(), '›']);
-    } else {
-      screen(['unexpected:' + JSON.stringify(draft)]);
+      continue;
     }
   }
 });
@@ -5048,19 +5035,14 @@ process.stdin.on('data', (chunk) => {
       continue;
     }
     const line = draft;
-    if (!side && line === '/btw') {
-      draft = '';
-      side = true;
-      screen([sideFooter(), '›']);
-      continue;
-    }
-    if (side && line === ${JSON.stringify(body)}) {
+    if (!side && line === '/btw ' + ${JSON.stringify(body)}) {
       bodySubmits += 1;
       if (bodySubmits < 5) {
-        screen(['› ' + draft, sideFooter()]);
+        screen(['› ' + draft, 'gpt-5.6-luna max · /tmp · Main [default]']);
         continue;
       }
       draft = '';
+      side = true;
       screen(['• slow-side-body-confirmed', sideFooter(), '›']);
       continue;
     }
@@ -5125,7 +5107,7 @@ process.stdin.on('data', (chunk) => {
     // This fake CLI intentionally leaves the terminal in the main thread.
     // Any body sent after the failed switch would be an unsafe main-thread
     // submission and is surfaced as a test failure.
-    if (line === '/btw') continue;
+    if (line === '/btw' || line.startsWith('/btw ')) continue;
     if (line) screen(['main-answer: ' + line, 'gpt-5.6-terra xhigh · /tmp', '›']);
   }
 });
@@ -5564,10 +5546,13 @@ setInterval(() => {}, 1000);
 process.stdin.setEncoding('utf8');
 let text = '';
 let inPaste = false;
+let sawBracketedPaste = false;
+process.stdout.write('\\x1b[?2004h');
 process.stdin.on('data', (chunk) => {
   for (let i = 0; i < chunk.length; i += 1) {
     if (chunk.startsWith('\\x1b[200~', i)) {
       inPaste = true;
+      sawBracketedPaste = true;
       i += '\\x1b[200~'.length - 1;
       continue;
     }
@@ -5578,8 +5563,10 @@ process.stdin.on('data', (chunk) => {
     }
     const char = chunk[i];
     if ((char === '\\r' || char === '\\n') && !inPaste) {
+      process.stdout.write('paste-mode:' + sawBracketedPaste + '\\n');
       process.stdout.write('submitted:' + JSON.stringify(text) + '\\n');
       text = '';
+      sawBracketedPaste = false;
       continue;
     }
     text += char;
@@ -5611,7 +5598,9 @@ setInterval(() => {}, 1000);
     await pool.closeAll();
 
     expect(textOf(events)).toContain('submitted:"alpha\\nbeta"\n');
+    expect(textOf(events)).toContain('paste-mode:true\n');
     expect(textOf(ordinaryControlWord)).toContain('submitted:"yes"\n');
+    expect(textOf(ordinaryControlWord)).toContain('paste-mode:true\n');
   }, 20_000);
 
   tmuxIt('does not send enter after a tmux picker literal when the screen changes first', async () => {

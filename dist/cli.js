@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.2.4",
+  version: "1.2.5",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -8248,6 +8248,7 @@ var LiveTerminalSession = class {
             finish();
           } else if (sideMode) {
             const enteredSideConversation = await this.enterSideConversation(
+              turnPrompt,
               writeTurn,
               () => !done && !interruption.requested && !interruption.detached
             );
@@ -8256,12 +8257,14 @@ var LiveTerminalSession = class {
               finish("\u672A\u786E\u8BA4 Codex \u5DF2\u8FDB\u5165 side conversation\uFF0C/btw \u6B63\u6587\u672A\u53D1\u9001\u3002\u8BF7\u5148\u56DE\u5230\u4E3B\u7EBF\u7A0B\u540E\u91CD\u8BD5\u3002");
             } else if (turnPrompt) {
               push({ type: "system", cwd, sideConversation: "entered" });
-              if (done || interruption.requested || interruption.detached) break submitTurn;
               markInput();
-              writeTurn(`${turnPrompt}\r`);
               sideBodyAwaitingSubmit = true;
               suspendIdle();
-              scheduleNormalSubmitRetry();
+              if (!enteredSideConversation.bodySubmitted) {
+                if (done || interruption.requested || interruption.detached) break submitTurn;
+                writeTurn(`${turnPrompt}\r`);
+                scheduleNormalSubmitRetry();
+              }
             } else {
               push({ type: "system", cwd, sideConversation: "entered" });
               push({
@@ -8305,7 +8308,7 @@ var LiveTerminalSession = class {
             }
           }
           if (sideBodyAwaitingSubmit) {
-            arm(SIDE_BODY_TIMEOUT_MS);
+            arm(sawAcceptedOutput && !terminalWasBusy ? idleMs : SIDE_BODY_TIMEOUT_MS);
           } else if (commandMode && isStatusLiveCommand(turnPrompt)) {
             arm(
               this.terminalInfo?.backend === "tmux" ? noOutputIdleMs(turnPrompt, idleMs) : idleMs
@@ -8363,28 +8366,30 @@ var LiveTerminalSession = class {
     await delay(COMMAND_CLEAR_SETTLE_MS);
     return shouldContinue();
   }
-  async enterSideConversation(writeInput = (input) => this.write(input), shouldContinue = () => true) {
+  async enterSideConversation(sidePrompt, writeInput = (input) => this.write(input), shouldContinue = () => true) {
     if (!shouldContinue()) return false;
     const terminal = this.latestTerminalState();
     if (this.hasSideConversationEvidence(terminal)) {
       this.markSideConversationSeen(Date.now());
       log.info("agent-live", "side-conversation-reuse");
-      return true;
+      return { bodySubmitted: false };
     }
     const beforeSide = this.latestTerminalState();
-    const hasPendingEntryDraft = isPendingLiveCommandDraft(terminal, "/btw", {
-      allowBusy: true
-    });
+    const inlineCommand = sidePrompt ? `/btw ${sidePrompt}` : "/btw";
+    const hasPendingInlineDraft = isPendingSideEntryDraft(terminal, inlineCommand);
+    const hasPendingBareDraft = inlineCommand !== "/btw" && isPendingSideEntryDraft(terminal, "/btw");
+    const entryCommand = hasPendingBareDraft ? "/btw" : inlineCommand;
+    const bodySubmittedWithEntry = Boolean(sidePrompt) && entryCommand === inlineCommand;
     if (isStructuredLiveInteraction(terminal)) {
       log.warn("agent-live", "side-entry-blocked-picker", {
         reason: "picker-is-active"
       });
     } else {
       if (!shouldContinue()) return false;
-      writeInput(hasPendingEntryDraft ? "\r" : "/btw\r");
+      writeInput(hasPendingInlineDraft || hasPendingBareDraft ? "\r" : `${entryCommand}\r`);
     }
     const deadline = Date.now() + (this.opts.sideSwitchTimeoutMs ?? SIDE_SWITCH_TIMEOUT_MS);
-    let lastDraftRetryAt = hasPendingEntryDraft ? Date.now() : 0;
+    let lastDraftRetryAt = hasPendingInlineDraft || hasPendingBareDraft ? Date.now() : 0;
     let entryRetries = 0;
     let entrySent = !isStructuredLiveInteraction(terminal);
     while (Date.now() < deadline) {
@@ -8393,23 +8398,23 @@ var LiveTerminalSession = class {
       if (isLiveSideConversation(current) && (current !== beforeSide || isLiveSideConversation(beforeSide))) {
         this.markSideConversationSeen(Date.now());
         await delay(SIDE_COMMAND_SETTLE_MS);
-        return true;
+        return { bodySubmitted: bodySubmittedWithEntry };
       }
-      if (!isStructuredLiveInteraction(current) && Date.now() - lastDraftRetryAt >= SIDE_ENTRY_RETRY_INTERVAL_MS && isPendingLiveCommandDraft(current, "/btw", { allowBusy: true })) {
+      if (!isStructuredLiveInteraction(current) && Date.now() - lastDraftRetryAt >= SIDE_ENTRY_RETRY_INTERVAL_MS && isPendingSideEntryDraft(current, entryCommand)) {
         lastDraftRetryAt = Date.now();
         entryRetries += 1;
         log.warn("agent-live", "side-command-confirm-draft", {
-          commandText: "/btw",
+          commandText: entryCommand,
           terminalBusy: isLiveTerminalBusy(current),
           attempt: entryRetries
         });
         if (!shouldContinue()) return false;
         writeInput("\r");
       }
-      if (!entrySent && !isStructuredLiveInteraction(current) && !isPendingLiveCommandDraft(current, "/btw", { allowBusy: true }) && (current === beforeSide || isLiveMainConversation(current))) {
+      if (!entrySent && !isStructuredLiveInteraction(current) && !isPendingSideEntryDraft(current, entryCommand) && (current === beforeSide || isLiveMainConversation(current))) {
         entrySent = true;
         if (!shouldContinue()) return false;
-        writeInput("/btw\r");
+        writeInput(`${entryCommand}\r`);
       }
       await delay(Math.min(SIDE_ENTRY_RETRY_POLL_MS, Math.max(1, deadline - Date.now())));
     }
@@ -8640,6 +8645,7 @@ let lastHistoryPane = '';
 let lastHistoryEnd = -1;
 let lastHistoryFingerprint = '';
 let inputBuffer = '';
+let pasteSequence = 0;
 
 process.on('uncaughtException', (error) => {
   process.stderr.write('tmux live helper crashed: ' + (error && error.stack ? error.stack : String(error)) + '\n');
@@ -8917,9 +8923,33 @@ function sendLiteral(text) {
   sendKeys(['-l', text]);
 }
 
-function sendBracketedPaste(text) {
-  if (!text) return;
-  sendKeys(['-l', '\x1b[200~' + text + '\x1b[201~']);
+function sendPaste(text) {
+  if (!text) return true;
+  const bufferName = 'argbridge-' + process.pid + '-' + (++pasteSequence);
+  const loaded = tmux(['load-buffer', '-b', bufferName, '-'], { input: text });
+  if (loaded.status !== 0) {
+    writeError('failed to load tmux input buffer', loaded);
+    return false;
+  }
+  // -p asks tmux to add bracketed-paste framing only when the target
+  // application enabled it. Codex then receives one Paste event, clears its
+  // non-bracketed paste-burst Enter suppression, and interprets the following
+  // Enter as submit even when the machine is slow. -r preserves multiline
+  // prompts and -d makes the per-write buffer one-shot.
+  const pasted = tmux([
+    'paste-buffer',
+    '-p',
+    '-r',
+    '-d',
+    '-b',
+    bufferName,
+    '-t',
+    target,
+  ]);
+  if (pasted.status === 0) return true;
+  writeError('failed to paste tmux input buffer', pasted);
+  tmux(['delete-buffer', '-b', bufferName], { stdio: 'ignore' });
+  return false;
 }
 
 function sendInput(input) {
@@ -8980,8 +9010,10 @@ function sendInput(input) {
   const shouldSubmit = input.endsWith('\r') || input.endsWith('\n');
   const body = shouldSubmit ? input.replace(/[\r\n]+$/u, '') : input;
   const normalized = body.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-  if (normalized.includes('\n')) sendBracketedPaste(normalized);
-  else sendLiteral(normalized);
+  // Do not synthesize bracket markers with send-keys. tmux's native paste
+  // transaction is aware of the pane's negotiated terminal mode and avoids
+  // the Codex race where a rapid literal stream plus Enter becomes a newline.
+  if (normalized && !sendPaste(normalized)) sendLiteral(normalized);
   if (shouldSubmit) sendKeys(['Enter']);
 }
 
@@ -9194,6 +9226,9 @@ function isPendingLiveCommandDraft(input, prompt, options = {}) {
   }
   const draft = new RegExp(`^[\u203A\u276F>]\\s*${escapeRegExp(command)}\\s*$`, "iu");
   return cleaned.split("\n").slice(-12).some((line) => draft.test(line.trim()));
+}
+function isPendingSideEntryDraft(input, command) {
+  return isPendingLiveCommandDraft(input, command, { allowBusy: true }) || isPendingLivePromptDraft(input, command);
 }
 function isPendingLivePromptDraft(input, prompt) {
   const echo = prompt.trim();
