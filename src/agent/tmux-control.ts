@@ -64,6 +64,13 @@ export interface AgentTmuxControl {
   /** Captures only the current scope's active or bound pane. */
   tail?(scopeId: string, lineCount: number, cwd?: string): Promise<TmuxPaneTail>;
   diagnostics?(scopeId: string, cwd?: string): Promise<LiveSessionDiagnostics>;
+  /** Inject one already-authorized picker control into the live session. */
+  sendInput?(
+    scopeId: string,
+    input: string,
+    cwd?: string,
+    stillActive?: () => boolean,
+  ): Promise<boolean>;
   /** Sends one guarded Ctrl-C to a durable terminal when no live handle exists. */
   interrupt?(scopeId: string, cwd?: string, options?: TmuxInterruptOptions): Promise<boolean>;
   /** Restores a persistent artifact grant to one bridge-managed tmux session. */

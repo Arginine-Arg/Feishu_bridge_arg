@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.2.5",
+  version: "1.2.6",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -6051,7 +6051,7 @@ function isActivityConnectorLine(line) {
 }
 function isExplicitPickerHeading(line) {
   const trimmed = line.trim();
-  return /^(?:select|choose|pick)\b/iu.test(trimmed) || /^(?:reasoning (?:effort|level)|skills?)\b/iu.test(trimmed) || /^(?:command )?requires?\s+(?:approval|confirmation)\b/iu.test(trimmed) || /^resume\s+previous\s+conversation\b/iu.test(trimmed) || /^(?:请选择|请(?:输入|回复).*(?:选项|编号|是|否)|等待(?:你|用户)(?:的)?(?:输入|选择|确认))/u.test(trimmed) || /\b(?:update\s+available|claude\s+code\s+running\s+in\s+bypass\s+permissions\s+mode)\b/iu.test(trimmed);
+  return /^(?:select|choose|pick)\b/iu.test(trimmed) || /^(?:reasoning (?:effort|level)|skills?)\b/iu.test(trimmed) || /^(?:command )?requires?\s+(?:approval|confirmation)\b/iu.test(trimmed) || /^resume\s+previous\s+conversation\b/iu.test(trimmed) || isApprovalPickerHeading(trimmed) || /^(?:请选择|请(?:输入|回复).*(?:选项|编号|是|否)|等待(?:你|用户)(?:的)?(?:输入|选择|确认))/u.test(trimmed) || /\b(?:update\s+available|claude\s+code\s+running\s+in\s+bypass\s+permissions\s+mode)\b/iu.test(trimmed);
 }
 function hasBareNavigationAnchor(lines, index) {
   for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
@@ -6133,15 +6133,21 @@ function interactionCandidate(input) {
   const recent = input.split("\n").map((line) => line.trimEnd()).filter((line) => Boolean(line.trim())).filter((line) => !/^_(?:🧠 正在思考…|🧰 正在调用工具…|✍️ 正在输出…)_$/u.test(line.trim())).slice(-MAX_INTERACTION_LINES);
   if (recent.length === 0) return void 0;
   let start = -1;
+  let approvalStart = -1;
   for (let index = 0; index < recent.length; index += 1) {
     const line = recent[index].trim();
+    if (isApprovalPickerHeading(line)) approvalStart = index;
     if (start >= 0 && /^\s*(?:do\s+you|would\s+you|shall\s+i|which\s+)/iu.test(line)) continue;
     if (isLiveInteractionPromptStart(line)) start = index;
   }
+  if (approvalStart >= 0) start = approvalStart;
   if (start >= 0 && isCodexResumeControlLine(recent[start])) {
     return recent.slice(Math.max(0, start - 24));
   }
   if (start >= 0) {
+    if (isApprovalPickerHeading(recent[start])) {
+      return mergeRepeatedPickerOptions(recent, start, recent.slice(start));
+    }
     let optionStart = start;
     while (optionStart > 0 && isOptionSyntaxLineAt(recent, optionStart - 1)) {
       optionStart -= 1;
@@ -6150,6 +6156,10 @@ function interactionCandidate(input) {
     return mergeRepeatedPickerOptions(recent, start, recent.slice(optionStart));
   }
   return fallbackInteractionCandidate(recent);
+}
+function isApprovalPickerHeading(line) {
+  const trimmed = line.trim().replace(/^(?:[│└╰>•◦]\s*)+/u, "");
+  return /^(?:command\s+)?requires?\s+(?:approval|confirmation)\b/iu.test(trimmed) || /^(?:would\s+you\s+like|do\s+you\s+want|shall\s+i)\b[\s\S]{0,240}\b(?:run|allow|approve|proceed|continue|execute|apply|install|overwrite|delete|save|cancel|make|grant|send|edit|update)\b/iu.test(trimmed);
 }
 function fallbackInteractionCandidate(lines) {
   const numericBlock = latestContiguousNumericOptionBlock(lines);
@@ -6436,7 +6446,8 @@ function isStructuredInteraction(lines, requireCompletePickerFrame) {
   const completeNumberedPicker = numberedChoiceCount >= 2 || hasNumberedChoice && (hasKeyHint || hasPromptMarker || hasInputPrompt);
   const genericOptionCount = requireCompletePickerFrame ? options.length >= 2 : options.length >= 2 || hasOptions && (hasInputPrompt || hasPromptTitle);
   const hasStrongOptionRows = lines.some((line) => isStrongOptionSyntaxLine(line));
-  const hasCodeLikeNoise = lines.some((line) => isCodeLikeInteractionLine(line));
+  const hasApprovalCommandSurface = lines.some((line) => isApprovalPickerHeading(line)) && hasKeyHint && numberedChoiceCount >= 2;
+  const hasCodeLikeNoise = !hasApprovalCommandSurface && lines.some((line) => isCodeLikeInteractionLine(line));
   const hasRepeatedKeyedOptionLabels = repeatedKeyedOptionLabelGroups(options) >= 2;
   const hasCleanNumericOptionBlock = hasContiguousNumericOptionBlock(lines);
   const hasSelectedNumberedChoice = options.some(
@@ -7260,6 +7271,7 @@ var PIPE_STARTUP_OUTPUT_GRACE_MS = 2500;
 var COMMAND_FRESH_SESSION_GRACE_MS = 1200;
 var FRESH_TERMINAL_GRACE_MS = 2500;
 var CONTROL_KEY_GAP_MS = 40;
+var CONTROL_PICKER_WAIT_MS = 5e3;
 var SIDE_COMMAND_SETTLE_MS = 450;
 var SIDE_SWITCH_TIMEOUT_MS = 12e4;
 var SIDE_ENTRY_RETRY_POLL_MS = 160;
@@ -7273,7 +7285,6 @@ var COMMAND_IDLE_MS = 2500;
 var COMMAND_NO_OUTPUT_IDLE_MS = 8e3;
 var COMPACT_NO_OUTPUT_IDLE_MS = 6e4;
 var COMMAND_DRAFT_CONFIRM_DELAY_MS = 2500;
-var CONTROL_LITERAL_CONFIRM_DELAY_MS = 900;
 var NORMAL_SUBMIT_RETRY_DELAY_MS = 1200;
 var NORMAL_SUBMIT_RETRY_POLL_MS = 400;
 var NORMAL_SUBMIT_RETRY_MAX_ATTEMPTS = 5;
@@ -7333,6 +7344,16 @@ var LiveSessionPool = class {
       retryCount: 0
     };
   }
+  /**
+   * Send a picker/control key through the existing live terminal without
+   * creating a second run or touching the main ActiveRuns handle. This is the
+   * control lane used while a parent task is paused at an approval picker.
+   */
+  async sendInput(key, input, _cwd, stillActive = () => true) {
+    const session = this.sessions.get(key);
+    if (!session) return false;
+    return session.sendControlInput(input, stillActive);
+  }
 };
 var LiveTerminalSession = class {
   signature;
@@ -7377,6 +7398,8 @@ var LiveTerminalSession = class {
   turnLastInputAt;
   turnLastOutputAt;
   turnLastError;
+  controlInputTail = Promise.resolve();
+  controlInputGeneration = 0;
   constructor(opts, onClose = () => {
   }) {
     this.opts = opts;
@@ -7391,9 +7414,11 @@ var LiveTerminalSession = class {
   }
   getDiagnostics() {
     const snapshot = this.latestTerminalState();
+    const screenPickerVisible = isStructuredLiveInteraction(snapshot);
+    const diagnosticPhase = this.turnPhase === "idle" && screenPickerVisible ? "picker" : this.turnPhase;
     const inputState = this.turnPromptPreview ? isLiveTerminalReady(snapshot) ? "empty" : isPendingLivePromptDraft(snapshot, this.turnPromptPreview) ? "draft" : this.turnPhase === "submitted" || this.turnPhase === "busy" || this.turnPhase === "streaming" ? "submitted" : "unknown" : "unknown";
     return {
-      phase: this.turnPhase,
+      phase: diagnosticPhase,
       sideConversation: this.hasSideConversationEvidence(snapshot),
       ...this.turnGeneration ? { generation: this.turnGeneration } : {},
       ...this.turnPromptPreview ? { promptPreview: previewLiveText(this.turnPromptPreview) } : {},
@@ -7477,6 +7502,57 @@ var LiveTerminalSession = class {
       },
       waitForExit: async () => true
     };
+  }
+  async sendControlInput(input, stillActive = () => true) {
+    const generation = ++this.controlInputGeneration;
+    const task = this.controlInputTail.then(() => this.sendControlInputNow(input, generation, stillActive));
+    this.controlInputTail = task.then(() => void 0, () => void 0);
+    return task;
+  }
+  async sendControlInputNow(input, generation, stillActive) {
+    if (!stillActive() || this.closed || !this.isAlive()) return false;
+    const trimmed = input.trim();
+    if (!trimmed) return false;
+    if (!isLiveInterruptInput(trimmed)) {
+      const pickerVisible = () => this.turnPhase === "picker" || isStructuredLiveInteraction(this.latestTerminalState());
+      const deadline = Date.now() + CONTROL_PICKER_WAIT_MS;
+      while (!pickerVisible() && Date.now() < deadline && !this.closed && this.isAlive()) {
+        await delay(80);
+      }
+      if (!stillActive() || !pickerVisible()) return false;
+    }
+    const controls = parseLiveControlSequence(trimmed);
+    if (controls) {
+      for (let index = 0; index < controls.length; index += 1) {
+        const control = controls[index];
+        const previous = controls[index - 1] ?? "";
+        if (index > 0) {
+          await delay(CONTROL_KEY_GAP_MS);
+        }
+        if (generation !== this.controlInputGeneration || !stillActive() || this.closed || !this.isAlive()) return false;
+        if (control === "\r" && isLiteralPickerChoice(previous)) {
+          continue;
+        }
+        if (isLiteralPickerChoice(control) && controls[index + 1] === "\r") {
+          this.write(control + "\r");
+          index += 1;
+        } else {
+          this.write(control);
+        }
+      }
+      return true;
+    }
+    if (isNumericControlLiteral(trimmed)) {
+      const approvalSurface = isApprovalControlSurface(this.latestTerminalState());
+      if (!stillActive()) return false;
+      this.write(approvalSurface ? `${trimmed}\r` : trimmed);
+      return true;
+    }
+    if (shouldDeferControlLiteralSubmit(trimmed)) {
+      this.write(trimmed);
+      return true;
+    }
+    return false;
   }
   async close(reason) {
     await this.stopHelper(reason);
@@ -7719,7 +7795,6 @@ var LiveTerminalSession = class {
     let timer;
     let outputTimer;
     let slashConfirmTimer;
-    let controlLiteralConfirmTimer;
     let normalSubmitRetryTimer;
     let acceptingOutput = false;
     let startupInteractionText;
@@ -7808,7 +7883,6 @@ var LiveTerminalSession = class {
       }
       if (timer) clearTimeout(timer);
       cancelSlashCommandConfirm();
-      if (controlLiteralConfirmTimer) clearTimeout(controlLiteralConfirmTimer);
       cancelNormalSubmitRetry();
       flushOutput();
       if (commandMode && isStatusLiveCommand(turnPrompt)) {
@@ -8075,11 +8149,6 @@ var LiveTerminalSession = class {
         const resultOutput = isLiveCommandResultOutput(text, turnPrompt);
         const statusSurfaceOutput = !isStatusLiveCommand(turnPrompt) || this.terminalInfo?.backend !== "tmux" || isLiveStatusPanelOutput(output.lastAcceptedText());
         const meaningfulCommandResult = resultOutput && statusSurfaceOutput;
-        if (controlLiteralConfirmTimer) {
-          clearTimeout(controlLiteralConfirmTimer);
-          controlLiteralConfirmTimer = void 0;
-          log.info("agent-live", "control-literal-output-before-enter", { input: turnPrompt });
-        }
         sawAcceptedOutput = true;
         if (meaningfulCommandResult) {
           sawCommandResultOutput = true;
@@ -8138,7 +8207,6 @@ var LiveTerminalSession = class {
       if (timer) clearTimeout(timer);
       if (outputTimer) clearTimeout(outputTimer);
       if (slashConfirmTimer) clearTimeout(slashConfirmTimer);
-      if (controlLiteralConfirmTimer) clearTimeout(controlLiteralConfirmTimer);
       if (settlingTimer) clearTimeout(settlingTimer);
       settlingTimer = void 0;
       settling = false;
@@ -8279,27 +8347,32 @@ var LiveTerminalSession = class {
             const controlKeys = inputMode === "control" ? parseLiveControlSequence(turnPrompt) : null;
             if (controlKeys) {
               for (let i = 0; i < controlKeys.length; i++) {
-                if (i > 0) await delay(CONTROL_KEY_GAP_MS);
+                const control = controlKeys[i];
+                if (isLiteralPickerChoice(control) && controlKeys[i + 1] === "\r") {
+                  if (done || interruption.requested || interruption.detached) break submitTurn;
+                  writeTurn(control + "\r");
+                  markInput();
+                  i += 1;
+                  continue;
+                }
+                if (i > 0) {
+                  await delay(CONTROL_KEY_GAP_MS);
+                }
                 if (done || interruption.requested || interruption.detached) break submitTurn;
-                writeTurn(controlKeys[i]);
+                writeTurn(control);
                 markInput();
               }
             } else {
               if (commandMode) log.info("agent-live", "command-submit", { commandText: turnPrompt });
               if (inputMode === "control" && isNumericControlLiteral(turnPrompt)) {
                 log.info("agent-live", "control-literal-type", { input: turnPrompt });
-                writeTurn(turnPrompt);
+                const approvalSurface = isApprovalControlSurface(this.latestTerminalState());
+                writeTurn(approvalSurface ? `${turnPrompt}\r` : turnPrompt);
                 markInput();
               } else if (inputMode === "control" && shouldDeferControlLiteralSubmit(turnPrompt)) {
                 log.info("agent-live", "control-literal-type", { input: turnPrompt });
                 writeTurn(turnPrompt);
                 markInput();
-                controlLiteralConfirmTimer = setTimeout(() => {
-                  controlLiteralConfirmTimer = void 0;
-                  if (done || interruption.requested || interruption.detached || sawAcceptedOutput) return;
-                  log.info("agent-live", "control-literal-confirm", { input: turnPrompt });
-                  writeTurn("\r");
-                }, CONTROL_LITERAL_CONFIRM_DELAY_MS);
               } else {
                 writeTurn(`${turnPrompt}\r`);
                 markInput();
@@ -8646,6 +8719,7 @@ let lastHistoryEnd = -1;
 let lastHistoryFingerprint = '';
 let inputBuffer = '';
 let pasteSequence = 0;
+const PASTE_SUBMIT_SETTLE_MS = 160;
 
 process.on('uncaughtException', (error) => {
   process.stderr.write('tmux live helper crashed: ' + (error && error.stack ? error.stack : String(error)) + '\n');
@@ -8952,6 +9026,14 @@ function sendPaste(text) {
   return false;
 }
 
+function settleBeforeSubmit() {
+  // If Codex has not enabled bracketed paste yet, its non-bracketed burst
+  // detector suppresses Enter for roughly 120ms. Keep the fallback path safe
+  // during startup/reconnect races as well as during normal framed pastes.
+  const waiter = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(waiter, 0, 0, PASTE_SUBMIT_SETTLE_MS);
+}
+
 function sendInput(input) {
   // Ctrl-C is a lifecycle command, but it still has to reach the pane the
   // user currently selected. Normal text goes through ensureLivePane(),
@@ -9006,6 +9088,17 @@ function sendInput(input) {
     sendKeys(['Escape']);
     return;
   }
+  if (input === '\t') {
+    // C-i is the terminal byte for Tab and is handled consistently by tmux
+    // across PTY/canonical modes (the symbolic Tab key is not forwarded by
+    // some tmux builds when the pane has no client attached).
+    sendKeys(['C-i']);
+    return;
+  }
+  if (input === ' ') {
+    sendKeys(['Space']);
+    return;
+  }
 
   const shouldSubmit = input.endsWith('\r') || input.endsWith('\n');
   const body = shouldSubmit ? input.replace(/[\r\n]+$/u, '') : input;
@@ -9014,7 +9107,10 @@ function sendInput(input) {
   // transaction is aware of the pane's negotiated terminal mode and avoids
   // the Codex race where a rapid literal stream plus Enter becomes a newline.
   if (normalized && !sendPaste(normalized)) sendLiteral(normalized);
-  if (shouldSubmit) sendKeys(['Enter']);
+  if (shouldSubmit) {
+    if (normalized) settleBeforeSubmit();
+    sendKeys(['Enter']);
+  }
 }
 
 function terminalReadyForFullReconcile(snapshot) {
@@ -9321,6 +9417,14 @@ function isLiveMainConversationFooter(lines) {
 function shouldDeferControlLiteralSubmit(input) {
   const trimmed = input.trim();
   return /^\d{1,2}$/u.test(trimmed) || /^(?:y|yes|n|no)$/iu.test(trimmed);
+}
+function isApprovalControlSurface(input) {
+  const recent = cleanTerminalOutput(input).split("\n").slice(-32).join(" ");
+  if (/(?:select\s+(?:a\s+)?model|reasoning\s+(?:effort|level))/iu.test(recent)) return false;
+  return /(?:would\s+you\s+like|do\s+you\s+want|command\s+requires?\s+(?:approval|confirmation)|yes,?\s+proceed|no,?\s+cancel|yes,?\s+(?:grant|make|send)|no,?\s+continue|\b(?:y|yes)\s*\/\s*(?:n|no)\b|\[(?:y|yes)\s*\/\s*(?:n|no)\]|\((?:y|yes)\s*\/\s*(?:n|no)\))/iu.test(recent);
+}
+function isLiteralPickerChoice(input) {
+  return /^(?:\d{1,2}|y|yes|n|no)$/iu.test(input.trim());
 }
 function isNumericControlLiteral(input) {
   return /^\d{1,2}$/u.test(input.trim());
@@ -10643,6 +10747,7 @@ var ClaudeAdapter = class {
           ...terminal ? { terminal: { backend: "tmux", ...terminal } } : {}
         };
       },
+      sendInput: (scopeId, input, cwd, stillActive) => this.liveSessions.sendInput(scopeId, input, cwd, stillActive),
       interrupt: (scopeId, cwd, options) => this.tmuxBindings.interrupt(scopeId, cwd, options),
       restoreArtifactDelivery: (scopeId, artifact) => this.tmuxBindings.restoreManagedArtifactDelivery(scopeId, artifact)
     };
@@ -11291,6 +11396,7 @@ var CodexAdapter = class {
           ...terminal ? { terminal: { backend: "tmux", ...terminal } } : {}
         };
       },
+      sendInput: (scopeId, input, cwd, stillActive) => this.liveSessions.sendInput(scopeId, input, cwd, stillActive),
       interrupt: (scopeId, cwd, options) => this.tmuxBindings.interrupt(scopeId, cwd, options),
       restoreArtifactDelivery: (scopeId, artifact) => this.tmuxBindings.restoreManagedArtifactDelivery(scopeId, artifact)
     };
@@ -17021,7 +17127,7 @@ function verifyDeferredInputToken(deps, payload, scope, operatorId, action) {
   }
   return true;
 }
-function forwardLiveInput(deps, payload, scope, threadId, mode) {
+async function forwardLiveInput(deps, payload, scope, threadId, mode) {
   const input = typeof payload.input === "string" ? payload.input.trim() : "";
   if (!input) return;
   log.info("cardAction", "live-input", { scope, input });
@@ -17043,7 +17149,94 @@ function forwardLiveInput(deps, payload, scope, threadId, mode) {
     },
     "control"
   );
-  deps.pending.pushFront(scope, synthetic, { immediate: true });
+  const activeHandle = [deps.activeRuns.getSide(scope), deps.activeRuns.get(scope)].find(
+    (handle) => Boolean(handle && !handle.interrupted && !handle.stopRequested && !handle.detached)
+  );
+  let pickerConfirmed = !deps.liveDiagnostics;
+  if (deps.liveDiagnostics) {
+    try {
+      const diagnostics = await Promise.race([
+        deps.liveDiagnostics(scope),
+        new Promise((resolve5) => setTimeout(() => resolve5(void 0), 2e3))
+      ]);
+      if (!diagnostics) {
+        log.info("cardAction", "live-input-diagnostics-timeout", { scope });
+        return {
+          toast: {
+            type: "error",
+            content: "\u7EC8\u7AEF\u72B6\u6001\u6682\u65F6\u65E0\u6CD5\u786E\u8BA4\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5\u6700\u65B0\u9009\u62E9\u5361\u7247"
+          }
+        };
+      }
+      pickerConfirmed = diagnostics.live ? diagnostics.live.phase === "picker" : Boolean(diagnostics.picker);
+    } catch (err) {
+      log.warn("cardAction", "live-input-diagnostics-failed", {
+        scope,
+        err: err instanceof Error ? err.message : String(err)
+      });
+      return {
+        toast: {
+          type: "error",
+          content: "\u7EC8\u7AEF\u72B6\u6001\u6682\u65F6\u65E0\u6CD5\u786E\u8BA4\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5\u6700\u65B0\u9009\u62E9\u5361\u7247"
+        }
+      };
+    }
+  }
+  if (activeHandle && !activeHandle.interrupted && !activeHandle.stopRequested && !activeHandle.detached && deps.agent.tmux?.sendInput) {
+    if (pickerConfirmed) {
+      const cwd = deps.workspaces.cwdFor(scope) ?? deps.controls.profileConfig.workspaces.default;
+      try {
+        const stillActive = () => {
+          const currentHandle = [deps.activeRuns.getSide(scope), deps.activeRuns.get(scope)].find(
+            (handle) => Boolean(handle && !handle.interrupted && !handle.stopRequested && !handle.detached)
+          );
+          return currentHandle === activeHandle;
+        };
+        if (stillActive() && await deps.agent.tmux.sendInput(scope, input, cwd, stillActive)) {
+          log.info("cardAction", "live-input-injected", { scope, input });
+          return {
+            toast: {
+              type: "success",
+              content: "\u5DF2\u63D0\u4EA4\uFF0C\u6B63\u5728\u7B49\u5F85\u7EC8\u7AEF\u54CD\u5E94"
+            }
+          };
+        }
+      } catch (err) {
+        log.warn("cardAction", "live-input-injection-failed", {
+          scope,
+          err: err instanceof Error ? err.message : String(err)
+        });
+      }
+      return {
+        toast: {
+          type: "error",
+          content: "\u9009\u62E9\u6309\u952E\u672A\u9001\u8FBE\u7EC8\u7AEF\uFF0C\u8BF7\u7B49\u5F85\u6700\u65B0\u9009\u62E9\u5361\u7247\u540E\u91CD\u8BD5"
+        }
+      };
+    } else {
+      log.info("cardAction", "live-input-not-at-picker", { scope });
+      return {
+        toast: {
+          type: "error",
+          content: "\u9009\u62E9\u7A97\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u53D1\u9001\u547D\u4EE4\u6216\u7B49\u5F85\u6700\u65B0\u9009\u62E9\u5361\u7247"
+        }
+      };
+    }
+  }
+  if (!activeHandle && deps.liveDiagnostics && !pickerConfirmed) {
+    log.info("cardAction", "live-input-not-at-picker", { scope });
+    return {
+      toast: {
+        type: "error",
+        content: "\u9009\u62E9\u7A97\u5DF2\u53D8\u5316\uFF0C\u8BF7\u91CD\u65B0\u53D1\u9001\u547D\u4EE4\u6216\u7B49\u5F85\u6700\u65B0\u9009\u62E9\u5361\u7247"
+      }
+    };
+  }
+  deps.pending.pushFront(scope, synthetic, {
+    immediate: true,
+    bypassBlock: true,
+    priorityOrder: "fifo"
+  });
   return {
     toast: {
       type: "success",
@@ -19757,6 +19950,7 @@ var PendingQueue = class {
     }
     this.map.set(scope, {
       messages: [msg],
+      priorityCount: 0,
       timer: this.blocked.has(scope) ? void 0 : this.armTimer(scope)
     });
     return 1;
@@ -19789,12 +19983,22 @@ var PendingQueue = class {
     const existing = this.map.get(scope);
     if (existing) {
       if (existing.timer) clearTimeout(existing.timer);
-      existing.messages.unshift(...incoming);
+      if (deferred.length > 0) {
+        const existingPriority = existing.messages.slice(0, existing.priorityCount);
+        const existingOrdinary = existing.messages.slice(existing.priorityCount);
+        existing.messages = options.priorityOrder === "fifo" ? [...existingPriority, ...priority, ...deferred, ...existingOrdinary] : [...priority, ...existingPriority, ...deferred, ...existingOrdinary];
+      } else if (options.priorityOrder === "fifo") {
+        existing.messages.splice(existing.priorityCount, 0, ...priority);
+      } else {
+        existing.messages.unshift(...priority);
+      }
+      existing.priorityCount += priority.length;
       existing.timer = this.blocked.has(scope) && !options.preempt && !options.bypassBlock ? void 0 : this.armTimer(scope, options.immediate ? 0 : void 0);
       return existing.messages.length;
     }
     this.map.set(scope, {
       messages: incoming,
+      priorityCount: priority.length,
       timer: this.blocked.has(scope) && !options.preempt && !options.bypassBlock ? void 0 : this.armTimer(scope, options.immediate ? 0 : void 0)
     });
     return incoming.length;
@@ -21390,6 +21594,40 @@ async function intakeMessage(deps) {
     return;
   }
   const route = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
+  if (route.nativeMode === "control") {
+    const recovery = recoverLiveControlScope(
+      liveInteractionByScope,
+      msg.chatId,
+      scope
+    );
+    if (recovery.ambiguous && recovery.ambiguous.length > 0) {
+      await channel.send(
+        msg.chatId,
+        { markdown: `\u26A0\uFE0F \u68C0\u6D4B\u5230\u591A\u4E2A\u53EF\u80FD\u7684\u9009\u62E9\u7A97\uFF08${recovery.ambiguous.map((item) => `\`${item}\``).join("\u3001")}\uFF09\uFF0C\u672A\u731C\u6D4B\u76EE\u6807\u3002\u8BF7\u5728\u5BF9\u5E94\u8BDD\u9898\u4E2D\u91CD\u8BD5\u3002` },
+        {
+          replyTo: msg.messageId,
+          ...threadId ? { replyInThread: true } : {}
+        }
+      );
+      return;
+    }
+    if (recovery.scope && recovery.scope !== scope) {
+      const requestedScope = scope;
+      scope = recovery.scope;
+      const recoveredThreadId = threadIdForChatScope(msg.chatId, scope);
+      if (!threadId && recoveredThreadId) {
+        threadId = recoveredThreadId;
+        emsg = { ...emsg, threadId };
+        route.msg = { ...route.msg, threadId };
+        chatMode = "topic";
+      }
+      log.info("agent-live", "picker-scope-recovered", {
+        requestedScope,
+        scope,
+        threadId
+      });
+    }
+  }
   const sideExitRequested = route.nativeMode === "side-exit";
   if (sideExitRequested) {
     const requestedScope = scope;
@@ -21433,7 +21671,7 @@ async function intakeMessage(deps) {
   }
   const pickerActive = Boolean(liveInteractionState(sessions, liveInteractionByScope, scope));
   const fastLifecycleCommand = /^\/stop(?:\s|$)/iu.test(route.msg.content.trim()) || route.nativeMode === "side" || route.nativeMode === "side-exit";
-  const existingSideState = fastLifecycleCommand ? sideConversationState(sideConversationByScope, scope) : await refreshSideConversationState(
+  const existingSideState = fastLifecycleCommand || route.nativeMode === "control" ? sideConversationState(sideConversationByScope, scope) : await refreshSideConversationState(
     sideConversationByScope,
     scope,
     agent,
@@ -21554,9 +21792,90 @@ async function intakeMessage(deps) {
     routedMsg,
     routedMsg.content.trimStart().startsWith("/") ? "command" : pickerActive ? "control" : void 0
   ) : routedMsg;
-  const priorityLiveControl = liveInputModeForMessage(agentMsg) === "control" && (isLiveInterruptInput(agentMsg.content) || pickerActive);
   const nativeInputMode = liveInputModeForMessage(agentMsg);
   const priorityNativeCommand = isForceLiveAgentCommandMessage(agentMsg) && (nativeInputMode === "command" || nativeInputMode === "side" || nativeInputMode === "side-exit");
+  const activeControlHandle = [activeRuns.getSide(scope), activeRuns.get(scope)].find(
+    (handle) => Boolean(
+      handle && !handle.interrupted && !handle.stopRequested && !handle.detached
+    )
+  );
+  const explicitInterruptControl = isLiveInterruptInput(agentMsg.content);
+  let terminalPickerActive = explicitInterruptControl;
+  let pickerDiagnosticsAvailable = false;
+  if (nativeInputMode === "control" && !explicitInterruptControl && activeControlHandle && agent.tmux?.diagnostics) {
+    pickerDiagnosticsAvailable = true;
+    const diagnostics = await withBoundedSideDiagnostic(
+      agent.tmux.diagnostics(
+        scope,
+        workspaces.cwdFor(scope) ?? controls.profileConfig.workspaces.default
+      ),
+      2e3
+    );
+    if (diagnostics) {
+      terminalPickerActive = diagnostics.phase === "picker";
+    } else {
+      pickerDiagnosticsAvailable = false;
+      log.info("intake", "picker-diagnostics-unavailable", { scope });
+    }
+  }
+  const priorityControlEvidence = terminalPickerActive || !pickerDiagnosticsAvailable && pickerActive;
+  const explicitPrefixedControl = liveInputModeForMessage(agentMsg) === "control" && route.forceNative;
+  const priorityLiveControl = liveInputModeForMessage(agentMsg) === "control" && (isLiveInterruptInput(agentMsg.content) || priorityControlEvidence || explicitPrefixedControl);
+  const canDirectLiveControl = liveInputModeForMessage(agentMsg) === "control" && (isLiveInterruptInput(agentMsg.content) || priorityControlEvidence || explicitPrefixedControl && Boolean(activeControlHandle && agent.tmux?.sendInput));
+  if (explicitPrefixedControl && activeControlHandle && !agent.tmux?.sendInput) {
+    await channel.send(
+      msg.chatId,
+      { markdown: "\u26A0\uFE0F \u5F53\u524D live \u9002\u914D\u5668\u4E0D\u652F\u6301\u76F4\u63A5\u53D1\u9001\u9009\u62E9\u6309\u952E\uFF0C\u672A\u4FEE\u6539\u6B63\u5728\u8FD0\u884C\u7684\u4EFB\u52A1\u3002" },
+      {
+        replyTo: msg.messageId,
+        ...chatMode === "topic" && threadId ? { replyInThread: true } : {}
+      }
+    ).catch((err) => log.warn("intake", "live-control-unsupported-reply-failed", { scope, err: String(err) }));
+    return;
+  }
+  if (canDirectLiveControl && nativeInputMode === "control") {
+    const activeHandle = activeControlHandle;
+    const sendInput = agent.tmux?.sendInput;
+    let directInjectionAttempted = false;
+    if (activeHandle && !activeHandle.interrupted && !activeHandle.stopRequested && !activeHandle.detached && sendInput) {
+      directInjectionAttempted = true;
+      const controlCwd = workspaces.cwdFor(scope) ?? controls.profileConfig.workspaces.default;
+      try {
+        const stillActive = () => {
+          const currentHandle = [activeRuns.getSide(scope), activeRuns.get(scope)].find(
+            (handle) => Boolean(
+              handle && !handle.interrupted && !handle.stopRequested && !handle.detached
+            )
+          );
+          return currentHandle === activeHandle;
+        };
+        if (stillActive() && await sendInput(scope, agentMsg.content, controlCwd, stillActive)) {
+          log.info("intake", "live-control-injected", {
+            scope,
+            input: agentMsg.content,
+            activeSide: Boolean(activeRuns.getSide(scope))
+          });
+          return;
+        }
+      } catch (err) {
+        log.warn("intake", "live-control-injection-failed", {
+          scope,
+          err: err instanceof Error ? err.message : String(err)
+        });
+      }
+    }
+    if (directInjectionAttempted) {
+      await channel.send(
+        msg.chatId,
+        { markdown: "\u26A0\uFE0F \u5F53\u524D\u9009\u62E9\u7A97\u65E0\u6CD5\u63A5\u6536\u8BE5\u64CD\u4F5C\uFF0C\u672A\u53D1\u9001\u6309\u952E\u3002\u8BF7\u7B49\u5F85\u6700\u65B0\u9009\u62E9\u5361\u7247\u540E\u91CD\u8BD5\u3002" },
+        {
+          replyTo: msg.messageId,
+          ...chatMode === "topic" && threadId ? { replyInThread: true } : {}
+        }
+      ).catch((err) => log.warn("intake", "live-control-failure-reply-failed", { scope, err: String(err) }));
+      return;
+    }
+  }
   if (priorityNativeCommand && activeRuns.hasAny(scope)) {
     log.info("intake", "native-command-preempt", {
       scope,
@@ -21573,11 +21892,19 @@ async function intakeMessage(deps) {
   const priorityLiveInput = priorityLiveControl || priorityNativeCommand;
   const size = priorityLiveInput ? pending.pushFront(scope, agentMsg, {
     immediate: true,
-    ...priorityNativeCommand ? { preempt: true } : {},
-    ...priorityNativeCommand && (nativeInputMode === "side" || nativeInputMode === "side-exit") ? { bypassBlock: true } : {}
+    priorityOrder: "fifo",
+    ...priorityNativeCommand || explicitPrefixedControl ? { preempt: true } : {},
+    // A picker control is already a complete action and must reach the
+    // native TUI even while the parent run keeps the conversational queue
+    // blocked. Without bypassBlock, `/codex 1` is merely placed ahead of
+    // the FIFO but still waits for the long task to finish—the exact
+    // symptom seen when the Feishu card is visible yet its choice does
+    // nothing. The explicit `/codex` prefix makes this safe even if the
+    // persisted picker marker was lost during a restart.
+    ...priorityControlEvidence || isLiveInterruptInput(agentMsg.content) || priorityNativeCommand && (nativeInputMode === "side" || nativeInputMode === "side-exit") ? { bypassBlock: true } : {}
   }) : pending.push(scope, agentMsg);
   log.info("intake", "queued", { scope, queueSize: size, debounceMs: DEBOUNCE_MS });
-  if (!priorityNativeCommand && pending.shouldAckBusy(scope)) {
+  if (!priorityNativeCommand && !priorityLiveControl && pending.shouldAckBusy(scope)) {
     void channel.send(
       msg.chatId,
       {
@@ -21709,6 +22036,29 @@ function sideConversationScopesForChat(map, chatId, phases = ["active", "opening
 function threadIdForChatScope(chatId, scope) {
   const prefix = `${chatId}:`;
   return scope.startsWith(prefix) ? scope.slice(prefix.length) || void 0 : void 0;
+}
+function recoverLiveControlScope(pickerMap, chatId, requestedScope) {
+  const prefix = `${chatId}:`;
+  const candidates = /* @__PURE__ */ new Set([
+    requestedScope,
+    ...[...pickerMap.keys()].filter((candidate) => candidate === chatId || candidate.startsWith(prefix))
+  ]);
+  const positive = [...candidates].filter((candidate) => {
+    const picker = liveInteractionStateFromMap(pickerMap, candidate);
+    return Boolean(picker);
+  });
+  if (positive.includes(requestedScope)) return {};
+  if (positive.length === 1) return { scope: positive[0] };
+  if (positive.length > 1) return { ambiguous: positive.sort() };
+  return {};
+}
+function liveInteractionStateFromMap(map, scope) {
+  const state = map.get(scope);
+  if (!state || state.expiresAt <= Date.now()) {
+    if (state) map.delete(scope);
+    return void 0;
+  }
+  return state;
 }
 async function recoverSideConversationScope(input) {
   const prefix = `${input.chatId}:`;
@@ -22244,7 +22594,7 @@ ${delta}`.slice(-64e3);
     }
     if (useLiveSession && (interaction || pickerLike)) {
       const currentState = liveInteractionState(sessions, liveInteractionByScope, scope);
-      if (currentState?.generation && currentState.generation !== execution.runId) return;
+      if (currentState?.generation && currentState.generation !== execution.runId && liveInputMode !== "control") return;
       const wasActive = Boolean(currentState);
       const previous = currentState;
       const nextSignature = interaction?.signature ?? previous?.signature;
@@ -23564,7 +23914,7 @@ function isReadyToPublishLiveInteraction(prompt) {
   );
 }
 function isPermissionApprovalPrompt(text) {
-  return isActionableBinaryConfirmation(text) || /\b(?:command|action|operation)\s+requires?\s+(?:approval|confirmation)\b/iu.test(text) || /\b(?:would\s+you\s+like|do\s+you\s+want)\s+to\s+(?:run|allow|approve|proceed|continue)\b/iu.test(text);
+  return isActionableBinaryConfirmation(text) || /\b(?:command|action|operation)\s+requires?\s+(?:approval|confirmation)\b/iu.test(text) || /\b(?:would\s+you\s+like|do\s+you\s+want)\s+to\s+(?:run|allow|approve|proceed|continue|make|grant|send|edit|update)\b/iu.test(text);
 }
 function isControlFooterOnly(text) {
   const lines = text.split("\n").map((line) => line.trim()).filter(Boolean);

@@ -1,5 +1,5 @@
 import type { CardActionEvent } from '@larksuite/channel';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ActiveRuns } from '../../../src/bot/active-runs.js';
 import type { ChatModeCache } from '../../../src/bot/chat-mode-cache.js';
 import { PendingQueue } from '../../../src/bot/pending-queue.js';
@@ -18,6 +18,7 @@ import { WorkspaceStore } from '../../../src/workspace/store.js';
 import { FakeAgentAdapter, type FakeAgentRun } from '../../helpers/fake-agent.js';
 import { createFakeChannel, type FakeChannel } from '../../helpers/fake-channel.js';
 import { createTmpProfile, type TmpProfile } from '../../helpers/tmp-profile.js';
+import type { LiveSessionDiagnostics } from '../../../src/agent/types.js';
 
 const cleanups: Array<() => Promise<void>> = [];
 
@@ -162,6 +163,52 @@ describe('signed card callback dispatch', () => {
     expect(liveInputModeForMessage(queued[0]!)).toBe('control');
   });
 
+  it('injects a live picker click into an active terminal instead of queueing behind its run', async () => {
+    const h = await createHarness();
+    const sendInput = vi.fn(async () => true);
+    h.agent.tmux = { sendInput } as unknown as NonNullable<typeof h.agent.tmux>;
+    const activeRun = h.agent.run({ runId: 'run-picker-active', prompt: 'running picker' }) as FakeAgentRun;
+    h.activeRuns.register('oc_group', activeRun);
+
+    const response = await h.dispatch({
+      cmd: 'live.input',
+      input: '1 enter',
+      __bridge_cb: true,
+      bridge_token: h.token('live_input', { nonce: 'nonce-live-picker-active' }),
+    });
+
+    expect(response).toEqual({
+      toast: { type: 'success', content: '已提交，正在等待终端响应' },
+    });
+    expect(sendInput.mock.calls[0]?.slice(0, 2)).toEqual(['oc_group', '1 enter']);
+    expect(activeRun.stopped).toBe(false);
+    expect(h.pending.cancel('oc_group')).toHaveLength(0);
+  });
+
+  it('rejects a stale live picker click when no active terminal is at a picker', async () => {
+    const h = await createHarness({
+      liveDiagnostics: async () => ({
+        live: {
+          phase: 'idle',
+          inputState: 'empty',
+          retryCount: 0,
+        },
+      }),
+    });
+
+    const response = await h.dispatch({
+      cmd: 'live.input',
+      input: '1 enter',
+      __bridge_cb: true,
+      bridge_token: h.token('live_input', { nonce: 'nonce-stale-live-picker' }),
+    });
+
+    expect(response).toEqual({
+      toast: { type: 'error', content: '选择窗已变化，请重新发送命令或等待最新选择卡片' },
+    });
+    expect(h.pending.cancel('oc_group')).toHaveLength(0);
+  });
+
   it('preserves a numeric native permission choice for tmux', async () => {
     const h = await createHarness();
 
@@ -249,7 +296,14 @@ type Harness = {
 };
 
 async function createHarness(
-  opts: { callbackAuth?: boolean; chatMode?: 'p2p' | 'group' | 'topic' } = {},
+  opts: {
+    callbackAuth?: boolean;
+    chatMode?: 'p2p' | 'group' | 'topic';
+    liveDiagnostics?: (scope: string) => Promise<{
+      live?: LiveSessionDiagnostics;
+      picker?: { updatedAt: number; expiresAt: number; signature?: string; generation?: string };
+    }>;
+  } = {},
 ): Promise<Harness> {
   const tmp = await createTmpProfile('callback-dispatch-test-');
   const channel = createFakeChannel();
@@ -330,6 +384,7 @@ async function createHarness(
         chatModeCache,
         ...(opts.callbackAuth === false ? {} : { callbackAuth: auth }),
         callbackPolicyFingerprint: 'fp-1',
+        ...(opts.liveDiagnostics ? { liveDiagnostics: opts.liveDiagnostics } : {}),
       }),
   };
 }

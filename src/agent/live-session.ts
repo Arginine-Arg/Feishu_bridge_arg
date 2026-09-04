@@ -101,6 +101,7 @@ const PIPE_STARTUP_OUTPUT_GRACE_MS = 2_500;
 const COMMAND_FRESH_SESSION_GRACE_MS = 1200;
 const FRESH_TERMINAL_GRACE_MS = 2500;
 const CONTROL_KEY_GAP_MS = 40;
+const CONTROL_PICKER_WAIT_MS = 5_000;
 const SIDE_COMMAND_SETTLE_MS = 450;
 // Codex can take tens of seconds to redraw a side conversation when the
 // provider or the local machine is loaded. Keep the request alive while the
@@ -121,7 +122,6 @@ const COMPACT_NO_OUTPUT_IDLE_MS = 60_000;
 // command draft on a loaded remote terminal. Keep this longer than the normal
 // redraw gap so the fallback cannot accept the highlighted picker option.
 const COMMAND_DRAFT_CONFIRM_DELAY_MS = 2_500;
-const CONTROL_LITERAL_CONFIRM_DELAY_MS = 900;
 const NORMAL_SUBMIT_RETRY_DELAY_MS = 1_200;
 const NORMAL_SUBMIT_RETRY_POLL_MS = 400;
 const NORMAL_SUBMIT_RETRY_MAX_ATTEMPTS = 5;
@@ -195,6 +195,22 @@ export class LiveSessionPool {
       retryCount: 0,
     };
   }
+
+  /**
+   * Send a picker/control key through the existing live terminal without
+   * creating a second run or touching the main ActiveRuns handle. This is the
+   * control lane used while a parent task is paused at an approval picker.
+   */
+  async sendInput(
+    key: string,
+    input: string,
+    _cwd?: string,
+    stillActive: () => boolean = () => true,
+  ): Promise<boolean> {
+    const session = this.sessions.get(key);
+    if (!session) return false;
+    return session.sendControlInput(input, stillActive);
+  }
 }
 
 export class LiveTerminalSession {
@@ -241,6 +257,8 @@ export class LiveTerminalSession {
   private turnLastInputAt: number | undefined;
   private turnLastOutputAt: number | undefined;
   private turnLastError: string | undefined;
+  private controlInputTail: Promise<void> = Promise.resolve();
+  private controlInputGeneration = 0;
 
   constructor(opts: LiveSessionCommand, onClose: () => void = () => {}) {
     this.opts = opts;
@@ -258,6 +276,13 @@ export class LiveTerminalSession {
 
   getDiagnostics(): LiveSessionDiagnostics {
     const snapshot = this.latestTerminalState();
+    // A native picker can remain visible for a short time after its observer
+    // turn has settled. Keep that on-screen evidence available to card
+    // callbacks; otherwise a valid delayed click looks like an idle terminal
+    // and is either lost or (worse) typed into the next ordinary prompt.
+    const screenPickerVisible = isStructuredLiveInteraction(snapshot);
+    const diagnosticPhase =
+      this.turnPhase === 'idle' && screenPickerVisible ? 'picker' : this.turnPhase;
     const inputState = this.turnPromptPreview
       ? isLiveTerminalReady(snapshot)
         ? 'empty'
@@ -268,7 +293,7 @@ export class LiveTerminalSession {
             : 'unknown'
       : 'unknown';
     return {
-      phase: this.turnPhase,
+      phase: diagnosticPhase,
       sideConversation: this.hasSideConversationEvidence(snapshot),
       ...(this.turnGeneration ? { generation: this.turnGeneration } : {}),
       ...(this.turnPromptPreview ? { promptPreview: previewLiveText(this.turnPromptPreview) } : {}),
@@ -367,6 +392,92 @@ export class LiveTerminalSession {
       },
       waitForExit: async () => true,
     };
+  }
+
+  async sendControlInput(input: string, stillActive: () => boolean = () => true): Promise<boolean> {
+    // Card callbacks and chat commands can arrive in the same event-loop
+    // tick. Serialize their key sequences so a delayed arrow/Enter pair from
+    // one click cannot interleave with the next click.
+    const generation = ++this.controlInputGeneration;
+    const task = this.controlInputTail.then(() => this.sendControlInputNow(input, generation, stillActive));
+    this.controlInputTail = task.then(() => undefined, () => undefined);
+    return task;
+  }
+
+  private async sendControlInputNow(
+    input: string,
+    generation: number,
+    stillActive: () => boolean,
+  ): Promise<boolean> {
+    if (!stillActive() || this.closed || !this.isAlive()) return false;
+    const trimmed = input.trim();
+    if (!trimmed) return false;
+    // A prefixed control can arrive just before the native picker repaint. Do
+    // not type into the parent editor during that window; wait briefly for
+    // the live observer to confirm the picker phase. Explicit Ctrl-C remains
+    // an emergency key and is handled immediately by its normal path.
+    if (!isLiveInterruptInput(trimmed)) {
+      const pickerVisible = (): boolean =>
+        this.turnPhase === 'picker' || isStructuredLiveInteraction(this.latestTerminalState());
+      const deadline = Date.now() + CONTROL_PICKER_WAIT_MS;
+      while (
+        !pickerVisible() &&
+        Date.now() < deadline &&
+        !this.closed &&
+        this.isAlive()
+      ) {
+        await delay(80);
+      }
+      if (!stillActive() || !pickerVisible()) return false;
+    }
+    const controls = parseLiveControlSequence(trimmed);
+    if (controls) {
+      for (let index = 0; index < controls.length; index += 1) {
+        const control = controls[index]!;
+        const previous = controls[index - 1] ?? '';
+        if (index > 0) {
+          await delay(CONTROL_KEY_GAP_MS);
+        }
+        if (
+          generation !== this.controlInputGeneration ||
+          !stillActive() ||
+          this.closed ||
+          !this.isAlive()
+        ) return false;
+        if (control === '\r' && isLiteralPickerChoice(previous)) {
+          // Keep a literal choice and its confirmation in one tmux frame. The
+          // helper can then apply its post-paste settle window at the pane,
+          // where transport latency cannot shorten the safety gap.
+          continue;
+        }
+        if (isLiteralPickerChoice(control) && controls[index + 1] === '\r') {
+          this.write(control + '\r');
+          index += 1;
+        } else {
+          this.write(control);
+        }
+      }
+      return true;
+    }
+    // A bare numeric picker choice intentionally stops after typing the
+    // number: model/reasoning menus can open a nested picker and must not be
+    // confirmed by an implicit Enter. Approval cards use `1 enter` (or an
+    // equivalent explicit sequence) when confirmation is required.
+    if (isNumericControlLiteral(trimmed)) {
+      const approvalSurface = isApprovalControlSurface(this.latestTerminalState());
+      if (!stillActive()) return false;
+      this.write(approvalSurface ? `${trimmed}\r` : trimmed);
+      // Approval pickers expose explicit Yes/No rows and require the number
+      // and Enter as one user action. Model/reasoning pickers deliberately do
+      // not match this surface, so a bare number still leaves confirmation to
+      // the dedicated Enter control and cannot skip a nested menu.
+      return true;
+    }
+    if (shouldDeferControlLiteralSubmit(trimmed)) {
+      this.write(trimmed);
+      return true;
+    }
+    return false;
   }
 
   async close(reason: string): Promise<void> {
@@ -664,7 +775,6 @@ export class LiveTerminalSession {
     let timer: ReturnType<typeof setTimeout> | undefined;
     let outputTimer: ReturnType<typeof setTimeout> | undefined;
     let slashConfirmTimer: ReturnType<typeof setTimeout> | undefined;
-    let controlLiteralConfirmTimer: ReturnType<typeof setTimeout> | undefined;
     let normalSubmitRetryTimer: ReturnType<typeof setTimeout> | undefined;
     let acceptingOutput = false;
     let startupInteractionText: string | undefined;
@@ -761,7 +871,6 @@ export class LiveTerminalSession {
       }
       if (timer) clearTimeout(timer);
       cancelSlashCommandConfirm();
-      if (controlLiteralConfirmTimer) clearTimeout(controlLiteralConfirmTimer);
       cancelNormalSubmitRetry();
       flushOutput();
       if (commandMode && isStatusLiveCommand(turnPrompt)) {
@@ -1136,11 +1245,6 @@ export class LiveTerminalSession {
           this.terminalInfo?.backend !== 'tmux' ||
           isLiveStatusPanelOutput(output.lastAcceptedText());
         const meaningfulCommandResult = resultOutput && statusSurfaceOutput;
-        if (controlLiteralConfirmTimer) {
-          clearTimeout(controlLiteralConfirmTimer);
-          controlLiteralConfirmTimer = undefined;
-          log.info('agent-live', 'control-literal-output-before-enter', { input: turnPrompt });
-        }
         sawAcceptedOutput = true;
         if (meaningfulCommandResult) {
           sawCommandResultOutput = true;
@@ -1211,7 +1315,6 @@ export class LiveTerminalSession {
       if (timer) clearTimeout(timer);
       if (outputTimer) clearTimeout(outputTimer);
       if (slashConfirmTimer) clearTimeout(slashConfirmTimer);
-      if (controlLiteralConfirmTimer) clearTimeout(controlLiteralConfirmTimer);
       if (settlingTimer) clearTimeout(settlingTimer);
       settlingTimer = undefined;
       settling = false;
@@ -1370,13 +1473,25 @@ export class LiveTerminalSession {
         } else {
           const controlKeys = inputMode === 'control' ? parseLiveControlSequence(turnPrompt) : null;
           if (controlKeys) {
-          // Send each key as its own write so the tmux backend (which matches a
-          // single key per stdin chunk) sees them individually; a small gap keeps
-          // the writes from coalescing into one unrecognized chunk.
+            // Send each key as its own write so the tmux backend (which matches a
+            // single key per stdin chunk) sees them individually; a small gap keeps
+            // the writes from coalescing into one unrecognized chunk.
             for (let i = 0; i < controlKeys.length; i++) {
-              if (i > 0) await delay(CONTROL_KEY_GAP_MS);
+              const control = controlKeys[i]!;
+              if (isLiteralPickerChoice(control) && controlKeys[i + 1] === '\r') {
+                // One frame lets the tmux helper apply its settle window after
+                // the literal paste and before the confirmation Enter.
+                if (done || interruption.requested || interruption.detached) break submitTurn;
+                writeTurn(control + '\r');
+                markInput();
+                i += 1;
+                continue;
+              }
+              if (i > 0) {
+                await delay(CONTROL_KEY_GAP_MS);
+              }
               if (done || interruption.requested || interruption.detached) break submitTurn;
-              writeTurn(controlKeys[i]!);
+              writeTurn(control);
               markInput();
             }
           } else {
@@ -1388,18 +1503,16 @@ export class LiveTerminalSession {
             // when this menu is meant to be confirmed. This prevents a delayed
             // fallback key from selecting the nested menu's default option.
               log.info('agent-live', 'control-literal-type', { input: turnPrompt });
-              writeTurn(turnPrompt);
+              const approvalSurface = isApprovalControlSurface(this.latestTerminalState());
+              writeTurn(approvalSurface ? `${turnPrompt}\r` : turnPrompt);
               markInput();
             } else if (inputMode === 'control' && shouldDeferControlLiteralSubmit(turnPrompt)) {
               log.info('agent-live', 'control-literal-type', { input: turnPrompt });
+              // A bare yes/no shortcut is already an actionable approval in
+              // Codex. Keep it as a literal; only an explicit `yes enter`
+              // control sequence may add Enter.
               writeTurn(turnPrompt);
               markInput();
-              controlLiteralConfirmTimer = setTimeout(() => {
-                controlLiteralConfirmTimer = undefined;
-                if (done || interruption.requested || interruption.detached || sawAcceptedOutput) return;
-                log.info('agent-live', 'control-literal-confirm', { input: turnPrompt });
-                writeTurn('\r');
-              }, CONTROL_LITERAL_CONFIRM_DELAY_MS);
             } else {
               writeTurn(`${turnPrompt}\r`);
               markInput();
@@ -1887,6 +2000,7 @@ let lastHistoryEnd = -1;
 let lastHistoryFingerprint = '';
 let inputBuffer = '';
 let pasteSequence = 0;
+const PASTE_SUBMIT_SETTLE_MS = 160;
 
 process.on('uncaughtException', (error) => {
   process.stderr.write('tmux live helper crashed: ' + (error && error.stack ? error.stack : String(error)) + '\n');
@@ -2193,6 +2307,14 @@ function sendPaste(text) {
   return false;
 }
 
+function settleBeforeSubmit() {
+  // If Codex has not enabled bracketed paste yet, its non-bracketed burst
+  // detector suppresses Enter for roughly 120ms. Keep the fallback path safe
+  // during startup/reconnect races as well as during normal framed pastes.
+  const waiter = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(waiter, 0, 0, PASTE_SUBMIT_SETTLE_MS);
+}
+
 function sendInput(input) {
   // Ctrl-C is a lifecycle command, but it still has to reach the pane the
   // user currently selected. Normal text goes through ensureLivePane(),
@@ -2247,6 +2369,17 @@ function sendInput(input) {
     sendKeys(['Escape']);
     return;
   }
+  if (input === '\t') {
+    // C-i is the terminal byte for Tab and is handled consistently by tmux
+    // across PTY/canonical modes (the symbolic Tab key is not forwarded by
+    // some tmux builds when the pane has no client attached).
+    sendKeys(['C-i']);
+    return;
+  }
+  if (input === ' ') {
+    sendKeys(['Space']);
+    return;
+  }
 
   const shouldSubmit = input.endsWith('\r') || input.endsWith('\n');
   const body = shouldSubmit ? input.replace(/[\r\n]+$/u, '') : input;
@@ -2255,7 +2388,10 @@ function sendInput(input) {
   // transaction is aware of the pane's negotiated terminal mode and avoids
   // the Codex race where a rapid literal stream plus Enter becomes a newline.
   if (normalized && !sendPaste(normalized)) sendLiteral(normalized);
-  if (shouldSubmit) sendKeys(['Enter']);
+  if (shouldSubmit) {
+    if (normalized) settleBeforeSubmit();
+    sendKeys(['Enter']);
+  }
 }
 
 function terminalReadyForFullReconcile(snapshot) {
@@ -2638,6 +2774,16 @@ function isLiveMainConversationFooter(lines: string[]): boolean {
 function shouldDeferControlLiteralSubmit(input: string): boolean {
   const trimmed = input.trim();
   return /^\d{1,2}$/u.test(trimmed) || /^(?:y|yes|n|no)$/iu.test(trimmed);
+}
+
+function isApprovalControlSurface(input: string): boolean {
+  const recent = cleanTerminalOutput(input).split('\n').slice(-32).join(' ');
+  if (/(?:select\s+(?:a\s+)?model|reasoning\s+(?:effort|level))/iu.test(recent)) return false;
+  return /(?:would\s+you\s+like|do\s+you\s+want|command\s+requires?\s+(?:approval|confirmation)|yes,?\s+proceed|no,?\s+cancel|yes,?\s+(?:grant|make|send)|no,?\s+continue|\b(?:y|yes)\s*\/\s*(?:n|no)\b|\[(?:y|yes)\s*\/\s*(?:n|no)\]|\((?:y|yes)\s*\/\s*(?:n|no)\))/iu.test(recent);
+}
+
+function isLiteralPickerChoice(input: string): boolean {
+  return /^(?:\d{1,2}|y|yes|n|no)$/iu.test(input.trim());
 }
 
 function isNumericControlLiteral(input: string): boolean {

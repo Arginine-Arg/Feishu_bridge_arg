@@ -4110,7 +4110,7 @@ setInterval(() => {}, 1000);
     expect(textOf(approval)).toContain('Would you like to run');
 
     const selected = await collect(
-      session.run('tmux-numeric-approval-choice', '1 enter', dir, 'control').events,
+      session.run('tmux-numeric-approval-choice', '1', dir, 'control').events,
     );
     await pool.closeAll();
 
@@ -5544,6 +5544,7 @@ setInterval(() => {}, 1000);
       bin,
       `#!/usr/bin/env node
 process.stdin.setEncoding('utf8');
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
 let text = '';
 let inPaste = false;
 let sawBracketedPaste = false;
@@ -5562,6 +5563,10 @@ process.stdin.on('data', (chunk) => {
       continue;
     }
     const char = chunk[i];
+    if (char === '\\t' && !inPaste) {
+      process.stdout.write('control-tab\\n');
+      continue;
+    }
     if ((char === '\\r' || char === '\\n') && !inPaste) {
       process.stdout.write('paste-mode:' + sawBracketedPaste + '\\n');
       process.stdout.write('submitted:' + JSON.stringify(text) + '\\n');
@@ -5595,12 +5600,16 @@ setInterval(() => {}, 1000);
     const ordinaryControlWord = await collect(
       session.run('run-tmux-ordinary-control-word', 'yes', dir).events,
     );
+    const tabControl = await collect(
+      session.run('run-tmux-tab-control', 'tab', dir, 'control').events,
+    );
     await pool.closeAll();
 
     expect(textOf(events)).toContain('submitted:"alpha\\nbeta"\n');
     expect(textOf(events)).toContain('paste-mode:true\n');
     expect(textOf(ordinaryControlWord)).toContain('submitted:"yes"\n');
     expect(textOf(ordinaryControlWord)).toContain('paste-mode:true\n');
+    expect(textOf(tabControl)).toContain('control-tab\n');
   }, 20_000);
 
   tmuxIt('does not send enter after a tmux picker literal when the screen changes first', async () => {
@@ -5655,6 +5664,95 @@ setInterval(() => {}, 1000);
   it('normalizes terminal redraws instead of appending every frame', () => {
     expect(cleanTerminalOutput('progress 1\rprogress 2\rdone\n')).toBe('done\n');
   });
+
+  tmuxIt('directly submits approval literals with a safe gap but leaves model choices unconfirmed', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-direct-control-test-'));
+    const bin = join(dir, 'fake-tmux-direct-control-agent.mjs');
+    const trace = join(dir, 'input-trace.txt');
+    await writeFile(
+      bin,
+      [
+        '#!/usr/bin/env node',
+        "import { appendFileSync, writeFileSync } from 'node:fs';",
+        "writeFileSync(" + JSON.stringify(trace) + ", '');",
+        "process.stdin.setEncoding('utf8');",
+        'if (process.stdin.isTTY) process.stdin.setRawMode(true);',
+        "appendFileSync(" + JSON.stringify(trace) + ", 'ready\\n');",
+        "process.stdin.on('data', (chunk) => {",
+        "  appendFileSync(" + JSON.stringify(trace) + ", Date.now() + '\\t' + Buffer.from(chunk).toString('hex') + '\\n');",
+        '});',
+        'setInterval(() => {}, 1000);',
+      ].join('\n'),
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const session = pool.getOrCreate('tmux-direct-control-scope', {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-direct-control',
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 500,
+      outputFlushMs: 30,
+      startupTimeoutMs: 2_000,
+    });
+    await (session as unknown as { start(): Promise<void> }).start();
+    try {
+      const deadline = Date.now() + 2_000;
+      while (!session.getTerminalInfo() && Date.now() < deadline) await testDelay(20);
+      expect(session.getTerminalInfo()).toBeDefined();
+      await waitForFileText(trace, 'ready\n', 2_000);
+      const internals = session as unknown as {
+        turnPhase: string;
+        lastTerminalSnapshot: string;
+        lastTerminalSnapshotAt: number;
+      };
+      // Simulate the common redraw race: the pane already shows the approval
+      // overlay while the observer's lifecycle phase is still `busy`.
+      // Direct control must trust the visible picker surface without waiting
+      // five seconds for a phase update.
+      internals.turnPhase = 'busy';
+      internals.lastTerminalSnapshot = [
+        'Would you like to run the following command?',
+        '› 1. Yes, proceed (y)',
+        '2. No, cancel (n)',
+        'Press enter to confirm or esc to cancel',
+      ].join('\n');
+      internals.lastTerminalSnapshotAt = Date.now();
+
+      const directResult = await pool.sendInput('tmux-direct-control-scope', '1');
+      expect(directResult).toBe(true);
+      await waitForFileText(trace, '0d', 2_000);
+      const firstTrace = (await readFile(trace, 'utf8')).trim().split('\n').filter(Boolean);
+      const firstBytes = firstTrace.map((line) => {
+        const [timestamp, bytes] = line.split('\t');
+        return { timestamp: Number(timestamp), bytes: bytes ?? '' };
+      });
+      const numberAt = firstBytes.findIndex((entry) => entry.bytes.includes('31'));
+      const enterAt = firstBytes.findIndex((entry) => entry.bytes.includes('0d'));
+      expect(numberAt).toBeGreaterThanOrEqual(0);
+      expect(enterAt).toBeGreaterThan(numberAt);
+      expect(firstBytes[enterAt]!.timestamp - firstBytes[numberAt]!.timestamp).toBeGreaterThanOrEqual(120);
+
+      internals.lastTerminalSnapshot = [
+        'Select Model and Effort',
+        '› 1. gpt-5.6-sol (current)',
+        '2. gpt-5.6-terra',
+        'Press enter to confirm or esc to go back',
+      ].join('\n');
+      internals.lastTerminalSnapshotAt = Date.now();
+      const beforeModel = firstBytes.length;
+      expect(await pool.sendInput('tmux-direct-control-scope', '1')).toBe(true);
+      await waitForFileText(trace, '31', 2_000);
+      const modelTrace = (await readFile(trace, 'utf8')).trim().split('\n').filter(Boolean).slice(beforeModel);
+      expect(modelTrace.some((line) => line.split('\t')[1]?.includes('0d'))).toBe(false);
+    } finally {
+      await pool.closeAll();
+    }
+  }, 15_000);
 
   linuxIt('renders PTY terminal redraws as a stable screen snapshot', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-pty-test-'));

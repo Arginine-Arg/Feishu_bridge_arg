@@ -872,6 +872,40 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   }
 
   const route = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
+  if (route.nativeMode === 'control') {
+    const recovery = recoverLiveControlScope(
+      liveInteractionByScope,
+      msg.chatId,
+      scope,
+    );
+    if (recovery.ambiguous && recovery.ambiguous.length > 0) {
+      await channel.send(
+        msg.chatId,
+        { markdown: `⚠️ 检测到多个可能的选择窗（${recovery.ambiguous.map((item) => `\`${item}\``).join('、')}），未猜测目标。请在对应话题中重试。` },
+        {
+          replyTo: msg.messageId,
+          ...(threadId ? { replyInThread: true } : {}),
+        },
+      );
+      return;
+    }
+    if (recovery.scope && recovery.scope !== scope) {
+      const requestedScope = scope;
+      scope = recovery.scope;
+      const recoveredThreadId = threadIdForChatScope(msg.chatId, scope);
+      if (!threadId && recoveredThreadId) {
+        threadId = recoveredThreadId;
+        emsg = { ...emsg, threadId };
+        route.msg = { ...route.msg, threadId };
+        chatMode = 'topic';
+      }
+      log.info('agent-live', 'picker-scope-recovered', {
+        requestedScope,
+        scope,
+        threadId,
+      });
+    }
+  }
   const sideExitRequested = route.nativeMode === 'side-exit';
   if (sideExitRequested) {
     const requestedScope = scope;
@@ -922,7 +956,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     /^\/stop(?:\s|$)/iu.test(route.msg.content.trim()) ||
     route.nativeMode === 'side' ||
     route.nativeMode === 'side-exit';
-  const existingSideState = fastLifecycleCommand
+  const existingSideState = (fastLifecycleCommand || route.nativeMode === 'control')
     ? sideConversationState(sideConversationByScope, scope)
     : await refreshSideConversationState(
         sideConversationByScope,
@@ -1111,13 +1145,121 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   // Picker controls and native slash commands form a separate control plane.
   // They must run before ordinary work so a long task cannot strand a model,
   // status, or side-conversation command in the conversational queue.
-  const priorityLiveControl =
-    liveInputModeForMessage(agentMsg) === 'control' &&
-    (isLiveInterruptInput(agentMsg.content) || pickerActive);
   const nativeInputMode = liveInputModeForMessage(agentMsg);
   const priorityNativeCommand =
     isForceLiveAgentCommandMessage(agentMsg) &&
     (nativeInputMode === 'command' || nativeInputMode === 'side' || nativeInputMode === 'side-exit');
+  const activeControlHandle = [activeRuns.getSide(scope), activeRuns.get(scope)].find(
+    (handle): handle is RunHandle => Boolean(
+      handle && !handle.interrupted && !handle.stopRequested && !handle.detached,
+    ),
+  );
+  const explicitInterruptControl = isLiveInterruptInput(agentMsg.content);
+  let terminalPickerActive = explicitInterruptControl;
+  let pickerDiagnosticsAvailable = false;
+  if (
+    nativeInputMode === 'control' &&
+    !explicitInterruptControl &&
+    activeControlHandle &&
+    agent.tmux?.diagnostics
+  ) {
+    pickerDiagnosticsAvailable = true;
+    const diagnostics = await withBoundedSideDiagnostic(
+      agent.tmux.diagnostics(
+        scope,
+        workspaces.cwdFor(scope) ?? controls.profileConfig.workspaces.default,
+      ),
+      2_000,
+    );
+    if (diagnostics) {
+      terminalPickerActive = diagnostics.phase === 'picker';
+    } else {
+      pickerDiagnosticsAvailable = false;
+      log.info('intake', 'picker-diagnostics-unavailable', { scope });
+    }
+  }
+  // A persisted marker is sufficient when no live diagnostics hook exists
+  // (older adapters/bridge restarts). When diagnostics is available, require
+  // its current picker phase so an old card cannot inject into a normal task.
+  const priorityControlEvidence =
+    terminalPickerActive || (!pickerDiagnosticsAvailable && pickerActive);
+  const explicitPrefixedControl =
+    liveInputModeForMessage(agentMsg) === 'control' && route.forceNative;
+  const priorityLiveControl =
+    liveInputModeForMessage(agentMsg) === 'control' &&
+    (isLiveInterruptInput(agentMsg.content) || priorityControlEvidence || explicitPrefixedControl);
+  const canDirectLiveControl =
+    liveInputModeForMessage(agentMsg) === 'control' &&
+    (isLiveInterruptInput(agentMsg.content) ||
+      priorityControlEvidence ||
+      (explicitPrefixedControl && Boolean(activeControlHandle && agent.tmux?.sendInput)));
+  if (explicitPrefixedControl && activeControlHandle && !agent.tmux?.sendInput) {
+    await channel.send(
+      msg.chatId,
+      { markdown: '⚠️ 当前 live 适配器不支持直接发送选择按键，未修改正在运行的任务。' },
+      {
+        replyTo: msg.messageId,
+        ...(chatMode === 'topic' && threadId ? { replyInThread: true } : {}),
+      },
+    ).catch((err) => log.warn('intake', 'live-control-unsupported-reply-failed', { scope, err: String(err) }));
+    return;
+  }
+  // A picker can belong to the currently running main live turn. Inject its
+  // control into that existing terminal instead of creating a second
+  // RunExecutor entry (which would collide with the scope reservation and be
+  // placed back into the blocked conversational queue).
+  if (canDirectLiveControl && nativeInputMode === 'control') {
+    const activeHandle = activeControlHandle;
+    const sendInput = agent.tmux?.sendInput;
+    let directInjectionAttempted = false;
+    if (
+      activeHandle &&
+      !activeHandle.interrupted &&
+      !activeHandle.stopRequested &&
+      !activeHandle.detached &&
+      sendInput
+    ) {
+      directInjectionAttempted = true;
+      const controlCwd = workspaces.cwdFor(scope) ?? controls.profileConfig.workspaces.default;
+      try {
+        const stillActive = (): boolean => {
+          const currentHandle = [activeRuns.getSide(scope), activeRuns.get(scope)].find(
+            (handle): handle is RunHandle => Boolean(
+              handle && !handle.interrupted && !handle.stopRequested && !handle.detached,
+            ),
+          );
+          return currentHandle === activeHandle;
+        };
+        if (stillActive() && await sendInput(scope, agentMsg.content, controlCwd, stillActive)) {
+          log.info('intake', 'live-control-injected', {
+            scope,
+            input: agentMsg.content,
+            activeSide: Boolean(activeRuns.getSide(scope)),
+          });
+          return;
+        }
+      } catch (err) {
+        log.warn('intake', 'live-control-injection-failed', {
+          scope,
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    if (directInjectionAttempted) {
+      // Never requeue a control that was meant for an active picker: the
+      // ordinary active-run guard would put it back behind the same picker
+      // forever. Return a retryable diagnostic instead.
+      await channel.send(
+        msg.chatId,
+        { markdown: '⚠️ 当前选择窗无法接收该操作，未发送按键。请等待最新选择卡片后重试。' },
+        {
+          replyTo: msg.messageId,
+          ...(chatMode === 'topic' && threadId ? { replyInThread: true } : {}),
+        },
+      ).catch((err) => log.warn('intake', 'live-control-failure-reply-failed', { scope, err: String(err) }));
+      return;
+    }
+  }
   if (priorityNativeCommand && activeRuns.hasAny(scope)) {
     log.info('intake', 'native-command-preempt', {
       scope,
@@ -1138,8 +1280,17 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   const size = priorityLiveInput
     ? pending.pushFront(scope, agentMsg, {
         immediate: true,
-        ...(priorityNativeCommand ? { preempt: true } : {}),
-        ...(priorityNativeCommand && (nativeInputMode === 'side' || nativeInputMode === 'side-exit')
+        priorityOrder: 'fifo',
+        ...((priorityNativeCommand || explicitPrefixedControl) ? { preempt: true } : {}),
+        // A picker control is already a complete action and must reach the
+        // native TUI even while the parent run keeps the conversational queue
+        // blocked. Without bypassBlock, `/codex 1` is merely placed ahead of
+        // the FIFO but still waits for the long task to finish—the exact
+        // symptom seen when the Feishu card is visible yet its choice does
+        // nothing. The explicit `/codex` prefix makes this safe even if the
+        // persisted picker marker was lost during a restart.
+        ...((priorityControlEvidence || isLiveInterruptInput(agentMsg.content) ||
+          (priorityNativeCommand && (nativeInputMode === 'side' || nativeInputMode === 'side-exit')))
           ? { bypassBlock: true }
           : {}),
       })
@@ -1150,7 +1301,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   // up until it finishes (block/unblock in the pending→run handoff). Without a
   // hint the sender thinks the bot is dead. Ack once per busy window — not per
   // queued message — and never let the ack block or throw into intake.
-  if (!priorityNativeCommand && pending.shouldAckBusy(scope)) {
+  if (!priorityNativeCommand && !priorityLiveControl && pending.shouldAckBusy(scope)) {
     void channel
       .send(
         msg.chatId,
@@ -1359,6 +1510,38 @@ function threadIdForChatScope(chatId: string, scope: string): string | undefined
 interface SideConversationScopeRecovery {
   scope?: string;
   ambiguous?: string[];
+}
+
+function recoverLiveControlScope(
+  pickerMap: Map<string, LiveInteractionState>,
+  chatId: string,
+  requestedScope: string,
+): { scope?: string; ambiguous?: string[] } {
+  const prefix = `${chatId}:`;
+  const candidates = new Set<string>([
+    requestedScope,
+    ...[...pickerMap.keys()].filter((candidate) => candidate === chatId || candidate.startsWith(prefix)),
+  ]);
+  const positive = [...candidates].filter((candidate) => {
+    const picker = liveInteractionStateFromMap(pickerMap, candidate);
+    return Boolean(picker);
+  });
+  if (positive.includes(requestedScope)) return {};
+  if (positive.length === 1) return { scope: positive[0] };
+  if (positive.length > 1) return { ambiguous: positive.sort() };
+  return {};
+}
+
+function liveInteractionStateFromMap(
+  map: Map<string, LiveInteractionState>,
+  scope: string,
+): LiveInteractionState | undefined {
+  const state = map.get(scope);
+  if (!state || state.expiresAt <= Date.now()) {
+    if (state) map.delete(scope);
+    return undefined;
+  }
+  return state;
 }
 
 /**
@@ -2138,7 +2321,17 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     }
     if (useLiveSession && (interaction || pickerLike)) {
       const currentState = liveInteractionState(sessions, liveInteractionByScope, scope);
-      if (currentState?.generation && currentState.generation !== execution.runId) return;
+      // A control turn is intentionally a follow-up to the run that created
+      // the picker. It may start before that run's final frame is persisted,
+      // so its generation can legitimately differ; rejecting it here drops
+      // the nested picker card under rapid `/codex 1` input. Ordinary/side
+      // turns retain the guard so stale observers cannot overwrite a newer
+      // control surface.
+      if (
+        currentState?.generation &&
+        currentState.generation !== execution.runId &&
+        liveInputMode !== 'control'
+      ) return;
       const wasActive = Boolean(currentState);
       const previous = currentState;
       const nextSignature = interaction?.signature ?? previous?.signature;
@@ -3902,7 +4095,7 @@ function isPermissionApprovalPrompt(text: string): boolean {
   return (
     isActionableBinaryConfirmation(text) ||
     /\b(?:command|action|operation)\s+requires?\s+(?:approval|confirmation)\b/iu.test(text) ||
-    /\b(?:would\s+you\s+like|do\s+you\s+want)\s+to\s+(?:run|allow|approve|proceed|continue)\b/iu.test(text)
+    /\b(?:would\s+you\s+like|do\s+you\s+want)\s+to\s+(?:run|allow|approve|proceed|continue|make|grant|send|edit|update)\b/iu.test(text)
   );
 }
 

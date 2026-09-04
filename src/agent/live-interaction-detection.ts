@@ -136,6 +136,7 @@ function isExplicitPickerHeading(line: string): boolean {
     /^(?:reasoning (?:effort|level)|skills?)\b/iu.test(trimmed) ||
     /^(?:command )?requires?\s+(?:approval|confirmation)\b/iu.test(trimmed) ||
     /^resume\s+previous\s+conversation\b/iu.test(trimmed) ||
+    isApprovalPickerHeading(trimmed) ||
     /^(?:请选择|请(?:输入|回复).*(?:选项|编号|是|否)|等待(?:你|用户)(?:的)?(?:输入|选择|确认))/u.test(trimmed) ||
     /\b(?:update\s+available|claude\s+code\s+running\s+in\s+bypass\s+permissions\s+mode)\b/iu.test(trimmed)
   );
@@ -261,18 +262,34 @@ function interactionCandidate(input: string): string[] | undefined {
   if (recent.length === 0) return undefined;
 
   let start = -1;
+  let approvalStart = -1;
   for (let index = 0; index < recent.length; index += 1) {
     const line = recent[index]!.trim();
+    if (isApprovalPickerHeading(line)) approvalStart = index;
     // Keep an explicit picker/approval heading as the anchor. A later
     // semantic question such as `Do you want to allow ...?` is part of that
     // same surface, not a new prompt that should hide the heading.
     if (start >= 0 && /^\s*(?:do\s+you|would\s+you|shall\s+i|which\s+)/iu.test(line)) continue;
     if (isLiveInteractionPromptStart(line)) start = index;
   }
+  // A native approval surface often contains a later `Reason:` line that
+  // also matches the generic input heuristic. Prefer the explicit
+  // Would/Do/Command-requires heading so preceding tool output and source
+  // line numbers cannot contaminate the candidate.
+  if (approvalStart >= 0) start = approvalStart;
   if (start >= 0 && isCodexResumeControlLine(recent[start]!)) {
     return recent.slice(Math.max(0, start - 24));
   }
   if (start >= 0) {
+    // Approval prompts are rendered after arbitrary tool output. A preceding
+    // source row such as `1132 reports/foo.md` matches the generic numbered
+    // option grammar, but it is not part of the approval menu. Once an
+    // explicit approval anchor is found, scope the candidate from that anchor
+    // forward instead of importing old tool rows (which can trigger the
+    // large-line-number rejection).
+    if (isApprovalPickerHeading(recent[start]!)) {
+      return mergeRepeatedPickerOptions(recent, start, recent.slice(start));
+    }
     // A generic prompt often appears *after* its option rows (for example
     // `a) staging`, `b) production`, `Choose one:`). Keep the contiguous
     // option block and a preceding question line with the prompt instead of
@@ -285,6 +302,14 @@ function interactionCandidate(input: string): string[] | undefined {
     return mergeRepeatedPickerOptions(recent, start, recent.slice(optionStart));
   }
   return fallbackInteractionCandidate(recent);
+}
+
+function isApprovalPickerHeading(line: string): boolean {
+  const trimmed = line.trim().replace(/^(?:[│└╰>•◦]\s*)+/u, '');
+  return (
+    /^(?:command\s+)?requires?\s+(?:approval|confirmation)\b/iu.test(trimmed) ||
+    /^(?:would\s+you\s+like|do\s+you\s+want|shall\s+i)\b[\s\S]{0,240}\b(?:run|allow|approve|proceed|continue|execute|apply|install|overwrite|delete|save|cancel|make|grant|send|edit|update)\b/iu.test(trimmed)
+  );
 }
 
 /**
@@ -735,7 +760,17 @@ function isStructuredInteraction(lines: string[], requireCompletePickerFrame: bo
     ? options.length >= 2
     : options.length >= 2 || (hasOptions && (hasInputPrompt || hasPromptTitle));
   const hasStrongOptionRows = lines.some((line) => isStrongOptionSyntaxLine(line));
-  const hasCodeLikeNoise = lines.some((line) => isCodeLikeInteractionLine(line));
+  const hasApprovalCommandSurface =
+    lines.some((line) => isApprovalPickerHeading(line)) &&
+    hasKeyHint &&
+    numberedChoiceCount >= 2;
+  // Approval panels legitimately include a shell command with quoted
+  // arguments. Once the explicit approval heading, numbered choices, and
+  // Enter/Esc footer are all present, those command lines are payload context,
+  // not source-code picker noise. Keep the strict rejection for every other
+  // surface so numbered code listings still cannot manufacture a card.
+  const hasCodeLikeNoise =
+    !hasApprovalCommandSurface && lines.some((line) => isCodeLikeInteractionLine(line));
   const hasRepeatedKeyedOptionLabels = repeatedKeyedOptionLabelGroups(options) >= 2;
   const hasCleanNumericOptionBlock = hasContiguousNumericOptionBlock(lines);
   const hasSelectedNumberedChoice = options.some(

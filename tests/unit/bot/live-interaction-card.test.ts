@@ -1123,6 +1123,38 @@ describe('liveInteractionCard', () => {
       'esc',
     ]);
   });
+
+  it('keeps an approval picker visible when preceding tool output has a large line number', () => {
+    const text = [
+      '▸ 执行活动（2 项，已折叠）',
+      'error: repetition quantifier expects a valid decimal',
+      '1132 reports/VCC2026_CTRL_support_experimental_design_bilingual_20260904.md',
+      '• Markdown 文档校验通过；首次 PDF 渲染因 Chrome 的 crashpad socket 被沙箱拦截。',
+      'Would you like to run the following command?',
+      'Environment: local',
+      'Reason: 允许使用项目的无头 Chrome 将双语实验设计 Markdown 渲染为带公式的 PDF 吗？',
+      '$ python scripts/render_current_results_pdf.py --input',
+      'reports/VCC2026_CTRL_support_experimental_design_bilingual_20260904.md --html reports/out.html --pdf reports/out.pdf',
+      "'1.0 · 2026-09-04' --team '关注希尔薇谢谢喵' --evidence-status 'A/B artifacts complete'",
+      '› 1. Yes, proceed (y)',
+      '2. Yes, and do not ask again',
+      '3. No, and tell Codex what to do differently (esc)',
+      'Press enter to confirm or esc to cancel',
+    ].join('\n');
+
+    const surface = liveInteractionSurface(text);
+    expect(surface).toContain('Would you like to run the following command?');
+    expect(surface).not.toContain('1132 reports/');
+    const card = liveInteractionCardForText(text, () => 'approval-with-tool-noise');
+    expect(card).toBeDefined();
+    expect(buttonValues(card).map((value) => value.input)).toEqual([
+      '1 enter',
+      '2 enter',
+      '3 enter',
+      'enter',
+      'esc',
+    ]);
+  });
 });
 
 function stateFrom(events: AgentEvent[]): RunState {

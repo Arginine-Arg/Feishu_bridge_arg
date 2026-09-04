@@ -113,6 +113,30 @@ describe('PendingQueue busy-ack', () => {
     }
   });
 
+  it('preserves FIFO order among rapid priority controls', () => {
+    vi.useFakeTimers();
+    try {
+      const flushed: string[][] = [];
+      const queue = new PendingQueue(10_000, (_scope, batch) => {
+        flushed.push(batch.map((message) => message.content));
+      });
+
+      queue.pushFront(SCOPE, { content: '/model', chatId: SCOPE } as never, {
+        immediate: true,
+        priorityOrder: 'fifo',
+      });
+      queue.pushFront(SCOPE, { content: '1', chatId: SCOPE } as never, {
+        immediate: true,
+        priorityOrder: 'fifo',
+      });
+      vi.advanceTimersByTime(0);
+
+      expect(flushed).toEqual([['/model', '1']]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('flushes a preemptive native command immediately after the run releases', () => {
     vi.useFakeTimers();
     try {

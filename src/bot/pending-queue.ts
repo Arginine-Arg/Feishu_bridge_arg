@@ -4,6 +4,8 @@ import { log } from '../core/logger';
 interface PendingEntry {
   messages: NormalizedMessage[];
   timer?: NodeJS.Timeout;
+  /** Number of priority messages at the front of `messages`. */
+  priorityCount: number;
 }
 
 export type FlushHandler = (scope: string, batch: NormalizedMessage[]) => void;
@@ -59,6 +61,7 @@ export class PendingQueue {
     }
     this.map.set(scope, {
       messages: [msg],
+      priorityCount: 0,
       timer: this.blocked.has(scope) ? undefined : this.armTimer(scope),
     });
     return 1;
@@ -75,7 +78,13 @@ export class PendingQueue {
   pushFront(
     scope: string,
     messages: NormalizedMessage | readonly NormalizedMessage[],
-    options: { immediate?: boolean; preempt?: boolean; bypassBlock?: boolean } = {},
+    options: {
+      immediate?: boolean;
+      preempt?: boolean;
+      bypassBlock?: boolean;
+      /** Preserve FIFO order among priority controls for rapid chat events. */
+      priorityOrder?: 'fifo' | 'lifo';
+    } = {},
   ): number {
     const priority = Array.isArray(messages) ? [...messages] : [messages];
     const deferred = this.deferredUntilFront.get(scope) ?? [];
@@ -96,7 +105,21 @@ export class PendingQueue {
     const existing = this.map.get(scope);
     if (existing) {
       if (existing.timer) clearTimeout(existing.timer);
-      existing.messages.unshift(...incoming);
+      if (deferred.length > 0) {
+        // Keep priority entries contiguous when releasing startup-deferred
+        // work. Without this reordering, a later FIFO control could be
+        // inserted after the deferred ordinary message and lose precedence.
+        const existingPriority = existing.messages.slice(0, existing.priorityCount);
+        const existingOrdinary = existing.messages.slice(existing.priorityCount);
+        existing.messages = options.priorityOrder === 'fifo'
+          ? [...existingPriority, ...priority, ...deferred, ...existingOrdinary]
+          : [...priority, ...existingPriority, ...deferred, ...existingOrdinary];
+      } else if (options.priorityOrder === 'fifo') {
+        existing.messages.splice(existing.priorityCount, 0, ...priority);
+      } else {
+        existing.messages.unshift(...priority);
+      }
+      existing.priorityCount += priority.length;
       existing.timer = this.blocked.has(scope) && !options.preempt && !options.bypassBlock
         ? undefined
         : this.armTimer(scope, options.immediate ? 0 : undefined);
@@ -104,6 +127,7 @@ export class PendingQueue {
     }
     this.map.set(scope, {
       messages: incoming,
+      priorityCount: priority.length,
       timer: this.blocked.has(scope) && !options.preempt && !options.bypassBlock
         ? undefined
         : this.armTimer(scope, options.immediate ? 0 : undefined),

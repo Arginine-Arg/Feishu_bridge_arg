@@ -103,6 +103,7 @@ export class ClaudeAdapter implements AgentAdapter {
           ...(terminal ? { terminal: { backend: 'tmux' as const, ...terminal } } : {}),
         };
       },
+      sendInput: (scopeId, input, cwd, stillActive) => this.liveSessions.sendInput(scopeId, input, cwd, stillActive),
       interrupt: (scopeId, cwd, options) => this.tmuxBindings.interrupt(scopeId, cwd, options),
       restoreArtifactDelivery: (scopeId, artifact) =>
         this.tmuxBindings.restoreManagedArtifactDelivery(scopeId, artifact),

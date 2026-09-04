@@ -245,13 +245,13 @@ function verifyDeferredInputToken(
   return true;
 }
 
-function forwardLiveInput(
+async function forwardLiveInput(
   deps: CardDispatchDeps,
   payload: Record<string, unknown>,
   scope: string,
   threadId: string | undefined,
   mode: 'p2p' | 'group' | 'topic',
-): CardActionResponse | undefined {
+): Promise<CardActionResponse | undefined> {
   const input = typeof payload.input === 'string' ? payload.input.trim() : '';
   if (!input) return;
   log.info('cardAction', 'live-input', { scope, input });
@@ -273,10 +273,124 @@ function forwardLiveInput(
     },
     'control',
   );
+  const activeHandle = [deps.activeRuns.getSide(scope), deps.activeRuns.get(scope)].find(
+    (handle) => Boolean(handle && !handle.interrupted && !handle.stopRequested && !handle.detached),
+  );
+  // Verify the current terminal surface once before choosing between the
+  // direct-live lane and the deferred queue. A signed card token proves which
+  // picker produced the button, but it does not prove that the same picker is
+  // still on screen after a run has completed or the terminal has advanced.
+  // This gate prevents an old `1 enter` click from becoming the next ordinary
+  // prompt while still allowing a picker that remains visible after observer
+  // cleanup to be handled by the normal control run.
+  let pickerConfirmed = !deps.liveDiagnostics;
+  if (deps.liveDiagnostics) {
+    try {
+      const diagnostics = await Promise.race([
+        deps.liveDiagnostics(scope),
+        new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 2_000)),
+      ]);
+      if (!diagnostics) {
+        log.info('cardAction', 'live-input-diagnostics-timeout', { scope });
+        return {
+          toast: {
+            type: 'error',
+            content: '终端状态暂时无法确认，请稍后重试最新选择卡片',
+          },
+        };
+      }
+      // Prefer live terminal phase over the persisted marker. The latter is
+      // needed for restart recovery, but it can outlive the picker itself.
+      pickerConfirmed = diagnostics.live
+        ? diagnostics.live.phase === 'picker'
+        : Boolean(diagnostics.picker);
+    } catch (err) {
+      log.warn('cardAction', 'live-input-diagnostics-failed', {
+        scope,
+        err: err instanceof Error ? err.message : String(err),
+      });
+      return {
+        toast: {
+          type: 'error',
+          content: '终端状态暂时无法确认，请稍后重试最新选择卡片',
+        },
+      };
+    }
+  }
+  // If the picker is displayed by an active live turn, reuse that turn's
+  // terminal directly. Starting a second RunExecutor job would collide with
+  // the scope reservation (and a blocked parent queue would silently defer
+  // the click). The main EventFanout remains subscribed and will publish the
+  // next picker/result normally.
+  if (
+    activeHandle &&
+    !activeHandle.interrupted &&
+    !activeHandle.stopRequested &&
+    !activeHandle.detached &&
+    deps.agent.tmux?.sendInput
+  ) {
+    if (pickerConfirmed) {
+      const cwd = deps.workspaces.cwdFor(scope) ?? deps.controls.profileConfig.workspaces.default;
+      try {
+        const stillActive = (): boolean => {
+          const currentHandle = [deps.activeRuns.getSide(scope), deps.activeRuns.get(scope)].find(
+            (handle) => Boolean(handle && !handle.interrupted && !handle.stopRequested && !handle.detached),
+          );
+          return currentHandle === activeHandle;
+        };
+        if (stillActive() && await deps.agent.tmux.sendInput(scope, input, cwd, stillActive)) {
+          log.info('cardAction', 'live-input-injected', { scope, input });
+          return {
+            toast: {
+              type: 'success',
+              content: '已提交，正在等待终端响应',
+            },
+          };
+        }
+      } catch (err) {
+        log.warn('cardAction', 'live-input-injection-failed', {
+          scope,
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+      return {
+        toast: {
+          type: 'error',
+          content: '选择按键未送达终端，请等待最新选择卡片后重试',
+        },
+      };
+    } else {
+      log.info('cardAction', 'live-input-not-at-picker', { scope });
+      // The callback is tied to a specific picker generation. Do not place a
+      // stale click into the ordinary queue where it could be replayed later
+      // against a normal prompt or remain blocked behind the parent run.
+      return {
+        toast: {
+          type: 'error',
+          content: '选择窗已变化，请重新发送命令或等待最新选择卡片',
+        },
+      };
+    }
+  }
+  if (!activeHandle && deps.liveDiagnostics && !pickerConfirmed) {
+    log.info('cardAction', 'live-input-not-at-picker', { scope });
+    return {
+      toast: {
+        type: 'error',
+        content: '选择窗已变化，请重新发送命令或等待最新选择卡片',
+      },
+    };
+  }
   // A card click is already a complete control action. Let the queue hand it
   // off on the next event-loop turn instead of waiting for the chat debounce.
-  // A currently-running scope remains blocked and will release it normally.
-  deps.pending.pushFront(scope, synthetic, { immediate: true });
+  // Picker cards commonly belong to a terminal that is still attached to a
+  // running parent task; bypass the conversational block or the click sits at
+  // the front of the FIFO but cannot execute until that task finishes.
+  deps.pending.pushFront(scope, synthetic, {
+    immediate: true,
+    bypassBlock: true,
+    priorityOrder: 'fifo',
+  });
   return {
     toast: {
       type: 'success',

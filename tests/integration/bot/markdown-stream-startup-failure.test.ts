@@ -517,6 +517,45 @@ describe('markdown stream startup failures', () => {
     expect(buttonLabels(content?.card)).toEqual(['1', '2', 'enter', 'esc']);
   });
 
+  it('publishes an approval picker after noisy tool output and preserves its controls', async () => {
+    const h = await createHarness({
+      stream: async () => {
+        throw new Error('native approval picker output should not use stream');
+      },
+    });
+    h.agent.setEvents([
+      [
+        {
+          type: 'text',
+          delta: [
+            '▸ 执行活动（2 项，已折叠）',
+            'error: repetition quantifier expects a valid decimal',
+            '1132 reports/VCC2026_CTRL_support_experimental_design_bilingual_20260904.md',
+            '• Markdown 文档校验通过；首次 PDF 渲染因 Chrome 的 crashpad socket 被沙箱拦截。',
+            'Would you like to run the following command?',
+            'Environment: local',
+            'Reason: 允许使用项目的无头 Chrome 将双语实验设计 Markdown 渲染为带公式的 PDF 吗？',
+            '$ python scripts/render_current_results_pdf.py --input reports/design.md --html reports/design.html',
+            "'1.0 · 2026-09-04' --team '关注希尔薇谢谢喵' --evidence-status 'A/B artifacts complete'",
+            '› 1. Yes, proceed (y)',
+            '2. Yes, and do not ask again',
+            '3. No, and tell Codex what to do differently (esc)',
+            'Press enter to confirm or esc to cancel',
+          ].join('\n'),
+        },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+    ]);
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_noisy_approval', '/codex /permissions'));
+    await waitFor(() => h.channel.sent.length === 1);
+    const content = h.channel.sent[0]?.content as { card?: unknown } | undefined;
+    expect(content?.card).toBeDefined();
+    expect(buttonLabels(content?.card)).toEqual(['1', '2', '3', 'enter', 'esc']);
+    expect(JSON.stringify(content?.card)).toContain('Would you like to run the following command?');
+  });
+
   it('waits for a complete model-picker frame before publishing its card', async () => {
     const h = await createHarness({
       stream: async () => {
@@ -674,6 +713,41 @@ describe('markdown stream startup failures', () => {
       reasoningEffort: 'ultra',
     });
   });
+
+  it('injects an explicit /codex picker choice into an active live run without queueing it', async () => {
+    const h = await createHarness();
+    h.profileConfig.preferences = {
+      ...(h.profileConfig.preferences ?? {}),
+      agentSessionMode: 'live',
+      messageReply: 'text',
+      messageReplyMigrated: true,
+    };
+    h.controls.profileConfig.preferences = h.profileConfig.preferences;
+    h.controls.cfg.preferences = h.profileConfig.preferences;
+    h.agent.setEvents([[{ type: 'text', delta: '• Working at an approval picker\n' }]]);
+    // Keep the main handle registered while the picker control arrives.
+    delayFakeAgentEvents(h.agent, 2_000);
+    const sendInput = vi.fn(async () => true);
+    h.agent.tmux = {
+      diagnostics: async () => ({
+        phase: 'picker' as const,
+        inputState: 'submitted' as const,
+        retryCount: 0,
+        sideConversation: false,
+      }),
+      sendInput,
+    } as never;
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_active_picker_task', 'start the long task'));
+    await waitFor(() => h.agent.runOptions.length === 1, 4000);
+    await h.channel.handlers.message?.(message('om_active_picker_choice', '/codex 1'));
+    await waitFor(() => sendInput.mock.calls.length === 1, 2000);
+
+    expect(sendInput.mock.calls[0]?.slice(0, 2)).toEqual(['oc_dm', '1']);
+    expect(h.agent.runOptions).toHaveLength(1);
+    expect(JSON.stringify(h.channel.sent)).not.toContain('当前任务仍在运行');
+  }, 10_000);
 
   it('keeps all practical Codex model-picker choices and accepts /codex model shorthand', async () => {
     const h = await createHarness({

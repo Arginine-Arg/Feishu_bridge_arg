@@ -190,7 +190,7 @@ function isActivityConnectorLine(line) {
 }
 function isExplicitPickerHeading(line) {
   const trimmed = line.trim();
-  return /^(?:select|choose|pick)\b/iu.test(trimmed) || /^(?:reasoning (?:effort|level)|skills?)\b/iu.test(trimmed) || /^(?:command )?requires?\s+(?:approval|confirmation)\b/iu.test(trimmed) || /^resume\s+previous\s+conversation\b/iu.test(trimmed) || /^(?:请选择|请(?:输入|回复).*(?:选项|编号|是|否)|等待(?:你|用户)(?:的)?(?:输入|选择|确认))/u.test(trimmed) || /\b(?:update\s+available|claude\s+code\s+running\s+in\s+bypass\s+permissions\s+mode)\b/iu.test(trimmed);
+  return /^(?:select|choose|pick)\b/iu.test(trimmed) || /^(?:reasoning (?:effort|level)|skills?)\b/iu.test(trimmed) || /^(?:command )?requires?\s+(?:approval|confirmation)\b/iu.test(trimmed) || /^resume\s+previous\s+conversation\b/iu.test(trimmed) || isApprovalPickerHeading(trimmed) || /^(?:请选择|请(?:输入|回复).*(?:选项|编号|是|否)|等待(?:你|用户)(?:的)?(?:输入|选择|确认))/u.test(trimmed) || /\b(?:update\s+available|claude\s+code\s+running\s+in\s+bypass\s+permissions\s+mode)\b/iu.test(trimmed);
 }
 function hasBareNavigationAnchor(lines, index) {
   for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
@@ -272,15 +272,21 @@ function interactionCandidate(input) {
   const recent = input.split("\n").map((line) => line.trimEnd()).filter((line) => Boolean(line.trim())).filter((line) => !/^_(?:🧠 正在思考…|🧰 正在调用工具…|✍️ 正在输出…)_$/u.test(line.trim())).slice(-MAX_INTERACTION_LINES);
   if (recent.length === 0) return void 0;
   let start = -1;
+  let approvalStart = -1;
   for (let index = 0; index < recent.length; index += 1) {
     const line = recent[index].trim();
+    if (isApprovalPickerHeading(line)) approvalStart = index;
     if (start >= 0 && /^\s*(?:do\s+you|would\s+you|shall\s+i|which\s+)/iu.test(line)) continue;
     if (isLiveInteractionPromptStart(line)) start = index;
   }
+  if (approvalStart >= 0) start = approvalStart;
   if (start >= 0 && isCodexResumeControlLine(recent[start])) {
     return recent.slice(Math.max(0, start - 24));
   }
   if (start >= 0) {
+    if (isApprovalPickerHeading(recent[start])) {
+      return mergeRepeatedPickerOptions(recent, start, recent.slice(start));
+    }
     let optionStart = start;
     while (optionStart > 0 && isOptionSyntaxLineAt(recent, optionStart - 1)) {
       optionStart -= 1;
@@ -289,6 +295,10 @@ function interactionCandidate(input) {
     return mergeRepeatedPickerOptions(recent, start, recent.slice(optionStart));
   }
   return fallbackInteractionCandidate(recent);
+}
+function isApprovalPickerHeading(line) {
+  const trimmed = line.trim().replace(/^(?:[│└╰>•◦]\s*)+/u, "");
+  return /^(?:command\s+)?requires?\s+(?:approval|confirmation)\b/iu.test(trimmed) || /^(?:would\s+you\s+like|do\s+you\s+want|shall\s+i)\b[\s\S]{0,240}\b(?:run|allow|approve|proceed|continue|execute|apply|install|overwrite|delete|save|cancel|make|grant|send|edit|update)\b/iu.test(trimmed);
 }
 function fallbackInteractionCandidate(lines) {
   const numericBlock = latestContiguousNumericOptionBlock(lines);
@@ -562,7 +572,8 @@ function isStructuredInteraction(lines, requireCompletePickerFrame) {
   const completeNumberedPicker = numberedChoiceCount >= 2 || hasNumberedChoice && (hasKeyHint || hasPromptMarker || hasInputPrompt);
   const genericOptionCount = requireCompletePickerFrame ? options.length >= 2 : options.length >= 2 || hasOptions && (hasInputPrompt || hasPromptTitle);
   const hasStrongOptionRows = lines.some((line) => isStrongOptionSyntaxLine(line));
-  const hasCodeLikeNoise = lines.some((line) => isCodeLikeInteractionLine(line));
+  const hasApprovalCommandSurface = lines.some((line) => isApprovalPickerHeading(line)) && hasKeyHint && numberedChoiceCount >= 2;
+  const hasCodeLikeNoise = !hasApprovalCommandSurface && lines.some((line) => isCodeLikeInteractionLine(line));
   const hasRepeatedKeyedOptionLabels = repeatedKeyedOptionLabelGroups(options) >= 2;
   const hasCleanNumericOptionBlock = hasContiguousNumericOptionBlock(lines);
   const hasSelectedNumberedChoice = options.some(
