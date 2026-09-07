@@ -71,6 +71,20 @@ describe('parseLiveControlSequence', () => {
     expect(session.getDiagnostics().sideConversation).toBe(true);
   });
 
+  it('keeps a fresh picker authoritative over an old main footer after observer cleanup', () => {
+    const session = new LiveTerminalSession({ command: 'node', args: [], cwd: tmpdir(), signature: 'picker-history' });
+    const internal = session as unknown as {
+      lastTerminalSnapshot: string; lastTerminalSnapshotAt: number;
+      lastTerminalHistory: { paneId: string; startLine: number; endLine: number; text: string };
+      lastTerminalHistoryAt: number;
+    };
+    internal.lastTerminalSnapshot = 'Select Model and Effort\n› 1. gpt-test\n2. gpt-other\nPress enter to confirm or esc to go back';
+    internal.lastTerminalSnapshotAt = 20;
+    internal.lastTerminalHistory = { paneId: '%1', startLine: 0, endLine: 2, text: 'gpt-test · /tmp · Main [default]\n› Ask Codex to do anything' };
+    internal.lastTerminalHistoryAt = 10;
+    expect(session.getDiagnostics().phase).toBe('picker');
+  });
+
   it('maps single and multi-key navigation words to terminal keys', () => {
     expect(parseLiveControlSequence('up')).toEqual(['\x1B[A']);
     expect(parseLiveControlSequence('down')).toEqual(['\x1B[B']);
@@ -667,12 +681,11 @@ describe('tmux input framing and snapshots', () => {
     ).toBe(true);
     const waiting = '• Waiting for background terminal (3m 34s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close';
     expect(isLiveTerminalBusy(waiting)).toBe(true);
-    // Codex can leave the waiting row in the final redraw even after it has
-    // returned to the editor. The native empty/suggestion prompt is the
-    // stronger lifecycle signal in that combined frame.
+    // Recommendations remain visible during active work and cannot override
+    // an interruptible Waiting/Working row.
     expect(
       isLiveTerminalBusy(
-        `${waiting}\ngpt-5.6-luna max · /tmp · Main [default]\n› Ask Codex to do anything`,
+        `${waiting}\n─ Worked for 1m 49s ─\ngpt-5.6-luna max · /tmp · Main [default]\n› Ask Codex to do anything`,
       ),
     ).toBe(false);
     expect(
@@ -692,14 +705,14 @@ describe('tmux input framing and snapshots', () => {
           'gpt-5.6-luna max · /tmp · Main [default]\n' +
           '› How many files have been modified?',
       ),
-    ).toBe(false);
+    ).toBe(true);
     expect(
       isLiveTerminalBusy(
         '• Working (14s • esc to interrupt)\n' +
           'gpt-5.6-luna max · /tmp · Main [default]\n' +
           '› Check recently modified functions for compatibility',
       ),
-    ).toBe(false);
+    ).toBe(true);
     expect(isLiveSideConversation('gpt-5.6-terra xhigh · /workspace · Side from main thread')).toBe(true);
     expect(isLiveSideConversation('Tip: Use /side to start a side conversation')).toBe(false);
   });
@@ -1889,7 +1902,7 @@ function footer() {
   return 'gpt-5.6-luna max · /tmp · Main [default]';
 }
 function ready(lines) {
-  screen([...lines, '• Waiting for background terminal (3m 34s • esc to interrupt)', footer(), '› Ask Codex to do anything']);
+  screen(['• Waiting for background terminal (3m 34s • esc to interrupt)', ...lines, '─ Worked for 3m 34s ─', footer(), '› Ask Codex to do anything']);
 }
 screen([footer(), '› Ask Codex to do anything']);
 process.stdin.on('data', (chunk) => {
@@ -5678,8 +5691,10 @@ setInterval(() => {}, 1000);
         "process.stdin.setEncoding('utf8');",
         'if (process.stdin.isTTY) process.stdin.setRawMode(true);',
         "appendFileSync(" + JSON.stringify(trace) + ", 'ready\\n');",
+        "process.stdout.write('Would you like to run the following command?\\r\\n› 1. Yes, proceed (y)\\r\\n2. No, cancel (n)\\r\\nPress enter to confirm or esc to cancel\\r\\n');",
         "process.stdin.on('data', (chunk) => {",
         "  appendFileSync(" + JSON.stringify(trace) + ", Date.now() + '\\t' + Buffer.from(chunk).toString('hex') + '\\n');",
+        "  if (chunk.includes('\\r')) process.stdout.write('\\x1b[2J\\x1b[HSelect Model and Effort\\r\\n› 1. gpt-5.6-sol (current)\\r\\n2. gpt-5.6-terra\\r\\nPress enter to confirm or esc to go back\\r\\n');",
         '});',
         'setInterval(() => {}, 1000);',
       ].join('\n'),
@@ -5705,24 +5720,8 @@ setInterval(() => {}, 1000);
       while (!session.getTerminalInfo() && Date.now() < deadline) await testDelay(20);
       expect(session.getTerminalInfo()).toBeDefined();
       await waitForFileText(trace, 'ready\n', 2_000);
-      const internals = session as unknown as {
-        turnPhase: string;
-        lastTerminalSnapshot: string;
-        lastTerminalSnapshotAt: number;
-      };
-      // Simulate the common redraw race: the pane already shows the approval
-      // overlay while the observer's lifecycle phase is still `busy`.
-      // Direct control must trust the visible picker surface without waiting
-      // five seconds for a phase update.
-      internals.turnPhase = 'busy';
-      internals.lastTerminalSnapshot = [
-        'Would you like to run the following command?',
-        '› 1. Yes, proceed (y)',
-        '2. No, cancel (n)',
-        'Press enter to confirm or esc to cancel',
-      ].join('\n');
-      internals.lastTerminalSnapshotAt = Date.now();
-
+      // Read actual helper captures, not manually seeded private snapshots
+      // which a concurrent capture could overwrite before the assertion.
       const directResult = await pool.sendInput('tmux-direct-control-scope', '1');
       expect(directResult).toBe(true);
       await waitForFileText(trace, '0d', 2_000);
@@ -5737,17 +5736,16 @@ setInterval(() => {}, 1000);
       expect(enterAt).toBeGreaterThan(numberAt);
       expect(firstBytes[enterAt]!.timestamp - firstBytes[numberAt]!.timestamp).toBeGreaterThanOrEqual(120);
 
-      internals.lastTerminalSnapshot = [
-        'Select Model and Effort',
-        '› 1. gpt-5.6-sol (current)',
-        '2. gpt-5.6-terra',
-        'Press enter to confirm or esc to go back',
-      ].join('\n');
-      internals.lastTerminalSnapshotAt = Date.now();
+      const modelDeadline = Date.now() + 2000;
+      const snapshot = () => (session as unknown as { lastTerminalSnapshot: string }).lastTerminalSnapshot;
+      while (!snapshot().includes('Select Model and Effort') && Date.now() < modelDeadline) await testDelay(25);
+      expect(snapshot()).toContain('Select Model and Effort');
       const beforeModel = firstBytes.length;
       expect(await pool.sendInput('tmux-direct-control-scope', '1')).toBe(true);
-      await waitForFileText(trace, '31', 2_000);
+      const numberDeadline = Date.now() + 2000;
+      while ((await readFile(trace, 'utf8')).trim().split('\n').length <= beforeModel && Date.now() < numberDeadline) await testDelay(25);
       const modelTrace = (await readFile(trace, 'utf8')).trim().split('\n').filter(Boolean).slice(beforeModel);
+      expect(modelTrace.some((line) => line.split('\t')[1]?.includes('31'))).toBe(true);
       expect(modelTrace.some((line) => line.split('\t')[1]?.includes('0d'))).toBe(false);
     } finally {
       await pool.closeAll();

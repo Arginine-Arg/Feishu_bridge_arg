@@ -320,6 +320,8 @@ describe('CodexAdapter process contract', () => {
       { type: 'done', terminationReason: 'normal' },
     ]);
     expect(record.argv).toEqual([
+      '-c',
+      'disable_paste_burst=true',
       '--sandbox',
       'read-only',
       '-C',

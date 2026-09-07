@@ -281,8 +281,7 @@ export class LiveTerminalSession {
     // callbacks; otherwise a valid delayed click looks like an idle terminal
     // and is either lost or (worse) typed into the next ordinary prompt.
     const screenPickerVisible = isStructuredLiveInteraction(snapshot);
-    const diagnosticPhase =
-      this.turnPhase === 'idle' && screenPickerVisible ? 'picker' : this.turnPhase;
+    const diagnosticPhase = screenPickerVisible ? 'picker' : this.turnPhase;
     const inputState = this.turnPromptPreview
       ? isLiveTerminalReady(snapshot)
         ? 'empty'
@@ -337,6 +336,7 @@ export class LiveTerminalSession {
     inputMode?: LiveTerminalInputMode,
     sideConversationConfirmed = false,
   ): AgentRun {
+    this.controlInputGeneration += 1;
     if (sideConversationConfirmed) this.markSideConversationSeen(Date.now());
     this.turnGeneration = runId;
     this.turnPromptPreview = prompt;
@@ -351,6 +351,7 @@ export class LiveTerminalSession {
       events,
       stop: async (options: AgentRunStopOptions = {}) => {
         if (interruption.requested) return;
+        this.controlInputGeneration += 1;
         interruption.requested = true;
         interruption.forceRequested = options.force === true;
         interruption.cancel?.(interruption.forceRequested);
@@ -372,6 +373,7 @@ export class LiveTerminalSession {
     inputMode: 'side' | 'side-exit',
     sideConversationConfirmed = false,
   ): AgentRun {
+    this.controlInputGeneration += 1;
     if (sideConversationConfirmed) this.markSideConversationSeen(Date.now());
     void this.start();
     const interruption: LiveTurnInterrupt = { requested: false, detached: false };
@@ -381,6 +383,7 @@ export class LiveTerminalSession {
       events,
       stop: async (options: AgentRunStopOptions = {}) => {
         if (interruption.requested) return;
+        this.controlInputGeneration += 1;
         interruption.requested = true;
         interruption.forceRequested = options.force === true;
         interruption.cancel?.(interruption.forceRequested);
@@ -398,7 +401,7 @@ export class LiveTerminalSession {
     // Card callbacks and chat commands can arrive in the same event-loop
     // tick. Serialize their key sequences so a delayed arrow/Enter pair from
     // one click cannot interleave with the next click.
-    const generation = ++this.controlInputGeneration;
+    const generation = this.controlInputGeneration;
     const task = this.controlInputTail.then(() => this.sendControlInputNow(input, generation, stillActive));
     this.controlInputTail = task.then(() => undefined, () => undefined);
     return task;
@@ -418,17 +421,18 @@ export class LiveTerminalSession {
     // an emergency key and is handled immediately by its normal path.
     if (!isLiveInterruptInput(trimmed)) {
       const pickerVisible = (): boolean =>
-        this.turnPhase === 'picker' || isStructuredLiveInteraction(this.latestTerminalState());
+        isStructuredLiveInteraction(this.latestTerminalState());
       const deadline = Date.now() + CONTROL_PICKER_WAIT_MS;
       while (
         !pickerVisible() &&
+        stillActive() &&
         Date.now() < deadline &&
         !this.closed &&
         this.isAlive()
       ) {
         await delay(80);
       }
-      if (!stillActive() || !pickerVisible()) return false;
+      if (!stillActive() || !pickerVisible() || generation !== this.controlInputGeneration) return false;
     }
     const controls = parseLiveControlSequence(trimmed);
     if (controls) {
@@ -451,22 +455,21 @@ export class LiveTerminalSession {
           continue;
         }
         if (isLiteralPickerChoice(control) && controls[index + 1] === '\r') {
-          this.write(control + '\r');
+          this.write(control + '\r', true, 'keys');
           index += 1;
         } else {
-          this.write(control);
+          this.write(control, true, 'keys');
         }
       }
       return true;
     }
-    // A bare numeric picker choice intentionally stops after typing the
-    // number: model/reasoning menus can open a nested picker and must not be
-    // confirmed by an implicit Enter. Approval cards use `1 enter` (or an
-    // equivalent explicit sequence) when confirmation is required.
+    // Numeric shortcuts are real key events. Model/reasoning shortcuts may
+    // immediately open a nested picker; only an identified approval surface
+    // receives the additional confirmation required by its numeric choices.
     if (isNumericControlLiteral(trimmed)) {
       const approvalSurface = isApprovalControlSurface(this.latestTerminalState());
       if (!stillActive()) return false;
-      this.write(approvalSurface ? `${trimmed}\r` : trimmed);
+      this.write(approvalSurface ? `${trimmed}\r` : trimmed, true, 'keys');
       // Approval pickers expose explicit Yes/No rows and require the number
       // and Enter as one user action. Model/reasoning pickers deliberately do
       // not match this surface, so a bare number still leaves confirmation to
@@ -474,7 +477,7 @@ export class LiveTerminalSession {
       return true;
     }
     if (shouldDeferControlLiteralSubmit(trimmed)) {
-      this.write(trimmed);
+      this.write(trimmed, true, 'keys');
       return true;
     }
     return false;
@@ -665,18 +668,23 @@ export class LiveTerminalSession {
     this.emitter.emit('data', output);
   }
 
-  private write(input: string, trackTurn = true): void {
+  private write(input: string, trackTurn = true, kind: 'text' | 'keys' = 'text'): void {
     const child = this.child;
     if (!child || child.exitCode !== null || child.signalCode !== null) return;
     if (trackTurn) this.turnLastInputAt = Date.now();
     child.stdin.write(
-      this.terminalInfo?.backend === 'tmux' ? encodeTmuxInputFrame(input) : input,
+      this.terminalInfo?.backend === 'tmux' ? encodeTmuxInputFrame(input, kind) : input,
     );
   }
 
   private latestTerminalState(): string {
     const snapshot = this.lastTerminalSnapshot;
     const history = this.lastTerminalHistory?.text ?? '';
+    // Full-screen menus replace the model/path footer. A fresh picker must
+    // not lose to an older history frame just because that history still
+    // contains a recognizable Main or Side footer.
+    if (snapshot.trim() && this.lastTerminalSnapshotAt >= this.lastTerminalHistoryAt &&
+      isStructuredLiveInteraction(snapshot)) return snapshot;
     const snapshotKind = classifyLiveConversation(snapshot);
     const historyKind = classifyLiveConversation(history);
     if (snapshotKind !== 'unknown' && historyKind === 'unknown') return snapshot;
@@ -757,7 +765,7 @@ export class LiveTerminalSession {
     };
     const writeTurn = (input: string, allowAfterCancel = false): void => {
       if (!allowAfterCancel && (done || interruption.requested || interruption.detached)) return;
-      this.write(input, !concurrentSide);
+      this.write(input, !concurrentSide, inputMode === 'control' ? 'keys' : 'text');
     };
     setPhase('awaiting-input');
     const idleMs =
@@ -1821,8 +1829,11 @@ function liveCommandLine(command: string, args: string[], rows: string, columns:
     .join(' ')}`;
 }
 
-export function encodeTmuxInputFrame(input: string): string {
-  return `${Buffer.from(input, 'utf8').toString('base64')}\n`;
+export function encodeTmuxInputFrame(input: string, kind: 'text' | 'keys' = 'text'): string {
+  // Preserve the old text framing while explicitly typing control frames.
+  // A TUI Paste event is not a Key event: non-searchable Codex menus ignore
+  // pasted numbers entirely. Never infer the transport from the text itself.
+  return `${kind === 'keys' ? 'keys:' : ''}${Buffer.from(input, 'utf8').toString('base64')}\n`;
 }
 
 function spawnTmuxLiveProcess(
@@ -2315,7 +2326,7 @@ function settleBeforeSubmit() {
   Atomics.wait(waiter, 0, 0, PASTE_SUBMIT_SETTLE_MS);
 }
 
-function sendInput(input) {
+function sendInput(input, kind = 'text') {
   // Ctrl-C is a lifecycle command, but it still has to reach the pane the
   // user currently selected. Normal text goes through ensureLivePane(),
   // whereas the old Ctrl-C fast path deliberately skipped it; after a manual
@@ -2387,7 +2398,14 @@ function sendInput(input) {
   // Do not synthesize bracket markers with send-keys. tmux's native paste
   // transaction is aware of the pane's negotiated terminal mode and avoids
   // the Codex race where a rapid literal stream plus Enter becomes a newline.
-  if (normalized && !sendPaste(normalized)) sendLiteral(normalized);
+  if (normalized) {
+    if (kind === 'keys') sendLiteral(normalized);
+    else if (!sendPaste(normalized)) {
+      // Failed paste delivery must not turn into a second, ambiguous literal
+      // write plus Enter. Report it instead of risking partial/duplicate text.
+      return;
+    }
+  }
   if (shouldSubmit) {
     if (normalized) settleBeforeSubmit();
     sendKeys(['Enter']);
@@ -2512,8 +2530,9 @@ process.stdin.on('data', (chunk) => {
     inputBuffer = inputBuffer.slice(newline + 1);
     if (!frame) continue;
     try {
-      const decoded = Buffer.from(frame, 'base64').toString('utf8');
-      sendInput(decoded);
+      const kind = frame.startsWith('keys:') ? 'keys' : 'text';
+      const decoded = Buffer.from(kind === 'keys' ? frame.slice(5) : frame, 'base64').toString('utf8');
+      sendInput(decoded, kind);
     } catch (error) {
       process.stderr.write('failed to decode tmux input frame: ' + String(error) + '\n');
     }
@@ -4201,11 +4220,9 @@ function isTerminalSuggestionLine(trimmed: string): boolean {
 
 export function isLiveTerminalBusy(input: string): boolean {
   const cleaned = cleanTerminalOutput(input);
-  // Codex can leave a completed background-terminal status row in the
-  // viewport after returning to its editor. An explicit empty editor prompt
-  // or the native "Ask Codex" suggestion is stronger evidence than that
-  // stale busy chrome, and prevents a finished turn from holding the bridge
-  // queue forever.
+  // Completed history may retain a busy row before a Worked divider. The
+  // ready classifier handles that evidence without mistaking the composer
+  // shown during active work for a completed turn.
   if (isLiveTerminalReady(cleaned)) return false;
   const recent = cleaned.split('\n').slice(-12).join('\n');
   return /(?:(?:working|waiting\s+for\s+background\s+terminal)\s*\([^)]*(?:esc|escape)\s+to\s+interrupt|esc(?:ape)?\s+to\s+interrupt|compacting(?:\s+context)?|^\s*[•◦]\s+running\b)/imu.test(
@@ -4308,9 +4325,15 @@ function isLiveTerminalReady(input: string): boolean {
   const recent = cleaned.split('\n').slice(-12);
   const hasInteraction = isStructuredLiveInteraction(cleaned);
   let lastBusyLine = -1;
+  let lastCompletedLine = -1;
   for (const [index, line] of recent.entries()) {
     if (isLiveTerminalBusyLine(line.trim())) lastBusyLine = index;
+    if (/^─+\s*Worked for\b/u.test(line.trim())) lastCompletedLine = index;
   }
+  // The composer and its suggestions remain visible while Codex is working.
+  // Their position below Working is not completion evidence. Only a later
+  // native completion divider can supersede a retained busy row.
+  if (lastBusyLine >= 0 && lastCompletedLine <= lastBusyLine) return false;
   return recent.some((line, index) => {
     const trimmed = line.trim();
     // The "Ask Codex" suggestion is a ready editor marker only when a

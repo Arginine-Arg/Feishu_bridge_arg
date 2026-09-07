@@ -209,6 +209,19 @@ describe('signed card callback dispatch', () => {
     expect(h.pending.cancel('oc_group')).toHaveLength(0);
   });
 
+  it('acknowledges slow picker checks promptly and reports a later rejection', async () => {
+    let resolveDiagnostic!: (result: { live: LiveSessionDiagnostics }) => void;
+    const h = await createHarness({ liveDiagnostics: () => new Promise(resolve => { resolveDiagnostic = resolve; }) });
+    const response = await h.dispatch({ cmd: 'live.input', input: '1 enter', __bridge_cb: true,
+      bridge_token: h.token('live_input', { nonce: 'slow-picker' }) });
+    expect(response).toEqual({ toast: { type: 'info', content: '已收到选择，正在确认终端状态' } });
+    expect(h.pending.cancel('oc_group')).toHaveLength(0);
+    resolveDiagnostic({ live: { phase: 'idle', inputState: 'empty', retryCount: 0 } });
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(JSON.stringify(h.channel.sent)).toContain('选择窗已变化');
+    expect(h.pending.cancel('oc_group')).toHaveLength(0);
+  });
+
   it('preserves a numeric native permission choice for tmux', async () => {
     const h = await createHarness();
 

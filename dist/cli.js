@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.2.6",
+  version: "1.2.7",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -7415,7 +7415,7 @@ var LiveTerminalSession = class {
   getDiagnostics() {
     const snapshot = this.latestTerminalState();
     const screenPickerVisible = isStructuredLiveInteraction(snapshot);
-    const diagnosticPhase = this.turnPhase === "idle" && screenPickerVisible ? "picker" : this.turnPhase;
+    const diagnosticPhase = screenPickerVisible ? "picker" : this.turnPhase;
     const inputState = this.turnPromptPreview ? isLiveTerminalReady(snapshot) ? "empty" : isPendingLivePromptDraft(snapshot, this.turnPromptPreview) ? "draft" : this.turnPhase === "submitted" || this.turnPhase === "busy" || this.turnPhase === "streaming" ? "submitted" : "unknown" : "unknown";
     return {
       phase: diagnosticPhase,
@@ -7454,6 +7454,7 @@ var LiveTerminalSession = class {
     return true;
   }
   run(runId, prompt, cwd, inputMode, sideConversationConfirmed = false) {
+    this.controlInputGeneration += 1;
     if (sideConversationConfirmed) this.markSideConversationSeen(Date.now());
     this.turnGeneration = runId;
     this.turnPromptPreview = prompt;
@@ -7468,6 +7469,7 @@ var LiveTerminalSession = class {
       events,
       stop: async (options = {}) => {
         if (interruption.requested) return;
+        this.controlInputGeneration += 1;
         interruption.requested = true;
         interruption.forceRequested = options.force === true;
         interruption.cancel?.(interruption.forceRequested);
@@ -7482,6 +7484,7 @@ var LiveTerminalSession = class {
   }
   /** Observe a side conversation without replacing the main live turn. */
   runSide(runId, prompt, cwd, inputMode, sideConversationConfirmed = false) {
+    this.controlInputGeneration += 1;
     if (sideConversationConfirmed) this.markSideConversationSeen(Date.now());
     void this.start();
     const interruption = { requested: false, detached: false };
@@ -7491,6 +7494,7 @@ var LiveTerminalSession = class {
       events,
       stop: async (options = {}) => {
         if (interruption.requested) return;
+        this.controlInputGeneration += 1;
         interruption.requested = true;
         interruption.forceRequested = options.force === true;
         interruption.cancel?.(interruption.forceRequested);
@@ -7504,7 +7508,7 @@ var LiveTerminalSession = class {
     };
   }
   async sendControlInput(input, stillActive = () => true) {
-    const generation = ++this.controlInputGeneration;
+    const generation = this.controlInputGeneration;
     const task = this.controlInputTail.then(() => this.sendControlInputNow(input, generation, stillActive));
     this.controlInputTail = task.then(() => void 0, () => void 0);
     return task;
@@ -7514,12 +7518,12 @@ var LiveTerminalSession = class {
     const trimmed = input.trim();
     if (!trimmed) return false;
     if (!isLiveInterruptInput(trimmed)) {
-      const pickerVisible = () => this.turnPhase === "picker" || isStructuredLiveInteraction(this.latestTerminalState());
+      const pickerVisible = () => isStructuredLiveInteraction(this.latestTerminalState());
       const deadline = Date.now() + CONTROL_PICKER_WAIT_MS;
-      while (!pickerVisible() && Date.now() < deadline && !this.closed && this.isAlive()) {
+      while (!pickerVisible() && stillActive() && Date.now() < deadline && !this.closed && this.isAlive()) {
         await delay(80);
       }
-      if (!stillActive() || !pickerVisible()) return false;
+      if (!stillActive() || !pickerVisible() || generation !== this.controlInputGeneration) return false;
     }
     const controls = parseLiveControlSequence(trimmed);
     if (controls) {
@@ -7534,10 +7538,10 @@ var LiveTerminalSession = class {
           continue;
         }
         if (isLiteralPickerChoice(control) && controls[index + 1] === "\r") {
-          this.write(control + "\r");
+          this.write(control + "\r", true, "keys");
           index += 1;
         } else {
-          this.write(control);
+          this.write(control, true, "keys");
         }
       }
       return true;
@@ -7545,11 +7549,11 @@ var LiveTerminalSession = class {
     if (isNumericControlLiteral(trimmed)) {
       const approvalSurface = isApprovalControlSurface(this.latestTerminalState());
       if (!stillActive()) return false;
-      this.write(approvalSurface ? `${trimmed}\r` : trimmed);
+      this.write(approvalSurface ? `${trimmed}\r` : trimmed, true, "keys");
       return true;
     }
     if (shouldDeferControlLiteralSubmit(trimmed)) {
-      this.write(trimmed);
+      this.write(trimmed, true, "keys");
       return true;
     }
     return false;
@@ -7705,17 +7709,18 @@ var LiveTerminalSession = class {
     }
     this.emitter.emit("data", output);
   }
-  write(input, trackTurn = true) {
+  write(input, trackTurn = true, kind = "text") {
     const child = this.child;
     if (!child || child.exitCode !== null || child.signalCode !== null) return;
     if (trackTurn) this.turnLastInputAt = Date.now();
     child.stdin.write(
-      this.terminalInfo?.backend === "tmux" ? encodeTmuxInputFrame(input) : input
+      this.terminalInfo?.backend === "tmux" ? encodeTmuxInputFrame(input, kind) : input
     );
   }
   latestTerminalState() {
     const snapshot = this.lastTerminalSnapshot;
     const history = this.lastTerminalHistory?.text ?? "";
+    if (snapshot.trim() && this.lastTerminalSnapshotAt >= this.lastTerminalHistoryAt && isStructuredLiveInteraction(snapshot)) return snapshot;
     const snapshotKind = classifyLiveConversation(snapshot);
     const historyKind = classifyLiveConversation(history);
     if (snapshotKind !== "unknown" && historyKind === "unknown") return snapshot;
@@ -7783,7 +7788,7 @@ var LiveTerminalSession = class {
     };
     const writeTurn = (input, allowAfterCancel = false) => {
       if (!allowAfterCancel && (done || interruption.requested || interruption.detached)) return;
-      this.write(input, !concurrentSide);
+      this.write(input, !concurrentSide, inputMode === "control" ? "keys" : "text");
     };
     setPhase("awaiting-input");
     const idleMs = commandMode ? Math.max(this.opts.idleMs ?? DEFAULT_IDLE_MS, COMMAND_IDLE_MS) : this.opts.idleMs ?? DEFAULT_IDLE_MS;
@@ -8598,8 +8603,8 @@ function liveCommandLine(command, args, rows, columns) {
     ...args
   ].map(shellQuote2).join(" ")}`;
 }
-function encodeTmuxInputFrame(input) {
-  return `${Buffer.from(input, "utf8").toString("base64")}
+function encodeTmuxInputFrame(input, kind = "text") {
+  return `${kind === "keys" ? "keys:" : ""}${Buffer.from(input, "utf8").toString("base64")}
 `;
 }
 function spawnTmuxLiveProcess(opts, env, commandLine, rows, columns) {
@@ -9034,7 +9039,7 @@ function settleBeforeSubmit() {
   Atomics.wait(waiter, 0, 0, PASTE_SUBMIT_SETTLE_MS);
 }
 
-function sendInput(input) {
+function sendInput(input, kind = 'text') {
   // Ctrl-C is a lifecycle command, but it still has to reach the pane the
   // user currently selected. Normal text goes through ensureLivePane(),
   // whereas the old Ctrl-C fast path deliberately skipped it; after a manual
@@ -9106,7 +9111,14 @@ function sendInput(input) {
   // Do not synthesize bracket markers with send-keys. tmux's native paste
   // transaction is aware of the pane's negotiated terminal mode and avoids
   // the Codex race where a rapid literal stream plus Enter becomes a newline.
-  if (normalized && !sendPaste(normalized)) sendLiteral(normalized);
+  if (normalized) {
+    if (kind === 'keys') sendLiteral(normalized);
+    else if (!sendPaste(normalized)) {
+      // Failed paste delivery must not turn into a second, ambiguous literal
+      // write plus Enter. Report it instead of risking partial/duplicate text.
+      return;
+    }
+  }
   if (shouldSubmit) {
     if (normalized) settleBeforeSubmit();
     sendKeys(['Enter']);
@@ -9231,8 +9243,9 @@ process.stdin.on('data', (chunk) => {
     inputBuffer = inputBuffer.slice(newline + 1);
     if (!frame) continue;
     try {
-      const decoded = Buffer.from(frame, 'base64').toString('utf8');
-      sendInput(decoded);
+      const kind = frame.startsWith('keys:') ? 'keys' : 'text';
+      const decoded = Buffer.from(kind === 'keys' ? frame.slice(5) : frame, 'base64').toString('utf8');
+      sendInput(decoded, kind);
     } catch (error) {
       process.stderr.write('failed to decode tmux input frame: ' + String(error) + '\n');
     }
@@ -10538,9 +10551,12 @@ function isLiveTerminalReady(input) {
   const recent = cleaned.split("\n").slice(-12);
   const hasInteraction = isStructuredLiveInteraction(cleaned);
   let lastBusyLine = -1;
+  let lastCompletedLine = -1;
   for (const [index, line] of recent.entries()) {
     if (isLiveTerminalBusyLine(line.trim())) lastBusyLine = index;
+    if (/^─+\s*Worked for\b/u.test(line.trim())) lastCompletedLine = index;
   }
+  if (lastBusyLine >= 0 && lastCompletedLine <= lastBusyLine) return false;
   return recent.some((line, index) => {
     const trimmed = line.trim();
     if (index < lastBusyLine) return false;
@@ -11573,6 +11589,11 @@ var CodexAdapter = class {
     }
     const sandbox = opts.sandbox ?? this.sandbox;
     const args = [
+      // Bridge sends deliberate paste transactions and submit keys. Disable
+      // Codex's heuristic for human terminals so delayed consumption cannot
+      // reinterpret the explicit submit as a pasted newline.
+      "-c",
+      "disable_paste_burst=true",
       "--sandbox",
       sandbox,
       ...opts.model ? ["--model", opts.model] : [],
@@ -17024,7 +17045,7 @@ async function handleCardAction(deps) {
       if (!verifyDeferredLiveInputToken(deps, payload, scope, operatorId)) {
         return staleInteractionResponse();
       }
-      return forwardLiveInput(deps, payload, scope, threadId, mode);
+      return acknowledgeLiveInput(deps, payload, scope, threadId, mode);
     }
     if (cmd === "agent.input") {
       if (!verifyDeferredAgentInputToken(deps, payload, scope, operatorId)) {
@@ -17126,6 +17147,31 @@ function verifyDeferredInputToken(deps, payload, scope, operatorId, action) {
     }
   }
   return true;
+}
+async function acknowledgeLiveInput(deps, payload, scope, threadId, mode) {
+  const operation = forwardLiveInput(deps, payload, scope, threadId, mode);
+  let timer;
+  const pending = /* @__PURE__ */ Symbol("pending");
+  try {
+    const result = await Promise.race([
+      operation,
+      new Promise((resolve5) => {
+        timer = setTimeout(() => resolve5(pending), 200);
+      })
+    ]);
+    if (result !== pending) return result;
+    void operation.then(async (response) => {
+      const toast = response?.toast;
+      if (toast?.type !== "error") return;
+      await deps.channel.send(deps.evt.chatId, { markdown: `\u26A0\uFE0F ${toast.content}` }, {
+        replyTo: deps.evt.messageId,
+        ...mode === "topic" && threadId ? { replyInThread: true } : {}
+      });
+    }).catch((err) => log.warn("cardAction", "live-input-background-failed", { scope, err: String(err) }));
+    return { toast: { type: "info", content: "\u5DF2\u6536\u5230\u9009\u62E9\uFF0C\u6B63\u5728\u786E\u8BA4\u7EC8\u7AEF\u72B6\u6001" } };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 async function forwardLiveInput(deps, payload, scope, threadId, mode) {
   const input = typeof payload.input === "string" ? payload.input.trim() : "";
@@ -21594,7 +21640,7 @@ async function intakeMessage(deps) {
     return;
   }
   const route = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
-  if (route.nativeMode === "control") {
+  if (route.nativeMode === "control" && !threadId) {
     const recovery = recoverLiveControlScope(
       liveInteractionByScope,
       msg.chatId,

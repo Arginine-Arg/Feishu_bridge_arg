@@ -108,7 +108,7 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<CardActi
       if (!verifyDeferredLiveInputToken(deps, payload, scope, operatorId)) {
         return staleInteractionResponse();
       }
-      return forwardLiveInput(deps, payload, scope, threadId, mode);
+      return acknowledgeLiveInput(deps, payload, scope, threadId, mode);
     }
     if (cmd === 'agent.input') {
       if (!verifyDeferredAgentInputToken(deps, payload, scope, operatorId)) {
@@ -243,6 +243,39 @@ function verifyDeferredInputToken(
     }
   }
   return true;
+}
+
+async function acknowledgeLiveInput(
+  deps: CardDispatchDeps,
+  payload: Record<string, unknown>,
+  scope: string,
+  threadId: string | undefined,
+  mode: 'p2p' | 'group' | 'topic',
+): Promise<CardActionResponse | undefined> {
+  // Card callbacks have a short response budget. Let slow terminal checks
+  // finish independently, while giving the user an accurate receipt (not a
+  // claim that the keys were already delivered).
+  const operation = forwardLiveInput(deps, payload, scope, threadId, mode);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const pending = Symbol('pending');
+  try {
+    const result = await Promise.race([
+      operation,
+      new Promise<typeof pending>((resolve) => { timer = setTimeout(() => resolve(pending), 200); }),
+    ]);
+    if (result !== pending) return result;
+    void operation.then(async (response) => {
+      const toast = response?.toast as { type?: string; content?: string } | undefined;
+      if (toast?.type !== 'error') return;
+      await deps.channel.send(deps.evt.chatId, { markdown: `⚠️ ${toast.content}` }, {
+        replyTo: deps.evt.messageId,
+        ...(mode === 'topic' && threadId ? { replyInThread: true } : {}),
+      });
+    }).catch((err) => log.warn('cardAction', 'live-input-background-failed', { scope, err: String(err) }));
+    return { toast: { type: 'info', content: '已收到选择，正在确认终端状态' } };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 async function forwardLiveInput(

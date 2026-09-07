@@ -872,7 +872,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   }
 
   const route = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
-  if (route.nativeMode === 'control') {
+  if (route.nativeMode === 'control' && !threadId) {
     const recovery = recoverLiveControlScope(
       liveInteractionByScope,
       msg.chatId,

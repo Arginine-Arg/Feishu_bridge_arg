@@ -322,6 +322,11 @@ export class CodexAdapter implements AgentAdapter {
     }
     const sandbox = opts.sandbox ?? this.sandbox;
     const args = [
+      // Bridge sends deliberate paste transactions and submit keys. Disable
+      // Codex's heuristic for human terminals so delayed consumption cannot
+      // reinterpret the explicit submit as a pasted newline.
+      '-c',
+      'disable_paste_burst=true',
       '--sandbox',
       sandbox,
       ...(opts.model ? ['--model', opts.model] : []),
