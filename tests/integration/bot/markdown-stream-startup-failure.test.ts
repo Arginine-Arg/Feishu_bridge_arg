@@ -584,6 +584,21 @@ describe('markdown stream startup failures', () => {
     expect(h.agent.runOptions).toHaveLength(1);
   });
 
+  it('streams structured goal output through the regular reply path', async () => {
+    const updates: string[] = [];
+    const h = await createHarness({ stream: async (_chatId, input) => {
+      const producer = (input as { markdown?: (ctrl: { setContent(text: string): Promise<void> }) => Promise<void> }).markdown;
+      if (!producer) throw new Error('expected streaming goal output');
+      await producer({ setContent: async text => { updates.push(text); } });
+    } });
+    h.agent.structuredControl = vi.fn(async () => []);
+    h.agent.setEvents([[{ type: 'text', delta: 'Structured goal progress' }, { type: 'done', terminationReason: 'normal' }]]);
+    await startTestBridge(h);
+    await h.channel.handlers.message?.(message('om_goal_stream', '/codex /goal finish the task'));
+    await waitFor(() => updates.some(text => text.includes('Structured goal progress')));
+    expect(h.agent.runOptions).toHaveLength(1);
+  });
+
   it('waits for a complete model-picker frame before publishing its card', async () => {
     const h = await createHarness({
       stream: async () => {
