@@ -12,7 +12,8 @@ for (const kind of ['codex', 'claude'] as const) {
     const adapter = new StructuredAdapter({ kind, binary: kind, profileDir: join(directory, 'state'), nativeView: kind === 'codex' });
     const events: AgentEvent[] = [];
     try {
-      for await (const event of adapter.run({ runId: 'probe', scopeId: 'probe', cwd: directory, prompt: '/model', liveInputMode: 'command' }).events) events.push(event);
+      for await (const event of adapter.run({ runId: 'probe', scopeId: 'probe', cwd: directory, prompt: '/model', liveInputMode: 'command',
+        ...(process.env.ARG_BRIDGE_NATIVE_MODEL ? { model: process.env.ARG_BRIDGE_NATIVE_MODEL } : {}) }).events) events.push(event);
       expect(events.filter(event => event.type === 'error')).toEqual([]);
       expect(events.some(event => event.type === 'interactive' && (event.interaction?.choices.length ?? 0) > 0)).toBe(true);
       if (process.env.ARG_BRIDGE_NATIVE_PROTOCOL_TURN !== '1') {
@@ -39,6 +40,25 @@ for (const kind of ['codex', 'claude'] as const) {
           prompt: 'Reply with exactly BRIDGE_PROTOCOL_OK. Do not use tools.' }).events) reply.push(event);
         expect(reply.filter(event => event.type === 'error')).toEqual([]);
         expect(reply.filter(event => event.type === 'text').map(event => event.delta).join('')).toContain('BRIDGE_PROTOCOL_OK');
+        if (kind === 'claude' && process.env.ARG_BRIDGE_NATIVE_FOLLOWUP === '1') {
+          const followup: AgentEvent[] = [];
+          for await (const event of adapter.run({ runId: 'followup-probe', scopeId: 'probe', cwd: directory,
+            prompt: 'Reply with exactly FOLLOWUP_PROTOCOL_OK. Do not use tools.' }).events) followup.push(event);
+          expect(followup.filter(event => event.type === 'error')).toEqual([]);
+          expect(followup.filter(event => event.type === 'text').map(event => event.delta).join('').trim()).toBe('FOLLOWUP_PROTOCOL_OK');
+          expect(followup.filter(event => event.type === 'done')).toEqual([expect.objectContaining({ terminationReason: 'normal' })]);
+          const firstId = reply.find(event => event.type === 'system' && event.sessionId);
+          expect(followup.find(event => event.type === 'system' && event.sessionId)).toMatchObject({ sessionId: (firstId as Extract<AgentEvent, { type: 'system' }>).sessionId });
+          expect((await adapter.tmux.diagnostics!('probe')).inputState).toBe('empty');
+          const deadline = Date.now() + 5000;
+          let screen = '';
+          do {
+            screen = (await adapter.tmux.tail!('probe', 80)).text;
+            if (/FOLLOWUP_PROTOCOL_OK\s+\[normal\]/.test(screen)) break;
+            await new Promise(resolve => setTimeout(resolve, 100));
+          } while (Date.now() < deadline);
+          expect(screen).toMatch(/FOLLOWUP_PROTOCOL_OK\s+\[normal\]/);
+        }
         if (kind === 'codex') {
           const deadline = Date.now() + 5000;
           let screen = '';

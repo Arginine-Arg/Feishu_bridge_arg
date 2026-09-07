@@ -92,8 +92,8 @@ model usage for that test task, not an extra routing/summarization request.
 On 2026-09-07, Codex 0.153.2 passed initialization, a real text round trip, and
 native shared-server tmux display. Claude Code 2.1.220 passed initialization and
 model discovery; the configured service rejected real generation with HTTP 403
-(`Free tier has no quota`). Successful Claude generation remains an external
-acceptance gate, not a passing test claim.
+(`Free tier has no quota`). At that stage successful Claude generation had not
+passed; the subsequent explicitly selected DeepSeek validation is recorded below.
 
 The same minimal task through native `claude -p` returned the identical 403,
 so that acceptance failure is not specific to the SDK path. The Codex real-turn
@@ -111,6 +111,25 @@ An additional minimal authenticated `/v1/messages` request using the configured
 model returned HTTP 403 with `error.type: permission_error` in 89 ms. This shows
 the generation endpoint rejected that request, but does not identify whether
 the cause is credential scope, model access, quota, or another service policy.
+
+The user subsequently selected `deepseek-v4-flash` via `https://api.xinlab-ioz.cn`.
+Inspection found Haiku mapped to that model but `ANTHROPIC_MODEL` still naming
+`claude-fable-5[1m]`; the earlier configured-model rejection is not evidence that
+DeepSeek is unavailable. With the native SDK `model` option explicitly set to
+`deepseek-v4-flash`, real generation passed. A second probe verified two sequential
+turns on the same session ID, exact follow-up output, normal completion, empty
+input state afterward, and the assistant's final text in the read-only tmux view.
+No global credentials or settings were changed; no Sonnet generation was tested.
+
+```sh
+ARG_BRIDGE_NATIVE_PROTOCOL=1 ARG_BRIDGE_NATIVE_PROTOCOL_TURN=1 \
+ARG_BRIDGE_NATIVE_FOLLOWUP=1 ARG_BRIDGE_NATIVE_MODEL=deepseek-v4-flash \
+pnpm vitest run tests/process/structured-native.test.ts -t 'claude:'
+```
+
+Set the intended model explicitly in the preview profile, or reconcile native
+Claude model configuration before relying on defaults. Alias mappings alone do
+not remove a conflicting explicit model setting.
 
 Native Codex side conversations include developer instructions and a boundary
 message defining inherited history as reference-only. The user approved retaining
