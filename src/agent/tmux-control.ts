@@ -31,6 +31,8 @@ export interface TmuxPaneTarget {
   structured?: {
     endpoint?: string;
     threadId: string;
+    legacy?: boolean;
+    codexHome?: string;
   };
 }
 

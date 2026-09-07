@@ -1375,7 +1375,7 @@ function formatTmuxList(panes: TmuxPaneTarget[]): string {
       `${index + 1}. ${pane.agentKind} \`${pane.paneId}\` (${pane.ownership})`,
       `   cwd: \`${pane.paneCurrentPath}\``,
       ...(pane.structured
-        ? [`   structured thread: \`${pane.structured.threadId}\``, `   endpoint: \`${pane.structured.endpoint ?? 'native'}\``]
+        ? [`   structured thread: \`${pane.structured.threadId}\``, `   endpoint: \`${pane.structured.endpoint ?? (pane.structured.legacy ? '待 Bridge 自动迁移' : 'native')}\``]
         : ['   structured: 未识别（普通 terminal pane）']),
       `   id: \`${tmuxTargetKey(pane)}\``,
       `   attach: \`${pane.attachCommand}\``,

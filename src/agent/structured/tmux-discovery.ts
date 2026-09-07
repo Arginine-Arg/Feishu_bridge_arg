@@ -1,4 +1,5 @@
 import { basename } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { spawnProcessSync } from '../../platform/spawn';
 import {
   listTmuxAgentPanes,
@@ -9,6 +10,8 @@ export interface StructuredTmuxPane extends TmuxPaneTarget {
   structured: {
     endpoint?: string;
     threadId: string;
+    legacy?: boolean;
+    codexHome?: string;
   };
 }
 
@@ -22,7 +25,9 @@ export function listStructuredTmuxPanes(socket?: string): StructuredTmuxPane[] {
   return listTmuxAgentPanes(socket).flatMap(pane => {
     const argv = processArgvTree(pane.panePid);
     const identity = parseStructuredAgentArgv(argv, pane.agentKind);
-    return identity ? [{ ...pane, structured: identity }] : [];
+    if (!identity) return [];
+    const codexHome = pane.agentKind === 'codex' ? processEnvironmentForPid(pane.panePid).CODEX_HOME : undefined;
+    return [{ ...pane, structured: { ...identity, ...(codexHome ? { codexHome } : {}) } }];
   });
 }
 
@@ -37,7 +42,7 @@ export function activeStructuredTmuxPane(socket: string, sessionName: string): S
   return listStructuredTmuxPanes(socket).find(pane => pane.sessionName === sessionName && pane.paneId === paneId);
 }
 
-export function parseStructuredAgentArgv(argv: readonly string[], kind: 'codex' | 'claude'): { endpoint?: string; threadId: string } | undefined {
+export function parseStructuredAgentArgv(argv: readonly string[], kind: 'codex' | 'claude'): { endpoint?: string; threadId: string; legacy?: boolean } | undefined {
   const normalized = argv.map(item => item.trim()).filter(Boolean);
   const hasAgent = normalized.some(item => {
     const name = basename(item).replace(/\.(?:cmd|exe)$/iu, '').toLowerCase();
@@ -51,8 +56,19 @@ export function parseStructuredAgentArgv(argv: readonly string[], kind: 'codex' 
   const endpoint = remoteIndex >= 0
     ? (normalized[remoteIndex]!.slice('--remote='.length) || normalized[remoteIndex + 1])
     : undefined;
-  if (kind === 'codex' && !endpoint) return undefined;
+  if (kind === 'codex' && !endpoint) return { threadId, legacy: true };
   return { ...(endpoint ? { endpoint } : {}), threadId };
+}
+
+function processEnvironmentForPid(rootPid: number): NodeJS.ProcessEnv {
+  if (process.platform !== 'linux') return {};
+  try {
+    const raw = readFileSync(`/proc/${rootPid}/environ`, 'utf8');
+    return Object.fromEntries(raw.split('\0').flatMap(item => {
+      const index = item.indexOf('=');
+      return index > 0 ? [[item.slice(0, index), item.slice(index + 1)]] : [];
+    }));
+  } catch { return {}; }
 }
 
 function processArgvTree(rootPid: number): string[] {

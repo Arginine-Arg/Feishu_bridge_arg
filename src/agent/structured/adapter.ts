@@ -20,6 +20,7 @@ import { StructuredView } from './view';
 import { RpcClient } from './rpc';
 import type { TmuxBindingStatus } from '../tmux-control';
 import { activeStructuredTmuxPane, listStructuredTmuxPanes } from './tmux-discovery';
+import { spawnProcessSync } from '../../platform/spawn';
 
 interface StructuredBinding { target: TmuxPaneTarget; endpoint: string; threadId: string; cwd: string; updatedAt: number }
 interface ScopeSession { main: StructuredSession; view: StructuredView; bound?: StructuredBinding; side?: CodexStructuredSession; sideOpening?: Promise<CodexStructuredSession>; sideExit?: Promise<void>; sideClosing?: boolean; sideView?: StructuredView; cwd: string }
@@ -146,13 +147,42 @@ export class StructuredAdapter implements AgentAdapter {
     const target = /^\d+$/u.test(key)
       ? candidates[Number.parseInt(key, 10) - 1]
       : candidates.find(item => item.paneId === key || `${item.socketPath}::${item.paneId}` === key);
-    if (!target?.structured?.endpoint) throw new Error(`未找到可接管的结构化 Codex pane：${selector}。先运行 /tmux list。`);
+    if (!target?.structured) throw new Error(`未找到可接管的 Codex pane：${selector}。先运行 /tmux list。`);
+    if (!target.structured.endpoint && target.structured.legacy) return this.adoptLegacyPane(scope, target);
+    if (!target.structured.endpoint) throw new Error('该 pane 尚未连接 App Server，无法结构化接管');
     const binding: StructuredBinding = { target, endpoint: target.structured.endpoint, threadId: target.structured.threadId, cwd: target.paneCurrentPath, updatedAt: Date.now() };
     await this.verifyBinding(binding);
     this.autoDiscoveryDisabled.delete(scope);
     this.bindings.set(scope, binding);
     await this.saveBindings();
     return target;
+  }
+  private async adoptLegacyPane(scope: string, target: TmuxPaneTarget & { structured?: { threadId: string; legacy?: boolean; codexHome?: string } }): Promise<TmuxPaneTarget> {
+    if (this.id !== 'codex' || !target.structured?.threadId) throw new Error('只有 Codex legacy resume pane 可以自动迁移');
+    const env = { ...process.env };
+    if (target.structured.codexHome) env.CODEX_HOME = target.structured.codexHome;
+    else if (this.options.codexHome) env.CODEX_HOME = this.options.codexHome;
+    const { rpc, endpoint } = await connectCodexHost({ binary: this.options.binary, profileDir: this.options.profileDir, scope, cwd: target.paneCurrentPath, env });
+    try {
+      const command = [this.options.binary, '-c', 'check_for_update_on_startup=false', '--remote', endpoint, 'resume', target.structured.threadId, '--no-alt-screen'].map(value => `'${value.replace(/'/g, `'\\''`)}'`).join(' ');
+      const created = spawnProcessSync('tmux', ['-S', target.socketPath, 'split-window', '-d', '-P', '-F', '#{pane_id}', '-t', target.sessionName, '-c', target.paneCurrentPath, command], { encoding: 'utf8' });
+      if (created.status !== 0 || typeof created.stdout !== 'string' || !created.stdout.trim()) throw new Error(`无法在 tmux 中创建 structured pane${typeof created.stderr === 'string' && created.stderr.trim() ? `：${created.stderr.trim()}` : ''}`);
+      const paneId = created.stdout.trim();
+      let current: TmuxPaneTarget | undefined;
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        current = listStructuredTmuxPanes(target.socketPath).find(pane => pane.paneId === paneId && pane.structured?.threadId === target.structured!.threadId && pane.structured.endpoint === endpoint);
+        if (current) break;
+        await new Promise(resolve => setTimeout(resolve, 200));
+      }
+      if (!current?.structured?.endpoint) throw new Error('structured pane 启动超时，请检查新 pane 输出');
+      const binding: StructuredBinding = { target: current, endpoint, threadId: target.structured.threadId, cwd: current.paneCurrentPath, updatedAt: Date.now() };
+      const loaded = await rpc.request('thread/loaded/list', {});
+      if (!Array.isArray(loaded.data) || !loaded.data.includes(binding.threadId)) throw new Error('App Server 未加载旧 thread，未创建绑定');
+      this.autoDiscoveryDisabled.delete(scope);
+      this.bindings.set(scope, binding);
+      await this.saveBindings();
+      return current;
+    } finally { rpc.close(); }
   }
   private refreshBindingTarget(binding: StructuredBinding): TmuxPaneTarget | undefined {
     const target = listStructuredTmuxPanes(binding.target.socketPath).find(item => item.paneId === binding.target.paneId);

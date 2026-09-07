@@ -1,9 +1,9 @@
-# Structured backend (v1.4.0)
+# Structured backend (v1.5.0)
 
-Version 1.4.0 is a regular release with an opt-in structured backend. The v1.2.7
+Version 1.5.0 is a regular release with an opt-in structured backend. The v1.2.7
 tag remains available for rollback. It does not automatically change any running
 profile or migrate an existing terminal session. The previously validated
-1.3.0 implementation is retained with the limitations below.
+1.4.0 implementation is retained with the limitations below.
 
 ## Transport
 
@@ -36,15 +36,16 @@ timeout. Explicit new input waits for the existing observed work to finish.
 ### Dynamic tmux panes
 
 For structured Codex, a pane running `codex --remote <endpoint> resume <threadId>`
-is discoverable from its process arguments. `/tmux list` displays the discovered
-identity; `/tmux bind` verifies the socket owner, loaded thread, and workspace
-before persisting the mapping. Within a Bridge-managed tmux session, the active
-pane is rechecked before an idle turn, so closing one pane and resuming another
+is discoverable from its process arguments. A legacy pane running plain
+`codex resume <threadId>` is also listed as an adoptable Codex pane. On
+`/tmux bind`, Bridge starts the App Server itself, creates a remote pane beside
+the legacy pane, verifies the loaded thread and persists the mapping; users do
+not need to copy an endpoint or launch App Server manually. `/tmux list` displays
+the discovered identity. Within a Bridge-managed tmux session, the active pane
+is rechecked before an idle turn, so closing one pane and resuming another
 thread in a new pane changes the structured target without starting a second
-App Server task. `/tmux unbind` persists an opt-out from automatic rediscovery.
-Plain `codex resume` without `--remote` is intentionally not attachable by the
-structured backend. See the v1.4.0 release notes for the Claude limitation and
-the exact command shape.
+model task. `/tmux unbind` persists an opt-out from automatic rediscovery.
+See the v1.5.0 release notes for the Claude limitation and migration behavior.
 
 Claude uses the official Agent SDK streaming-input mode with one persistent
 Claude process per scope. The default `claude_code` preset and normal user/project

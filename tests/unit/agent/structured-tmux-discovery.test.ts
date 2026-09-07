@@ -9,11 +9,11 @@ describe('structured tmux process discovery', () => {
     ], 'codex')).toEqual({ endpoint: 'unix:///run/user/1000/codex.sock', threadId: 'thread-123' });
   });
 
-  it('accepts equals-form remote options and rejects a legacy Codex resume', () => {
+  it('accepts equals-form remote options and marks a legacy Codex resume for Bridge migration', () => {
     expect(parseStructuredAgentArgv(['codex', '--remote=unix:///tmp/codex.sock', 'resume', 'thread-1'], 'codex')).toEqual({
       endpoint: 'unix:///tmp/codex.sock', threadId: 'thread-1',
     });
-    expect(parseStructuredAgentArgv(['codex', 'resume', 'thread-1'], 'codex')).toBeUndefined();
+    expect(parseStructuredAgentArgv(['codex', 'resume', 'thread-1'], 'codex')).toEqual({ threadId: 'thread-1', legacy: true });
   });
 
   it('recognizes Claude resume for listing but leaves endpoint-less attach policy to the adapter', () => {

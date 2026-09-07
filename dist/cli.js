@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.4.0",
+  version: "1.5.0",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -11759,7 +11759,7 @@ function isWindowsCommandNotFoundLine2(line) {
 // src/agent/structured/adapter.ts
 import { createHash as createHash5, randomUUID as randomUUID3 } from "crypto";
 import { readFile as readFile13, mkdir as mkdir16, lstat as lstat3 } from "fs/promises";
-import { readFileSync as readFileSync3 } from "fs";
+import { readFileSync as readFileSync4 } from "fs";
 import { tmpdir as tmpdir4 } from "os";
 import { join as join23, resolve as resolve4 } from "path";
 
@@ -12684,11 +12684,14 @@ ${event.output}
 
 // src/agent/structured/tmux-discovery.ts
 import { basename as basename5 } from "path";
+import { readFileSync as readFileSync3 } from "fs";
 function listStructuredTmuxPanes(socket) {
   return listTmuxAgentPanes(socket).flatMap((pane) => {
     const argv = processArgvTree(pane.panePid);
     const identity = parseStructuredAgentArgv(argv, pane.agentKind);
-    return identity ? [{ ...pane, structured: identity }] : [];
+    if (!identity) return [];
+    const codexHome = pane.agentKind === "codex" ? processEnvironmentForPid(pane.panePid).CODEX_HOME : void 0;
+    return [{ ...pane, structured: { ...identity, ...codexHome ? { codexHome } : {} } }];
   });
 }
 function activeStructuredTmuxPane(socket, sessionName) {
@@ -12713,8 +12716,20 @@ function parseStructuredAgentArgv(argv, kind) {
   const threadId = normalized[resumeIndex + 1];
   const remoteIndex = normalized.findIndex((item) => item === "--remote" || item.startsWith("--remote="));
   const endpoint = remoteIndex >= 0 ? normalized[remoteIndex].slice("--remote=".length) || normalized[remoteIndex + 1] : void 0;
-  if (kind === "codex" && !endpoint) return void 0;
+  if (kind === "codex" && !endpoint) return { threadId, legacy: true };
   return { ...endpoint ? { endpoint } : {}, threadId };
+}
+function processEnvironmentForPid(rootPid) {
+  if (process.platform !== "linux") return {};
+  try {
+    const raw = readFileSync3(`/proc/${rootPid}/environ`, "utf8");
+    return Object.fromEntries(raw.split("\0").flatMap((item) => {
+      const index = item.indexOf("=");
+      return index > 0 ? [[item.slice(0, index), item.slice(index + 1)]] : [];
+    }));
+  } catch {
+    return {};
+  }
 }
 function processArgvTree(rootPid) {
   if (process.platform === "win32") return [];
@@ -12855,7 +12870,7 @@ var StructuredAdapter = class {
   }
   loadBindings() {
     try {
-      const parsed = JSON.parse(readFileSync3(this.bindingsFile, "utf8"));
+      const parsed = JSON.parse(readFileSync4(this.bindingsFile, "utf8"));
       if (parsed.version !== 1) return;
       for (const scope of parsed.disabled ?? []) if (typeof scope === "string") this.autoDiscoveryDisabled.add(scope);
       for (const [scope, binding] of Object.entries(parsed.bindings ?? {})) {
@@ -12874,13 +12889,44 @@ var StructuredAdapter = class {
     const candidates = this.listStructuredPanes(explicitSocket);
     const key = selector.trim();
     const target = /^\d+$/u.test(key) ? candidates[Number.parseInt(key, 10) - 1] : candidates.find((item) => item.paneId === key || `${item.socketPath}::${item.paneId}` === key);
-    if (!target?.structured?.endpoint) throw new Error(`\u672A\u627E\u5230\u53EF\u63A5\u7BA1\u7684\u7ED3\u6784\u5316 Codex pane\uFF1A${selector}\u3002\u5148\u8FD0\u884C /tmux list\u3002`);
+    if (!target?.structured) throw new Error(`\u672A\u627E\u5230\u53EF\u63A5\u7BA1\u7684 Codex pane\uFF1A${selector}\u3002\u5148\u8FD0\u884C /tmux list\u3002`);
+    if (!target.structured.endpoint && target.structured.legacy) return this.adoptLegacyPane(scope, target);
+    if (!target.structured.endpoint) throw new Error("\u8BE5 pane \u5C1A\u672A\u8FDE\u63A5 App Server\uFF0C\u65E0\u6CD5\u7ED3\u6784\u5316\u63A5\u7BA1");
     const binding = { target, endpoint: target.structured.endpoint, threadId: target.structured.threadId, cwd: target.paneCurrentPath, updatedAt: Date.now() };
     await this.verifyBinding(binding);
     this.autoDiscoveryDisabled.delete(scope);
     this.bindings.set(scope, binding);
     await this.saveBindings();
     return target;
+  }
+  async adoptLegacyPane(scope, target) {
+    if (this.id !== "codex" || !target.structured?.threadId) throw new Error("\u53EA\u6709 Codex legacy resume pane \u53EF\u4EE5\u81EA\u52A8\u8FC1\u79FB");
+    const env = { ...process.env };
+    if (target.structured.codexHome) env.CODEX_HOME = target.structured.codexHome;
+    else if (this.options.codexHome) env.CODEX_HOME = this.options.codexHome;
+    const { rpc, endpoint } = await connectCodexHost({ binary: this.options.binary, profileDir: this.options.profileDir, scope, cwd: target.paneCurrentPath, env });
+    try {
+      const command = [this.options.binary, "-c", "check_for_update_on_startup=false", "--remote", endpoint, "resume", target.structured.threadId, "--no-alt-screen"].map((value) => `'${value.replace(/'/g, `'\\''`)}'`).join(" ");
+      const created = spawnProcessSync("tmux", ["-S", target.socketPath, "split-window", "-d", "-P", "-F", "#{pane_id}", "-t", target.sessionName, "-c", target.paneCurrentPath, command], { encoding: "utf8" });
+      if (created.status !== 0 || typeof created.stdout !== "string" || !created.stdout.trim()) throw new Error(`\u65E0\u6CD5\u5728 tmux \u4E2D\u521B\u5EFA structured pane${typeof created.stderr === "string" && created.stderr.trim() ? `\uFF1A${created.stderr.trim()}` : ""}`);
+      const paneId = created.stdout.trim();
+      let current;
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        current = listStructuredTmuxPanes(target.socketPath).find((pane) => pane.paneId === paneId && pane.structured?.threadId === target.structured.threadId && pane.structured.endpoint === endpoint);
+        if (current) break;
+        await new Promise((resolve6) => setTimeout(resolve6, 200));
+      }
+      if (!current?.structured?.endpoint) throw new Error("structured pane \u542F\u52A8\u8D85\u65F6\uFF0C\u8BF7\u68C0\u67E5\u65B0 pane \u8F93\u51FA");
+      const binding = { target: current, endpoint, threadId: target.structured.threadId, cwd: current.paneCurrentPath, updatedAt: Date.now() };
+      const loaded = await rpc.request("thread/loaded/list", {});
+      if (!Array.isArray(loaded.data) || !loaded.data.includes(binding.threadId)) throw new Error("App Server \u672A\u52A0\u8F7D\u65E7 thread\uFF0C\u672A\u521B\u5EFA\u7ED1\u5B9A");
+      this.autoDiscoveryDisabled.delete(scope);
+      this.bindings.set(scope, binding);
+      await this.saveBindings();
+      return current;
+    } finally {
+      rpc.close();
+    }
   }
   refreshBindingTarget(binding) {
     const target = listStructuredTmuxPanes(binding.target.socketPath).find((item) => item.paneId === binding.target.paneId);
@@ -17042,7 +17088,7 @@ function formatTmuxList(panes) {
     ...panes.flatMap((pane, index) => [
       `${index + 1}. ${pane.agentKind} \`${pane.paneId}\` (${pane.ownership})`,
       `   cwd: \`${pane.paneCurrentPath}\``,
-      ...pane.structured ? [`   structured thread: \`${pane.structured.threadId}\``, `   endpoint: \`${pane.structured.endpoint ?? "native"}\``] : ["   structured: \u672A\u8BC6\u522B\uFF08\u666E\u901A terminal pane\uFF09"],
+      ...pane.structured ? [`   structured thread: \`${pane.structured.threadId}\``, `   endpoint: \`${pane.structured.endpoint ?? (pane.structured.legacy ? "\u5F85 Bridge \u81EA\u52A8\u8FC1\u79FB" : "native")}\``] : ["   structured: \u672A\u8BC6\u522B\uFF08\u666E\u901A terminal pane\uFF09"],
       `   id: \`${tmuxTargetKey(pane)}\``,
       `   attach: \`${pane.attachCommand}\``
     ]),
