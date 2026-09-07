@@ -19,7 +19,7 @@ import { StructuredView } from './view';
 import { RpcClient } from './rpc';
 import type { TmuxBindingStatus } from '../tmux-control';
 
-interface ScopeSession { main: StructuredSession; view: StructuredView; side?: CodexStructuredSession; sideView?: StructuredView; cwd: string }
+interface ScopeSession { main: StructuredSession; view: StructuredView; side?: CodexStructuredSession; sideOpening?: Promise<CodexStructuredSession>; sideExit?: Promise<void>; sideClosing?: boolean; sideView?: StructuredView; cwd: string }
 export interface StructuredAdapterOptions {
   kind: 'codex' | 'claude'; binary: string; profileDir: string; codexHome?: string;
   larkChannel?: LarkChannelEnvContext; nativeView?: boolean;
@@ -112,25 +112,52 @@ export class StructuredAdapter implements AgentAdapter {
     };
     void (async () => {
       try {
-        if (side && options.liveInputMode !== 'side-exit') throw new Error('结构化 /btw 尚在验收原生边界语义，当前未启用；主任务未改变。');
-        if (side && options.liveInputMode === 'side-exit' && !this.sessions.get(options.scopeId ?? options.cwd ?? '')?.side) {
+        const known = this.sessions.get(options.scopeId ?? options.cwd ?? '');
+        if (side && options.liveInputMode === 'side-exit' && !known?.side && !known?.sideOpening) {
           emit(textEvent('当前没有已打开的结构化 side，会话未改变。')); return;
         }
         const current = await this.session(options);
         if (abort.signal.aborted) return;
         let target = current.main;
+        if (!side && options.liveInputMode) {
+          const requestId = /^\/answer\s+(\S+)/.exec(options.prompt)?.[1];
+          const controlTarget = requestId
+            ? [current.main, current.side].find(session => session?.hasRequest(requestId))
+            : current.side ?? current.main;
+          if (!controlTarget) throw new Error('选择请求已失效，请使用最新卡片');
+          target = controlTarget;
+        }
         let prompt = options.prompt;
         if (side) {
           if (!(current.main instanceof CodexStructuredSession)) throw new Error('Claude 结构化 side 尚未验证，请保留原生后端使用此功能');
           if (options.liveInputMode === 'side-exit') {
-            if (current.side) { await current.side.interrupt(); await current.side.close(); current.side = undefined; current.sideView = undefined; }
+            current.sideExit ??= (async () => {
+              current.sideClosing = true;
+              try {
+                if (current.sideOpening) await current.sideOpening;
+                if (current.side) { await current.side.discardSide(); current.side = undefined; await current.sideView?.dispose(); current.sideView = undefined; }
+              } finally { current.sideClosing = false; }
+            })();
+            try { await current.sideExit; } finally { current.sideExit = undefined; }
             emit({ type: 'system', sideConversation: 'exited' }); emit(textEvent('已退出 side，主任务继续运行。')); return;
           }
           if (!current.side) {
-            current.side = await current.main.forkSide();
-            current.sideView = this.makeView(`${options.scopeId}:side:${current.side.id}`);
-            await current.sideView.start(this.options.nativeView !== false ? { binary: this.options.binary, endpoint: current.side.endpoint, threadId: current.side.id } : undefined, current.cwd);
+            current.sideOpening ??= current.main.forkSide(current.cwd).then(async session => {
+              current.side = session;
+              current.sideView = this.makeView(`${options.scopeId}:side:${session.id}`);
+              // A separate native TUI would retain a subscription after /btw out.
+              // The side view observes the same events read-only; main stays native.
+              await current.sideView.start(undefined, current.cwd);
+              return session;
+            });
+            try { await current.sideOpening; } finally { current.sideOpening = undefined; }
           }
+          if (current.sideClosing) return;
+          if (abort.signal.aborted) {
+            if (current.side) { await current.side.discardSide(); current.side = undefined; await current.sideView?.dispose(); current.sideView = undefined; }
+            return;
+          }
+          if (!current.side) throw new Error('Side closed before submission; text was not sent');
           target = current.side;
           prompt = options.prompt.replace(/^\/btw(?:\s+|$)/i, '');
           emit({ type: 'system', sideConversation: 'entered' });
@@ -233,7 +260,7 @@ export class StructuredAdapter implements AgentAdapter {
   }
   async shutdown(): Promise<void> {
     for (const current of this.sessions.values()) {
-      await current.side?.close(); await current.main.close(); await current.view.close();
+      await current.side?.close(); await current.sideView?.dispose(); await current.main.close(); await current.view.close();
       if (current.main instanceof CodexStructuredSession) current.main.disconnect();
     }
     this.sessions.clear();

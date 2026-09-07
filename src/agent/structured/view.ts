@@ -51,4 +51,12 @@ export class StructuredView {
   }
   status(): TmuxBindingStatus { return this.statusValue; }
   async close(): Promise<void> { await this.tail; }
+  async dispose(): Promise<void> {
+    await this.close();
+    const terminal = this.statusValue.terminal;
+    if (terminal?.socketPath && terminal.ownership === 'managed') {
+      spawnProcessSync('tmux', ['-S', terminal.socketPath, 'kill-session', '-t', terminal.target], { stdio: 'ignore' });
+    }
+    this.statusValue = { state: 'none' };
+  }
 }

@@ -11,6 +11,46 @@ import { join } from 'node:path';
 import { sendStructuredCard } from '../../../src/card/structured-interaction';
 
 describe('structured transport contracts', () => {
+  it('prepares native side boundaries before sending text and never interrupts the parent', async () => {
+    const rpc = new EventEmitter() as EventEmitter & { request: ReturnType<typeof vi.fn> };
+    rpc.request = vi.fn(async (method, params) => {
+      if (method === 'config/read') return { config: { developer_instructions: 'Existing policy.' } };
+      if (method === 'thread/fork') return { thread: { id: 'child' } };
+      if (method === 'turn/start') return { turn: { id: 'child-turn' } };
+      return {};
+    });
+    const main = new CodexStructuredSession('parent', '', rpc as unknown as RpcClient);
+    const child = await main.forkSide('/workspace');
+    expect(rpc.request.mock.calls.map(call => call[0])).toEqual(['config/read', 'thread/fork', 'thread/inject_items']);
+    expect(rpc.request.mock.calls[1]?.[1]).toMatchObject({ threadId: 'parent', ephemeral: true, developerInstructions: expect.stringContaining('Existing policy.') });
+    expect(rpc.request.mock.calls[1]?.[1]).not.toHaveProperty('deferGoalContinuation');
+    expect(rpc.request.mock.calls[2]?.[1]).toMatchObject({ threadId: 'child', items: [{ role: 'user', content: [{ type: 'input_text', text: expect.stringContaining('It is not your current task.') }] }] });
+    const events: AgentEvent[] = [];
+    const turn = child.submit({ runId: 'side', prompt: 'Exact side question' }, event => events.push(event), new AbortController().signal);
+    await Promise.resolve();
+    rpc.emit('message', { method: 'turn/completed', params: { threadId: 'parent', turn: { id: 'main-turn', status: 'completed' } } });
+    await child.discardSide();
+    await turn;
+    expect(rpc.request.mock.calls.filter(call => call[0] === 'turn/start')).toEqual([['turn/start', { threadId: 'child', input: [{ type: 'text', text: 'Exact side question' }] }]]);
+    expect(rpc.request.mock.calls.filter(call => call[0] === 'turn/interrupt')).toEqual([['turn/interrupt', { threadId: 'child', turnId: 'child-turn' }]]);
+    expect(rpc.request.mock.calls.filter(call => call[0] === 'thread/unsubscribe')).toEqual([['thread/unsubscribe', { threadId: 'child' }]]);
+    await main.close();
+  });
+
+  it('never submits side text when native boundary preparation fails', async () => {
+    const rpc = new EventEmitter() as EventEmitter & { request: ReturnType<typeof vi.fn> };
+    rpc.request = vi.fn(async method => {
+      if (method === 'config/read') return { config: {} };
+      if (method === 'thread/fork') return { thread: { id: 'child' } };
+      if (method === 'thread/inject_items') throw new Error('boundary rejected');
+      return {};
+    });
+    const main = new CodexStructuredSession('parent', '', rpc as unknown as RpcClient);
+    await expect(main.forkSide()).rejects.toThrow('boundary rejected');
+    expect(rpc.request).toHaveBeenLastCalledWith('thread/unsubscribe', { threadId: 'child' });
+    expect(rpc.request.mock.calls.some(call => call[0] === 'turn/start' || call[0] === 'turn/interrupt')).toBe(false);
+    await main.close();
+  });
   it('keeps the request actionable in text when CardKit delivery fails', async () => {
     const send = vi.fn().mockRejectedValueOnce(new Error('card rejected')).mockResolvedValueOnce({});
     await sendStructuredCard({ send } as never, 'chat', {

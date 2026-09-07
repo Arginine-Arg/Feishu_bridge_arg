@@ -48,8 +48,23 @@ for (const kind of ['codex', 'claude'] as const) {
             await new Promise(resolve => setTimeout(resolve, 200));
           } while (Date.now() < deadline);
           expect(screen).toMatch(/[•●]\s+BRIDGE_PROTOCOL_OK/);
+          if (process.env.ARG_BRIDGE_NATIVE_SIDE === '1') {
+            const side: AgentEvent[] = [];
+            for await (const event of adapter.runSide({ runId: 'side-probe', scopeId: 'probe', cwd: directory,
+              prompt: '/btw Reply with exactly SIDE_PROTOCOL_OK. Do not use tools.', liveInputMode: 'side' }).events) side.push(event);
+            expect(side.filter(event => event.type === 'error')).toEqual([]);
+            expect(side.some(event => event.type === 'system' && event.sideConversation === 'entered')).toBe(true);
+            expect(side.filter(event => event.type === 'text').map(event => event.delta).join('')).toContain('SIDE_PROTOCOL_OK');
+            expect((await adapter.tmux.diagnostics!('probe')).sideConversation).toBe(true);
+            const out: AgentEvent[] = [];
+            for await (const event of adapter.runSide({ runId: 'side-out', scopeId: 'probe', cwd: directory,
+              prompt: '/btw out', liveInputMode: 'side-exit' }).events) out.push(event);
+            expect(out.filter(event => event.type === 'error')).toEqual([]);
+            expect((await adapter.tmux.diagnostics!('probe')).sideConversation).toBe(false);
+            expect(await adapter.structuredControl('probe', '/status')).toEqual(expect.arrayContaining([expect.objectContaining({ type: 'text' })]));
+          }
         }
       }
     } finally { await adapter.shutdown(); }
-  }, 60000);
+  }, 120000);
 }

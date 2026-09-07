@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { AgentEvent, AgentRunOptions, LiveSessionDiagnostics } from '../types';
 import { interactionEvent, textEvent, type StructuredSession } from './contracts';
 import { RpcClient, type Wire } from './rpc';
+import { SIDE_BOUNDARY_PROMPT, SIDE_DEVELOPER_INSTRUCTIONS } from './side-boundary';
 
 const toolItems = new Set(['commandExecution', 'fileChange', 'mcpToolCall', 'collabAgentToolCall', 'webSearch', 'imageGeneration', 'dynamicToolCall']);
 
@@ -267,15 +268,30 @@ export class CodexStructuredSession implements StructuredSession {
       if (active) { this.turnId = active.id; this.phase = 'busy'; }
     } catch { /* An unmaterialized new thread has no turns to list. */ }
   }
-  async forkSide(): Promise<CodexStructuredSession> {
-    throw new Error('结构化 /btw 正在核实原生 side 边界语义，当前未启用；旧版后端仍可使用原生 /btw');
-    /* Enabled only after the native side boundary contract is validated.
-    const result = await this.rpc.request('thread/fork', { threadId: this.id, ephemeral: true, deferGoalContinuation: true, excludeTurns: true });
+  async forkSide(cwd?: string): Promise<CodexStructuredSession> {
+    // Match the native TUI's boundary, preserving the effective developer policy.
+    // Never start a turn just to initialize side context.
+    const config = await this.rpc.request('config/read', { ...(cwd ? { cwd } : {}) });
+    const existing = config.config?.developer_instructions;
+    if (existing != null && typeof existing !== 'string') throw new Error('Cannot preserve native developer instructions');
+    const developerInstructions = [existing?.trim() ? existing : '', SIDE_DEVELOPER_INSTRUCTIONS].filter(Boolean).join('\n\n');
+    // Ephemeral threads cannot carry goals. Do not combine them with
+    // deferGoalContinuation or call goal/clear (both are rejected natively).
+    const result = await this.rpc.request('thread/fork', { threadId: this.id, ephemeral: true, excludeTurns: true, developerInstructions });
     const id = result.thread?.id;
-    if (!id) throw new Error('Side fork did not return an identity');
-    await this.rpc.request('thread/goal/clear', { threadId: id });
-    return new CodexStructuredSession(id, this.endpoint, this.rpc);
-    */
+    if (typeof id !== 'string' || id === this.id) throw new Error('Side fork did not return a distinct identity');
+    try {
+      await this.rpc.request('thread/inject_items', { threadId: id, items: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: SIDE_BOUNDARY_PROMPT }] }] });
+      return new CodexStructuredSession(id, this.endpoint, this.rpc);
+    } catch (error) {
+      await this.rpc.request('thread/unsubscribe', { threadId: id }).catch(() => {});
+      throw error;
+    }
+  }
+  async discardSide(): Promise<void> {
+    await this.interrupt();
+    await this.rpc.request('thread/unsubscribe', { threadId: this.id });
+    await this.close();
   }
   async close(): Promise<void> {
     this.rpc.off('message', this.listener); this.rpc.off('disconnected', this.disconnected);

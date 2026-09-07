@@ -54,7 +54,7 @@ for Claude remote-service transport, not a verified local attach replacement.
 | `/status` | thread metadata and Bridge diagnostics | SDK session/model/phase and Bridge diagnostics |
 | `/goal` | native get/set/pause/resume/clear, with goal relay spanning turns | unsupported; no imitation goal loop |
 | `/stop` | pause active goal and interrupt the exact turn | SDK interrupt |
-| `/btw` | gated pending native side-boundary acceptance/validation | not enabled in the structured preview |
+| `/btw` | ephemeral fork with native side boundary; text submitted only after preparation | not enabled in the structured preview |
 
 Other slash commands are not forwarded to the model as ordinary task text when
 unsupported. The stable terminal backend remains available for its full native
@@ -100,10 +100,37 @@ so that acceptance failure is not specific to the SDK path. The Codex real-turn
 probe additionally checks for the assistant's answer in the shared tmux TUI,
 not merely a repeated copy of the user prompt.
 
+After the user updated `/home/wanghaoran/.claude/settings.json` on 2026-09-07,
+Claude initialization and model selection passed again. Generation did not
+finish within the SDK probe's 120-second deadline; an independent native
+`claude -p` probe also produced no result before its 55-second deadline.
+The configured endpoint's unauthenticated root returned HTTP 200, which confirms
+basic reachability but not successful authenticated generation. This is not
+reported as a passing Claude round trip; no credentials were printed or changed.
+
 Native Codex side conversations include developer instructions and a boundary
-message defining inherited history as reference-only. A bare ephemeral fork is
-not equivalent. The preview deliberately rejects `/btw` until that native
-boundary behavior is accepted under the no-extra-prompt requirement and tested.
+message defining inherited history as reference-only. The user approved retaining
+these native strings on 2026-09-07. The adapter preserves the effective existing
+developer policy and appends the verbatim native side policy, then injects the
+native boundary without starting a model turn. A bare ephemeral fork is not
+equivalent. Ephemeral threads do not support goals; the server rejects combining
+`ephemeral` with `deferGoalContinuation`. No goal mutation is sent to the parent.
+
+`/btw` without text prepares side without a generation; `/btw text` submits only
+after preparation. `/btw out` interrupts and unsubscribes only the child ID.
+Its tmux view is currently read-only, avoiding an extra native subscription that
+could keep the ephemeral thread alive after exit. The main view remains native.
+Side state is currently connection-local: Bridge restart does not promise side
+recovery. Real Codex entry, answer, exit and subsequent main status have passed;
+this is still an opt-in preview, not a stable-backend replacement.
+
+A separate real Codex test started a native goal that ran `sleep 25`, submitted
+a side question while that goal was active, exited side, and observed the main
+goal finish normally (not interrupted). Run it explicitly with:
+
+```sh
+ARG_BRIDGE_NATIVE_GOAL_SIDE=1 pnpm vitest run tests/process/structured-side-goal.test.ts
+```
 
 The preview has not replaced the stable backend or been advertised as a fully
 validated migration. Windows currently retains the terminal backend for Codex;

@@ -33,6 +33,7 @@
     "README.md",
     "README.zh.md",
     "docs/structured-backend.md",
+    "THIRD_PARTY_CODEX_NOTICE",
     "LICENSE"
   ],
   "scripts": {
