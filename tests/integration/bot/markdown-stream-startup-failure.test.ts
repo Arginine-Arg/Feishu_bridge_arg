@@ -78,10 +78,16 @@ type StreamFn = FakeLarkChannel['stream'];
 const cleanups: Array<() => Promise<void>> = [];
 
 afterEach(async () => {
-  vi.restoreAllMocks();
-  sdkMock.channel = undefined;
-  sdkMock.createLarkChannel.mockClear();
-  await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
+  try {
+    // Disconnect and flush the bridge before deleting its profile directory.
+    // Parallel teardown raced persistent writes against rm (especially on
+    // Windows), producing ENOENT retries and hook timeouts.
+    for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+  } finally {
+    vi.restoreAllMocks();
+    sdkMock.channel = undefined;
+    sdkMock.createLarkChannel.mockClear();
+  }
 });
 
 describe('markdown stream startup failures', () => {
