@@ -200,6 +200,22 @@ describe('signed card callback dispatch', () => {
     expect(h.pending.cancel('oc_group')).toHaveLength(0);
   });
 
+  it('restores an output observer before answering a cold structured approval', async () => {
+    const h = await createHarness();
+    const control = vi.fn(async () => []);
+    h.agent.structuredControl = control;
+    h.agent.structuredReady = () => false;
+    const input = '/answer approval-cold deny';
+    const response = await h.dispatch({ cmd: 'live.input', input, __bridge_cb: true,
+      bridge_token: h.token(`live_input:${input}`, { nonce: 'structured-cold' }) });
+    expect(response).toEqual({ toast: { type: 'info', content: '已收到选择，正在恢复会话监听' } });
+    expect(control).not.toHaveBeenCalled();
+    const queued = h.pending.cancel('oc_group');
+    expect(queued).toHaveLength(1);
+    expect(queued[0]?.content).toBe(input);
+    expect(liveInputModeForMessage(queued[0]!)).toBe('control');
+  });
+
   it('routes a signed structured topic card even when chat metadata omits the thread', async () => {
     const h = await createHarness({ chatMode: 'group' });
     const control = vi.fn(async () => []);

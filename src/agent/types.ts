@@ -149,6 +149,7 @@ export interface AgentAdapter {
   /** Optional structured control plane; no terminal input or model call. */
   structuredControl?: (scopeId: string, input: string) => Promise<AgentEvent[]>;
   structuredQuestion?: (scopeId: string) => string | undefined;
+  structuredReady?: (scopeId: string) => boolean;
   readonly id: string;
   readonly displayName: string;
   isAvailable(): Promise<boolean>;

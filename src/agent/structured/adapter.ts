@@ -79,7 +79,7 @@ export class StructuredAdapter implements AgentAdapter {
     if (this.id === 'codex') await ensureBundledCodexSkill(this.options.codexHome ?? process.env.CODEX_HOME);
   }
   structuredControl = async (scope: string, input: string): Promise<AgentEvent[]> => {
-    const current = this.sessions.get(scope);
+    const current = this.sessions.get(scope) ?? await this.starting.get(scope);
     if (!current) throw new Error('当前结构化会话尚未建立');
     const requestId = /^\/answer\s+(\S+)/.exec(input)?.[1];
     const target = requestId
@@ -91,6 +91,7 @@ export class StructuredAdapter implements AgentAdapter {
     for (const event of [...events, ...extra]) (current.sideView ?? current.view).event(event);
     return [...events, ...extra];
   };
+  structuredReady = (scope: string): boolean => this.sessions.has(scope);
   structuredQuestion = (scope: string): string | undefined => {
     const current = this.sessions.get(scope);
     return (current?.side ?? current?.main)?.freeTextRequest();
@@ -111,6 +112,7 @@ export class StructuredAdapter implements AgentAdapter {
     };
     void (async () => {
       try {
+        if (side && options.liveInputMode !== 'side-exit') throw new Error('结构化 /btw 尚在验收原生边界语义，当前未启用；主任务未改变。');
         if (side && options.liveInputMode === 'side-exit' && !this.sessions.get(options.scopeId ?? options.cwd ?? '')?.side) {
           emit(textEvent('当前没有已打开的结构化 side，会话未改变。')); return;
         }
@@ -181,21 +183,33 @@ export class StructuredAdapter implements AgentAdapter {
     const directory = join(this.options.profileDir, 'structured');
     await mkdir(directory, { recursive: true, mode: 0o700 });
     const stateFile = this.stateFile(scope, cwd);
-    let saved: { id: string } | undefined;
+    let saved: { id: string; endpoint?: string } | undefined;
     try { saved = JSON.parse(await readFile(stateFile, 'utf8')); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    if (!saved && options.liveInputMode === 'control') throw new Error('没有可恢复的结构化会话；选择操作未启动新任务');
     const env = withArtifactDeliveryEnv({ ...process.env, ...buildLarkChannelEnv(this.options.larkChannel) }, options.artifactDelivery);
     let main: StructuredSession;
     const view = this.makeView(`${scope}\0${cwd}`);
     if (this.id === 'codex') {
       if (this.options.codexHome) env.CODEX_HOME = this.options.codexHome;
-      const { rpc, endpoint } = await connectCodexHost({ binary: this.options.binary, profileDir: this.options.profileDir, scope, cwd, env });
+      const readOnlyReconnect = saved && options.liveInputMode && !/^\/goal\s+(?!pause\b|clear\b|edit\b|status\b)/.test(options.prompt);
+      let rpc: RpcClient;
+      let endpoint: string;
+      if (readOnlyReconnect) {
+        if (!saved?.endpoint?.startsWith('unix://')) throw new Error('旧连接信息不足，控制操作未启动任何新服务');
+        endpoint = saved.endpoint;
+        rpc = await RpcClient.connect(`ws+unix://${endpoint.slice('unix://'.length)}:/`);
+        try {
+          await rpc.initialize();
+          const loaded = await rpc.request('thread/loaded/list', {});
+          if (!loaded.data?.includes(saved.id)) throw new Error('原会话未运行；控制操作不会自动恢复任务');
+        } catch (error) { rpc.close(); throw error; }
+      } else ({ rpc, endpoint } = await connectCodexHost({ binary: this.options.binary, profileDir: this.options.profileDir, scope, cwd, env }));
       const restored = saved ? new CodexStructuredSession(saved.id, endpoint, rpc) : undefined;
       try {
         const result = await rpc.request(saved ? 'thread/resume' : 'thread/start', {
           ...(saved ? { threadId: saved.id, excludeTurns: true } : {}), cwd,
-          ...(!saved && options.model ? { model: options.model } : {}), sandbox: options.sandbox ?? 'read-only',
+          ...(!saved && options.model ? { model: options.model } : {}), ...(!readOnlyReconnect ? { sandbox: options.sandbox ?? 'read-only', approvalPolicy: 'on-request' } : {}),
           ...(!saved && options.reasoningEffort ? { config: { model_reasoning_effort: options.reasoningEffort } } : {}),
-          approvalPolicy: 'on-request',
         });
         const id = result.thread?.id;
         if (typeof id !== 'string') throw new Error('Codex did not return a thread ID');

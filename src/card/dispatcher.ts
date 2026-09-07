@@ -299,7 +299,12 @@ async function forwardLiveInput(
   const input = typeof payload.input === 'string' ? payload.input.trim() : '';
   if (!input) return;
   log.info('cardAction', 'live-input', { scope, input });
-  if (deps.agent.structuredControl) {
+  let needsStructuredObserver = false;
+  if (deps.agent.structuredControl && !deps.activeRuns.hasAny(scope)) {
+    needsStructuredObserver = deps.agent.structuredReady?.(scope) === false ||
+      (await deps.agent.tmux?.diagnostics?.(scope))?.inputState === 'submitted';
+  }
+  if (deps.agent.structuredControl && !needsStructuredObserver) {
     try {
       const events = await deps.agent.structuredControl(scope, input);
       for (const event of events) {
@@ -331,6 +336,12 @@ async function forwardLiveInput(
     },
     'control',
   );
+  if (deps.agent.structuredControl) {
+    // Reconnect through a control run so resumed output has a renderer and a
+    // lifecycle owner. This run submits no user/model prompt.
+    deps.pending.pushFront(scope, synthetic, { immediate: true, bypassBlock: true, priorityOrder: 'fifo' });
+    return { toast: { type: 'info', content: '已收到选择，正在恢复会话监听' } };
+  }
   const activeHandle = [deps.activeRuns.getSide(scope), deps.activeRuns.get(scope)].find(
     (handle) => Boolean(handle && !handle.interrupted && !handle.stopRequested && !handle.detached),
   );

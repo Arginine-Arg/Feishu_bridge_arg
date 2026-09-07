@@ -63,6 +63,12 @@ not a terminal position. Slow callbacks return a receipt while completion is
 checked independently. Assistant prose is not parsed into native picker cards in
 this backend.
 
+When a signed approval arrives after the Bridge relay has disconnected, a
+control-only observer reconnects before answering so subsequent output is still
+forwarded. It does not replay the task. Codex control recovery requires the
+original server and loaded thread; a stale choice cannot launch a replacement
+task. Goal and resumed-approval output uses the normal streaming relay.
+
 Legacy `/resume` and scope reset are intentionally blocked in the preview rather
 than acknowledging a reset while continuing the old protocol thread. Use a new
 profile/scope for evaluation. Workspace changes use distinct persisted thread

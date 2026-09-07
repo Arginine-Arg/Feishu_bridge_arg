@@ -1971,6 +1971,20 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   };
   if (stopRequested('batch-start')) return;
   if (!isSideBatch && activeRuns.hasAny(scope)) {
+    if (firstInputMode === 'control' && agent.structuredControl) {
+      // An observer may have registered since this control entered the FIFO.
+      // Reuse it instead of stranding the approval behind that same run.
+      const sendOpts = { replyTo: firstMsg.messageId, ...(firstMsg.threadId ? { replyInThread: true } : {}) };
+      try {
+        for (const event of await agent.structuredControl(scope, firstMsg.content)) {
+          if (event.type === 'text') await channel.send(firstMsg.chatId, { markdown: event.delta }, sendOpts);
+          if (event.type === 'interactive' && event.interaction) await sendStructuredCard(channel, firstMsg.chatId, event.interaction,
+            callbackAuth ? input => callbackAuth.sign({ runId: event.interaction!.id, scope, chatId: firstMsg.chatId,
+              operatorOpenId: firstMsg.senderId, action: `live_input:${input}`, policyFingerprint: 'structured', ttlMs: 30 * 60 * 1000 }) : undefined, sendOpts);
+        }
+      } catch (error) { await channel.send(firstMsg.chatId, { markdown: `⚠️ ${error instanceof Error ? error.message : String(error)}` }, sendOpts); }
+      return;
+    }
     for (const message of batch) pending.push(scope, message);
     log.info('flush', 'ordinary-batch-deferred-during-side', {
       scope,
@@ -2476,9 +2490,13 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   }
 
   const configuredReplyMode = getMessageReplyMode(controls.cfg);
+  const structuredWorkControl = Boolean(agent.structuredControl) && (
+    liveInputMode === 'control' || liveInputMode === 'side' ||
+    /^\/goal\s+(?!pause\b|clear\b|edit\b|status\b)/.test(nativeCommand ?? '')
+  );
   const replyMode = outputModeAtStart === 'final'
     ? 'text'
-    : useLiveSession && bridgeRoute?.presentation === 'card'
+    : useLiveSession && bridgeRoute?.presentation === 'card' && !structuredWorkControl
       ? 'card'
       : configuredReplyMode;
   log.info('flush', 'reply-mode', {
@@ -2610,7 +2628,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     // Native slash commands and pickers form the control plane. They remain
     // observable even under `/output off`, otherwise a user could not select
     // a model or resume a session while ordinary task narration is muted.
-    if (useLiveSession && nativeCommand) {
+    if (useLiveSession && nativeCommand && !structuredWorkControl) {
       const finalState = await processAgentStream(
         handle,
         eventStream,

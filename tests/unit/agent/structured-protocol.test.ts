@@ -28,6 +28,9 @@ describe('structured transport contracts', () => {
     for await (const event of adapter.runSide({ runId: 'out', scopeId: 'scope', cwd: directory, prompt: '/btw out', liveInputMode: 'side-exit' }).events) events.push(event);
     expect(events.some(event => event.type === 'error')).toBe(false);
     expect(events.filter(event => event.type === 'text').map(event => event.delta).join('')).toContain('没有已打开');
+    const controlEvents: AgentEvent[] = [];
+    for await (const event of adapter.run({ runId: 'cold', scopeId: 'scope', cwd: directory, prompt: '/answer stale deny', liveInputMode: 'control' }).events) controlEvents.push(event);
+    expect(controlEvents.find(event => event.type === 'error')).toMatchObject({ message: '没有可恢复的结构化会话；选择操作未启动新任务' });
     await adapter.shutdown();
   });
   it('answers a structured question with its original question ID and exact text', async () => {

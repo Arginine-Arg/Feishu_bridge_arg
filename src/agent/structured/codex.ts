@@ -145,7 +145,7 @@ export class CodexStructuredSession implements StructuredSession {
       if (options.liveInputMode === 'command' || options.liveInputMode === 'control') {
         for (const event of [...await this.command(options.prompt), ...this.drainCommands()]) emit(event);
         const startsGoal = this.goalActive && /^\/goal\s+(?!pause\b|clear\b|status\b|edit\b)/.test(options.prompt);
-        const continuesTurn = Boolean(this.turnId) && (/^\/?answer\s/.test(options.prompt) || /^\d+$/.test(options.prompt));
+        const continuesTurn = Boolean(this.turnId || this.goalActive) && (/^\/?answer\s/.test(options.prompt) || /^\d+$/.test(options.prompt));
         if (!startsGoal && !continuesTurn) return;
         if (signal.aborted) await this.interrupt();
       } else {
@@ -257,7 +257,7 @@ export class CodexStructuredSession implements StructuredSession {
     if (this.turnId) await this.rpc.request('turn/interrupt', { threadId: this.id, turnId: this.turnId });
     else this.finish();
   }
-  diagnostics(): LiveSessionDiagnostics { return { phase: this.phase, inputState: this.turnId ? 'submitted' : 'empty', retryCount: 0 }; }
+  diagnostics(): LiveSessionDiagnostics { return { phase: this.goalActive && this.phase === 'idle' ? 'busy' : this.phase, inputState: this.turnId || this.goalActive ? 'submitted' : 'empty', retryCount: 0 }; }
   async syncState(): Promise<void> {
     try { const result = await this.rpc.request('thread/goal/get', { threadId: this.id }); this.goalActive = result.goal?.status === 'active'; }
     catch { /* Older servers may lack goals; ordinary turns remain available. */ }

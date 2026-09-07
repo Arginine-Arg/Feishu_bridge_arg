@@ -12102,7 +12102,7 @@ ${p3.command ?? JSON.stringify(p3.changes ?? {})}`,
       if (options.liveInputMode === "command" || options.liveInputMode === "control") {
         for (const event of [...await this.command(options.prompt), ...this.drainCommands()]) emit2(event);
         const startsGoal = this.goalActive && /^\/goal\s+(?!pause\b|clear\b|status\b|edit\b)/.test(options.prompt);
-        const continuesTurn = Boolean(this.turnId) && (/^\/?answer\s/.test(options.prompt) || /^\d+$/.test(options.prompt));
+        const continuesTurn = Boolean(this.turnId || this.goalActive) && (/^\/?answer\s/.test(options.prompt) || /^\d+$/.test(options.prompt));
         if (!startsGoal && !continuesTurn) return;
         if (signal.aborted) await this.interrupt();
       } else {
@@ -12255,7 +12255,7 @@ ${options.prompt}` : options.prompt }];
     else this.finish();
   }
   diagnostics() {
-    return { phase: this.phase, inputState: this.turnId ? "submitted" : "empty", retryCount: 0 };
+    return { phase: this.goalActive && this.phase === "idle" ? "busy" : this.phase, inputState: this.turnId || this.goalActive ? "submitted" : "empty", retryCount: 0 };
   }
   async syncState() {
     try {
@@ -12707,7 +12707,7 @@ var StructuredAdapter = class {
     if (this.id === "codex") await ensureBundledCodexSkill(this.options.codexHome ?? process.env.CODEX_HOME);
   }
   structuredControl = async (scope, input) => {
-    const current = this.sessions.get(scope);
+    const current = this.sessions.get(scope) ?? await this.starting.get(scope);
     if (!current) throw new Error("\u5F53\u524D\u7ED3\u6784\u5316\u4F1A\u8BDD\u5C1A\u672A\u5EFA\u7ACB");
     const requestId = /^\/answer\s+(\S+)/.exec(input)?.[1];
     const target = requestId ? [current.main, current.side].find((session) => session?.hasRequest(requestId)) : current.side ?? current.main;
@@ -12717,6 +12717,7 @@ var StructuredAdapter = class {
     for (const event of [...events, ...extra]) (current.sideView ?? current.view).event(event);
     return [...events, ...extra];
   };
+  structuredReady = (scope) => this.sessions.has(scope);
   structuredQuestion = (scope) => {
     const current = this.sessions.get(scope);
     return (current?.side ?? current?.main)?.freeTextRequest();
@@ -12741,6 +12742,7 @@ var StructuredAdapter = class {
     };
     void (async () => {
       try {
+        if (side && options.liveInputMode !== "side-exit") throw new Error("\u7ED3\u6784\u5316 /btw \u5C1A\u5728\u9A8C\u6536\u539F\u751F\u8FB9\u754C\u8BED\u4E49\uFF0C\u5F53\u524D\u672A\u542F\u7528\uFF1B\u4E3B\u4EFB\u52A1\u672A\u6539\u53D8\u3002");
         if (side && options.liveInputMode === "side-exit" && !this.sessions.get(options.scopeId ?? options.cwd ?? "")?.side) {
           emit2(textEvent("\u5F53\u524D\u6CA1\u6709\u5DF2\u6253\u5F00\u7684\u7ED3\u6784\u5316 side\uFF0C\u4F1A\u8BDD\u672A\u6539\u53D8\u3002"));
           return;
@@ -12851,21 +12853,36 @@ ${prompt}
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
     }
+    if (!saved && options.liveInputMode === "control") throw new Error("\u6CA1\u6709\u53EF\u6062\u590D\u7684\u7ED3\u6784\u5316\u4F1A\u8BDD\uFF1B\u9009\u62E9\u64CD\u4F5C\u672A\u542F\u52A8\u65B0\u4EFB\u52A1");
     const env = withArtifactDeliveryEnv({ ...process.env, ...buildLarkChannelEnv(this.options.larkChannel) }, options.artifactDelivery);
     let main;
     const view = this.makeView(`${scope}\0${cwd}`);
     if (this.id === "codex") {
       if (this.options.codexHome) env.CODEX_HOME = this.options.codexHome;
-      const { rpc, endpoint } = await connectCodexHost({ binary: this.options.binary, profileDir: this.options.profileDir, scope, cwd, env });
+      const readOnlyReconnect = saved && options.liveInputMode && !/^\/goal\s+(?!pause\b|clear\b|edit\b|status\b)/.test(options.prompt);
+      let rpc;
+      let endpoint;
+      if (readOnlyReconnect) {
+        if (!saved?.endpoint?.startsWith("unix://")) throw new Error("\u65E7\u8FDE\u63A5\u4FE1\u606F\u4E0D\u8DB3\uFF0C\u63A7\u5236\u64CD\u4F5C\u672A\u542F\u52A8\u4EFB\u4F55\u65B0\u670D\u52A1");
+        endpoint = saved.endpoint;
+        rpc = await RpcClient.connect(`ws+unix://${endpoint.slice("unix://".length)}:/`);
+        try {
+          await rpc.initialize();
+          const loaded = await rpc.request("thread/loaded/list", {});
+          if (!loaded.data?.includes(saved.id)) throw new Error("\u539F\u4F1A\u8BDD\u672A\u8FD0\u884C\uFF1B\u63A7\u5236\u64CD\u4F5C\u4E0D\u4F1A\u81EA\u52A8\u6062\u590D\u4EFB\u52A1");
+        } catch (error) {
+          rpc.close();
+          throw error;
+        }
+      } else ({ rpc, endpoint } = await connectCodexHost({ binary: this.options.binary, profileDir: this.options.profileDir, scope, cwd, env }));
       const restored = saved ? new CodexStructuredSession(saved.id, endpoint, rpc) : void 0;
       try {
         const result = await rpc.request(saved ? "thread/resume" : "thread/start", {
           ...saved ? { threadId: saved.id, excludeTurns: true } : {},
           cwd,
           ...!saved && options.model ? { model: options.model } : {},
-          sandbox: options.sandbox ?? "read-only",
-          ...!saved && options.reasoningEffort ? { config: { model_reasoning_effort: options.reasoningEffort } } : {},
-          approvalPolicy: "on-request"
+          ...!readOnlyReconnect ? { sandbox: options.sandbox ?? "read-only", approvalPolicy: "on-request" } : {},
+          ...!saved && options.reasoningEffort ? { config: { model_reasoning_effort: options.reasoningEffort } } : {}
         });
         const id = result.thread?.id;
         if (typeof id !== "string") throw new Error("Codex did not return a thread ID");
@@ -18375,7 +18392,11 @@ async function forwardLiveInput(deps, payload, scope, threadId, mode) {
   const input = typeof payload.input === "string" ? payload.input.trim() : "";
   if (!input) return;
   log.info("cardAction", "live-input", { scope, input });
-  if (deps.agent.structuredControl) {
+  let needsStructuredObserver = false;
+  if (deps.agent.structuredControl && !deps.activeRuns.hasAny(scope)) {
+    needsStructuredObserver = deps.agent.structuredReady?.(scope) === false || (await deps.agent.tmux?.diagnostics?.(scope))?.inputState === "submitted";
+  }
+  if (deps.agent.structuredControl && !needsStructuredObserver) {
     try {
       const events = await deps.agent.structuredControl(scope, input);
       for (const event of events) {
@@ -18407,6 +18428,10 @@ async function forwardLiveInput(deps, payload, scope, threadId, mode) {
     },
     "control"
   );
+  if (deps.agent.structuredControl) {
+    deps.pending.pushFront(scope, synthetic, { immediate: true, bypassBlock: true, priorityOrder: "fifo" });
+    return { toast: { type: "info", content: "\u5DF2\u6536\u5230\u9009\u62E9\uFF0C\u6B63\u5728\u6062\u590D\u4F1A\u8BDD\u76D1\u542C" } };
+  }
   const activeHandle = [deps.activeRuns.getSide(scope), deps.activeRuns.get(scope)].find(
     (handle) => Boolean(handle && !handle.interrupted && !handle.stopRequested && !handle.detached)
   );
@@ -23606,6 +23631,32 @@ async function runAgentBatch(deps) {
   };
   if (stopRequested("batch-start")) return;
   if (!isSideBatch && activeRuns.hasAny(scope)) {
+    if (firstInputMode === "control" && agent.structuredControl) {
+      const sendOpts2 = { replyTo: firstMsg.messageId, ...firstMsg.threadId ? { replyInThread: true } : {} };
+      try {
+        for (const event of await agent.structuredControl(scope, firstMsg.content)) {
+          if (event.type === "text") await channel.send(firstMsg.chatId, { markdown: event.delta }, sendOpts2);
+          if (event.type === "interactive" && event.interaction) await sendStructuredCard(
+            channel,
+            firstMsg.chatId,
+            event.interaction,
+            callbackAuth ? (input) => callbackAuth.sign({
+              runId: event.interaction.id,
+              scope,
+              chatId: firstMsg.chatId,
+              operatorOpenId: firstMsg.senderId,
+              action: `live_input:${input}`,
+              policyFingerprint: "structured",
+              ttlMs: 30 * 60 * 1e3
+            }) : void 0,
+            sendOpts2
+          );
+        }
+      } catch (error) {
+        await channel.send(firstMsg.chatId, { markdown: `\u26A0\uFE0F ${error instanceof Error ? error.message : String(error)}` }, sendOpts2);
+      }
+      return;
+    }
     for (const message of batch) pending.push(scope, message);
     log.info("flush", "ordinary-batch-deferred-during-side", {
       scope,
@@ -23985,7 +24036,8 @@ ${delta}`.slice(-64e3);
     log.info("flush", "progress-heartbeat", { progressHeartbeatMs });
   }
   const configuredReplyMode = getMessageReplyMode(controls.cfg);
-  const replyMode = outputModeAtStart === "final" ? "text" : useLiveSession && bridgeRoute?.presentation === "card" ? "card" : configuredReplyMode;
+  const structuredWorkControl = Boolean(agent.structuredControl) && (liveInputMode === "control" || liveInputMode === "side" || /^\/goal\s+(?!pause\b|clear\b|edit\b|status\b)/.test(nativeCommand ?? ""));
+  const replyMode = outputModeAtStart === "final" ? "text" : useLiveSession && bridgeRoute?.presentation === "card" && !structuredWorkControl ? "card" : configuredReplyMode;
   log.info("flush", "reply-mode", {
     mode: replyMode,
     ...replyMode !== configuredReplyMode ? { configuredMode: configuredReplyMode } : {}
@@ -24075,7 +24127,7 @@ ${delta}`.slice(-64e3);
   }) : Promise.resolve();
   const reactionPromise = outputModeAtStart !== "live" || cotEnabled || replyMode === "card" ? void 0 : addWorkingReaction(channel, lastMsg.messageId);
   try {
-    if (useLiveSession && nativeCommand) {
+    if (useLiveSession && nativeCommand && !structuredWorkControl) {
       const finalState = await processAgentStream(
         handle,
         eventStream,
