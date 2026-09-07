@@ -1,13 +1,14 @@
-# Structured backend preview
+# Structured backend (v1.3.0)
 
-The stable v1.2.7 tag and `release-v0.6.35` branch are preserved. Development
-takes place on `feature/structured-backends`; the preview package identifies
-itself as `1.3.0-alpha.1`. It does not automatically change any running profile.
+Version 1.3.0 is a regular release with an opt-in structured backend. The v1.2.7
+tag remains available for rollback. It does not automatically change any running
+profile or migrate an existing terminal session. The previously validated
+1.3.0-alpha.1 implementation is retained with the limitations below.
 
 ## Transport
 
 The default remains `preferences.agentTransport: "terminal"` (also the behavior
-when this field is omitted). To evaluate the preview, use a separate profile
+when this field is omitted). To evaluate the structured backend, use a separate profile
 with:
 
 ```json
@@ -37,7 +38,7 @@ Claude process per scope. The default `claude_code` preset and normal user/proje
 configuration are retained. No Bridge system/developer prompt, summarizer,
 router model, or synthetic task is added. Its tmux view currently follows the
 same event log read-only. Native `claude attach` targets background-agent
-sessions; this preview does not start a second native Claude process against an
+sessions; this backend does not start a second native Claude process against an
 SDK session just to create a terminal view. The public SDK `/bridge` export is
 for Claude remote-service transport, not a verified local attach replacement.
 
@@ -54,7 +55,7 @@ for Claude remote-service transport, not a verified local attach replacement.
 | `/status` | thread metadata and Bridge diagnostics | SDK session/model/phase and Bridge diagnostics |
 | `/goal` | native get/set/pause/resume/clear, with goal relay spanning turns | unsupported; no imitation goal loop |
 | `/stop` | pause active goal and interrupt the exact turn | SDK interrupt |
-| `/btw` | ephemeral fork with native side boundary; text submitted only after preparation | not enabled in the structured preview |
+| `/btw` | ephemeral fork with native side boundary; text submitted only after preparation | unsupported in the structured backend |
 
 Other slash commands are not forwarded to the model as ordinary task text when
 unsupported. The stable terminal backend remains available for its full native
@@ -69,7 +70,7 @@ forwarded. It does not replay the task. Codex control recovery requires the
 original server and loaded thread; a stale choice cannot launch a replacement
 task. Goal and resumed-approval output uses the normal streaming relay.
 
-Legacy `/resume` and scope reset are intentionally blocked in the preview rather
+Legacy `/resume` and scope reset are intentionally blocked in the structured backend rather
 than acknowledging a reset while continuing the old protocol thread. Use a new
 profile/scope for evaluation. Workspace changes use distinct persisted thread
 and host identities. Claude's SDK subprocess currently belongs to the Bridge
@@ -127,7 +128,7 @@ ARG_BRIDGE_NATIVE_FOLLOWUP=1 ARG_BRIDGE_NATIVE_MODEL=deepseek-v4-flash \
 pnpm vitest run tests/process/structured-native.test.ts -t 'claude:'
 ```
 
-Set the intended model explicitly in the preview profile, or reconcile native
+Set the intended model explicitly in the structured profile, or reconcile native
 Claude model configuration before relying on defaults. Alias mappings alone do
 not remove a conflicting explicit model setting.
 
@@ -145,7 +146,7 @@ Its tmux view is currently read-only, avoiding an extra native subscription that
 could keep the ephemeral thread alive after exit. The main view remains native.
 Side state is currently connection-local: Bridge restart does not promise side
 recovery. Real Codex entry, answer, exit and subsequent main status have passed;
-this is still an opt-in preview, not a stable-backend replacement.
+this remains opt-in, not an automatic terminal-backend replacement.
 
 A separate real Codex test started a native goal that ran `sleep 25`, submitted
 a side question while that goal was active, exited side, and observed the main
@@ -155,8 +156,8 @@ goal finish normally (not interrupted). Run it explicitly with:
 ARG_BRIDGE_NATIVE_GOAL_SIDE=1 pnpm vitest run tests/process/structured-side-goal.test.ts
 ```
 
-The preview has not replaced the stable backend or been advertised as a fully
-validated migration. Windows currently retains the terminal backend for Codex;
+This release does not claim full command parity or automatic session migration.
+Windows currently retains the terminal backend for Codex;
 the shared-server native-view path requires Unix sockets and tmux.
 
 References: [Codex App Server](https://developers.openai.com/codex/app-server),

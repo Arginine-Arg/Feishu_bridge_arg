@@ -80,8 +80,12 @@ jobs:
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" release/* --clobber
           else
+            notes_args=(--generate-notes)
+            if [ -f "docs/releases/$GITHUB_REF_NAME.md" ]; then
+              notes_args=(--notes-file "docs/releases/$GITHUB_REF_NAME.md")
+            fi
             gh release create "$GITHUB_REF_NAME" release/* \
               --title "arg-bridge $GITHUB_REF_NAME" \
-              --generate-notes \
+              "${notes_args[@]}" \
               --verify-tag
           fi
