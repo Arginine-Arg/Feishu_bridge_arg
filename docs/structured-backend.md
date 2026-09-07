@@ -107,6 +107,10 @@ finish within the SDK probe's 120-second deadline; an independent native
 The configured endpoint's unauthenticated root returned HTTP 200, which confirms
 basic reachability but not successful authenticated generation. This is not
 reported as a passing Claude round trip; no credentials were printed or changed.
+An additional minimal authenticated `/v1/messages` request using the configured
+model returned HTTP 403 with `error.type: permission_error` in 89 ms. This shows
+the generation endpoint rejected that request, but does not identify whether
+the cause is credential scope, model access, quota, or another service policy.
 
 Native Codex side conversations include developer instructions and a boundary
 message defining inherited history as reference-only. The user approved retaining
