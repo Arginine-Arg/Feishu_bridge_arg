@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.3.0",
+  version: "1.4.0",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -141,7 +141,7 @@ async function checkAgentVersion(input) {
   const args = input.args ?? ["--version"];
   const timeoutMs = input.timeoutMs ?? 5e3;
   const executable = input.realpath ?? input.binaryPath;
-  return new Promise((resolve5, reject4) => {
+  return new Promise((resolve6, reject4) => {
     let settled = false;
     let stdout = "";
     let stderr = "";
@@ -246,7 +246,7 @@ async function checkAgentVersion(input) {
           );
           return;
         }
-        resolve5(version);
+        resolve6(version);
       });
     });
   });
@@ -886,7 +886,7 @@ function codexBootstrapBinaryErrorCode(errno) {
 import { createInterface } from "readline";
 import { Writable } from "stream";
 async function promptLine(prompt) {
-  return new Promise((resolve5) => {
+  return new Promise((resolve6) => {
     const rl = createInterface({
       input: process.stdin,
       output: process.stdout,
@@ -894,13 +894,13 @@ async function promptLine(prompt) {
     });
     rl.question(prompt, (answer) => {
       rl.close();
-      resolve5(answer.trim());
+      resolve6(answer.trim());
     });
   });
 }
 async function promptPassword(prompt) {
   const isTTY = Boolean(process.stdin.isTTY);
-  return new Promise((resolve5) => {
+  return new Promise((resolve6) => {
     const muted = new Writable({
       write(_chunk, _enc, cb) {
         cb();
@@ -915,7 +915,7 @@ async function promptPassword(prompt) {
     rl.question("", (answer) => {
       rl.close();
       process.stdout.write("\n");
-      resolve5(answer.trim());
+      resolve6(answer.trim());
     });
   });
 }
@@ -1085,7 +1085,7 @@ async function fsyncDir(path) {
   }
 }
 function sleep(ms) {
-  return new Promise((resolve5) => setTimeout(resolve5, ms));
+  return new Promise((resolve6) => setTimeout(resolve6, ms));
 }
 
 // src/runtime/locks.ts
@@ -2643,13 +2643,13 @@ async function listSecretProfiles(rootDir) {
 }
 async function readAllStdin() {
   if (process.stdin.isTTY) return "";
-  return new Promise((resolve5, reject4) => {
+  return new Promise((resolve6, reject4) => {
     let data = "";
     process.stdin.setEncoding("utf8");
     process.stdin.on("data", (chunk) => {
       data += chunk;
     });
-    process.stdin.on("end", () => resolve5(data));
+    process.stdin.on("end", () => resolve6(data));
     process.stdin.on("error", reject4);
   });
 }
@@ -2748,7 +2748,7 @@ async function spawnExecProvider(pc, ref) {
   const timeoutMs = pc.noOutputTimeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
   const maxOutput = pc.maxOutputBytes ?? DEFAULT_EXEC_MAX_OUTPUT;
   const providerName = ref.provider ?? DEFAULT_PROVIDER;
-  return new Promise((resolve5, reject4) => {
+  return new Promise((resolve6, reject4) => {
     const env = {};
     if (pc.passEnv) {
       for (const k of pc.passEnv) {
@@ -2806,7 +2806,7 @@ async function spawnExecProvider(pc, ref) {
         const parsed = JSON.parse(stdout);
         const value = parsed.values?.[ref.id];
         if (typeof value === "string") {
-          resolve5(value);
+          resolve6(value);
           return;
         }
         const err = parsed.errors?.[ref.id]?.message;
@@ -2833,7 +2833,7 @@ import * as p from "@clack/prompts";
 import { registerApp } from "@larksuite/channel";
 import qrcode from "qrcode-terminal";
 async function requestScopeGrantLink(opts) {
-  return new Promise((resolve5, reject4) => {
+  return new Promise((resolve6, reject4) => {
     let urlDelivered = false;
     const completion = registerApp({
       source: "arg-bridge",
@@ -2842,7 +2842,7 @@ async function requestScopeGrantLink(opts) {
       ...opts.signal ? { signal: opts.signal } : {},
       onQRCodeReady: (info) => {
         urlDelivered = true;
-        resolve5({ url: info.url, expireIn: info.expireIn, completion });
+        resolve6({ url: info.url, expireIn: info.expireIn, completion });
       }
     }).then(() => void 0);
     completion.catch((err) => {
@@ -4826,7 +4826,7 @@ async function applyLarkCliIdentityPolicy(context, identityPreset) {
 }
 async function runQuiet(cmd, args, env) {
   let timedOut = false;
-  const exitCode = await new Promise((resolve5) => {
+  const exitCode = await new Promise((resolve6) => {
     const child = spawnProcess(cmd, args, {
       env: mergeProcessEnv(process.env, env),
       stdio: ["ignore", "ignore", "ignore"]
@@ -4837,11 +4837,11 @@ async function runQuiet(cmd, args, env) {
     }, POLICY_TIMEOUT_MS);
     child.once("error", () => {
       clearTimeout(timer);
-      resolve5(null);
+      resolve6(null);
     });
     child.once("exit", (code) => {
       clearTimeout(timer);
-      resolve5(code);
+      resolve6(code);
     });
   });
   return !timedOut && exitCode === 0;
@@ -5429,7 +5429,7 @@ function isLarkCliInstalled() {
 async function runCapture(cmd, args, timeoutMs, env) {
   let captured = "";
   let timedOut = false;
-  const exitCode = await new Promise((resolve5) => {
+  const exitCode = await new Promise((resolve6) => {
     const child = spawnProcess(cmd, args, {
       env: env ? mergeProcessEnv(process.env, env) : void 0,
       stdio: ["ignore", "pipe", "pipe"]
@@ -5446,11 +5446,11 @@ async function runCapture(cmd, args, timeoutMs, env) {
     }, timeoutMs);
     child.once("error", () => {
       clearTimeout(timer);
-      resolve5(null);
+      resolve6(null);
     });
     child.once("exit", (code) => {
       clearTimeout(timer);
-      resolve5(code);
+      resolve6(code);
     });
   });
   return { success: !timedOut && exitCode === 0, output: captured };
@@ -5553,7 +5553,7 @@ async function confirmStopRuntimeLockProcess() {
   const rl = createInterface2({ input: process.stdin, output: process.stdout });
   try {
     const answer = await new Promise(
-      (resolve5) => rl.question("\u662F\u5426\u505C\u6B62\u65E7\u8FDB\u7A0B\u5E76\u7EE7\u7EED\u542F\u52A8\u540E\u53F0\u670D\u52A1? [y/N]: ", resolve5)
+      (resolve6) => rl.question("\u662F\u5426\u505C\u6B62\u65E7\u8FDB\u7A0B\u5E76\u7EE7\u7EED\u542F\u52A8\u540E\u53F0\u670D\u52A1? [y/N]: ", resolve6)
     );
     const normalized = answer.trim().toLowerCase();
     return normalized === "y" || normalized === "yes";
@@ -5787,7 +5787,7 @@ var AsyncEventQueue = class {
         const value = this.values.shift();
         if (value !== void 0) return Promise.resolve({ value, done: false });
         if (this.closed) return Promise.resolve({ value: void 0, done: true });
-        return new Promise((resolve5) => this.waiters.push(resolve5));
+        return new Promise((resolve6) => this.waiters.push(resolve6));
       }
     };
   }
@@ -7049,7 +7049,7 @@ function detectTmuxAgent(paneCommand, panePid, processAgents) {
 function linuxProcessAgents() {
   const out = /* @__PURE__ */ new Map();
   if (process.platform !== "linux") return out;
-  const result = spawnProcessSync("ps", ["-eo", "pid=,ppid=,comm=,args="], {
+  const result = spawnProcessSync("ps", ["-ww", "-eo", "pid=,ppid=,comm=,args="], {
     encoding: "utf8",
     maxBuffer: 4 * 1024 * 1024
   });
@@ -7590,14 +7590,14 @@ var LiveTerminalSession = class {
     if (child && child.exitCode === null && child.signalCode === null) {
       log.info("agent-live", "close", { pid: child.pid ?? null, reason });
       child.kill("SIGTERM");
-      await new Promise((resolve5) => {
+      await new Promise((resolve6) => {
         const timer = setTimeout(() => {
           if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-          resolve5();
+          resolve6();
         }, 2e3);
         child.once("exit", () => {
           clearTimeout(timer);
-          resolve5();
+          resolve6();
         });
       });
     }
@@ -7613,11 +7613,11 @@ var LiveTerminalSession = class {
     if (this.isAlive()) return;
     if (this.closed) throw new Error("live session is closed");
     const spawned = spawnLiveProcess(this.opts);
-    this.terminalReady = new Promise((resolve5) => {
-      this.resolveTerminalReady = resolve5;
+    this.terminalReady = new Promise((resolve6) => {
+      this.resolveTerminalReady = resolve6;
     });
-    this.firstTerminalOutput = new Promise((resolve5) => {
-      this.resolveFirstTerminalOutput = resolve5;
+    this.firstTerminalOutput = new Promise((resolve6) => {
+      this.resolveFirstTerminalOutput = resolve6;
     });
     this.child = spawned.child;
     this.terminalInfo = spawned.terminal;
@@ -8404,8 +8404,8 @@ var LiveTerminalSession = class {
       }
       while (!done || queue.length > 0) {
         if (queue.length === 0) {
-          await new Promise((resolve5) => {
-            wake = resolve5;
+          await new Promise((resolve6) => {
+            wake = resolve6;
           });
           wake = void 0;
           continue;
@@ -10645,7 +10645,7 @@ function isIncompleteEscapeSequence(seq) {
   return false;
 }
 function delay(ms) {
-  return new Promise((resolve5) => setTimeout(resolve5, ms));
+  return new Promise((resolve6) => setTimeout(resolve6, ms));
 }
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -10874,7 +10874,7 @@ var ClaudeAdapter = class {
         if (child.exitCode !== null || child.signalCode !== null) return;
         log.info("agent", "stop-sigterm", { pid: child.pid ?? null, graceMs: stopGraceMs });
         child.kill("SIGTERM");
-        await new Promise((resolve5) => {
+        await new Promise((resolve6) => {
           const timer = setTimeout(() => {
             if (child.exitCode === null && child.signalCode === null) {
               log.warn("agent", "stop-sigkill", {
@@ -10884,11 +10884,11 @@ var ClaudeAdapter = class {
               });
               child.kill("SIGKILL");
             }
-            resolve5();
+            resolve6();
           }, stopGraceMs);
           child.once("exit", () => {
             clearTimeout(timer);
-            resolve5();
+            resolve6();
           });
         });
       },
@@ -10896,14 +10896,14 @@ var ClaudeAdapter = class {
         if (child.exitCode !== null || child.signalCode !== null) {
           return Promise.resolve(true);
         }
-        return new Promise((resolve5) => {
+        return new Promise((resolve6) => {
           const onExit = () => {
             clearTimeout(timer);
-            resolve5(true);
+            resolve6(true);
           };
           const timer = setTimeout(() => {
             child.removeListener("exit", onExit);
-            resolve5(false);
+            resolve6(false);
           }, timeoutMs);
           child.once("exit", onExit);
         });
@@ -11546,7 +11546,7 @@ var CodexAdapter = class {
         stopReason = "interrupted";
         log.info("agent", "stop-sigterm", { pid: child.pid ?? null, graceMs: stopGraceMs });
         child.kill("SIGTERM");
-        await new Promise((resolve5) => {
+        await new Promise((resolve6) => {
           const timer = setTimeout(() => {
             if (child.exitCode === null && child.signalCode === null) {
               log.warn("agent", "stop-sigkill", {
@@ -11556,11 +11556,11 @@ var CodexAdapter = class {
               });
               child.kill("SIGKILL");
             }
-            resolve5();
+            resolve6();
           }, stopGraceMs);
           child.once("exit", () => {
             clearTimeout(timer);
-            resolve5();
+            resolve6();
           });
         });
       },
@@ -11568,14 +11568,14 @@ var CodexAdapter = class {
         if (child.exitCode !== null || child.signalCode !== null) {
           return Promise.resolve(true);
         }
-        return new Promise((resolve5) => {
+        return new Promise((resolve6) => {
           const onExit = () => {
             clearTimeout(timer);
-            resolve5(true);
+            resolve6(true);
           };
           const timer = setTimeout(() => {
             child.removeListener("exit", onExit);
-            resolve5(false);
+            resolve6(false);
           }, timeoutMs);
           child.once("exit", onExit);
         });
@@ -11758,9 +11758,10 @@ function isWindowsCommandNotFoundLine2(line) {
 
 // src/agent/structured/adapter.ts
 import { createHash as createHash5, randomUUID as randomUUID3 } from "crypto";
-import { readFile as readFile13, mkdir as mkdir16 } from "fs/promises";
+import { readFile as readFile13, mkdir as mkdir16, lstat as lstat3 } from "fs/promises";
+import { readFileSync as readFileSync3 } from "fs";
 import { tmpdir as tmpdir4 } from "os";
-import { join as join23 } from "path";
+import { join as join23, resolve as resolve4 } from "path";
 
 // src/agent/structured/host.ts
 import { createHash as createHash3 } from "crypto";
@@ -11806,8 +11807,8 @@ var RpcClient = class _RpcClient extends EventEmitter2 {
   static async connect(url) {
     const socket = new WebSocket(url, { handshakeTimeout: 5e3, maxPayload: 32 * 1024 * 1024, perMessageDeflate: false });
     const client = new _RpcClient(socket);
-    await new Promise((resolve5, reject4) => {
-      socket.once("open", resolve5);
+    await new Promise((resolve6, reject4) => {
+      socket.once("open", resolve6);
       socket.once("error", reject4);
     });
     return client;
@@ -11819,12 +11820,12 @@ var RpcClient = class _RpcClient extends EventEmitter2 {
   request(method, params, timeoutMs = 3e4) {
     if (this.failure || this.socket.readyState !== WebSocket.OPEN) return Promise.reject(this.failure ?? new Error("RPC connection is not open"));
     const id = this.nextId++;
-    return new Promise((resolve5, reject4) => {
+    return new Promise((resolve6, reject4) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject4(new Error(`RPC ${method} timed out; outcome unknown, not retried`));
       }, timeoutMs);
-      this.pending.set(id, { resolve: resolve5, reject: reject4, timer });
+      this.pending.set(id, { resolve: resolve6, reject: reject4, timer });
       this.socket.send(JSON.stringify({ id, method, params }), (error) => {
         if (!error) return;
         clearTimeout(timer);
@@ -11894,7 +11895,7 @@ async function connectCodexHost(options) {
         connected = await RpcClient.connect(url);
         break;
       } catch {
-        await new Promise((resolve5) => setTimeout(resolve5, 150));
+        await new Promise((resolve6) => setTimeout(resolve6, 150));
       }
     }
     if (!connected) {
@@ -12096,8 +12097,8 @@ ${p3.command ?? JSON.stringify(p3.changes ?? {})}`,
     for (const event of this.deferredInteractions.splice(0)) {
       if (event.type === "interactive" && event.interaction && this.pending.has(event.interaction.id)) emit2(event);
     }
-    let completion = new Promise((resolve5) => {
-      this.complete = resolve5;
+    let completion = new Promise((resolve6) => {
+      this.complete = resolve6;
     });
     const abort = () => {
       void this.interrupt().catch((error) => this.disconnected(error));
@@ -12114,8 +12115,8 @@ ${p3.command ?? JSON.stringify(p3.changes ?? {})}`,
         if (this.turnId || this.goalActive) {
           await completion;
           if (signal.aborted) return;
-          completion = new Promise((resolve5) => {
-            this.complete = resolve5;
+          completion = new Promise((resolve6) => {
+            this.complete = resolve6;
           });
         }
         this.phase = "submitted";
@@ -12241,8 +12242,8 @@ ${options.prompt}` : options.prompt }];
     const key = String(id);
     let timer;
     try {
-      await new Promise((resolve5, reject4) => {
-        this.acknowledgements.set(key, { resolve: resolve5, reject: reject4 });
+      await new Promise((resolve6, reject4) => {
+        this.acknowledgements.set(key, { resolve: resolve6, reject: reject4 });
         timer = setTimeout(() => reject4(new Error("\u5BA1\u6279\u56DE\u590D\u5C1A\u672A\u83B7\u5F97\u670D\u52A1\u7AEF\u786E\u8BA4\uFF1B\u4E0D\u4F1A\u81EA\u52A8\u91CD\u53D1")), 1e4);
         this.rpc.respond(id, result);
       });
@@ -12332,10 +12333,10 @@ var ClaudeStructuredSession = class _ClaudeStructuredSession {
       canUseTool: async (tool, input, context) => {
         const id2 = context.toolUseID;
         if (tool === "AskUserQuestion" && Array.isArray(input.questions)) return this.askQuestions(id2, input, context.signal);
-        return new Promise((resolve5) => {
+        return new Promise((resolve6) => {
           const cancel2 = () => {
             this.pending.delete(id2);
-            resolve5({ behavior: "deny", message: "\u64CD\u4F5C\u5DF2\u53D6\u6D88" });
+            resolve6({ behavior: "deny", message: "\u64CD\u4F5C\u5DF2\u53D6\u6D88" });
           };
           if (context.signal.aborted) {
             cancel2();
@@ -12344,7 +12345,7 @@ var ClaudeStructuredSession = class _ClaudeStructuredSession {
           context.signal.addEventListener("abort", cancel2, { once: true });
           this.pending.set(id2, { values: /* @__PURE__ */ new Set(["allow", "deny"]), answer: async (value) => {
             context.signal.removeEventListener("abort", cancel2);
-            resolve5(value === "allow" ? { behavior: "allow", updatedInput: input } : { behavior: "deny", message: "\u7528\u6237\u62D2\u7EDD\u6B64\u64CD\u4F5C" });
+            resolve6(value === "allow" ? { behavior: "allow", updatedInput: input } : { behavior: "deny", message: "\u7528\u6237\u62D2\u7EDD\u6B64\u64CD\u4F5C" });
             return [];
           } });
           this.phase = "picker";
@@ -12447,8 +12448,8 @@ ${JSON.stringify(input, null, 2)}`,
     this.streamingMessages.clear();
     this.streamingThinking.clear();
     emit2({ type: "system", sessionId: this.id, cwd: options.cwd });
-    const done = new Promise((resolve5) => {
-      this.complete = resolve5;
+    const done = new Promise((resolve6) => {
+      this.complete = resolve6;
     });
     const abort = () => {
       void this.interrupt().catch((error) => {
@@ -12546,12 +12547,12 @@ ${JSON.stringify(input, null, 2)}`,
   askQuestions(id, input, signal) {
     const questions = input.questions;
     if (!questions.length) return Promise.resolve({ behavior: "deny", message: "\u6CA1\u6709\u53EF\u56DE\u7B54\u7684\u95EE\u9898" });
-    return new Promise((resolve5) => {
+    return new Promise((resolve6) => {
       const ids = questions.map((_, index) => `${id}.q${index}`);
       const answers = {};
       const cancel2 = () => {
         for (const key of ids) this.pending.delete(key);
-        resolve5({ behavior: "deny", message: "\u95EE\u9898\u5DF2\u53D6\u6D88" });
+        resolve6({ behavior: "deny", message: "\u95EE\u9898\u5DF2\u53D6\u6D88" });
       };
       if (signal.aborted) {
         cancel2();
@@ -12565,7 +12566,7 @@ ${JSON.stringify(input, null, 2)}`,
           answers[question.question] = options[Number(value) - 1]?.label ?? value;
           if (Object.keys(answers).length === questions.length) {
             signal.removeEventListener("abort", cancel2);
-            resolve5({ behavior: "allow", updatedInput: { ...input, answers } });
+            resolve6({ behavior: "allow", updatedInput: { ...input, answers } });
           }
           return [];
         } });
@@ -12604,7 +12605,11 @@ var StructuredView = class {
   tail = Promise.resolve();
   statusValue = { state: "none" };
   logPath = "";
+  nativeSpec;
+  nativeCwd;
   async start(native, cwd) {
+    if (native) this.nativeSpec = native;
+    if (cwd) this.nativeCwd = cwd;
     await mkdir15(this.directory, { recursive: true, mode: 448 });
     const info = await lstat2(this.directory);
     if (info.isSymbolicLink() || !info.isDirectory() || process.getuid && info.uid !== process.getuid()) throw new Error("Unsafe terminal view directory");
@@ -12616,7 +12621,14 @@ var StructuredView = class {
     const socket = join22(this.directory, "view.sock");
     if (Buffer.byteLength(socket) > 100) return;
     const exists2 = spawnProcessSync("tmux", ["-S", socket, "has-session", "-t", name], { stdio: "ignore" });
-    if (exists2.status !== 0) {
+    if (exists2.status === 0 && native) {
+      const dead = spawnProcessSync("tmux", ["-S", socket, "list-panes", "-t", name, "-F", "#{pane_dead}"], { encoding: "utf8" });
+      if (dead.status === 0 && typeof dead.stdout === "string" && dead.stdout.trim().split(/\s+/u).every((value) => value === "1")) {
+        spawnProcessSync("tmux", ["-S", socket, "kill-session", "-t", name], { stdio: "ignore" });
+      }
+    }
+    const sessionExists = spawnProcessSync("tmux", ["-S", socket, "has-session", "-t", name], { stdio: "ignore" });
+    if (sessionExists.status !== 0) {
       const command = native ? [native.binary, "-c", "check_for_update_on_startup=false", "--remote", native.endpoint, "resume", native.threadId, "--no-alt-screen"].map(quote).join(" ") : `tail -n 200 -F ${quote(this.logPath)}`;
       const created = spawnProcessSync("tmux", ["-S", socket, "-f", "/dev/null", "new-session", "-d", "-s", name, "-x", "120", "-y", "40", "-c", cwd ?? this.directory, command], { encoding: "utf8", env: native?.env ?? process.env });
       if (created.status !== 0) return;
@@ -12628,6 +12640,9 @@ var StructuredView = class {
       ownership: "managed",
       attachCommand: `tmux -S ${quote(socket)} attach -t ${quote(name)}`
     }, message: native ? "Shared Codex App Server terminal" : "Read-only structured event view; input is controlled from Feishu" };
+  }
+  async ensureNative() {
+    if (this.nativeSpec) await this.start(this.nativeSpec, this.nativeCwd);
   }
   event(event) {
     if (!this.logPath) return;
@@ -12667,20 +12682,91 @@ ${event.output}
   }
 };
 
+// src/agent/structured/tmux-discovery.ts
+import { basename as basename5 } from "path";
+function listStructuredTmuxPanes(socket) {
+  return listTmuxAgentPanes(socket).flatMap((pane) => {
+    const argv = processArgvTree(pane.panePid);
+    const identity = parseStructuredAgentArgv(argv, pane.agentKind);
+    return identity ? [{ ...pane, structured: identity }] : [];
+  });
+}
+function activeStructuredTmuxPane(socket, sessionName) {
+  const active2 = spawnProcessSync(
+    "tmux",
+    ["-S", socket, "display-message", "-p", "-t", sessionName, "#{pane_id}"],
+    { encoding: "utf8" }
+  );
+  const paneId = active2.status === 0 && typeof active2.stdout === "string" ? active2.stdout.trim() : "";
+  if (!paneId) return void 0;
+  return listStructuredTmuxPanes(socket).find((pane) => pane.sessionName === sessionName && pane.paneId === paneId);
+}
+function parseStructuredAgentArgv(argv, kind) {
+  const normalized = argv.map((item) => item.trim()).filter(Boolean);
+  const hasAgent = normalized.some((item) => {
+    const name = basename5(item).replace(/\.(?:cmd|exe)$/iu, "").toLowerCase();
+    return name === kind;
+  });
+  if (!hasAgent) return void 0;
+  const resumeIndex = normalized.findIndex((item) => item === "resume" || item === "--resume");
+  if (resumeIndex < 0 || !normalized[resumeIndex + 1]) return void 0;
+  const threadId = normalized[resumeIndex + 1];
+  const remoteIndex = normalized.findIndex((item) => item === "--remote" || item.startsWith("--remote="));
+  const endpoint = remoteIndex >= 0 ? normalized[remoteIndex].slice("--remote=".length) || normalized[remoteIndex + 1] : void 0;
+  if (kind === "codex" && !endpoint) return void 0;
+  return { ...endpoint ? { endpoint } : {}, threadId };
+}
+function processArgvTree(rootPid) {
+  if (process.platform === "win32") return [];
+  const result = spawnProcessSync("ps", ["-ww", "-eo", "pid=,ppid=,args="], { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 });
+  if (result.status !== 0 || typeof result.stdout !== "string") return [];
+  const rows = /* @__PURE__ */ new Map();
+  for (const line of result.stdout.split("\n")) {
+    const match = /^\s*(\d+)\s+(\d+)\s+(.*)$/u.exec(line);
+    if (!match) continue;
+    rows.set(Number(match[1]), { ppid: Number(match[2]), args: match[3] ?? "" });
+  }
+  const ids = /* @__PURE__ */ new Set([rootPid]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [pid, row] of rows) {
+      if (!ids.has(pid) && ids.has(row.ppid)) {
+        ids.add(pid);
+        changed = true;
+      }
+    }
+  }
+  return [...ids].flatMap((pid) => {
+    const args = rows.get(pid)?.args;
+    return args ? args.split(/\s+/u) : [];
+  });
+}
+
 // src/agent/structured/adapter.ts
 var StructuredAdapter = class {
   constructor(options) {
     this.options = options;
     this.id = options.kind;
     this.displayName = options.kind === "codex" ? "Codex App Server" : "Claude Agent SDK";
+    this.bindingsFile = join23(options.profileDir, "structured", "tmux-bindings.json");
+    this.loadBindings();
     this.tmux = {
-      list: async () => [],
-      bind: async () => {
-        throw new Error("\u7ED3\u6784\u5316\u540E\u7AEF\u4E0D\u7ED1\u5B9A\u65E7\u7EC8\u7AEF\uFF1B\u8BF7\u4F7F\u7528\u8BE5\u4F1A\u8BDD\u7684 /tmux attach");
+      list: async (socket) => this.listStructuredPanes(socket),
+      bind: async (scope, selector) => this.bindTmuxPane(scope, selector),
+      unbind: async (scope) => {
+        const removed = this.bindings.delete(scope);
+        if (removed) this.autoDiscoveryDisabled.add(scope);
+        if (removed) await this.saveBindings();
+        return removed;
       },
-      unbind: async () => false,
       status: async (scope, cwd) => {
         const current = this.sessions.get(scope);
+        const binding = this.bindings.get(scope) ?? current?.bound;
+        if (binding) {
+          const pane = this.refreshBindingTarget(binding);
+          return pane ? { state: "external", target: pane } : { state: "invalid", target: binding.target, message: "\u7ED3\u6784\u5316 pane \u5DF2\u5173\u95ED\u6216 resume \u5230\u5176\u4ED6\u4F1A\u8BDD" };
+        }
         return (current?.sideView ?? current?.view)?.status() ?? (cwd ? (await this.saved(scope, cwd))?.view : void 0) ?? { state: "none" };
       },
       diagnostics: async (scope) => {
@@ -12689,8 +12775,14 @@ var StructuredAdapter = class {
       },
       tail: async (scope, lines, cwd) => {
         const status = await this.tmux.status(scope, cwd);
-        if (!status.terminal) throw new Error("\u5F53\u524D\u4F1A\u8BDD\u5C1A\u672A\u5EFA\u7ACB\u7EC8\u7AEF\u663E\u793A");
-        return captureTmuxPaneTail(status.terminal, lines);
+        const terminal = status.terminal ?? (status.target ? {
+          socketPath: status.target.socketPath,
+          target: status.target.paneId,
+          attachCommand: status.target.attachCommand,
+          ownership: status.target.ownership
+        } : void 0);
+        if (!terminal) throw new Error("\u5F53\u524D\u4F1A\u8BDD\u5C1A\u672A\u5EFA\u7ACB\u7EC8\u7AEF\u663E\u793A");
+        return captureTmuxPaneTail(terminal, lines);
       },
       interrupt: async (scope, cwd, options2) => {
         const current = this.sessions.get(scope);
@@ -12699,6 +12791,8 @@ var StructuredAdapter = class {
           await (current.side ?? current.main).interrupt();
           return true;
         }
+        const binding = this.bindings.get(scope);
+        if (binding) return this.interruptBinding(binding);
         if (this.id !== "codex" || !cwd) return false;
         const saved = await this.saved(scope, cwd);
         if (!saved?.endpoint?.startsWith("unix://")) return false;
@@ -12727,6 +12821,27 @@ var StructuredAdapter = class {
   tmux;
   sessions = /* @__PURE__ */ new Map();
   starting = /* @__PURE__ */ new Map();
+  bindings = /* @__PURE__ */ new Map();
+  autoDiscoveryDisabled = /* @__PURE__ */ new Set();
+  bindingsFile;
+  listStructuredPanes(socket) {
+    if (this.id !== "codex") return listTmuxAgentPanes(socket);
+    const sockets = socket ? [socket] : [.../* @__PURE__ */ new Set([
+      ...discoverTmuxSockets(),
+      ...[...this.sessions.values()].flatMap((current) => {
+        const terminal = current.view.status().terminal;
+        return terminal?.socketPath ? [terminal.socketPath] : [];
+      }),
+      ...[...this.bindings.values()].map((binding) => binding.target.socketPath)
+    ])];
+    const seen = /* @__PURE__ */ new Set();
+    const result = sockets.flatMap((item) => listStructuredTmuxPanes(item));
+    return result.filter((pane) => {
+      if (seen.has(`${pane.socketPath}\0${pane.paneId}`)) return false;
+      seen.add(`${pane.socketPath}\0${pane.paneId}`);
+      return true;
+    });
+  }
   async isAvailable() {
     return (await this.checkAvailability()).ok;
   }
@@ -12737,6 +12852,78 @@ var StructuredAdapter = class {
     const available = await this.checkAvailability();
     if (!available.ok) throw available.error;
     if (this.id === "codex") await ensureBundledCodexSkill(this.options.codexHome ?? process.env.CODEX_HOME);
+  }
+  loadBindings() {
+    try {
+      const parsed = JSON.parse(readFileSync3(this.bindingsFile, "utf8"));
+      if (parsed.version !== 1) return;
+      for (const scope of parsed.disabled ?? []) if (typeof scope === "string") this.autoDiscoveryDisabled.add(scope);
+      for (const [scope, binding] of Object.entries(parsed.bindings ?? {})) {
+        if (binding?.cwd && binding.endpoint?.startsWith("unix://") && binding.threadId && binding.target?.paneId) this.bindings.set(scope, binding);
+      }
+    } catch {
+    }
+  }
+  async saveBindings() {
+    await mkdir16(join23(this.options.profileDir, "structured"), { recursive: true, mode: 448 });
+    await writeFileAtomic(this.bindingsFile, JSON.stringify({ version: 1, bindings: Object.fromEntries(this.bindings), disabled: [...this.autoDiscoveryDisabled] }, null, 2) + "\n", { mode: 384 });
+  }
+  async bindTmuxPane(scope, selector) {
+    if (this.id !== "codex") throw new Error("Claude \u7ED3\u6784\u5316\u4F1A\u8BDD\u6682\u4E0D\u652F\u6301\u63A5\u7BA1\u4EFB\u610F tmux resume\uFF1B\u8BF7\u4F7F\u7528 terminal \u540E\u7AEF\u3002");
+    const explicitSocket = selector.includes("::") ? selector.slice(0, selector.lastIndexOf("::")) : void 0;
+    const candidates = this.listStructuredPanes(explicitSocket);
+    const key = selector.trim();
+    const target = /^\d+$/u.test(key) ? candidates[Number.parseInt(key, 10) - 1] : candidates.find((item) => item.paneId === key || `${item.socketPath}::${item.paneId}` === key);
+    if (!target?.structured?.endpoint) throw new Error(`\u672A\u627E\u5230\u53EF\u63A5\u7BA1\u7684\u7ED3\u6784\u5316 Codex pane\uFF1A${selector}\u3002\u5148\u8FD0\u884C /tmux list\u3002`);
+    const binding = { target, endpoint: target.structured.endpoint, threadId: target.structured.threadId, cwd: target.paneCurrentPath, updatedAt: Date.now() };
+    await this.verifyBinding(binding);
+    this.autoDiscoveryDisabled.delete(scope);
+    this.bindings.set(scope, binding);
+    await this.saveBindings();
+    return target;
+  }
+  refreshBindingTarget(binding) {
+    const target = listStructuredTmuxPanes(binding.target.socketPath).find((item) => item.paneId === binding.target.paneId);
+    if (!target?.structured || target.structured.threadId !== binding.threadId || target.structured.endpoint !== binding.endpoint) return void 0;
+    binding.target = target;
+    return target;
+  }
+  async verifyBinding(binding) {
+    const rpc = await this.connectExisting(binding.endpoint);
+    try {
+      await rpc.initialize();
+      const loaded = await rpc.request("thread/loaded/list", {});
+      if (!Array.isArray(loaded.data) || !loaded.data.includes(binding.threadId)) throw new Error("App Server \u672A\u52A0\u8F7D\u8BE5 thread\uFF0C\u672A\u521B\u5EFA\u7ED1\u5B9A");
+    } finally {
+      rpc.close();
+    }
+  }
+  async interruptBinding(binding) {
+    if (!this.refreshBindingTarget(binding)) return false;
+    const rpc = await this.connectExisting(binding.endpoint);
+    try {
+      await rpc.initialize();
+      const loaded = await rpc.request("thread/loaded/list", {});
+      if (!Array.isArray(loaded.data) || !loaded.data.includes(binding.threadId)) return false;
+      const session = new CodexStructuredSession(binding.threadId, binding.endpoint, rpc);
+      try {
+        await session.syncState();
+        await session.interrupt();
+        return true;
+      } finally {
+        await session.close();
+      }
+    } finally {
+      rpc.close();
+    }
+  }
+  async connectExisting(endpoint) {
+    if (process.platform === "win32" || !endpoint.startsWith("unix://")) throw new Error("\u7ED3\u6784\u5316 pane \u5FC5\u987B\u4F7F\u7528\u672C\u673A Unix App Server socket");
+    const path = endpoint.slice("unix://".length);
+    if (!path.startsWith("/") || path.includes("\0")) throw new Error("App Server endpoint \u4E0D\u5B89\u5168");
+    const stat8 = await lstat3(path);
+    if (!stat8.isSocket() || stat8.isSymbolicLink() || process.getuid && stat8.uid !== process.getuid()) throw new Error("App Server socket \u4E0D\u5B89\u5168");
+    return RpcClient.connect(`ws+unix://${path}:/`);
   }
   structuredControl = async (scope, input) => {
     const current = this.sessions.get(scope) ?? await this.starting.get(scope);
@@ -12852,6 +13039,7 @@ var StructuredAdapter = class {
 ${prompt}
 `));
         await target.submit({ ...options, prompt, ...side ? { liveInputMode: void 0 } : {} }, emit2, abort.signal);
+        if (!side && target === current.main && this.id === "codex" && this.options.nativeView !== false) await current.view.ensureNative();
       } catch (error) {
         emit2({ type: "error", message: error instanceof Error ? error.message : String(error), terminationReason: "failed" });
       } finally {
@@ -12892,17 +13080,45 @@ ${prompt}
   async session(options) {
     const scope = options.scopeId ?? options.cwd;
     if (!scope || !options.cwd) throw new Error("Structured session requires scope and cwd");
-    const found = this.sessions.get(scope);
+    let found = this.sessions.get(scope);
+    let binding = this.bindings.get(scope);
+    if (found && !this.autoDiscoveryDisabled.has(scope) && this.id === "codex" && found.main.diagnostics().inputState === "empty" && !found.side) {
+      const terminal = found.bound?.target ? { socketPath: found.bound.target.socketPath, target: found.bound.target.sessionName } : found.view.status().terminal;
+      const canInspectCurrentView = !binding || found.bound?.target.sessionName === terminal?.target || binding.target.sessionName === terminal?.target;
+      const pane = canInspectCurrentView && terminal ? activeStructuredTmuxPane(terminal.socketPath, terminal.target) : void 0;
+      if (pane?.structured) {
+        const discovered = { target: pane, endpoint: pane.structured.endpoint, threadId: pane.structured.threadId, cwd: pane.paneCurrentPath, updatedAt: Date.now() };
+        if (!binding || binding.threadId !== discovered.threadId || binding.endpoint !== discovered.endpoint || binding.target.paneId !== discovered.target.paneId) {
+          binding = discovered;
+          this.bindings.set(scope, binding);
+          await this.saveBindings();
+        } else {
+          binding.target = pane;
+        }
+      }
+    }
+    if (binding && resolve4(binding.cwd) !== resolve4(options.cwd)) throw new Error(`tmux pane workspace (${binding.cwd}) \u4E0E\u5F53\u524D workspace (${options.cwd}) \u4E0D\u4E00\u81F4`);
     if (found) {
-      if (found.cwd === options.cwd) return found;
+      if (this.autoDiscoveryDisabled.has(scope) && found.bound) {
+        await found.main.close();
+        if (found.main instanceof CodexStructuredSession) found.main.disconnect();
+        this.sessions.delete(scope);
+        found = void 0;
+      }
+    }
+    if (found) {
+      const currentThreadId = found.main instanceof CodexStructuredSession ? found.main.id : void 0;
+      const currentEndpoint = found.main instanceof CodexStructuredSession ? found.main.endpoint : void 0;
+      if (found.cwd === options.cwd && (!binding || found.bound?.threadId === binding.threadId || currentThreadId === binding.threadId && currentEndpoint === binding.endpoint)) return found;
       if (found.main.diagnostics().inputState === "submitted" || found.side) throw new Error("\u5F53\u524D\u4F1A\u8BDD\u4ECD\u6709\u4EFB\u52A1\u6216 side\uFF0C\u8BF7\u7ED3\u675F\u540E\u518D\u5207\u6362\u5DE5\u4F5C\u76EE\u5F55");
       await found.main.close();
       if (found.main instanceof CodexStructuredSession) found.main.disconnect();
       this.sessions.delete(scope);
+      found = void 0;
     }
     const starting = this.starting.get(scope);
     if (starting) return starting;
-    const operation = this.createSession(scope, options);
+    const operation = this.createSession(scope, options, binding);
     this.starting.set(scope, operation);
     try {
       const result = await operation;
@@ -12912,10 +13128,9 @@ ${prompt}
       this.starting.delete(scope);
     }
   }
-  async createSession(scope, options) {
+  async createSession(scope, options, bound2) {
     const cwd = options.cwd;
     const directory = join23(this.options.profileDir, "structured");
-    await mkdir16(directory, { recursive: true, mode: 448 });
     const stateFile = this.stateFile(scope, cwd);
     let saved;
     try {
@@ -12929,6 +13144,31 @@ ${prompt}
     const view = this.makeView(`${scope}\0${cwd}`);
     if (this.id === "codex") {
       if (this.options.codexHome) env.CODEX_HOME = this.options.codexHome;
+      if (!bound2 && !this.autoDiscoveryDisabled.has(scope) && saved?.view?.terminal) {
+        const pane = activeStructuredTmuxPane(saved.view.terminal.socketPath, saved.view.terminal.target);
+        if (pane?.structured) {
+          bound2 = { target: pane, endpoint: pane.structured.endpoint, threadId: pane.structured.threadId, cwd: pane.paneCurrentPath, updatedAt: Date.now() };
+          this.bindings.set(scope, bound2);
+          await this.saveBindings();
+        }
+      }
+      if (bound2) {
+        const rpc2 = await this.connectExisting(bound2.endpoint);
+        try {
+          await rpc2.initialize();
+          const loaded = await rpc2.request("thread/loaded/list", {});
+          if (!Array.isArray(loaded.data) || !loaded.data.includes(bound2.threadId)) throw new Error("tmux \u5F53\u524D resume \u7684 thread \u4E0D\u5728\u5BF9\u5E94 App Server \u4E2D");
+          const resumed = await rpc2.request("thread/resume", { threadId: bound2.threadId, excludeTurns: true, cwd });
+          if (resumed.thread?.id !== bound2.threadId) throw new Error("App Server \u8FD4\u56DE\u4E86\u4E0D\u540C\u7684 thread");
+          const attached = new CodexStructuredSession(bound2.threadId, bound2.endpoint, rpc2);
+          await attached.syncState();
+          await writeFileAtomic(stateFile, JSON.stringify({ id: bound2.threadId, cwd, scope, kind: this.id, endpoint: bound2.endpoint, bound: true }, null, 2));
+          return { main: attached, view, bound: bound2, cwd };
+        } catch (error) {
+          rpc2.close();
+          throw error;
+        }
+      }
       const readOnlyReconnect = saved && options.liveInputMode && !/^\/goal\s+(?!pause\b|clear\b|edit\b|status\b)/.test(options.prompt);
       let rpc;
       let endpoint;
@@ -13397,9 +13637,9 @@ function safeJsonStringify(value) {
 
 // src/commands/index.ts
 import { randomUUID as randomUUID4 } from "crypto";
-import { lstat as lstat3, readFile as readFile14, realpath as realpath4 } from "fs/promises";
+import { lstat as lstat4, readFile as readFile14, realpath as realpath4 } from "fs/promises";
 import { homedir as homedir7 } from "os";
-import { basename as basename5, dirname as dirname17, isAbsolute as isAbsolute3, relative, sep } from "path";
+import { basename as basename6, dirname as dirname17, isAbsolute as isAbsolute3, relative, sep } from "path";
 
 // src/card/account-cards.ts
 function maskAppId(id) {
@@ -15530,7 +15770,7 @@ async function listCodexThreadHistory(options) {
   const timeoutMs = options.timeoutMs ?? DEFAULT_HISTORY_TIMEOUT_MS;
   const stderrChunks = [];
   let settled = false;
-  const result = await new Promise((resolve5, reject4) => {
+  const result = await new Promise((resolve6, reject4) => {
     const rl = createInterface6({ input: child.stdout, crlfDelay: Infinity });
     let timer;
     const fail = (err) => {
@@ -15587,7 +15827,7 @@ async function listCodexThreadHistory(options) {
         cleanup({ kill: true });
         return;
       }
-      resolve5(parsed.entries);
+      resolve6(parsed.entries);
       cleanup({ kill: true });
     });
     child.once("exit", (code) => {
@@ -15693,14 +15933,14 @@ function normalizeThread(input) {
 }
 async function waitForChildExit(child, timeoutMs) {
   if (child.exitCode !== null || child.signalCode !== null) return;
-  await new Promise((resolve5) => {
+  await new Promise((resolve6) => {
     const timer = setTimeout(() => {
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
-      resolve5();
+      resolve6();
     }, timeoutMs);
     child.once("exit", () => {
       clearTimeout(timer);
-      resolve5();
+      resolve6();
     });
   });
 }
@@ -15965,7 +16205,7 @@ async function handleSendFile(args, ctx) {
   const requestedPath = expandTilde(input);
   let entry;
   try {
-    entry = await lstat3(requestedPath);
+    entry = await lstat4(requestedPath);
   } catch {
     await reply(ctx, "\u6587\u4EF6\u4E0D\u5B58\u5728\u6216\u4E0D\u53EF\u8BBF\u95EE\u3002");
     return;
@@ -16001,13 +16241,13 @@ async function handleSendFile(args, ctx) {
   try {
     await ctx.channel.send(
       ctx.msg.chatId,
-      { file: { source: resolvedPath, fileName: basename5(resolvedPath) } },
+      { file: { source: resolvedPath, fileName: basename6(resolvedPath) } },
       commandReplyOptions(ctx)
     );
     log.info("command", "send-file", {
       profile: ctx.controls.profile,
       size: entry.size,
-      fileName: basename5(resolvedPath)
+      fileName: basename6(resolvedPath)
     });
   } catch (err) {
     log.fail("command", err, { step: "send-file" });
@@ -16612,8 +16852,8 @@ async function boundedStopSideDiagnostic(operation) {
   try {
     const diagnostics = await Promise.race([
       operation.catch(() => void 0),
-      new Promise((resolve5) => {
-        timer = setTimeout(() => resolve5(void 0), 1500);
+      new Promise((resolve6) => {
+        timer = setTimeout(() => resolve6(void 0), 1500);
       })
     ]);
     return diagnostics?.sideConversation === true;
@@ -16802,6 +17042,7 @@ function formatTmuxList(panes) {
     ...panes.flatMap((pane, index) => [
       `${index + 1}. ${pane.agentKind} \`${pane.paneId}\` (${pane.ownership})`,
       `   cwd: \`${pane.paneCurrentPath}\``,
+      ...pane.structured ? [`   structured thread: \`${pane.structured.threadId}\``, `   endpoint: \`${pane.structured.endpoint ?? "native"}\``] : ["   structured: \u672A\u8BC6\u522B\uFF08\u666E\u901A terminal pane\uFF09"],
       `   id: \`${tmuxTargetKey(pane)}\``,
       `   attach: \`${pane.attachCommand}\``
     ]),
@@ -18429,8 +18670,8 @@ async function acknowledgeLiveInput(deps, payload, scope, threadId, mode) {
   try {
     const result = await Promise.race([
       operation,
-      new Promise((resolve5) => {
-        timer = setTimeout(() => resolve5(pending), 200);
+      new Promise((resolve6) => {
+        timer = setTimeout(() => resolve6(pending), 200);
       })
     ]);
     if (result !== pending) return result;
@@ -18511,7 +18752,7 @@ async function forwardLiveInput(deps, payload, scope, threadId, mode) {
     try {
       const diagnostics = await Promise.race([
         deps.liveDiagnostics(scope),
-        new Promise((resolve5) => setTimeout(() => resolve5(void 0), 2e3))
+        new Promise((resolve6) => setTimeout(() => resolve6(void 0), 2e3))
       ]);
       if (!diagnostics) {
         log.info("cardAction", "live-input-diagnostics-timeout", { scope });
@@ -19861,7 +20102,7 @@ var ActiveRuns = class {
     if (!this.sideHandles.has(chatId)) return true;
     const waiters = this.sideReleaseWaiters.get(chatId) ?? /* @__PURE__ */ new Set();
     this.sideReleaseWaiters.set(chatId, waiters);
-    return new Promise((resolve5) => {
+    return new Promise((resolve6) => {
       let settled = false;
       let timer;
       const onRelease = () => {
@@ -19870,7 +20111,7 @@ var ActiveRuns = class {
         if (timer) clearTimeout(timer);
         waiters.delete(onRelease);
         if (waiters.size === 0) this.sideReleaseWaiters.delete(chatId);
-        resolve5(!this.sideHandles.has(chatId));
+        resolve6(!this.sideHandles.has(chatId));
       };
       timer = setTimeout(onRelease, Math.max(0, timeoutMs));
       waiters.add(onRelease);
@@ -20006,7 +20247,7 @@ var ActiveRuns = class {
   notifySideReleased(chatId) {
     const waiters = this.sideReleaseWaiters.get(chatId);
     if (!waiters) return;
-    for (const resolve5 of [...waiters]) resolve5();
+    for (const resolve6 of [...waiters]) resolve6();
   }
   durableStopKey(chatId, target) {
     return `${target}:${chatId}`;
@@ -20040,7 +20281,7 @@ var ProcessPool = class {
     }
     log.info("pool", "wait", { active: this.active, cap: this.cap(), waiting: this.waiters.length + 1 });
     reportMetric("pool_waiting", this.waiters.length + 1);
-    await new Promise((resolve5) => this.waiters.push(resolve5));
+    await new Promise((resolve6) => this.waiters.push(resolve6));
     this.active++;
     log.info("pool", "acquired", { active: this.active, cap: this.cap() });
     reportMetric("pool_active", this.active);
@@ -20398,11 +20639,11 @@ var EventFanout = class {
               release();
               return { done: true, value: void 0 };
             }
-            await new Promise((resolve5) => {
+            await new Promise((resolve6) => {
               waiter = () => {
                 if (waiter) this.waiters.delete(waiter);
                 waiter = void 0;
-                resolve5();
+                resolve6();
               };
               this.waiters.add(waiter);
             });
@@ -21174,8 +21415,8 @@ async function nextCommentEvent(iterator, expiresAt) {
   try {
     return await Promise.race([
       iterator.next(),
-      new Promise((resolve5) => {
-        timer = setTimeout(() => resolve5("expired"), delayMs);
+      new Promise((resolve6) => {
+        timer = setTimeout(() => resolve6("expired"), delayMs);
       })
     ]);
   } finally {
@@ -21684,9 +21925,9 @@ async function removeReaction(channel, messageId, reactionId) {
 
 // src/bot/artifact-broker.ts
 import { createHash as createHash10, randomBytes as randomBytes5 } from "crypto";
-import { lstat as lstat4, mkdir as mkdir19, readFile as readFile16, realpath as realpath5, rm as rm12 } from "fs/promises";
+import { lstat as lstat5, mkdir as mkdir19, readFile as readFile16, realpath as realpath5, rm as rm12 } from "fs/promises";
 import { createServer } from "net";
-import { basename as basename6, dirname as dirname19, isAbsolute as isAbsolute4, relative as relative2, resolve as resolve4, sep as sep2 } from "path";
+import { basename as basename7, dirname as dirname19, isAbsolute as isAbsolute4, relative as relative2, resolve as resolve5, sep as sep2 } from "path";
 var ArtifactBroker = class {
   constructor(socketPath, channel, allowLocalFileRoot, persistentStatePath) {
     this.channel = channel;
@@ -21712,12 +21953,12 @@ var ArtifactBroker = class {
     this.server = createServer((socket) => {
       void this.handle(socket);
     });
-    await new Promise((resolve5, reject4) => {
+    await new Promise((resolve6, reject4) => {
       const server = this.server;
       server.once("error", reject4);
       server.listen(this.socketPath, () => {
         server.off("error", reject4);
-        resolve5();
+        resolve6();
       });
     });
   }
@@ -21773,7 +22014,7 @@ var ArtifactBroker = class {
     const server = this.server;
     this.server = void 0;
     if (server) {
-      await new Promise((resolve5) => server.close(() => resolve5()));
+      await new Promise((resolve6) => server.close(() => resolve6()));
     }
     if (process.platform !== "win32") await rm12(this.socketPath, { force: true }).catch(() => {
     });
@@ -21822,8 +22063,8 @@ var ArtifactBroker = class {
     if (grant.allowedRoots.length === 0) {
       throw new Error("\u5F53\u524D\u4EFB\u52A1\u5C1A\u672A\u6388\u6743\u6587\u4EF6\u76EE\u5F55\uFF1B\u8BF7\u5728\u5F53\u524D\u4EFB\u52A1\u4E2D\u91CD\u65B0\u8BF7\u6C42\u53D1\u9001");
     }
-    const requested = resolve4(grant.allowedRoots[0], request.path);
-    const entry = await lstat4(requested).catch(() => void 0);
+    const requested = resolve5(grant.allowedRoots[0], request.path);
+    const entry = await lstat5(requested).catch(() => void 0);
     if (!entry) throw new Error("\u6587\u4EF6\u4E0D\u5B58\u5728\u6216\u4E0D\u53EF\u8BBF\u95EE");
     if (entry.isSymbolicLink()) throw new Error("\u4E0D\u5141\u8BB8\u53D1\u9001\u7B26\u53F7\u94FE\u63A5");
     if (!entry.isFile()) throw new Error("\u53EA\u80FD\u53D1\u9001\u666E\u901A\u6587\u4EF6");
@@ -21835,7 +22076,7 @@ var ArtifactBroker = class {
     const caption = normalizeCaption(request.caption);
     await this.channel.send(
       grant.chatId,
-      { file: { source: resolved, fileName: basename6(resolved) } },
+      { file: { source: resolved, fileName: basename7(resolved) } },
       { replyTo: grant.replyTo, ...grant.replyInThread ? { replyInThread: true } : {} }
     );
     if (caption) {
@@ -21847,10 +22088,10 @@ var ArtifactBroker = class {
     }
     log.info("artifact", "delivered", {
       scope: grant.scope,
-      name: basename6(resolved),
+      name: basename7(resolved),
       size: entry.size
     });
-    return { ok: true, message: `\u5DF2\u53D1\u9001 ${basename6(resolved)}` };
+    return { ok: true, message: `\u5DF2\u53D1\u9001 ${basename7(resolved)}` };
   }
   async loadPersistentGrants() {
     if (!this.persistentStatePath) return;
@@ -21895,7 +22136,7 @@ function isPathWithinRoot2(path, root) {
 }
 function artifactBrokerSocketPath(socketPath) {
   if (process.platform !== "win32") return socketPath;
-  const digest = createHash10("sha256").update(resolve4(socketPath)).digest("hex").slice(0, 32);
+  const digest = createHash10("sha256").update(resolve5(socketPath)).digest("hex").slice(0, 32);
   return `\\\\.\\pipe\\arg-bridge-artifact-${digest}`;
 }
 async function findCanonicalAllowedRoot(path, roots) {
@@ -23539,8 +23780,8 @@ async function withBoundedSideDiagnostic(operation, timeoutMs) {
   try {
     return await Promise.race([
       operation.catch(() => void 0),
-      new Promise((resolve5) => {
-        timer = setTimeout(() => resolve5(void 0), timeoutMs);
+      new Promise((resolve6) => {
+        timer = setTimeout(() => resolve6(void 0), timeoutMs);
       })
     ]);
   } finally {
@@ -24354,16 +24595,16 @@ ${delta}`.slice(-64e3);
       let segmentTextReadyFlag = true;
       const armSegmentTextWait = () => {
         segmentTextReadyFlag = false;
-        segmentTextReady = new Promise((resolve5) => {
-          resolveSegmentText = resolve5;
+        segmentTextReady = new Promise((resolve6) => {
+          resolveSegmentText = resolve6;
         });
       };
       const signalSegmentText = (state) => {
         if (resolveSegmentText && runStateTextCursor(prepareStateForReply(state)) !== segmentBaseText) {
-          const resolve5 = resolveSegmentText;
+          const resolve6 = resolveSegmentText;
           resolveSegmentText = void 0;
           segmentTextReadyFlag = true;
-          resolve5();
+          resolve6();
         }
       };
       const stateForSegment = (state) => projectRunStateFromCursor(prepareStateForReply(state), segmentBaseText);
@@ -24549,16 +24790,16 @@ ${delta}`.slice(-64e3);
       let segmentTextReadyFlag = true;
       const armSegmentTextWait = () => {
         segmentTextReadyFlag = false;
-        segmentTextReady = new Promise((resolve5) => {
-          resolveSegmentText = resolve5;
+        segmentTextReady = new Promise((resolve6) => {
+          resolveSegmentText = resolve6;
         });
       };
       const signalSegmentText = (state) => {
         if (resolveSegmentText && runStateTextCursor(prepareStateForReply(state)) !== segmentBaseText) {
-          const resolve5 = resolveSegmentText;
+          const resolve6 = resolveSegmentText;
           resolveSegmentText = void 0;
           segmentTextReadyFlag = true;
-          resolve5();
+          resolve6();
         }
       };
       const stateForSegment = (state) => projectRunStateFromCursor(prepareStateForReply(state), segmentBaseText);
@@ -25135,8 +25376,8 @@ async function runRollingReplyStream(input) {
     segment += 1;
     let producerStarted = false;
     let rolloverTimer;
-    const rollover = new Promise((resolve5) => {
-      rolloverTimer = setTimeout(resolve5, rolloverMs);
+    const rollover = new Promise((resolve6) => {
+      rolloverTimer = setTimeout(resolve6, rolloverMs);
     });
     const segmentDone = Promise.race([
       renderResult.then(() => void 0),
@@ -25243,7 +25484,7 @@ function scheduleWorkingReactionCleanup(channel, messageId, reactionPromise) {
   })();
 }
 function delay2(ms) {
-  return new Promise((resolve5) => setTimeout(resolve5, ms));
+  return new Promise((resolve6) => setTimeout(resolve6, ms));
 }
 function buildPrompt(batch, attachments, quotes = [], topicContext = []) {
   const first = batch[0];
@@ -26641,7 +26882,7 @@ async function resolveConflict(conflicts) {
     return false;
   }
   const rl = createInterface7({ input: process.stdin, output: process.stdout });
-  const ask = (q) => new Promise((resolve5) => rl.question(q, resolve5));
+  const ask = (q) => new Promise((resolve6) => rl.question(q, resolve6));
   try {
     const verb = conflicts.length > 1 ? "\u5B83\u4EEC" : "\u90A3\u4E2A";
     const answer = (await ask(`\u7EE7\u7EED\u542F\u52A8\u4F1A\u5148\u5173\u6389${verb},\u662F\u5426\u7EE7\u7EED? [y/N]: `)).trim().toLowerCase();
@@ -26696,7 +26937,7 @@ async function confirmStopRuntimeLockProcess2(err) {
   const rl = createInterface7({ input: process.stdin, output: process.stdout });
   try {
     const answer = (await new Promise(
-      (resolve5) => rl.question("\u662F\u5426\u505C\u6B62\u65E7\u8FDB\u7A0B\u5E76\u91CD\u65B0\u542F\u52A8? [y/N]: ", resolve5)
+      (resolve6) => rl.question("\u662F\u5426\u505C\u6B62\u65E7\u8FDB\u7A0B\u5E76\u91CD\u65B0\u542F\u52A8? [y/N]: ", resolve6)
     )).trim().toLowerCase();
     return answer === "y" || answer === "yes";
   } finally {
@@ -26742,7 +26983,7 @@ async function runAgentSendFile(path, caption) {
   if (!artifact) {
     throw new Error("\u5F53\u524D\u8FDB\u7A0B\u6CA1\u6709 bridge \u6587\u4EF6\u53D1\u9001\u80FD\u529B\uFF1B\u8BF7\u4ECE bridge agent \u4EFB\u52A1\u5185\u8C03\u7528\uFF0C\u6216\u5728\u6258\u7BA1 tmux session \u4E2D\u91CD\u542F bridge \u540E\u91CD\u8BD5");
   }
-  const response = await new Promise((resolve5, reject4) => {
+  const response = await new Promise((resolve6, reject4) => {
     const socket = connect(artifact.socketPath);
     let data = "";
     socket.setEncoding("utf8");
@@ -26752,7 +26993,7 @@ async function runAgentSendFile(path, caption) {
       data += chunk;
       if (!data.includes("\n")) return;
       try {
-        resolve5(JSON.parse(data.slice(0, data.indexOf("\n"))));
+        resolve6(JSON.parse(data.slice(0, data.indexOf("\n"))));
       } catch (err) {
         reject4(err);
       }

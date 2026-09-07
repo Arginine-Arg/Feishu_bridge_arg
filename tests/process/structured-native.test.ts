@@ -1,4 +1,5 @@
 import { mkdtemp } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, it } from 'vitest';
@@ -11,6 +12,7 @@ for (const kind of ['codex', 'claude'] as const) {
     const directory = await mkdtemp(join(tmpdir(), `bridge-native-${kind}-`));
     const adapter = new StructuredAdapter({ kind, binary: kind, profileDir: join(directory, 'state'), nativeView: kind === 'codex' });
     const events: AgentEvent[] = [];
+    let cleanupTmux: { socket: string; session: string } | undefined;
     try {
       for await (const event of adapter.run({ runId: 'probe', scopeId: 'probe', cwd: directory, prompt: '/model', liveInputMode: 'command',
         ...(process.env.ARG_BRIDGE_NATIVE_MODEL ? { model: process.env.ARG_BRIDGE_NATIVE_MODEL } : {}) }).events) events.push(event);
@@ -40,6 +42,35 @@ for (const kind of ['codex', 'claude'] as const) {
           prompt: 'Reply with exactly BRIDGE_PROTOCOL_OK. Do not use tools.' }).events) reply.push(event);
         expect(reply.filter(event => event.type === 'error')).toEqual([]);
         expect(reply.filter(event => event.type === 'text').map(event => event.delta).join('')).toContain('BRIDGE_PROTOCOL_OK');
+        if (kind === 'codex' && process.env.ARG_BRIDGE_NATIVE_DISCOVERY === '1') {
+          let discovered = await adapter.tmux.list();
+          const discoveryDeadline = Date.now() + 10000;
+          while (!discovered.some(pane => pane.structured?.threadId) && Date.now() < discoveryDeadline) {
+            await new Promise(resolve => setTimeout(resolve, 200));
+            discovered = await adapter.tmux.list();
+          }
+          expect(discovered.some(pane => pane.structured?.threadId)).toBe(true);
+          const bound = discovered.find(pane => pane.structured?.threadId);
+          expect(bound?.structured?.endpoint).toMatch(/^unix:\/\//);
+          expect(bound?.structured?.threadId).toMatch(/\S/);
+          if (process.env.ARG_BRIDGE_NATIVE_REBIND === '1' && bound) {
+            const split = spawnSync('tmux', ['-S', bound.socketPath, 'split-window', '-d', '-t', bound.sessionName,
+              '-c', bound.paneCurrentPath, '--', 'codex', '-c', 'check_for_update_on_startup=false', '--remote', bound.structured!.endpoint!,
+              'resume', bound.structured!.threadId, '--no-alt-screen'], { encoding: 'utf8' });
+            expect(split.status).toBe(0);
+            const panes = await adapter.tmux.list(bound.socketPath);
+            const replacement = panes.find(pane => pane.paneId !== bound!.paneId && pane.structured?.threadId === bound!.structured?.threadId);
+            expect(replacement).toBeDefined();
+            spawnSync('tmux', ['-S', bound.socketPath, 'select-pane', '-t', replacement!.paneId], { stdio: 'ignore' });
+            const follow: AgentEvent[] = [];
+            for await (const event of adapter.run({ runId: 'rebind-probe', scopeId: 'probe', cwd: directory,
+              prompt: 'Reply with exactly REBIND_PROTOCOL_OK. Do not use tools.' }).events) follow.push(event);
+            expect(follow.filter(event => event.type === 'error')).toEqual([]);
+            const rebound = await adapter.tmux.status('probe', directory);
+            expect(rebound.target?.paneId).toBe(replacement!.paneId);
+            cleanupTmux = { socket: bound.socketPath, session: bound.sessionName };
+          }
+        }
         if (kind === 'claude' && process.env.ARG_BRIDGE_NATIVE_FOLLOWUP === '1') {
           const followup: AgentEvent[] = [];
           for await (const event of adapter.run({ runId: 'followup-probe', scopeId: 'probe', cwd: directory,
@@ -85,6 +116,9 @@ for (const kind of ['codex', 'claude'] as const) {
           }
         }
       }
-    } finally { await adapter.shutdown(); }
+    } finally {
+      if (cleanupTmux) spawnSync('tmux', ['-S', cleanupTmux.socket, 'kill-session', '-t', cleanupTmux.session], { stdio: 'ignore' });
+      await adapter.shutdown();
+    }
   }, 120000);
 }

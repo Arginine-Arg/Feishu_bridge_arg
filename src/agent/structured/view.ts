@@ -12,8 +12,12 @@ export class StructuredView {
   private tail: Promise<void> = Promise.resolve();
   private statusValue: TmuxBindingStatus = { state: 'none' };
   private logPath = '';
+  private nativeSpec?: { binary: string; endpoint: string; threadId: string; env?: NodeJS.ProcessEnv };
+  private nativeCwd?: string;
   constructor(private readonly directory: string, private readonly key: string) {}
   async start(native?: { binary: string; endpoint: string; threadId: string; env?: NodeJS.ProcessEnv }, cwd?: string): Promise<void> {
+    if (native) this.nativeSpec = native;
+    if (cwd) this.nativeCwd = cwd;
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
     const info = await lstat(this.directory);
     if (info.isSymbolicLink() || !info.isDirectory() || (process.getuid && info.uid !== process.getuid())) throw new Error('Unsafe terminal view directory');
@@ -25,7 +29,14 @@ export class StructuredView {
     const socket = join(this.directory, 'view.sock');
     if (Buffer.byteLength(socket) > 100) return;
     const exists = spawnProcessSync('tmux', ['-S', socket, 'has-session', '-t', name], { stdio: 'ignore' });
-    if (exists.status !== 0) {
+    if (exists.status === 0 && native) {
+      const dead = spawnProcessSync('tmux', ['-S', socket, 'list-panes', '-t', name, '-F', '#{pane_dead}'], { encoding: 'utf8' });
+      if (dead.status === 0 && typeof dead.stdout === 'string' && dead.stdout.trim().split(/\s+/u).every(value => value === '1')) {
+        spawnProcessSync('tmux', ['-S', socket, 'kill-session', '-t', name], { stdio: 'ignore' });
+      }
+    }
+    const sessionExists = spawnProcessSync('tmux', ['-S', socket, 'has-session', '-t', name], { stdio: 'ignore' });
+    if (sessionExists.status !== 0) {
       const command = native
         ? [native.binary, '-c', 'check_for_update_on_startup=false', '--remote', native.endpoint, 'resume', native.threadId, '--no-alt-screen'].map(quote).join(' ')
         : `tail -n 200 -F ${quote(this.logPath)}`;
@@ -37,6 +48,9 @@ export class StructuredView {
       socketPath: socket, target: name, ownership: 'managed',
       attachCommand: `tmux -S ${quote(socket)} attach -t ${quote(name)}`,
     }, message: native ? 'Shared Codex App Server terminal' : 'Read-only structured event view; input is controlled from Feishu' };
+  }
+  async ensureNative(): Promise<void> {
+    if (this.nativeSpec) await this.start(this.nativeSpec, this.nativeCwd);
   }
   event(event: AgentEvent): void {
     if (!this.logPath) return;

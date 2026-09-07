@@ -27,6 +27,11 @@ export interface TmuxPaneTarget {
   agentKind: TmuxAgentKind;
   ownership: TmuxOwnership;
   attachCommand: string;
+  /** Structured backend identity discovered from the pane's process argv. */
+  structured?: {
+    endpoint?: string;
+    threadId: string;
+  };
 }
 
 export interface TmuxTerminalTarget {
@@ -694,7 +699,7 @@ function detectTmuxAgent(
 function linuxProcessAgents(): Map<number, { ppid: number; agent?: TmuxAgentKind }> {
   const out = new Map<number, { ppid: number; agent?: TmuxAgentKind }>();
   if (process.platform !== 'linux') return out;
-  const result = spawnProcessSync('ps', ['-eo', 'pid=,ppid=,comm=,args='], {
+  const result = spawnProcessSync('ps', ['-ww', '-eo', 'pid=,ppid=,comm=,args='], {
     encoding: 'utf8',
     maxBuffer: 4 * 1024 * 1024,
   });

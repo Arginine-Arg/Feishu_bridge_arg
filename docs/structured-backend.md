@@ -1,9 +1,9 @@
-# Structured backend (v1.3.0)
+# Structured backend (v1.4.0)
 
-Version 1.3.0 is a regular release with an opt-in structured backend. The v1.2.7
+Version 1.4.0 is a regular release with an opt-in structured backend. The v1.2.7
 tag remains available for rollback. It does not automatically change any running
 profile or migrate an existing terminal session. The previously validated
-1.3.0-alpha.1 implementation is retained with the limitations below.
+1.3.0 implementation is retained with the limitations below.
 
 ## Transport
 
@@ -32,6 +32,19 @@ independently of the Bridge connection; thread IDs are recorded per scope and
 working directory. Rejoining a running thread observes it rather than replaying
 its previous prompt. No mutating RPC is automatically retried after an uncertain
 timeout. Explicit new input waits for the existing observed work to finish.
+
+### Dynamic tmux panes
+
+For structured Codex, a pane running `codex --remote <endpoint> resume <threadId>`
+is discoverable from its process arguments. `/tmux list` displays the discovered
+identity; `/tmux bind` verifies the socket owner, loaded thread, and workspace
+before persisting the mapping. Within a Bridge-managed tmux session, the active
+pane is rechecked before an idle turn, so closing one pane and resuming another
+thread in a new pane changes the structured target without starting a second
+App Server task. `/tmux unbind` persists an opt-out from automatic rediscovery.
+Plain `codex resume` without `--remote` is intentionally not attachable by the
+structured backend. See the v1.4.0 release notes for the Claude limitation and
+the exact command shape.
 
 Claude uses the official Agent SDK streaming-input mode with one persistent
 Claude process per scope. The default `claude_code` preset and normal user/project
