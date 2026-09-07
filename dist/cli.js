@@ -18166,6 +18166,18 @@ async function consumeInteractivePrompts(events, deps) {
 }
 
 // src/card/structured-interaction.ts
+async function sendStructuredCard(channel, chatId, interaction, sign2, options) {
+  if (sign2) {
+    try {
+      await channel.send(chatId, { card: structuredInteractionCard(interaction, sign2) }, options);
+      return;
+    } catch {
+    }
+  }
+  const choices = interaction.choices.map((choice, index) => `${index + 1}. ${choice.label}
+\`/answer ${interaction.id} ${choice.value}\``);
+  await channel.send(chatId, { markdown: [interaction.prompt, "", ...choices].join("\n") }, options);
+}
 function structuredInteractionCard(interaction, sign2) {
   return { schema: "2.0", config: { streaming_mode: false, summary: { content: "\u7B49\u5F85\u9009\u62E9" } }, body: { elements: [
     { tag: "markdown", content: interaction.prompt.slice(0, 1e4) },
@@ -18349,7 +18361,7 @@ async function acknowledgeLiveInput(deps, payload, scope, threadId, mode) {
 }
 async function sendStructuredInteraction(deps, event, scope, threadId, mode) {
   if (!event.interaction || !deps.callbackAuth) return;
-  await deps.channel.send(deps.evt.chatId, { card: structuredInteractionCard(event.interaction, (input) => deps.callbackAuth.sign({
+  await sendStructuredCard(deps.channel, deps.evt.chatId, event.interaction, (input) => deps.callbackAuth.sign({
     runId: event.interaction.id,
     scope,
     chatId: deps.evt.chatId,
@@ -18357,7 +18369,7 @@ async function sendStructuredInteraction(deps, event, scope, threadId, mode) {
     action: `live_input:${input}`,
     policyFingerprint: "structured",
     ttlMs: 30 * 60 * 1e3
-  })) }, { replyTo: deps.evt.messageId, ...mode === "topic" && threadId ? { replyInThread: true } : {} });
+  }), { replyTo: deps.evt.messageId, ...mode === "topic" && threadId ? { replyInThread: true } : {} });
 }
 async function forwardLiveInput(deps, payload, scope, threadId, mode) {
   const input = typeof payload.input === "string" ? payload.input.trim() : "";
@@ -23054,7 +23066,7 @@ async function intakeMessage(deps) {
       return;
     }
   }
-  const nativeInputActive = pickerActive || getAgentSessionMode(controls.cfg) === "live";
+  const nativeInputActive = Boolean(agent.structuredControl) || pickerActive || getAgentSessionMode(controls.cfg) === "live";
   const routedInputMode = liveInputModeForMessage(routedMsg);
   const explicitLiveControl = nativeInputActive && isLiveControlInput(routedMsg.content);
   const forceNative = route.forceNative || nativeModelCommand || Boolean(pickerFollowup) || explicitLiveControl || isForceLiveAgentCommandMessage(routedMsg);
@@ -23071,8 +23083,8 @@ async function intakeMessage(deps) {
     try {
       for (const event of await agent.structuredControl(scope, agentMsg.content)) {
         if (event.type === "text") await channel.send(msg.chatId, { markdown: event.delta }, sendOpts);
-        if (event.type === "interactive" && event.interaction && callbackAuth) {
-          await channel.send(msg.chatId, { card: structuredInteractionCard(event.interaction, (input) => callbackAuth.sign({
+        if (event.type === "interactive" && event.interaction) {
+          await sendStructuredCard(channel, msg.chatId, event.interaction, callbackAuth ? (input) => callbackAuth.sign({
             runId: event.interaction.id,
             scope,
             chatId: msg.chatId,
@@ -23080,7 +23092,7 @@ async function intakeMessage(deps) {
             action: `live_input:${input}`,
             policyFingerprint: "structured",
             ttlMs: 30 * 60 * 1e3
-          })) }, sendOpts);
+          }) : void 0, sendOpts);
         }
       }
     } catch (error) {
@@ -23856,12 +23868,12 @@ async function runAgentBatch(deps) {
   const observeLiveEvent = (evt, opts = {}) => {
     if (agent.structuredControl) {
       if (evt.type === "error" && sideInputMode) sideRunFailed = true;
-      if (evt.type === "interactive" && evt.interaction && callbackAuth) {
+      if (evt.type === "interactive" && evt.interaction) {
         pickerObservedAfterInput = true;
         const interaction2 = evt.interaction;
         if (!sentInteractionSignatures.has(interaction2.id)) {
           sentInteractionSignatures.add(interaction2.id);
-          interactionSends.push(channel.send(chatId, { card: structuredInteractionCard(interaction2, (input) => callbackAuth.sign({
+          interactionSends.push(sendStructuredCard(channel, chatId, interaction2, callbackAuth ? (input) => callbackAuth.sign({
             runId: interaction2.id,
             scope,
             chatId,
@@ -23869,7 +23881,7 @@ async function runAgentBatch(deps) {
             action: `live_input:${input}`,
             policyFingerprint: flow.policy.policyFingerprint,
             ttlMs: 30 * 60 * 1e3
-          })) }, sendOpts).then(() => void 0));
+          }) : void 0, sendOpts));
         }
       }
       return;

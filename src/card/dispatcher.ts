@@ -21,7 +21,7 @@ import { markNativeAgentCommand } from '../bot/live-input';
 import { commandSessionCatalogIdentity } from '../bot/session-catalog-identity';
 import { lookupMessageThreadId } from '../bot/thread-id';
 import { BRIDGE_PROMPT_CALLBACK_MARKER, PROMPT_CALLBACK_ACTION } from './interactive-prompt';
-import { structuredInteractionCard } from './structured-interaction';
+import { sendStructuredCard } from './structured-interaction';
 import type { AgentEvent } from '../agent/types';
 
 /** Marker key on a button's value object that flags the cardAction as
@@ -283,10 +283,10 @@ async function acknowledgeLiveInput(
 
 async function sendStructuredInteraction(deps: CardDispatchDeps, event: Extract<AgentEvent, { type: 'interactive' }>, scope: string, threadId: string | undefined, mode: string): Promise<void> {
   if (!event.interaction || !deps.callbackAuth) return;
-  await deps.channel.send(deps.evt.chatId, { card: structuredInteractionCard(event.interaction, input => deps.callbackAuth!.sign({
+  await sendStructuredCard(deps.channel, deps.evt.chatId, event.interaction, input => deps.callbackAuth!.sign({
     runId: event.interaction!.id, scope, chatId: deps.evt.chatId, operatorOpenId: deps.evt.operator.openId,
     action: `live_input:${input}`, policyFingerprint: 'structured', ttlMs: 30 * 60 * 1000,
-  })) }, { replyTo: deps.evt.messageId, ...(mode === 'topic' && threadId ? { replyInThread: true } : {}) });
+  }), { replyTo: deps.evt.messageId, ...(mode === 'topic' && threadId ? { replyInThread: true } : {}) });
 }
 
 async function forwardLiveInput(

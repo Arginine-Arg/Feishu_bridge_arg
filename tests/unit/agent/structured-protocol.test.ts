@@ -8,8 +8,18 @@ import { StructuredAdapter } from '../../../src/agent/structured/adapter';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { sendStructuredCard } from '../../../src/card/structured-interaction';
 
 describe('structured transport contracts', () => {
+  it('keeps the request actionable in text when CardKit delivery fails', async () => {
+    const send = vi.fn().mockRejectedValueOnce(new Error('card rejected')).mockResolvedValueOnce({});
+    await sendStructuredCard({ send } as never, 'chat', {
+      id: 'approval-7', prompt: 'Allow the command?', choices: [{ label: 'Deny', value: 'deny' }],
+    }, () => 'signed-token', { replyTo: 'message', replyInThread: true });
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send.mock.calls[1]?.[1].markdown).toContain('/answer approval-7 deny');
+    expect(send.mock.calls[1]?.[2]).toEqual({ replyTo: 'message', replyInThread: true });
+  });
   it('does not launch a backend to stop or exit a side that does not exist', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'structured-no-spawn-'));
     const adapter = new StructuredAdapter({ kind: 'codex', binary: '/nonexistent/agent', profileDir: directory });

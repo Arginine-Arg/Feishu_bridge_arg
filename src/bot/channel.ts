@@ -92,7 +92,7 @@ import { recordRunSessionEvent, startRunFlow } from './run-flow';
 import { commandSessionCatalogIdentity } from './session-catalog-identity';
 import { startKeepalive } from './keepalive';
 import { PendingQueue } from './pending-queue';
-import { structuredInteractionCard } from '../card/structured-interaction';
+import { sendStructuredCard } from '../card/structured-interaction';
 import { ProcessPool } from './process-pool';
 import { fetchQuotedContext, fetchTopicContext, type QuotedContext } from './quote';
 import { lookupMessageThreadId } from './thread-id';
@@ -1126,7 +1126,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   // be inside a picker. Ordinary chat stays on turn-mode runs instead of being
   // typed into a TUI.
   const nativeInputActive =
-    pickerActive || getAgentSessionMode(controls.cfg) === 'live';
+    Boolean(agent.structuredControl) || pickerActive || getAgentSessionMode(controls.cfg) === 'live';
   const routedInputMode = liveInputModeForMessage(routedMsg);
   // Native controls are a separate control plane.  They must never pass
   // through prompt batching just because an earlier picker card expired or a
@@ -1169,11 +1169,11 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     try {
       for (const event of await agent.structuredControl(scope, agentMsg.content)) {
         if (event.type === 'text') await channel.send(msg.chatId, { markdown: event.delta }, sendOpts);
-        if (event.type === 'interactive' && event.interaction && callbackAuth) {
-          await channel.send(msg.chatId, { card: structuredInteractionCard(event.interaction, input => callbackAuth.sign({
+        if (event.type === 'interactive' && event.interaction) {
+          await sendStructuredCard(channel, msg.chatId, event.interaction, callbackAuth ? input => callbackAuth.sign({
             runId: event.interaction!.id, scope, chatId: msg.chatId, operatorOpenId: msg.senderId,
             action: `live_input:${input}`, policyFingerprint: 'structured', ttlMs: 30 * 60 * 1000,
-          })) }, sendOpts);
+          }) : undefined, sendOpts);
         }
       }
     } catch (error) { await channel.send(msg.chatId, { markdown: `⚠️ ${error instanceof Error ? error.message : String(error)}` }, sendOpts); }
@@ -2303,15 +2303,15 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const observeLiveEvent = (evt: AgentEvent, opts: { sendInteractionCard?: boolean } = {}): void => {
     if (agent.structuredControl) {
       if (evt.type === 'error' && sideInputMode) sideRunFailed = true;
-      if (evt.type === 'interactive' && evt.interaction && callbackAuth) {
+      if (evt.type === 'interactive' && evt.interaction) {
         pickerObservedAfterInput = true;
         const interaction = evt.interaction;
         if (!sentInteractionSignatures.has(interaction.id)) {
           sentInteractionSignatures.add(interaction.id);
-          interactionSends.push(channel.send(chatId, { card: structuredInteractionCard(interaction, input => callbackAuth.sign({
+          interactionSends.push(sendStructuredCard(channel, chatId, interaction, callbackAuth ? input => callbackAuth.sign({
             runId: interaction.id, scope, chatId, operatorOpenId: firstMsg.senderId,
             action: `live_input:${input}`, policyFingerprint: flow.policy.policyFingerprint, ttlMs: 30 * 60 * 1000,
-          })) }, sendOpts).then(() => undefined));
+          }) : undefined, sendOpts));
         }
       }
       return;
