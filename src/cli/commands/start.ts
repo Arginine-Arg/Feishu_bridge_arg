@@ -4,6 +4,7 @@ import { createInterface } from 'node:readline';
 import pkg from '../../../package.json';
 import { ClaudeAdapter } from '../../agent/claude/adapter';
 import { CodexAdapter } from '../../agent/codex/adapter';
+import { StructuredAdapter } from '../../agent/structured/adapter';
 import {
   AgentPreflightError,
   formatAgentPreflightDiagnostic,
@@ -428,6 +429,16 @@ export function createRuntimeAgent(
             : {}),
         }
       : undefined;
+  if (profileConfig.preferences?.agentTransport === 'structured') {
+    return new StructuredAdapter({
+      kind: profileConfig.agentKind,
+      binary: profileConfig.agentKind === 'codex' ? profileConfig.codex?.binaryPath ?? 'codex' : 'claude',
+      profileDir: appPaths.profileDir,
+      codexHome: profileConfig.codex?.codexHome ?? (profileConfig.codex?.inheritCodexHome === true ? undefined : `${appPaths.profileDir}/codex-home`),
+      nativeView: profileConfig.preferences.structuredNativeView !== false,
+      larkChannel,
+    });
+  }
   if (profileConfig.agentKind === 'codex') {
     const codex = profileConfig.codex;
     if (!codex?.binaryPath) {

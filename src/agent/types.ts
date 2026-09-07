@@ -63,7 +63,7 @@ export type AgentEvent =
       /** Monotonic within one live terminal turn. */
       sequence?: number;
     }
-  | { type: 'interactive'; text: string; phase: 'startup' | 'turn' }
+  | { type: 'interactive'; text: string; phase: 'startup' | 'turn'; interaction?: import('./structured/contracts').StructuredInteraction }
   | { type: 'thinking'; delta: string }
   | { type: 'tool_use'; id: string; name: string; input: unknown }
   | { type: 'tool_result'; id: string; output: string; isError: boolean }
@@ -146,6 +146,9 @@ export interface AgentBotIdentity {
 }
 
 export interface AgentAdapter {
+  /** Optional structured control plane; no terminal input or model call. */
+  structuredControl?: (scopeId: string, input: string) => Promise<AgentEvent[]>;
+  structuredQuestion?: (scopeId: string) => string | undefined;
   readonly id: string;
   readonly displayName: string;
   isAvailable(): Promise<boolean>;

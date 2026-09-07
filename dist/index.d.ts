@@ -1,3 +1,13 @@
+interface StructuredChoice {
+    label: string;
+    value: string;
+}
+interface StructuredInteraction {
+    id: string;
+    prompt: string;
+    choices: StructuredChoice[];
+}
+
 type AgentEvent = {
     type: 'system';
     sessionId?: string;
@@ -17,6 +27,7 @@ type AgentEvent = {
     type: 'interactive';
     text: string;
     phase: 'startup' | 'turn';
+    interaction?: StructuredInteraction;
 } | {
     type: 'thinking';
     delta: string;

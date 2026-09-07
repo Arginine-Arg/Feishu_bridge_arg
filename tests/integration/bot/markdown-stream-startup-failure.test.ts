@@ -1,4 +1,4 @@
-import type { NormalizedMessage } from '@larksuite/channel';
+import type { NormalizedMessage, CardActionEvent, CardActionResponse } from '@larksuite/channel';
 import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -34,6 +34,7 @@ import { startChannel } from '../../../src/bot/channel.js';
 
 interface MessageHandlerMap {
   message?: (msg: NormalizedMessage) => Promise<void> | void;
+  cardAction?: (event: CardActionEvent) => Promise<CardActionResponse | void>;
 }
 
 interface FakeLarkChannel {
@@ -554,6 +555,27 @@ describe('markdown stream startup failures', () => {
     expect(content?.card).toBeDefined();
     expect(buttonLabels(content?.card)).toEqual(['1', '2', '3', 'enter', 'esc']);
     expect(JSON.stringify(content?.card)).toContain('Would you like to run the following command?');
+  });
+
+  it('renders a structured picker from request data and forwards its signed callback without a new run', async () => {
+    const h = await createHarness();
+    const control = vi.fn(async () => []);
+    h.agent.structuredControl = control;
+    h.agent.setEvents([[{ type: 'interactive', phase: 'turn', text: 'Models', interaction: {
+      id: 'request-structured', prompt: 'Models', choices: [{ label: 'Model A', value: 'model-a' }],
+    } }, { type: 'done', terminationReason: 'normal' }]]);
+    await startTestBridge(h);
+    await h.channel.handlers.message?.(message('om_structured', '/model'));
+    await waitFor(() => h.channel.sent.length > 0);
+    const card = (h.channel.sent[0]?.content as { card?: any }).card;
+    expect(buttonLabels(card)).toEqual(['1. Model A']);
+    const value = card.body.elements[1].behaviors[0].value;
+    const response = await h.channel.handlers.cardAction?.({
+      chatId: 'oc_dm', messageId: 'om_card', operator: { openId: 'ou_user' }, action: { value },
+    } as never);
+    expect(response).toMatchObject({ toast: { type: 'success' } });
+    expect(control).toHaveBeenCalledWith('oc_dm', '/answer request-structured model-a');
+    expect(h.agent.runOptions).toHaveLength(1);
   });
 
   it('waits for a complete model-picker frame before publishing its card', async () => {

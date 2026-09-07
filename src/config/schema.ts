@@ -102,6 +102,10 @@ export interface AppPreferences {
    * scope so native slash commands and yes/no prompts can be answered from Lark.
    */
   agentSessionMode?: AgentSessionMode;
+  /** Opt-in protocol backend. Omitted preserves the v1.2.7 terminal backend. */
+  agentTransport?: 'terminal' | 'structured';
+  /** Codex native shared-server TUI; false requests a read-only event view. */
+  structuredNativeView?: boolean;
   /** Reply rendering mode for IM (group/p2p) messages. Default 'card'. */
   messageReply?: MessageReplyMode;
   /**

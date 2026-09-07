@@ -10,6 +10,14 @@ import { createDefaultProfileConfig } from '../../../src/config/profile-schema.j
 import { createRuntimeProfileConfig } from '../../../src/runtime/profile-runtime.js';
 
 describe('start runtime agent factory', () => {
+  it('selects protocol transport only when explicitly configured for each tool', () => {
+    for (const agentKind of ['codex', 'claude'] as const) {
+      const profile = createDefaultProfileConfig({ agentKind, accounts: appAccount(), preferences: { agentTransport: 'structured' }, ...(agentKind === 'codex' ? { codex: codexConfig() } : {}) });
+      const agent = createRuntimeAgent(profile, { profileDir: tmpdir() });
+      expect(agent.id).toBe(agentKind);
+      expect(agent.structuredControl).toBeTypeOf('function');
+    }
+  });
   it('keeps Claude as the default runtime agent', () => {
     const agent = createRuntimeAgent(
       createDefaultProfileConfig({

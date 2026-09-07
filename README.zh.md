@@ -4,6 +4,8 @@
 
 [English README](./README.md)
 
+此开发分支包含可选择开启的结构化接口预览版（`1.3.0-alpha.1`），默认仍使用 v1.2.7 的终端后端。启用前请阅读[预览范围、配置方式与验收条件](./docs/structured-backend.md)。
+
 关于能实现的效果，详情可以阅读[飞书文档](https://larkcommunity.feishu.cn/docx/OaRIdFIRFoLM3xxTmKwcetHqn5e)
 
 ## 主要功能

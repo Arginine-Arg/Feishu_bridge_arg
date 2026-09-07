@@ -92,6 +92,7 @@ import { recordRunSessionEvent, startRunFlow } from './run-flow';
 import { commandSessionCatalogIdentity } from './session-catalog-identity';
 import { startKeepalive } from './keepalive';
 import { PendingQueue } from './pending-queue';
+import { structuredInteractionCard } from '../card/structured-interaction';
 import { ProcessPool } from './process-pool';
 import { fetchQuotedContext, fetchTopicContext, type QuotedContext } from './quote';
 import { lookupMessageThreadId } from './thread-id';
@@ -511,6 +512,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           sideConversationByScope,
           allowLocalFileRoot,
           inboundMessages,
+          callbackAuth,
         }),
       ).catch((err) => log.fail('intake', err));
     },
@@ -723,6 +725,7 @@ async function sendNonAllowedGroupHint(
 }
 
 interface IntakeDeps {
+  callbackAuth?: CallbackAuth;
   channel: LarkChannel;
   agent: AgentAdapter;
   sessions: SessionStore;
@@ -750,6 +753,7 @@ type LogThreadModeOverride = (input: {
 
 async function intakeMessage(deps: IntakeDeps): Promise<void> {
   const {
+    callbackAuth,
     channel,
     agent,
     sessions,
@@ -872,6 +876,12 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   }
 
   const route = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
+  const structuredQuestion = agent.structuredQuestion?.(scope);
+  if (structuredQuestion && !route.forceNative && !route.msg.content.trimStart().startsWith('/')) {
+    route.msg = { ...route.msg, content: `/answer ${structuredQuestion} ${route.msg.content}` };
+    route.forceNative = true;
+    route.nativeMode = 'control';
+  }
   if (route.nativeMode === 'control' && !threadId) {
     const recovery = recoverLiveControlScope(
       liveInteractionByScope,
@@ -947,7 +957,9 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
       });
     }
   }
-  const pickerActive = Boolean(liveInteractionState(sessions, liveInteractionByScope, scope));
+  const pickerActive = agent.structuredControl
+    ? (await agent.tmux?.diagnostics?.(scope))?.phase === 'picker'
+    : Boolean(liveInteractionState(sessions, liveInteractionByScope, scope));
   // Lifecycle controls must not wait for a potentially slow tmux capture. In
   // particular, /stop is the escape hatch for a stuck run and /btw out must be
   // able to reach the live terminal while Codex is still repainting its side
@@ -999,6 +1011,12 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     ? sideConversationScopesForChat(sideConversationByScope, msg.chatId, ['opening', 'closing'])
     : [];
   const nativeModelCommand = routedMsg.content.trim() === '/model';
+  if (agent.structuredControl && /^\/(?:reset|resume)(?:\s|$)|^\/new(?:\s*$|\s+(?!chat\b))/i.test(routedMsg.content.trim())) {
+    await channel.send(msg.chatId, { markdown: '结构化预览尚未开放旧会话导入与重置。请使用独立 profile 测试；现有终端会话未改变。' }, {
+      replyTo: msg.messageId, ...(threadId ? { replyInThread: true } : {}),
+    });
+    return;
+  }
 
   if (
     nativeModelCommand &&
@@ -1146,6 +1164,21 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   // They must run before ordinary work so a long task cannot strand a model,
   // status, or side-conversation command in the conversational queue.
   const nativeInputMode = liveInputModeForMessage(agentMsg);
+  if (agent.structuredControl && activeRuns.hasAny(scope) && (nativeInputMode === 'command' || nativeInputMode === 'control')) {
+    const sendOpts = { replyTo: msg.messageId, ...(threadId ? { replyInThread: true } : {}) };
+    try {
+      for (const event of await agent.structuredControl(scope, agentMsg.content)) {
+        if (event.type === 'text') await channel.send(msg.chatId, { markdown: event.delta }, sendOpts);
+        if (event.type === 'interactive' && event.interaction && callbackAuth) {
+          await channel.send(msg.chatId, { card: structuredInteractionCard(event.interaction, input => callbackAuth.sign({
+            runId: event.interaction!.id, scope, chatId: msg.chatId, operatorOpenId: msg.senderId,
+            action: `live_input:${input}`, policyFingerprint: 'structured', ttlMs: 30 * 60 * 1000,
+          })) }, sendOpts);
+        }
+      }
+    } catch (error) { await channel.send(msg.chatId, { markdown: `⚠️ ${error instanceof Error ? error.message : String(error)}` }, sendOpts); }
+    return;
+  }
   const priorityNativeCommand =
     isForceLiveAgentCommandMessage(agentMsg) &&
     (nativeInputMode === 'command' || nativeInputMode === 'side' || nativeInputMode === 'side-exit');
@@ -2268,6 +2301,21 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     }
   }
   const observeLiveEvent = (evt: AgentEvent, opts: { sendInteractionCard?: boolean } = {}): void => {
+    if (agent.structuredControl) {
+      if (evt.type === 'error' && sideInputMode) sideRunFailed = true;
+      if (evt.type === 'interactive' && evt.interaction && callbackAuth) {
+        pickerObservedAfterInput = true;
+        const interaction = evt.interaction;
+        if (!sentInteractionSignatures.has(interaction.id)) {
+          sentInteractionSignatures.add(interaction.id);
+          interactionSends.push(channel.send(chatId, { card: structuredInteractionCard(interaction, input => callbackAuth.sign({
+            runId: interaction.id, scope, chatId, operatorOpenId: firstMsg.senderId,
+            action: `live_input:${input}`, policyFingerprint: flow.policy.policyFingerprint, ttlMs: 30 * 60 * 1000,
+          })) }, sendOpts).then(() => undefined));
+        }
+      }
+      return;
+    }
     // `recordSession` is intentionally limited to system events. Side
     // lifecycle evidence arrives as text/error events, so capture it here
     // before the interaction-only observer returns early.
@@ -2510,6 +2558,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     filterForPrefs(withNativeEmptyFallback(state));
   const cardRenderOptions = callbackAuth
     ? {
+        structuredOnly: Boolean(agent.structuredControl),
         signCallback: (action: string) =>
           callbackAuth.sign({
             runId: execution.runId,
@@ -2529,7 +2578,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   // click. The click resumes the session (via handleCardAction → pending
   // queue) as a follow-up turn carrying the choice. Runs as an independent
   // stream subscriber; awaited in finally so it drains before cleanup.
-  const promptBridge = outputModeAtStart !== 'off' && callbackAuth
+  const promptBridge = outputModeAtStart !== 'off' && callbackAuth && !agent.structuredControl
     ? consumeInteractivePrompts(execution.subscribe(), {
         channel,
         chatId,
@@ -2573,6 +2622,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         observeLiveEvent,
       );
       if (handle.detached) return;
+      if (agent.structuredControl && !completeReplyText(finalState).trim()) return;
       // A native control turn can finish after the TUI has only redrawn its
       // confirmation legend. That is an intermediate surface, not a final
       // answer; publishing it as a completed card leaves the user with a
@@ -4314,7 +4364,7 @@ export function liveInteractionCardForText(
 
 export function renderLiveAwareReplyCard(
   state: RunState,
-  cardRenderOptions: { signCallback?: (action: string) => string } = {},
+  cardRenderOptions: { signCallback?: (action: string) => string; structuredOnly?: boolean } = {},
   inputRoute: LiveInteractionInputRoute = 'live',
   skipSignatures?: ReadonlySet<string>,
 ): object {
@@ -4323,7 +4373,7 @@ export function renderLiveAwareReplyCard(
   const body = renderText(state, { activityMode: 'none' });
   const liveCard = liveInteractionCardForText(
     body,
-    cardRenderOptions.signCallback,
+    cardRenderOptions.structuredOnly ? undefined : cardRenderOptions.signCallback,
     inputRoute,
     skipSignatures,
   );

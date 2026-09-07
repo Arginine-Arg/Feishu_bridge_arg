@@ -4,6 +4,8 @@ A lightweight bot that bridges Feishu / Lark messenger with your local Claude Co
 
 [中文 README](./README.zh.md)
 
+This development branch contains an opt-in structured API preview (`1.3.0-alpha.1`). The stable v1.2.7 backend remains the default. See [preview scope, configuration, and validation gates](./docs/structured-backend.md) before enabling it.
+
 For a product walkthrough, see the [Feishu document](https://larkcommunity.feishu.cn/docx/OaRIdFIRFoLM3xxTmKwcetHqn5e).
 
 ## What it does

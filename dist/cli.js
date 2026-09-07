@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.2.7",
+  version: "1.3.0-alpha.1",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -36,6 +36,7 @@ var package_default = {
     "skills",
     "README.md",
     "README.zh.md",
+    "docs/structured-backend.md",
     "LICENSE"
   ],
   scripts: {
@@ -52,13 +53,15 @@ var package_default = {
     prepublishOnly: "npm run typecheck && npm run build"
   },
   dependencies: {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.263",
     "@clack/prompts": "^1.4.0",
     "@larksuite/channel": "^0.3.0",
     commander: "^12.1.0",
     "cross-spawn": "^7.0.6",
     "graceful-fs": "^4.2.11",
     "proper-lockfile": "^4.1.2",
-    "qrcode-terminal": "^0.12.0"
+    "qrcode-terminal": "^0.12.0",
+    ws: "^8.21.3"
   },
   devDependencies: {
     "@types/cross-spawn": "^6.0.6",
@@ -66,6 +69,7 @@ var package_default = {
     "@types/node": "^22.10.0",
     "@types/proper-lockfile": "^4.1.4",
     "@types/qrcode-terminal": "^0.12.2",
+    "@types/ws": "^8.18.1",
     tsup: "^8.3.5",
     typescript: "^5.6.3",
     vitest: "^2.1.8"
@@ -11751,11 +11755,1165 @@ function isWindowsCommandNotFoundLine2(line) {
   return process.platform === "win32" && /is not recognized as an internal or external command|operable program or batch file/i.test(line);
 }
 
+// src/agent/structured/adapter.ts
+import { createHash as createHash5, randomUUID as randomUUID3 } from "crypto";
+import { readFile as readFile13, mkdir as mkdir16 } from "fs/promises";
+import { tmpdir as tmpdir4 } from "os";
+import { join as join23 } from "path";
+
+// src/agent/structured/host.ts
+import { createHash as createHash3 } from "crypto";
+import { mkdir as mkdir14, lstat, chmod as chmod5, open as open3 } from "fs/promises";
+import { tmpdir as tmpdir3 } from "os";
+import { join as join21 } from "path";
+
+// src/agent/structured/rpc.ts
+import { EventEmitter as EventEmitter2 } from "events";
+import WebSocket from "ws";
+var RpcClient = class _RpcClient extends EventEmitter2 {
+  constructor(socket) {
+    super();
+    this.socket = socket;
+    socket.on("message", (data) => {
+      let message;
+      try {
+        message = JSON.parse(data.toString());
+      } catch {
+        this.fail(new Error("Invalid JSON from Codex App Server"));
+        return;
+      }
+      if (!message || typeof message !== "object" || Array.isArray(message)) {
+        this.fail(new Error("Invalid RPC message"));
+        return;
+      }
+      if (typeof message.id === "number" && !message.method) {
+        const request = this.pending.get(message.id);
+        if (!request) return;
+        this.pending.delete(message.id);
+        clearTimeout(request.timer);
+        if (message.error) request.reject(new Error(String(message.error.message ?? "RPC error")));
+        else request.resolve(message.result ?? {});
+      } else this.emit("message", message);
+    });
+    socket.on("error", (error) => this.fail(error));
+    socket.on("close", () => this.fail(new Error("Codex App Server connection closed; input will not be replayed")));
+  }
+  socket;
+  nextId = 1;
+  failure;
+  pending = /* @__PURE__ */ new Map();
+  static async connect(url) {
+    const socket = new WebSocket(url, { handshakeTimeout: 5e3, maxPayload: 32 * 1024 * 1024, perMessageDeflate: false });
+    const client = new _RpcClient(socket);
+    await new Promise((resolve5, reject4) => {
+      socket.once("open", resolve5);
+      socket.once("error", reject4);
+    });
+    return client;
+  }
+  async initialize() {
+    await this.request("initialize", { clientInfo: { name: "arg_bridge", version: "structured-preview" }, capabilities: { experimentalApi: true } });
+    this.notify("initialized", {});
+  }
+  request(method, params, timeoutMs = 3e4) {
+    if (this.failure || this.socket.readyState !== WebSocket.OPEN) return Promise.reject(this.failure ?? new Error("RPC connection is not open"));
+    const id = this.nextId++;
+    return new Promise((resolve5, reject4) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject4(new Error(`RPC ${method} timed out; outcome unknown, not retried`));
+      }, timeoutMs);
+      this.pending.set(id, { resolve: resolve5, reject: reject4, timer });
+      this.socket.send(JSON.stringify({ id, method, params }), (error) => {
+        if (!error) return;
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject4(error);
+      });
+    });
+  }
+  notify(method, params) {
+    this.socket.send(JSON.stringify({ method, params }));
+  }
+  respond(id, result) {
+    this.socket.send(JSON.stringify({ id, result }));
+  }
+  rejectRequest(id, message) {
+    this.socket.send(JSON.stringify({ id, error: { code: -32601, message } }));
+  }
+  close() {
+    this.socket.close();
+  }
+  fail(error) {
+    if (this.failure) return;
+    this.failure = error;
+    for (const request of this.pending.values()) {
+      clearTimeout(request.timer);
+      request.reject(error);
+    }
+    this.pending.clear();
+    this.socket.terminate();
+    this.emit("disconnected", error);
+  }
+};
+
+// src/agent/structured/host.ts
+async function connectCodexHost(options) {
+  if (process.platform === "win32") throw new Error("Codex structured shared-terminal backend currently requires Unix sockets; keep terminal transport on Windows");
+  const hash = createHash3("sha256").update(options.profileDir).update("\0").update(options.scope).update("\0").update(options.cwd).digest("hex").slice(0, 20);
+  const directory = join21(tmpdir3(), `argbridge-rpc-${process.getuid?.() ?? "user"}-${hash}`);
+  await mkdir14(directory, { recursive: true, mode: 448 });
+  const stat8 = await lstat(directory);
+  if (stat8.isSymbolicLink() || !stat8.isDirectory() || process.getuid && stat8.uid !== process.getuid()) throw new Error("Unsafe structured runtime directory");
+  await chmod5(directory, 448);
+  const path = join21(directory, "server.sock");
+  const endpoint = `unix://${path}`;
+  const url = `ws+unix://${path}:/`;
+  let rpc;
+  try {
+    rpc = await RpcClient.connect(url);
+  } catch {
+    const log2 = await open3(join21(directory, "server.log"), "a", 384);
+    const child = spawnProcess(options.binary, ["app-server", "--listen", endpoint], {
+      cwd: options.cwd,
+      env: options.env,
+      detached: true,
+      stdio: ["ignore", log2.fd, log2.fd]
+    });
+    let failure;
+    child.once("error", (error) => {
+      failure = error;
+    });
+    child.unref();
+    await log2.close();
+    const deadline = Date.now() + 2e4;
+    let connected;
+    while (Date.now() < deadline && !failure) {
+      try {
+        connected = await RpcClient.connect(url);
+        break;
+      } catch {
+        await new Promise((resolve5) => setTimeout(resolve5, 150));
+      }
+    }
+    if (!connected) {
+      child.kill("SIGTERM");
+      throw failure ?? new Error(`Codex App Server did not become ready; inspect ${join21(directory, "server.log")}`);
+    }
+    rpc = connected;
+  }
+  try {
+    await rpc.initialize();
+  } catch (error) {
+    rpc.close();
+    throw error;
+  }
+  return { rpc, endpoint };
+}
+
+// src/agent/structured/codex.ts
+import { randomUUID } from "crypto";
+
+// src/agent/structured/contracts.ts
+function interactionEvent(interaction) {
+  return { type: "interactive", phase: "turn", text: interaction.prompt, interaction };
+}
+function textEvent(delta) {
+  return { type: "text", delta, source: "agent" };
+}
+
+// src/agent/structured/codex.ts
+var toolItems = /* @__PURE__ */ new Set(["commandExecution", "fileChange", "mcpToolCall", "collabAgentToolCall", "webSearch", "imageGeneration", "dynamicToolCall"]);
+var CodexStructuredSession = class {
+  constructor(id, endpoint, rpc) {
+    this.id = id;
+    this.endpoint = endpoint;
+    this.rpc = rpc;
+    this.listener = (message) => this.receive(message);
+    rpc.on("message", this.listener);
+    rpc.on("disconnected", this.disconnected);
+  }
+  id;
+  endpoint;
+  rpc;
+  emit;
+  complete;
+  turnId;
+  phase = "idle";
+  goalActive = false;
+  finishedTurns = /* @__PURE__ */ new Set();
+  selectedSkill;
+  pending = /* @__PURE__ */ new Map();
+  menus = /* @__PURE__ */ new Set();
+  deltas = /* @__PURE__ */ new Map();
+  acknowledgements = /* @__PURE__ */ new Map();
+  deferredInteractions = [];
+  usageTotal;
+  listener;
+  disconnected = (error) => {
+    for (const waiter of this.acknowledgements.values()) waiter.reject(error);
+    this.acknowledgements.clear();
+    this.phase = "failed";
+    this.emit?.({ type: "error", message: error.message, terminationReason: "failed" });
+    this.finish();
+  };
+  finish() {
+    for (const id of this.pending.keys()) if (!this.menus.has(id)) this.pending.delete(id);
+    this.deferredInteractions = [];
+    this.complete?.();
+    this.complete = void 0;
+    if (this.menus.size && this.phase !== "failed") this.phase = "picker";
+  }
+  interaction(event) {
+    if (this.emit) this.emit(event);
+    else this.deferredInteractions.push(event);
+  }
+  receive(message) {
+    const p3 = message.params ?? {};
+    if (p3.threadId !== this.id) return;
+    if (message.id !== void 0 && message.method) {
+      const requestId = String(message.id);
+      if (message.method === "item/commandExecution/requestApproval" || message.method === "item/fileChange/requestApproval") {
+        const choices = /* @__PURE__ */ new Map();
+        const decisions = p3.availableDecisions ?? ["accept", "acceptForSession", "decline", "cancel"];
+        for (const [index, value] of decisions.entries()) choices.set(String(index + 1), value);
+        this.pending.set(requestId, { choices, respond: (decision) => this.respondAcknowledged(message.id, { decision }) });
+        this.phase = "picker";
+        this.interaction(interactionEvent({
+          id: requestId,
+          prompt: `${p3.reason ?? "Codex \u8BF7\u6C42\u5BA1\u6279"}
+${p3.command ?? JSON.stringify(p3.changes ?? {})}`,
+          choices: [...choices].map(([value, decision]) => ({ value, label: typeof decision === "string" ? decision : JSON.stringify(decision) }))
+        }));
+      } else if (message.method === "item/tool/requestUserInput") {
+        const questions = p3.questions ?? [];
+        if (!questions.length) {
+          this.rpc.rejectRequest(message.id, "Empty question request");
+          return;
+        }
+        const answers = {};
+        for (const [index, question] of questions.entries()) {
+          const id = `${requestId}.q${index}`;
+          const options = question.options ?? [];
+          this.pending.set(id, { choices: new Map(options.map((option, i) => [String(i + 1), option.label])), freeText: true, respond: async (value) => {
+            answers[question.id] = { answers: [String(value)] };
+            if (Object.keys(answers).length === questions.length) await this.respondAcknowledged(message.id, { answers });
+          } });
+          this.phase = "picker";
+          this.interaction(interactionEvent({
+            id,
+            prompt: `${question.question}
+\u4E5F\u53EF\u7528 /answer ${id} \u6B63\u6587 \u81EA\u7531\u56DE\u7B54\u3002`,
+            choices: options.map((option, i) => ({ label: option.label, value: String(i + 1) }))
+          }));
+        }
+      } else {
+        this.rpc.rejectRequest(message.id, "Unsupported control request");
+        this.emit?.(textEvent(`\u672A\u5B9E\u73B0\u7684 Codex \u63A7\u5236\u8BF7\u6C42\uFF1A${message.method}
+`));
+      }
+      return;
+    }
+    if (message.method === "turn/started") {
+      this.turnId = p3.turn?.id;
+      this.phase = "busy";
+    }
+    if (message.method === "item/agentMessage/delta") {
+      const key = `${p3.turnId}:${p3.itemId}`;
+      this.deltas.set(key, (this.deltas.get(key) ?? "") + p3.delta);
+      this.emit?.(textEvent(p3.delta));
+    }
+    if (message.method === "item/started" && toolItems.has(p3.item?.type)) {
+      this.emit?.({ type: "tool_use", id: p3.item.id, name: p3.item.type, input: p3.item.input ?? p3.item.arguments ?? { command: p3.item.command, cwd: p3.item.cwd } });
+    }
+    if (message.method === "item/completed") {
+      const item = p3.item ?? {};
+      if (item.type === "agentMessage") {
+        const key = `${p3.turnId}:${item.id}`;
+        const sent = this.deltas.get(key) ?? "";
+        if (typeof item.text === "string" && item.text.startsWith(sent) && item.text.length > sent.length) this.emit?.(textEvent(item.text.slice(sent.length)));
+        this.deltas.delete(key);
+      }
+      if (toolItems.has(item.type)) this.emit?.({
+        type: "tool_result",
+        id: item.id,
+        output: item.aggregatedOutput ?? JSON.stringify(item.result ?? item.error ?? item.changes ?? ""),
+        isError: item.status === "failed" || item.exitCode != null && item.exitCode !== 0
+      });
+    }
+    if (message.method === "thread/goal/updated") {
+      this.goalActive = p3.goal?.status === "active";
+      if (!this.goalActive && !this.turnId) this.finish();
+    }
+    if (message.method === "thread/goal/cleared") {
+      this.goalActive = false;
+      if (!this.turnId) this.finish();
+    }
+    if (message.method === "thread/tokenUsage/updated") {
+      const usage = p3.tokenUsage?.last;
+      const total = p3.tokenUsage?.total;
+      if (usage) {
+        const previous = this.usageTotal;
+        this.emit?.({
+          type: "usage",
+          inputTokens: total && previous ? Math.max(0, total.inputTokens - previous.inputTokens) : usage.inputTokens,
+          outputTokens: total && previous ? Math.max(0, total.outputTokens - previous.outputTokens) : usage.outputTokens,
+          cachedInputTokens: total && previous ? Math.max(0, total.cachedInputTokens - previous.cachedInputTokens) : usage.cachedInputTokens
+        });
+      }
+      if (total) this.usageTotal = total;
+    }
+    if (message.method === "serverRequest/resolved") {
+      this.acknowledgements.get(String(p3.requestId))?.resolve();
+      const id = String(p3.requestId);
+      for (const key of this.pending.keys()) if (key === id || key.startsWith(`${id}.q`)) this.pending.delete(key);
+      if (!this.pending.size) this.phase = this.turnId ? "busy" : "idle";
+    }
+    if (message.method === "turn/completed" && (!this.turnId || p3.turn?.id === this.turnId)) {
+      this.finishedTurns.add(p3.turn.id);
+      if (this.finishedTurns.size > 100) this.finishedTurns.delete(this.finishedTurns.values().next().value);
+      this.turnId = void 0;
+      this.phase = "idle";
+      if (p3.turn?.status === "failed") {
+        this.emit?.({ type: "error", message: p3.turn.error?.message ?? "Codex turn failed", terminationReason: "failed" });
+        this.finish();
+      } else if (!this.goalActive || p3.turn?.status === "interrupted") {
+        if (p3.turn?.status === "interrupted") this.emit?.({ type: "done", terminationReason: "interrupted" });
+        this.finish();
+      }
+    }
+  }
+  async submit(options, emit2, signal) {
+    if (this.emit) throw new Error("Structured thread already has an active relay");
+    if (signal.aborted) return;
+    this.emit = emit2;
+    emit2({ type: "system", threadId: this.id, cwd: options.cwd });
+    for (const event of this.deferredInteractions.splice(0)) {
+      if (event.type === "interactive" && event.interaction && this.pending.has(event.interaction.id)) emit2(event);
+    }
+    let completion = new Promise((resolve5) => {
+      this.complete = resolve5;
+    });
+    const abort = () => {
+      void this.interrupt().catch((error) => this.disconnected(error));
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    try {
+      if (options.liveInputMode === "command" || options.liveInputMode === "control") {
+        for (const event of [...await this.command(options.prompt), ...this.drainCommands()]) emit2(event);
+        const startsGoal = this.goalActive && /^\/goal\s+(?!pause\b|clear\b|status\b|edit\b)/.test(options.prompt);
+        const continuesTurn = Boolean(this.turnId) && (/^\/?answer\s/.test(options.prompt) || /^\d+$/.test(options.prompt));
+        if (!startsGoal && !continuesTurn) return;
+        if (signal.aborted) await this.interrupt();
+      } else {
+        if (this.turnId || this.goalActive) {
+          await completion;
+          if (signal.aborted) return;
+          completion = new Promise((resolve5) => {
+            this.complete = resolve5;
+          });
+        }
+        this.phase = "submitted";
+        const input = [{ type: "text", text: this.selectedSkill ? `$${this.selectedSkill.name}
+${options.prompt}` : options.prompt }];
+        if (this.selectedSkill) {
+          input.push({ type: "skill", ...this.selectedSkill });
+          this.selectedSkill = void 0;
+        }
+        for (const path of options.images ?? []) input.push({ type: "localImage", path });
+        const result = await this.rpc.request("turn/start", { threadId: this.id, input });
+        if (!this.finishedTurns.has(result.turn?.id)) this.turnId = result.turn?.id ?? this.turnId;
+        if (signal.aborted) await this.interrupt();
+      }
+      await completion;
+    } finally {
+      signal.removeEventListener("abort", abort);
+      this.emit = void 0;
+      this.complete = void 0;
+    }
+  }
+  async command(input) {
+    const [name, ...args] = input.trim().split(/\s+/);
+    if (name === "/status") return [textEvent(JSON.stringify(await this.rpc.request("thread/read", { threadId: this.id, includeTurns: false }), null, 2))];
+    if (name === "/goal") {
+      const action = args[0];
+      let result;
+      if (!action || action === "status") result = await this.rpc.request("thread/goal/get", { threadId: this.id });
+      else if (action === "clear") {
+        result = await this.rpc.request("thread/goal/clear", { threadId: this.id });
+        this.goalActive = false;
+      } else {
+        const state = action === "pause" ? "paused" : "active";
+        const objective = input.trim().slice("/goal".length).trim();
+        result = await this.rpc.request("thread/goal/set", {
+          threadId: this.id,
+          ...action === "edit" ? {} : { status: state },
+          ...["pause", "resume"].includes(action) ? {} : { objective: action === "edit" ? objective.slice("edit".length).trimStart() : objective }
+        });
+        this.goalActive = result.goal?.status === "active";
+      }
+      return [textEvent(JSON.stringify(result, null, 2))];
+    }
+    if (name === "/model") {
+      const result = await this.rpc.request("model/list", { limit: 100 });
+      const models = result.data ?? [];
+      return [this.menu("\u9009\u62E9\u6A21\u578B", models.map((model) => ({ label: model.displayName ?? model.id, apply: async () => {
+        const efforts = model.supportedReasoningEfforts ?? [];
+        if (!efforts.length) {
+          await this.rpc.request("thread/settings/update", { threadId: this.id, model: model.id });
+          return [textEvent(`\u6A21\u578B\u5DF2\u8BBE\u7F6E\u4E3A ${model.id}`)];
+        }
+        return [this.menu(`\u9009\u62E9 ${model.id} \u7684\u63A8\u7406\u5F3A\u5EA6`, efforts.map((effort) => ({ label: effort.reasoningEffort, apply: async () => {
+          await this.rpc.request("thread/settings/update", { threadId: this.id, model: model.id, effort: effort.reasoningEffort });
+          return [textEvent(`\u6A21\u578B\u5DF2\u8BBE\u7F6E\u4E3A ${model.id} / ${effort.reasoningEffort}`)];
+        } })))];
+      } })))];
+    }
+    if (name === "/skills") {
+      const result = await this.rpc.request("skills/list", {});
+      const skills = (result.data ?? []).flatMap((item) => item.skills ?? []).filter((skill) => skill.enabled !== false);
+      return [this.menu("\u9009\u62E9\u4E0B\u4E00\u6761\u6D88\u606F\u4F7F\u7528\u7684 skill", skills.map((skill) => ({ label: skill.name, apply: async () => {
+        this.selectedSkill = { name: skill.name, path: skill.path };
+        return [textEvent(`\u4E0B\u4E00\u6761\u6D88\u606F\u5C06\u4F7F\u7528 $${skill.name}`)];
+      } })))];
+    }
+    if (name === "/compact") {
+      await this.rpc.request("thread/compact/start", { threadId: this.id });
+      return [textEvent("\u5DF2\u8BF7\u6C42\u538B\u7F29\u4E0A\u4E0B\u6587")];
+    }
+    if (name === "/stop") {
+      await this.interrupt();
+      return [];
+    }
+    const reply2 = /^\/?answer\s+(\S+)\s+([\s\S]+)$/.exec(input.trim());
+    if (reply2) {
+      await this.answer(reply2[1], reply2[2]);
+      return [];
+    }
+    if (/^\d+$/.test(input.trim()) && this.pending.size === 1) {
+      await this.answer([...this.pending.keys()][0], input.trim());
+      return [];
+    }
+    throw new Error(`\u7ED3\u6784\u5316\u540E\u7AEF\u4E0D\u652F\u6301\u6B64\u63A7\u5236\u547D\u4EE4\uFF1A${input}\u3002\u4E0D\u4F1A\u5C06\u5B83\u5F53\u666E\u901A\u63D0\u793A\u8BCD\u53D1\u9001\u3002`);
+  }
+  menu(prompt, entries) {
+    if (!entries.length) return textEvent(`${prompt}\uFF1A\u6682\u65E0\u53EF\u7528\u9009\u9879`);
+    for (const id2 of this.menus) this.pending.delete(id2);
+    this.menus.clear();
+    const id = randomUUID();
+    this.menus.add(id);
+    const choices = new Map(entries.map((entry, index) => [String(index + 1), entry]));
+    this.pending.set(id, { choices, respond: async (value) => {
+      const entry = value;
+      const events = await entry.apply();
+      for (const event of events) this.commandEvents.push(event);
+    } });
+    this.phase = "picker";
+    return interactionEvent({ id, prompt, choices: entries.map((entry, index) => ({ label: entry.label, value: String(index + 1) })) });
+  }
+  commandEvents = [];
+  drainCommands() {
+    return this.commandEvents.splice(0);
+  }
+  hasRequest(id) {
+    return this.pending.has(id);
+  }
+  freeTextRequest() {
+    const entry = [...this.pending][0];
+    return this.pending.size === 1 && entry?.[1].freeText ? entry[0] : void 0;
+  }
+  async answer(id, value) {
+    const request = this.pending.get(id);
+    if (!request) throw new Error("\u8BE5\u8BF7\u6C42\u5DF2\u5931\u6548");
+    const answer = request.choices.get(value) ?? (request.freeText ? value : void 0);
+    if (answer === void 0) throw new Error("\u65E0\u6548\u9009\u9879");
+    await request.respond(answer);
+    this.pending.delete(id);
+    this.menus.delete(id);
+    if (!this.pending.size) this.phase = this.turnId ? "busy" : "idle";
+  }
+  async respondAcknowledged(id, result) {
+    const key = String(id);
+    let timer;
+    try {
+      await new Promise((resolve5, reject4) => {
+        this.acknowledgements.set(key, { resolve: resolve5, reject: reject4 });
+        timer = setTimeout(() => reject4(new Error("\u5BA1\u6279\u56DE\u590D\u5C1A\u672A\u83B7\u5F97\u670D\u52A1\u7AEF\u786E\u8BA4\uFF1B\u4E0D\u4F1A\u81EA\u52A8\u91CD\u53D1")), 1e4);
+        this.rpc.respond(id, result);
+      });
+    } finally {
+      if (timer) clearTimeout(timer);
+      this.acknowledgements.delete(key);
+    }
+  }
+  async interrupt() {
+    if (this.goalActive) {
+      await this.rpc.request("thread/goal/set", { threadId: this.id, status: "paused" });
+      this.goalActive = false;
+    }
+    if (this.turnId) await this.rpc.request("turn/interrupt", { threadId: this.id, turnId: this.turnId });
+    else this.finish();
+  }
+  diagnostics() {
+    return { phase: this.phase, inputState: this.turnId ? "submitted" : "empty", retryCount: 0 };
+  }
+  async syncState() {
+    try {
+      const result = await this.rpc.request("thread/goal/get", { threadId: this.id });
+      this.goalActive = result.goal?.status === "active";
+    } catch {
+    }
+    try {
+      const result = await this.rpc.request("thread/turns/list", { threadId: this.id, limit: 1, sortDirection: "desc" });
+      const active2 = result.data?.find((turn) => turn.status === "inProgress");
+      if (active2) {
+        this.turnId = active2.id;
+        this.phase = "busy";
+      }
+    } catch {
+    }
+  }
+  async forkSide() {
+    throw new Error("\u7ED3\u6784\u5316 /btw \u6B63\u5728\u6838\u5B9E\u539F\u751F side \u8FB9\u754C\u8BED\u4E49\uFF0C\u5F53\u524D\u672A\u542F\u7528\uFF1B\u65E7\u7248\u540E\u7AEF\u4ECD\u53EF\u4F7F\u7528\u539F\u751F /btw");
+  }
+  async close() {
+    this.rpc.off("message", this.listener);
+    this.rpc.off("disconnected", this.disconnected);
+    for (const waiter of this.acknowledgements.values()) waiter.reject(new Error("Session closed"));
+    this.acknowledgements.clear();
+    this.pending.clear();
+    this.menus.clear();
+    this.finish();
+  }
+  disconnect() {
+    this.rpc.close();
+  }
+};
+
+// src/agent/structured/claude.ts
+import { randomUUID as randomUUID2 } from "crypto";
+import { readFile as readFile12 } from "fs/promises";
+import { extname as extname2 } from "path";
+var ClaudeStructuredSession = class _ClaudeStructuredSession {
+  constructor(id, options, query) {
+    this.id = id;
+    this.model = options.model;
+    this.query = query({ prompt: this.input, options: {
+      ...options,
+      // The native preset restores Claude Code's own default instructions.
+      // There is deliberately no appended Bridge system prompt.
+      systemPrompt: { type: "preset", preset: "claude_code" },
+      settingSources: ["user", "project", "local"],
+      includePartialMessages: true,
+      canUseTool: async (tool, input, context) => {
+        const id2 = context.toolUseID;
+        if (tool === "AskUserQuestion" && Array.isArray(input.questions)) return this.askQuestions(id2, input, context.signal);
+        return new Promise((resolve5) => {
+          const cancel2 = () => {
+            this.pending.delete(id2);
+            resolve5({ behavior: "deny", message: "\u64CD\u4F5C\u5DF2\u53D6\u6D88" });
+          };
+          if (context.signal.aborted) {
+            cancel2();
+            return;
+          }
+          context.signal.addEventListener("abort", cancel2, { once: true });
+          this.pending.set(id2, { values: /* @__PURE__ */ new Set(["allow", "deny"]), answer: async (value) => {
+            context.signal.removeEventListener("abort", cancel2);
+            resolve5(value === "allow" ? { behavior: "allow", updatedInput: input } : { behavior: "deny", message: "\u7528\u6237\u62D2\u7EDD\u6B64\u64CD\u4F5C" });
+            return [];
+          } });
+          this.phase = "picker";
+          this.emit?.(interactionEvent({
+            id: id2,
+            prompt: `${context.title ?? tool}
+${JSON.stringify(input, null, 2)}`,
+            choices: [{ label: "\u5141\u8BB8\u672C\u6B21", value: "allow" }, { label: "\u62D2\u7EDD", value: "deny" }]
+          }));
+        });
+      }
+    } });
+    this.reader = this.consume();
+  }
+  id;
+  input = new AsyncEventQueue();
+  query;
+  emit;
+  complete;
+  failure;
+  phase = "starting";
+  pending = /* @__PURE__ */ new Map();
+  menus = /* @__PURE__ */ new Set();
+  streamingMessages = /* @__PURE__ */ new Set();
+  streamingThinking = /* @__PURE__ */ new Set();
+  signal;
+  currentMessage = "";
+  sentText = false;
+  reader;
+  selectedSkill;
+  model;
+  cumulativeCost = 0;
+  static async create(id, options) {
+    const { query } = await import("@anthropic-ai/claude-agent-sdk");
+    return new _ClaudeStructuredSession(id, options, query);
+  }
+  async ready() {
+    await this.query.initializationResult();
+    this.phase = "idle";
+  }
+  async consume() {
+    try {
+      for await (const raw of this.query) {
+        const event = raw;
+        if (event.type === "system" && event.subtype === "init") this.model = event.model;
+        if (event.parent_tool_use_id) continue;
+        if (event.type === "stream_event") {
+          const partial = event.event ?? {};
+          if (partial.type === "message_start") this.currentMessage = partial.message.id;
+          if (partial.type === "content_block_delta" && partial.delta?.type === "text_delta") {
+            this.streamingMessages.add(this.currentMessage);
+            this.sentText = true;
+            this.emit?.(textEvent(partial.delta.text));
+          }
+          if (partial.type === "content_block_delta" && partial.delta?.type === "thinking_delta") {
+            this.streamingThinking.add(this.currentMessage);
+            this.emit?.({ type: "thinking", delta: partial.delta.thinking });
+          }
+          continue;
+        }
+        if (event.type === "result") {
+          if (this.signal?.aborted) this.emit?.({ type: "done", terminationReason: "interrupted" });
+          else if (event.subtype !== "success" || event.is_error) this.emit?.({ type: "error", message: event.result ?? (event.errors ?? []).join("\n") ?? "Claude turn failed", terminationReason: "failed" });
+          else if (!this.sentText && event.result) this.emit?.(textEvent(event.result));
+          for (const translated of translateEvent(event)) if (translated.type === "usage") {
+            const total = event.total_cost_usd;
+            const costUsd = typeof total === "number" ? total >= this.cumulativeCost ? total - this.cumulativeCost : total : void 0;
+            this.emit?.({ ...translated, costUsd });
+            if (typeof total === "number") this.cumulativeCost = total;
+          }
+          this.phase = this.menus.size ? "picker" : "idle";
+          this.complete?.();
+          this.complete = void 0;
+          for (const id of this.pending.keys()) if (!this.menus.has(id)) this.pending.delete(id);
+          continue;
+        }
+        for (const translated of translateEvent(event)) {
+          if (translated.type === "text" && this.streamingMessages.has(event.message?.id)) continue;
+          if (translated.type === "thinking" && this.streamingThinking.has(event.message?.id)) continue;
+          if (translated.type === "text") this.sentText = true;
+          this.emit?.(translated);
+        }
+      }
+      throw new Error("Claude structured process ended");
+    } catch (error) {
+      this.failure = error instanceof Error ? error : new Error(String(error));
+      this.phase = "failed";
+      this.emit?.({ type: "error", message: this.failure.message, terminationReason: "failed" });
+      this.complete?.();
+      this.complete = void 0;
+    }
+  }
+  async submit(options, emit2, signal) {
+    if (this.failure) throw this.failure;
+    if (this.emit) throw new Error("Claude session already has an active relay");
+    if (signal.aborted) return;
+    this.emit = emit2;
+    this.signal = signal;
+    this.sentText = false;
+    this.streamingMessages.clear();
+    this.streamingThinking.clear();
+    emit2({ type: "system", sessionId: this.id, cwd: options.cwd });
+    const done = new Promise((resolve5) => {
+      this.complete = resolve5;
+    });
+    const abort = () => {
+      void this.interrupt().catch((error) => {
+        this.emit?.({ type: "error", message: String(error), terminationReason: "failed" });
+        this.complete?.();
+      });
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    try {
+      if (options.liveInputMode === "command" || options.liveInputMode === "control") {
+        for (const event of await this.command(options.prompt)) emit2(event);
+        return;
+      }
+      const content = [{ type: "text", text: this.selectedSkill ? `/${this.selectedSkill} ${options.prompt}` : options.prompt }];
+      this.selectedSkill = void 0;
+      for (const path of options.images ?? []) {
+        const mime = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif" }[extname2(path).toLowerCase()];
+        if (!mime) throw new Error("Unsupported image format");
+        content.push({ type: "image", source: { type: "base64", media_type: mime, data: await readFile12(path, "base64") } });
+      }
+      if (signal.aborted) return;
+      this.phase = "busy";
+      this.input.push({ type: "user", session_id: this.id, parent_tool_use_id: null, message: { role: "user", content } });
+      await done;
+    } finally {
+      signal.removeEventListener("abort", abort);
+      this.emit = void 0;
+      this.signal = void 0;
+      this.complete = void 0;
+    }
+  }
+  async command(input) {
+    if (input === "/status") return [textEvent(JSON.stringify({ sessionId: this.id, phase: this.phase, model: this.model }, null, 2))];
+    if (input === "/model") {
+      const models = await this.query.supportedModels();
+      return [this.menu("\u9009\u62E9 Claude \u6A21\u578B", models.map((model) => ({ label: model.displayName, action: async () => {
+        await this.query.setModel(model.value);
+        this.model = model.value;
+        return [textEvent(`\u6A21\u578B\u5DF2\u8BBE\u7F6E\u4E3A ${model.value}`)];
+      } })))];
+    }
+    if (input === "/skills") {
+      const commands = await this.query.supportedCommands();
+      return [this.menu("\u9009\u62E9\u4E0B\u4E00\u6761\u6D88\u606F\u4F7F\u7528\u7684 skill", commands.map((command) => ({ label: command.name, action: async () => {
+        this.selectedSkill = command.name;
+        return [textEvent(`\u4E0B\u4E00\u6761\u6D88\u606F\u5C06\u4F7F\u7528 /${command.name}`)];
+      } })))];
+    }
+    const reply2 = /^\/?answer\s+(\S+)\s+([\s\S]+)$/.exec(input.trim());
+    if (reply2) {
+      await this.answer(reply2[1], reply2[2]);
+      return this.drainCommands();
+    }
+    if (/^\d+$/.test(input.trim()) && this.pending.size === 1) {
+      const [id, request] = [...this.pending][0];
+      const value = [...request.values][Number(input.trim()) - 1];
+      if (!value) throw new Error("\u9009\u9879\u65E0\u6548");
+      await this.answer(id, value);
+      return this.drainCommands();
+    }
+    throw new Error(`Claude \u7ED3\u6784\u5316\u540E\u7AEF\u6682\u4E0D\u652F\u6301 ${input}\uFF1B\u4E0D\u4F1A\u6A21\u62DF Codex \u7684 goal \u6216 side\u3002`);
+  }
+  menu(prompt, options) {
+    if (!options.length) return textEvent(`${prompt}\uFF1A\u6682\u65E0\u53EF\u7528\u9009\u9879`);
+    for (const id2 of this.menus) this.pending.delete(id2);
+    this.menus.clear();
+    const id = randomUUID2();
+    this.menus.add(id);
+    this.pending.set(id, { values: new Set(options.map((_, index) => String(index + 1))), answer: (value) => options[Number(value) - 1].action() });
+    this.phase = "picker";
+    return interactionEvent({ id, prompt, choices: options.map((option, index) => ({ label: option.label, value: String(index + 1) })) });
+  }
+  commandEvents = [];
+  drainCommands() {
+    return this.commandEvents.splice(0);
+  }
+  hasRequest(id) {
+    return this.pending.has(id);
+  }
+  freeTextRequest() {
+    const entry = [...this.pending][0];
+    return this.pending.size === 1 && entry?.[1].freeText ? entry[0] : void 0;
+  }
+  async answer(id, value) {
+    const request = this.pending.get(id);
+    if (!request || !request.freeText && !request.values.has(value)) throw new Error("\u9009\u62E9\u5DF2\u5931\u6548\u6216\u9009\u9879\u65E0\u6548");
+    this.pending.delete(id);
+    this.menus.delete(id);
+    this.commandEvents.push(...await request.answer(value));
+    this.phase = this.pending.size ? "picker" : this.complete ? "busy" : "idle";
+  }
+  async interrupt() {
+    await this.query.interrupt();
+  }
+  askQuestions(id, input, signal) {
+    const questions = input.questions;
+    if (!questions.length) return Promise.resolve({ behavior: "deny", message: "\u6CA1\u6709\u53EF\u56DE\u7B54\u7684\u95EE\u9898" });
+    return new Promise((resolve5) => {
+      const ids = questions.map((_, index) => `${id}.q${index}`);
+      const answers = {};
+      const cancel2 = () => {
+        for (const key of ids) this.pending.delete(key);
+        resolve5({ behavior: "deny", message: "\u95EE\u9898\u5DF2\u53D6\u6D88" });
+      };
+      if (signal.aborted) {
+        cancel2();
+        return;
+      }
+      signal.addEventListener("abort", cancel2, { once: true });
+      for (const [index, question] of questions.entries()) {
+        const options = question.options ?? [];
+        const key = ids[index];
+        this.pending.set(key, { values: new Set(options.map((_, i) => String(i + 1))), freeText: true, answer: async (value) => {
+          answers[question.question] = options[Number(value) - 1]?.label ?? value;
+          if (Object.keys(answers).length === questions.length) {
+            signal.removeEventListener("abort", cancel2);
+            resolve5({ behavior: "allow", updatedInput: { ...input, answers } });
+          }
+          return [];
+        } });
+        this.phase = "picker";
+        this.emit?.(interactionEvent({
+          id: key,
+          prompt: `${question.question}
+\u4E5F\u53EF\u7528 /answer ${key} \u6B63\u6587 \u81EA\u7531\u56DE\u7B54\u3002`,
+          choices: options.map((option, i) => ({ label: option.label, value: String(i + 1) }))
+        }));
+      }
+    });
+  }
+  diagnostics() {
+    return { phase: this.phase, inputState: this.complete ? "submitted" : "empty", retryCount: 0 };
+  }
+  async close() {
+    this.input.close();
+    this.query.close();
+    await this.reader;
+  }
+};
+
+// src/agent/structured/view.ts
+import { createHash as createHash4 } from "crypto";
+import { mkdir as mkdir15, appendFile, lstat as lstat2, chmod as chmod6 } from "fs/promises";
+import { join as join22 } from "path";
+var quote = (value) => `'${value.replace(/'/g, `'\\''`)}'`;
+var StructuredView = class {
+  constructor(directory, key) {
+    this.directory = directory;
+    this.key = key;
+  }
+  directory;
+  key;
+  tail = Promise.resolve();
+  statusValue = { state: "none" };
+  logPath = "";
+  async start(native, cwd) {
+    await mkdir15(this.directory, { recursive: true, mode: 448 });
+    const info = await lstat2(this.directory);
+    if (info.isSymbolicLink() || !info.isDirectory() || process.getuid && info.uid !== process.getuid()) throw new Error("Unsafe terminal view directory");
+    await chmod6(this.directory, 448);
+    const name = `argbridge-api-${createHash4("sha256").update(this.key).digest("hex").slice(0, 16)}`;
+    this.logPath = join22(this.directory, `${name}.log`);
+    await appendFile(this.logPath, "", { mode: 384 });
+    if (process.platform === "win32" || spawnProcessSync("tmux", ["-V"], { stdio: "ignore" }).status !== 0) return;
+    const socket = join22(this.directory, "view.sock");
+    if (Buffer.byteLength(socket) > 100) return;
+    const exists2 = spawnProcessSync("tmux", ["-S", socket, "has-session", "-t", name], { stdio: "ignore" });
+    if (exists2.status !== 0) {
+      const command = native ? [native.binary, "-c", "check_for_update_on_startup=false", "--remote", native.endpoint, "resume", native.threadId, "--no-alt-screen"].map(quote).join(" ") : `tail -n 200 -F ${quote(this.logPath)}`;
+      const created = spawnProcessSync("tmux", ["-S", socket, "-f", "/dev/null", "new-session", "-d", "-s", name, "-x", "120", "-y", "40", "-c", cwd ?? this.directory, command], { encoding: "utf8", env: native?.env ?? process.env });
+      if (created.status !== 0) return;
+      spawnProcessSync("tmux", ["-S", socket, "set-option", "-t", name, "remain-on-exit", "on"], { stdio: "ignore" });
+    }
+    this.statusValue = { state: "managed", terminal: {
+      socketPath: socket,
+      target: name,
+      ownership: "managed",
+      attachCommand: `tmux -S ${quote(socket)} attach -t ${quote(name)}`
+    }, message: native ? "Shared Codex App Server terminal" : "Read-only structured event view; input is controlled from Feishu" };
+  }
+  event(event) {
+    if (!this.logPath) return;
+    let text = "";
+    if (event.type === "text") text = event.delta;
+    else if (event.type === "interactive") text = `
+[\u7B49\u5F85\u9009\u62E9] ${event.text}
+`;
+    else if (event.type === "tool_use") text = `
+[${event.name}] ${JSON.stringify(event.input)}
+`;
+    else if (event.type === "tool_result") text = `
+${event.output}
+`;
+    else if (event.type === "done") text = `
+[${event.terminationReason}]
+`;
+    else if (event.type === "error") text = `
+[\u9519\u8BEF] ${event.message}
+`;
+    if (text) this.tail = this.tail.then(() => appendFile(this.logPath, text.replace(/\x1b/g, ""))).catch(() => {
+    });
+  }
+  status() {
+    return this.statusValue;
+  }
+  async close() {
+    await this.tail;
+  }
+};
+
+// src/agent/structured/adapter.ts
+var StructuredAdapter = class {
+  constructor(options) {
+    this.options = options;
+    this.id = options.kind;
+    this.displayName = options.kind === "codex" ? "Codex App Server" : "Claude Agent SDK";
+    this.tmux = {
+      list: async () => [],
+      bind: async () => {
+        throw new Error("\u7ED3\u6784\u5316\u540E\u7AEF\u4E0D\u7ED1\u5B9A\u65E7\u7EC8\u7AEF\uFF1B\u8BF7\u4F7F\u7528\u8BE5\u4F1A\u8BDD\u7684 /tmux attach");
+      },
+      unbind: async () => false,
+      status: async (scope, cwd) => {
+        const current = this.sessions.get(scope);
+        return (current?.sideView ?? current?.view)?.status() ?? (cwd ? (await this.saved(scope, cwd))?.view : void 0) ?? { state: "none" };
+      },
+      diagnostics: async (scope) => {
+        const current = this.sessions.get(scope);
+        return { ...(current?.side ?? current?.main)?.diagnostics() ?? { phase: "idle", inputState: "unknown", retryCount: 0 }, sideConversation: Boolean(current?.side) };
+      },
+      tail: async (scope, lines, cwd) => {
+        const status = await this.tmux.status(scope, cwd);
+        if (!status.terminal) throw new Error("\u5F53\u524D\u4F1A\u8BDD\u5C1A\u672A\u5EFA\u7ACB\u7EC8\u7AEF\u663E\u793A");
+        return captureTmuxPaneTail(status.terminal, lines);
+      },
+      interrupt: async (scope, cwd, options2) => {
+        const current = this.sessions.get(scope);
+        if (options2?.sideOnly && !current?.side) return false;
+        if (current) {
+          await (current.side ?? current.main).interrupt();
+          return true;
+        }
+        if (this.id !== "codex" || !cwd) return false;
+        const saved = await this.saved(scope, cwd);
+        if (!saved?.endpoint?.startsWith("unix://")) return false;
+        const rpc = await RpcClient.connect(`ws+unix://${saved.endpoint.slice("unix://".length)}:/`);
+        try {
+          await rpc.initialize();
+          const loaded = await rpc.request("thread/loaded/list", {});
+          if (!loaded.data?.includes(saved.id)) return false;
+          const session = new CodexStructuredSession(saved.id, saved.endpoint, rpc);
+          try {
+            await session.syncState();
+            await session.interrupt();
+            return true;
+          } finally {
+            await session.close();
+          }
+        } finally {
+          rpc.close();
+        }
+      }
+    };
+  }
+  options;
+  id;
+  displayName;
+  tmux;
+  sessions = /* @__PURE__ */ new Map();
+  starting = /* @__PURE__ */ new Map();
+  async isAvailable() {
+    return (await this.checkAvailability()).ok;
+  }
+  checkAvailability() {
+    return checkAgentAvailability({ agentId: this.id, agentName: this.displayName, command: this.options.binary, binaryPath: this.options.binary });
+  }
+  async prepareRun() {
+    const available = await this.checkAvailability();
+    if (!available.ok) throw available.error;
+    if (this.id === "codex") await ensureBundledCodexSkill(this.options.codexHome ?? process.env.CODEX_HOME);
+  }
+  structuredControl = async (scope, input) => {
+    const current = this.sessions.get(scope);
+    if (!current) throw new Error("\u5F53\u524D\u7ED3\u6784\u5316\u4F1A\u8BDD\u5C1A\u672A\u5EFA\u7ACB");
+    const requestId = /^\/answer\s+(\S+)/.exec(input)?.[1];
+    const target = requestId ? [current.main, current.side].find((session) => session?.hasRequest(requestId)) : current.side ?? current.main;
+    if (!target) throw new Error("\u8BF7\u6C42\u5DF2\u5931\u6548\u6216\u4E0D\u5C5E\u4E8E\u6B64\u4F1A\u8BDD");
+    const events = await target.command(input);
+    const extra = target instanceof CodexStructuredSession || target instanceof ClaudeStructuredSession ? target.drainCommands() : [];
+    for (const event of [...events, ...extra]) (current.sideView ?? current.view).event(event);
+    return [...events, ...extra];
+  };
+  structuredQuestion = (scope) => {
+    const current = this.sessions.get(scope);
+    return (current?.side ?? current?.main)?.freeTextRequest();
+  };
+  run(options) {
+    return this.createRun(options, false);
+  }
+  runSide(options) {
+    return this.createRun(options, true);
+  }
+  createRun(options, side) {
+    const events = new AsyncEventQueue();
+    const abort = new AbortController();
+    let detached = false;
+    let terminal = false;
+    const emit2 = (event) => {
+      if (detached) return;
+      if (event.type === "error" || event.type === "done") terminal = true;
+      events.push(event);
+      const current = this.sessions.get(options.scopeId ?? options.cwd ?? "");
+      (side ? current?.sideView : current?.view)?.event(event);
+    };
+    void (async () => {
+      try {
+        if (side && options.liveInputMode === "side-exit" && !this.sessions.get(options.scopeId ?? options.cwd ?? "")?.side) {
+          emit2(textEvent("\u5F53\u524D\u6CA1\u6709\u5DF2\u6253\u5F00\u7684\u7ED3\u6784\u5316 side\uFF0C\u4F1A\u8BDD\u672A\u6539\u53D8\u3002"));
+          return;
+        }
+        const current = await this.session(options);
+        if (abort.signal.aborted) return;
+        let target = current.main;
+        let prompt = options.prompt;
+        if (side) {
+          if (!(current.main instanceof CodexStructuredSession)) throw new Error("Claude \u7ED3\u6784\u5316 side \u5C1A\u672A\u9A8C\u8BC1\uFF0C\u8BF7\u4FDD\u7559\u539F\u751F\u540E\u7AEF\u4F7F\u7528\u6B64\u529F\u80FD");
+          if (options.liveInputMode === "side-exit") {
+            if (current.side) {
+              await current.side.interrupt();
+              await current.side.close();
+              current.side = void 0;
+              current.sideView = void 0;
+            }
+            emit2({ type: "system", sideConversation: "exited" });
+            emit2(textEvent("\u5DF2\u9000\u51FA side\uFF0C\u4E3B\u4EFB\u52A1\u7EE7\u7EED\u8FD0\u884C\u3002"));
+            return;
+          }
+          if (!current.side) {
+            current.side = await current.main.forkSide();
+            current.sideView = this.makeView(`${options.scopeId}:side:${current.side.id}`);
+            await current.sideView.start(this.options.nativeView !== false ? { binary: this.options.binary, endpoint: current.side.endpoint, threadId: current.side.id } : void 0, current.cwd);
+          }
+          target = current.side;
+          prompt = options.prompt.replace(/^\/btw(?:\s+|$)/i, "");
+          emit2({ type: "system", sideConversation: "entered" });
+          if (!prompt) {
+            emit2(textEvent("\u5DF2\u8FDB\u5165 side\uFF0C\u8BF7\u53D1\u9001\u6B63\u6587\u3002"));
+            return;
+          }
+        }
+        if (!options.liveInputMode || side) (side ? current.sideView : current.view)?.event(textEvent(`
+[user]
+${prompt}
+`));
+        await target.submit({ ...options, prompt, ...side ? { liveInputMode: void 0 } : {} }, emit2, abort.signal);
+      } catch (error) {
+        emit2({ type: "error", message: error instanceof Error ? error.message : String(error), terminationReason: "failed" });
+      } finally {
+        if (!terminal && !detached) emit2({ type: "done", terminationReason: abort.signal.aborted ? "interrupted" : "normal" });
+        events.close();
+      }
+    })();
+    return {
+      runId: options.runId,
+      events,
+      stop: async () => {
+        abort.abort();
+      },
+      detach: async () => {
+        detached = true;
+        events.close();
+      },
+      waitForExit: async () => true
+    };
+  }
+  makeView(scope) {
+    const key = `${this.options.profileDir}\0${scope}`;
+    const directory = join23(tmpdir4(), `ab-view-${process.getuid?.() ?? "user"}-${createHash5("sha256").update(key).digest("hex").slice(0, 12)}`);
+    return new StructuredView(directory, key);
+  }
+  stateFile(scope, cwd) {
+    return join23(this.options.profileDir, "structured", `${createHash5("sha256").update(scope).update("\0").update(cwd).digest("hex")}.json`);
+  }
+  async saved(scope, cwd) {
+    try {
+      const value = JSON.parse(await readFile13(this.stateFile(scope, cwd), "utf8"));
+      return value.scope === scope && value.cwd === cwd && value.kind === this.id && typeof value.id === "string" ? value : void 0;
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      return void 0;
+    }
+  }
+  async session(options) {
+    const scope = options.scopeId ?? options.cwd;
+    if (!scope || !options.cwd) throw new Error("Structured session requires scope and cwd");
+    const found = this.sessions.get(scope);
+    if (found) {
+      if (found.cwd === options.cwd) return found;
+      if (found.main.diagnostics().inputState === "submitted" || found.side) throw new Error("\u5F53\u524D\u4F1A\u8BDD\u4ECD\u6709\u4EFB\u52A1\u6216 side\uFF0C\u8BF7\u7ED3\u675F\u540E\u518D\u5207\u6362\u5DE5\u4F5C\u76EE\u5F55");
+      await found.main.close();
+      if (found.main instanceof CodexStructuredSession) found.main.disconnect();
+      this.sessions.delete(scope);
+    }
+    const starting = this.starting.get(scope);
+    if (starting) return starting;
+    const operation = this.createSession(scope, options);
+    this.starting.set(scope, operation);
+    try {
+      const result = await operation;
+      this.sessions.set(scope, result);
+      return result;
+    } finally {
+      this.starting.delete(scope);
+    }
+  }
+  async createSession(scope, options) {
+    const cwd = options.cwd;
+    const directory = join23(this.options.profileDir, "structured");
+    await mkdir16(directory, { recursive: true, mode: 448 });
+    const stateFile = this.stateFile(scope, cwd);
+    let saved;
+    try {
+      saved = JSON.parse(await readFile13(stateFile, "utf8"));
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+    const env = withArtifactDeliveryEnv({ ...process.env, ...buildLarkChannelEnv(this.options.larkChannel) }, options.artifactDelivery);
+    let main;
+    const view = this.makeView(`${scope}\0${cwd}`);
+    if (this.id === "codex") {
+      if (this.options.codexHome) env.CODEX_HOME = this.options.codexHome;
+      const { rpc, endpoint } = await connectCodexHost({ binary: this.options.binary, profileDir: this.options.profileDir, scope, cwd, env });
+      const restored = saved ? new CodexStructuredSession(saved.id, endpoint, rpc) : void 0;
+      try {
+        const result = await rpc.request(saved ? "thread/resume" : "thread/start", {
+          ...saved ? { threadId: saved.id, excludeTurns: true } : {},
+          cwd,
+          ...!saved && options.model ? { model: options.model } : {},
+          sandbox: options.sandbox ?? "read-only",
+          ...!saved && options.reasoningEffort ? { config: { model_reasoning_effort: options.reasoningEffort } } : {},
+          approvalPolicy: "on-request"
+        });
+        const id = result.thread?.id;
+        if (typeof id !== "string") throw new Error("Codex did not return a thread ID");
+        main = restored ?? new CodexStructuredSession(id, endpoint, rpc);
+        await main.syncState();
+        await view.start(this.options.nativeView !== false ? { binary: this.options.binary, endpoint, threadId: id, env } : void 0, cwd);
+        await writeFileAtomic(stateFile, JSON.stringify({ id, cwd, scope, kind: this.id, endpoint, view: view.status() }));
+      } catch (error) {
+        await restored?.close();
+        rpc.close();
+        throw error;
+      }
+    } else {
+      const id = saved?.id ?? randomUUID3();
+      const permissionMode = options.permissionMode ?? "default";
+      const sdkOptions = {
+        cwd,
+        env,
+        pathToClaudeCodeExecutable: this.options.binary,
+        ...saved ? { resume: id } : { sessionId: id },
+        ...!saved && options.model ? { model: options.model } : {},
+        permissionMode,
+        allowDangerouslySkipPermissions: permissionMode === "bypassPermissions"
+      };
+      const claude = await ClaudeStructuredSession.create(id, sdkOptions);
+      await claude.ready();
+      main = claude;
+      await view.start(void 0, cwd);
+      await writeFileAtomic(stateFile, JSON.stringify({ id, cwd, scope, kind: this.id, view: view.status() }));
+    }
+    return { main, view, cwd };
+  }
+  async shutdown() {
+    for (const current of this.sessions.values()) {
+      await current.side?.close();
+      await current.main.close();
+      await current.view.close();
+      if (current.main instanceof CodexStructuredSession) current.main.disconnect();
+    }
+    this.sessions.clear();
+  }
+};
+
 // src/bot/channel.ts
 import { createLarkChannel } from "@larksuite/channel";
-import { createHash as createHash8 } from "crypto";
+import { createHash as createHash11 } from "crypto";
 import { homedir as homedir8 } from "os";
-import { dirname as dirname20, join as join24 } from "path";
+import { dirname as dirname20, join as join27 } from "path";
 
 // src/agent/bridge-system-prompt.ts
 var BRIDGE_SYSTEM_PROMPT = `# arg-bridge \u8FD0\u884C\u7EA6\u5B9A
@@ -11951,7 +13109,7 @@ function codexCapability(profile2) {
 }
 
 // src/bridge-agent/router.ts
-import { createHash as createHash3 } from "crypto";
+import { createHash as createHash6 } from "crypto";
 var OpenAiCompatibleBridgeClassifier = class {
   endpoint;
   model;
@@ -12044,7 +13202,7 @@ function looksLikeTerminalPicker(text) {
   return isStructuredLiveInteraction(text);
 }
 function sha256(value) {
-  return createHash3("sha256").update(value).digest("hex");
+  return createHash6("sha256").update(value).digest("hex");
 }
 
 // src/agent/models.ts
@@ -12150,8 +13308,8 @@ function safeJsonStringify(value) {
 }
 
 // src/commands/index.ts
-import { randomUUID } from "crypto";
-import { lstat, readFile as readFile12, realpath as realpath4 } from "fs/promises";
+import { randomUUID as randomUUID4 } from "crypto";
+import { lstat as lstat3, readFile as readFile14, realpath as realpath4 } from "fs/promises";
 import { homedir as homedir7 } from "os";
 import { basename as basename5, dirname as dirname17, isAbsolute as isAbsolute3, relative, sep } from "path";
 
@@ -13036,7 +14194,7 @@ function escapeCode(s) {
 }
 
 // src/policy/fingerprint.ts
-import { createHash as createHash4 } from "crypto";
+import { createHash as createHash7 } from "crypto";
 
 // src/session/jcs.ts
 function canonicalizeJcs(value) {
@@ -13099,7 +14257,7 @@ function attachmentPolicyConfigDigest(input) {
   });
 }
 function digestCanonical(value) {
-  return createHash4("sha256").update(canonicalizeJcs(value)).digest().subarray(0, 16).toString("base64url");
+  return createHash7("sha256").update(canonicalizeJcs(value)).digest().subarray(0, 16).toString("base64url");
 }
 
 // src/policy/access.ts
@@ -14138,7 +15296,7 @@ function finalizeIfRunning(state) {
 import { createReadStream } from "fs";
 import { readdir as readdir4, stat as stat6 } from "fs/promises";
 import { homedir as homedir6 } from "os";
-import { join as join21 } from "path";
+import { join as join24 } from "path";
 import { createInterface as createInterface5 } from "readline";
 
 // src/session/preview.ts
@@ -14177,7 +15335,7 @@ function encodeCwd(cwd) {
   return cwd.replace(/[^A-Za-z0-9]/g, "-");
 }
 function claudeProjectDir(cwd) {
-  return join21(homedir6(), ".claude", "projects", encodeCwd(cwd));
+  return join24(homedir6(), ".claude", "projects", encodeCwd(cwd));
 }
 async function listRecentSessions(cwd, limit = 5) {
   const dir = claudeProjectDir(cwd);
@@ -14191,7 +15349,7 @@ async function listRecentSessions(cwd, limit = 5) {
   const jsonls = files.filter((f) => f.endsWith(".jsonl"));
   const withStats = await Promise.all(
     jsonls.map(async (f) => {
-      const path = join21(dir, f);
+      const path = join24(dir, f);
       try {
         const st = await stat6(path);
         return { file: f, path, mtime: st.mtimeMs };
@@ -14262,7 +15420,7 @@ function formatRelTime(mtime) {
 
 // src/session/codex-history.ts
 import { createInterface as createInterface6 } from "readline";
-import { join as join22 } from "path";
+import { join as join25 } from "path";
 var CodexHistoryError = class extends Error {
   code;
   constructor(code, message, options) {
@@ -14377,7 +15535,7 @@ function spawnCodexAppServer(options) {
   if (options.codexHome) {
     envOverrides.CODEX_HOME = options.codexHome;
   } else if (options.inheritCodexHome === false) {
-    envOverrides.CODEX_HOME = join22(options.profileStateDir, "codex-home");
+    envOverrides.CODEX_HOME = join25(options.profileStateDir, "codex-home");
   }
   return spawnProcess(options.binary, ["app-server", "--listen", "stdio://"], {
     env: mergeProcessEnv(process.env, envOverrides),
@@ -14719,7 +15877,7 @@ async function handleSendFile(args, ctx) {
   const requestedPath = expandTilde(input);
   let entry;
   try {
-    entry = await lstat(requestedPath);
+    entry = await lstat3(requestedPath);
   } catch {
     await reply(ctx, "\u6587\u4EF6\u4E0D\u5B58\u5728\u6216\u4E0D\u53EF\u8BBF\u95EE\u3002");
     return;
@@ -15111,8 +16269,8 @@ async function applyResume(sessionId, ctx) {
 }
 function issueResumeCandidate(identity, target) {
   pruneResumeCandidates();
-  let nonce = randomUUID().slice(0, 12);
-  while (resumeCandidates.has(nonce)) nonce = randomUUID().slice(0, 12);
+  let nonce = randomUUID4().slice(0, 12);
+  while (resumeCandidates.has(nonce)) nonce = randomUUID4().slice(0, 12);
   resumeCandidates.set(nonce, {
     scopeId: identity.scopeId,
     agentId: identity.agentId,
@@ -15187,7 +16345,7 @@ function runtimeAccessStatus(profileConfig) {
 async function larkCliStatus(ctx) {
   const appPaths2 = commandProfilePaths(ctx);
   try {
-    const raw = JSON.parse(await readFile12(appPaths2.larkCliTargetConfigFile, "utf8"));
+    const raw = JSON.parse(await readFile14(appPaths2.larkCliTargetConfigFile, "utf8"));
     const app = raw.apps?.find(
       (candidate) => candidate.appId === ctx.controls.profileConfig.accounts.app.id && candidate.brand === ctx.controls.profileConfig.accounts.app.tenant
     );
@@ -17007,6 +18165,22 @@ async function consumeInteractivePrompts(events, deps) {
   }
 }
 
+// src/card/structured-interaction.ts
+function structuredInteractionCard(interaction, sign2) {
+  return { schema: "2.0", config: { streaming_mode: false, summary: { content: "\u7B49\u5F85\u9009\u62E9" } }, body: { elements: [
+    { tag: "markdown", content: interaction.prompt.slice(0, 1e4) },
+    ...interaction.choices.map((choice, index) => {
+      const input = `/answer ${interaction.id} ${choice.value}`;
+      return {
+        tag: "button",
+        type: "default",
+        text: { tag: "plain_text", content: `${index + 1}. ${choice.label}`.slice(0, 100) },
+        behaviors: [{ type: "callback", value: { cmd: "live.input", input, __bridge_cb: true, bridge_token: sign2(input) } }]
+      };
+    })
+  ] } };
+}
+
 // src/card/dispatcher.ts
 var BRIDGE_CALLBACK_MARKER = "__bridge_cb";
 var LEGACY_CLAUDE_CALLBACK_MARKER = "__claude_cb";
@@ -17124,7 +18298,7 @@ function verifyDeferredInputToken(deps, payload, scope, operatorId, action) {
     scope,
     chatId: deps.evt.chatId,
     operatorOpenId: operatorId,
-    action
+    action: action === LIVE_INPUT_CALLBACK_ACTION && deps.agent.structuredControl ? `live_input:${String(payload.input ?? "")}` : action
   });
   if (!result.ok) {
     log.info("cardAction", "skip-deferred-input-auth-failed", { scope, action, reason: result.reason });
@@ -17135,7 +18309,7 @@ function verifyDeferredInputToken(deps, payload, scope, operatorId, action) {
     });
     return false;
   }
-  if (action === LIVE_INPUT_CALLBACK_ACTION && deps.liveInteractionGeneration) {
+  if (action === LIVE_INPUT_CALLBACK_ACTION && deps.liveInteractionGeneration && !deps.agent.structuredControl) {
     const generation = deps.liveInteractionGeneration(scope);
     if (!generation || result.payload.r !== generation) {
       log.info("cardAction", "skip-stale-live-input-generation", {
@@ -17173,10 +18347,36 @@ async function acknowledgeLiveInput(deps, payload, scope, threadId, mode) {
     if (timer) clearTimeout(timer);
   }
 }
+async function sendStructuredInteraction(deps, event, scope, threadId, mode) {
+  if (!event.interaction || !deps.callbackAuth) return;
+  await deps.channel.send(deps.evt.chatId, { card: structuredInteractionCard(event.interaction, (input) => deps.callbackAuth.sign({
+    runId: event.interaction.id,
+    scope,
+    chatId: deps.evt.chatId,
+    operatorOpenId: deps.evt.operator.openId,
+    action: `live_input:${input}`,
+    policyFingerprint: "structured",
+    ttlMs: 30 * 60 * 1e3
+  })) }, { replyTo: deps.evt.messageId, ...mode === "topic" && threadId ? { replyInThread: true } : {} });
+}
 async function forwardLiveInput(deps, payload, scope, threadId, mode) {
   const input = typeof payload.input === "string" ? payload.input.trim() : "";
   if (!input) return;
   log.info("cardAction", "live-input", { scope, input });
+  if (deps.agent.structuredControl) {
+    try {
+      const events = await deps.agent.structuredControl(scope, input);
+      for (const event of events) {
+        if (event.type === "text") await deps.channel.send(deps.evt.chatId, { markdown: event.delta }, { replyTo: deps.evt.messageId });
+        if (event.type === "interactive" && event.interaction) {
+          await sendStructuredInteraction(deps, event, scope, threadId, mode);
+        }
+      }
+      return { toast: { type: "success", content: "\u5DF2\u63D0\u4EA4\u9009\u62E9" } };
+    } catch (error) {
+      return { toast: { type: "error", content: error instanceof Error ? error.message : String(error) } };
+    }
+  }
   const synthetic = markNativeAgentCommand(
     {
       messageId: deps.evt.messageId,
@@ -17319,6 +18519,18 @@ function forwardAgentInput(deps, payload, scope, threadId, mode) {
 }
 async function resolveScope(deps) {
   const chatId = deps.evt.chatId;
+  if (deps.agent.structuredControl) {
+    const payload = deps.evt.action.value;
+    if (payload?.cmd === "live.input" && typeof payload.bridge_token === "string") {
+      try {
+        const hint = JSON.parse(Buffer.from(payload.bridge_token.split(".")[2] ?? "", "base64url").toString("utf8"));
+        if (typeof hint.s === "string" && hint.s.startsWith(`${chatId}:`) && hint.s.length > chatId.length + 1) {
+          return { scope: hint.s, threadId: hint.s.slice(chatId.length + 1), mode: "topic" };
+        }
+      } catch {
+      }
+    }
+  }
   const mode = await deps.chatModeCache.resolve(deps.channel, chatId);
   if (mode !== "topic") {
     return { scope: chatId, threadId: void 0, mode };
@@ -17547,7 +18759,7 @@ function signatureMatches(actual, expected) {
 }
 
 // src/card/callback-store.ts
-import { readFile as readFile13 } from "fs/promises";
+import { readFile as readFile15 } from "fs/promises";
 var CallbackNonceStore = class {
   path;
   nonces = /* @__PURE__ */ new Map();
@@ -17557,7 +18769,7 @@ var CallbackNonceStore = class {
   }
   async load() {
     try {
-      const raw = JSON.parse(await readFile13(this.path, "utf8"));
+      const raw = JSON.parse(await readFile15(this.path, "utf8"));
       if (!raw || typeof raw !== "object") return;
       this.nonces.clear();
       for (const [nonce, state] of Object.entries(raw)) {
@@ -18105,10 +19317,10 @@ function footerLine(status) {
 }
 
 // src/media/cache.ts
-import { createHash as createHash5 } from "crypto";
+import { createHash as createHash8 } from "crypto";
 import { createReadStream as createReadStream2 } from "fs";
-import { mkdir as mkdir14, readdir as readdir5, rename as rename4, rm as rm11, stat as stat7 } from "fs/promises";
-import { join as join23 } from "path";
+import { mkdir as mkdir17, readdir as readdir5, rename as rename4, rm as rm11, stat as stat7 } from "fs/promises";
+import { join as join26 } from "path";
 
 // src/media/attachment.ts
 var DEFAULT_POLICY = {
@@ -18214,7 +19426,7 @@ var MediaCache = class {
   }
   async resolve(items, options = {}) {
     if (items.length === 0) return [];
-    await mkdir14(this.rootDir, { recursive: true });
+    await mkdir17(this.rootDir, { recursive: true });
     const candidates = [];
     for (const item of items) {
       try {
@@ -18244,7 +19456,7 @@ var MediaCache = class {
       return null;
     }
     const kind = r.type;
-    const tmpPath = join23(
+    const tmpPath = join26(
       this.rootDir,
       `.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`
     );
@@ -18258,7 +19470,7 @@ var MediaCache = class {
     const hash = await hashFile(tmpPath);
     const mime = contentType ?? defaultMime(kind);
     const ext = safeExtensionForMime(mime);
-    const absPath = join23(this.rootDir, `${hash}.${ext}`);
+    const absPath = join26(this.rootDir, `${hash}.${ext}`);
     try {
       await stat7(absPath);
       await rm11(tmpPath, { force: true });
@@ -18321,7 +19533,7 @@ async function listFiles(root) {
   const out = [];
   const entries = await readdir5(root, { withFileTypes: true }).catch(() => []);
   for (const entry of entries) {
-    const full = join23(root, entry.name);
+    const full = join26(root, entry.name);
     if (entry.isDirectory()) {
       out.push(...await listFiles(full));
     } else if (entry.isFile()) {
@@ -18331,7 +19543,7 @@ async function listFiles(root) {
   return out;
 }
 async function hashFile(path) {
-  const hash = createHash5("sha256");
+  const hash = createHash8("sha256");
   for await (const chunk of createReadStream2(path)) {
     hash.update(chunk);
   }
@@ -18403,7 +19615,7 @@ async function fetchOwnerId(source) {
 }
 
 // src/runtime/run-executor.ts
-import { randomUUID as randomUUID2 } from "crypto";
+import { randomUUID as randomUUID5 } from "crypto";
 
 // src/bot/active-runs.ts
 function requestRunStop(handle, options = {}) {
@@ -18762,7 +19974,7 @@ var RunExecutor = class {
     this.agent = deps.agent;
     this.pool = deps.pool;
     this.activeRuns = deps.activeRuns;
-    this.createRunId = deps.createRunId ?? randomUUID2;
+    this.createRunId = deps.createRunId ?? randomUUID5;
     this.now = deps.now ?? Date.now;
     this.postDoneExitGraceMs = deps.postDoneExitGraceMs ?? DEFAULT_POST_DONE_EXIT_GRACE_MS;
   }
@@ -19193,8 +20405,8 @@ var ChatModeCache = class {
 };
 
 // src/bot/comments.ts
-import { randomUUID as randomUUID3 } from "crypto";
-import { mkdir as mkdir15 } from "fs/promises";
+import { randomUUID as randomUUID6 } from "crypto";
+import { mkdir as mkdir18 } from "fs/promises";
 import { dirname as dirname18 } from "path";
 
 // src/bot/run-flow.ts
@@ -19331,9 +20543,9 @@ function recordRunSessionEvent(input) {
 }
 
 // src/bot/comment-resource.ts
-import { createHash as createHash6 } from "crypto";
+import { createHash as createHash9 } from "crypto";
 function commentTokenDigest(token) {
-  return createHash6("sha256").update(token).digest("hex").slice(0, 16);
+  return createHash9("sha256").update(token).digest("hex").slice(0, 16);
 }
 function commentDocumentScopeId(fileToken) {
   return `comment-doc:${commentTokenDigest(fileToken)}`;
@@ -19706,7 +20918,7 @@ function commentRunRejectedReply(code) {
   }
 }
 function commentExecutionScopeId(commentThreadScopeId) {
-  return `${commentThreadScopeId}:${randomUUID3().slice(0, 12)}`;
+  return `${commentThreadScopeId}:${randomUUID6().slice(0, 12)}`;
 }
 function commentDocumentSessionScopeId(fileToken) {
   return `doc:${commentTokenDigest(fileToken)}`;
@@ -19775,7 +20987,7 @@ async function resolveCommentWorkingDirectory(configuredCwd, defaultCwd, managed
 }
 async function resolveManagedCommentWorkingDirectory(managedFallbackCwd, fallbackFrom, fallbackReason, failures) {
   try {
-    await mkdir15(managedFallbackCwd, { recursive: true, mode: 448 });
+    await mkdir18(managedFallbackCwd, { recursive: true, mode: 448 });
   } catch (err) {
     return {
       ok: false,
@@ -20363,8 +21575,8 @@ async function removeReaction(channel, messageId, reactionId) {
 }
 
 // src/bot/artifact-broker.ts
-import { createHash as createHash7, randomBytes as randomBytes5 } from "crypto";
-import { lstat as lstat2, mkdir as mkdir16, readFile as readFile14, realpath as realpath5, rm as rm12 } from "fs/promises";
+import { createHash as createHash10, randomBytes as randomBytes5 } from "crypto";
+import { lstat as lstat4, mkdir as mkdir19, readFile as readFile16, realpath as realpath5, rm as rm12 } from "fs/promises";
 import { createServer } from "net";
 import { basename as basename6, dirname as dirname19, isAbsolute as isAbsolute4, relative as relative2, resolve as resolve4, sep as sep2 } from "path";
 var ArtifactBroker = class {
@@ -20385,7 +21597,7 @@ var ArtifactBroker = class {
   async start() {
     await this.loadPersistentGrants();
     if (process.platform !== "win32") {
-      await mkdir16(dirname19(this.socketPath), { recursive: true });
+      await mkdir19(dirname19(this.socketPath), { recursive: true });
       await rm12(this.socketPath, { force: true }).catch(() => {
       });
     }
@@ -20503,7 +21715,7 @@ var ArtifactBroker = class {
       throw new Error("\u5F53\u524D\u4EFB\u52A1\u5C1A\u672A\u6388\u6743\u6587\u4EF6\u76EE\u5F55\uFF1B\u8BF7\u5728\u5F53\u524D\u4EFB\u52A1\u4E2D\u91CD\u65B0\u8BF7\u6C42\u53D1\u9001");
     }
     const requested = resolve4(grant.allowedRoots[0], request.path);
-    const entry = await lstat2(requested).catch(() => void 0);
+    const entry = await lstat4(requested).catch(() => void 0);
     if (!entry) throw new Error("\u6587\u4EF6\u4E0D\u5B58\u5728\u6216\u4E0D\u53EF\u8BBF\u95EE");
     if (entry.isSymbolicLink()) throw new Error("\u4E0D\u5141\u8BB8\u53D1\u9001\u7B26\u53F7\u94FE\u63A5");
     if (!entry.isFile()) throw new Error("\u53EA\u80FD\u53D1\u9001\u666E\u901A\u6587\u4EF6");
@@ -20535,7 +21747,7 @@ var ArtifactBroker = class {
   async loadPersistentGrants() {
     if (!this.persistentStatePath) return;
     try {
-      const raw = JSON.parse(await readFile14(this.persistentStatePath, "utf8"));
+      const raw = JSON.parse(await readFile16(this.persistentStatePath, "utf8"));
       if (raw.version !== 1 || !Array.isArray(raw.grants)) return;
       for (const item of raw.grants) {
         if (!isPersistentGrant(item)) continue;
@@ -20575,7 +21787,7 @@ function isPathWithinRoot2(path, root) {
 }
 function artifactBrokerSocketPath(socketPath) {
   if (process.platform !== "win32") return socketPath;
-  const digest = createHash7("sha256").update(resolve4(socketPath)).digest("hex").slice(0, 32);
+  const digest = createHash10("sha256").update(resolve4(socketPath)).digest("hex").slice(0, 32);
   return `\\\\.\\pipe\\arg-bridge-artifact-${digest}`;
 }
 async function findCanonicalAllowedRoot(path, roots) {
@@ -20600,7 +21812,7 @@ function normalizeCaption(value) {
 }
 
 // src/bot/inbound-message-ledger.ts
-import { readFile as readFile15 } from "fs/promises";
+import { readFile as readFile17 } from "fs/promises";
 var FILE_VERSION2 = 1;
 var DEFAULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1e3;
 var DEFAULT_MAX_ENTRIES = 5e4;
@@ -20616,7 +21828,7 @@ var InboundMessageLedger = class {
   async load() {
     if (!this.path) return;
     try {
-      const raw = JSON.parse(await readFile15(this.path, "utf8"));
+      const raw = JSON.parse(await readFile17(this.path, "utf8"));
       if (raw.version !== FILE_VERSION2 || !raw.entries || typeof raw.entries !== "object") return;
       for (const [messageId, acceptedAt] of Object.entries(raw.entries)) {
         if (typeof acceptedAt === "number" && Number.isFinite(acceptedAt) && messageId) {
@@ -21161,7 +22373,7 @@ function stringifyArgs(args) {
 }
 function expandHomeDirectory(path) {
   if (path === "~") return homedir8();
-  return path.startsWith("~/") ? join24(homedir8(), path.slice(2)) : path;
+  return path.startsWith("~/") ? join27(homedir8(), path.slice(2)) : path;
 }
 async function startChannel(deps) {
   const { cfg, agent, sessions, sessionCatalog, workspaces, controls } = deps;
@@ -21171,10 +22383,10 @@ async function startChannel(deps) {
   const pool = new ProcessPool(() => getMaxConcurrentRuns(controls.cfg));
   const executor = new RunExecutor({ agent, pool, activeRuns });
   const appSecret = await resolveAppSecret(cfg, deps.appPaths);
-  const callbackNonceStore = deps.appPaths?.mediaDir ? new CallbackNonceStore(join24(dirname20(deps.appPaths.mediaDir), "callback-nonces.json")) : void 0;
+  const callbackNonceStore = deps.appPaths?.mediaDir ? new CallbackNonceStore(join27(dirname20(deps.appPaths.mediaDir), "callback-nonces.json")) : void 0;
   await callbackNonceStore?.load();
   const inboundMessages = new InboundMessageLedger(
-    deps.appPaths?.mediaDir ? join24(dirname20(deps.appPaths.mediaDir), "inbound-message-ledger.json") : void 0
+    deps.appPaths?.mediaDir ? join27(dirname20(deps.appPaths.mediaDir), "inbound-message-ledger.json") : void 0
   );
   await inboundMessages.load();
   const callbackAuth = callbackNonceStore ? new CallbackAuth({
@@ -21265,10 +22477,10 @@ async function startChannel(deps) {
   const media = new MediaCache(channel, deps.appPaths?.mediaDir);
   const artifactStateDir = deps.appPaths?.mediaDir ? dirname20(deps.appPaths.mediaDir) : void 0;
   const artifactBroker = new ArtifactBroker(
-    join24(artifactStateDir ?? join24(process.cwd(), ".arg-bridge-media"), "artifact-broker.sock"),
+    join27(artifactStateDir ?? join27(process.cwd(), ".arg-bridge-media"), "artifact-broker.sock"),
     channel,
     allowLocalFileRoot,
-    artifactStateDir ? join24(artifactStateDir, "artifact-grants.json") : void 0
+    artifactStateDir ? join27(artifactStateDir, "artifact-grants.json") : void 0
   );
   await artifactBroker.start();
   if (agent.tmux?.restoreArtifactDelivery) {
@@ -21375,7 +22587,8 @@ async function startChannel(deps) {
           liveInteractionByScope,
           sideConversationByScope,
           allowLocalFileRoot,
-          inboundMessages
+          inboundMessages,
+          callbackAuth
         })
       ).catch((err) => log.fail("intake", err));
     },
@@ -21562,6 +22775,7 @@ async function sendNonAllowedGroupHint(channel, chatId, replyToMessageId) {
 }
 async function intakeMessage(deps) {
   const {
+    callbackAuth,
     channel,
     agent,
     sessions,
@@ -21640,6 +22854,12 @@ async function intakeMessage(deps) {
     return;
   }
   const route = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
+  const structuredQuestion = agent.structuredQuestion?.(scope);
+  if (structuredQuestion && !route.forceNative && !route.msg.content.trimStart().startsWith("/")) {
+    route.msg = { ...route.msg, content: `/answer ${structuredQuestion} ${route.msg.content}` };
+    route.forceNative = true;
+    route.nativeMode = "control";
+  }
   if (route.nativeMode === "control" && !threadId) {
     const recovery = recoverLiveControlScope(
       liveInteractionByScope,
@@ -21715,7 +22935,7 @@ async function intakeMessage(deps) {
       });
     }
   }
-  const pickerActive = Boolean(liveInteractionState(sessions, liveInteractionByScope, scope));
+  const pickerActive = agent.structuredControl ? (await agent.tmux?.diagnostics?.(scope))?.phase === "picker" : Boolean(liveInteractionState(sessions, liveInteractionByScope, scope));
   const fastLifecycleCommand = /^\/stop(?:\s|$)/iu.test(route.msg.content.trim()) || route.nativeMode === "side" || route.nativeMode === "side-exit";
   const existingSideState = fastLifecycleCommand || route.nativeMode === "control" ? sideConversationState(sideConversationByScope, scope) : await refreshSideConversationState(
     sideConversationByScope,
@@ -21745,6 +22965,13 @@ async function intakeMessage(deps) {
   }
   const lifecycleScopes = /^\/stop(?:\s|$)/iu.test(routedMsg.content.trim()) ? sideConversationScopesForChat(sideConversationByScope, msg.chatId, ["opening", "closing"]) : [];
   const nativeModelCommand = routedMsg.content.trim() === "/model";
+  if (agent.structuredControl && /^\/(?:reset|resume)(?:\s|$)|^\/new(?:\s*$|\s+(?!chat\b))/i.test(routedMsg.content.trim())) {
+    await channel.send(msg.chatId, { markdown: "\u7ED3\u6784\u5316\u9884\u89C8\u5C1A\u672A\u5F00\u653E\u65E7\u4F1A\u8BDD\u5BFC\u5165\u4E0E\u91CD\u7F6E\u3002\u8BF7\u4F7F\u7528\u72EC\u7ACB profile \u6D4B\u8BD5\uFF1B\u73B0\u6709\u7EC8\u7AEF\u4F1A\u8BDD\u672A\u6539\u53D8\u3002" }, {
+      replyTo: msg.messageId,
+      ...threadId ? { replyInThread: true } : {}
+    });
+    return;
+  }
   if (nativeModelCommand && !canRunAdminCommand(controls.profileConfig, controls, msg.senderId).ok) {
     log.info("command", "admin-deny", {
       cmd: "/model",
@@ -21839,6 +23066,28 @@ async function intakeMessage(deps) {
     routedMsg.content.trimStart().startsWith("/") ? "command" : pickerActive ? "control" : void 0
   ) : routedMsg;
   const nativeInputMode = liveInputModeForMessage(agentMsg);
+  if (agent.structuredControl && activeRuns.hasAny(scope) && (nativeInputMode === "command" || nativeInputMode === "control")) {
+    const sendOpts = { replyTo: msg.messageId, ...threadId ? { replyInThread: true } : {} };
+    try {
+      for (const event of await agent.structuredControl(scope, agentMsg.content)) {
+        if (event.type === "text") await channel.send(msg.chatId, { markdown: event.delta }, sendOpts);
+        if (event.type === "interactive" && event.interaction && callbackAuth) {
+          await channel.send(msg.chatId, { card: structuredInteractionCard(event.interaction, (input) => callbackAuth.sign({
+            runId: event.interaction.id,
+            scope,
+            chatId: msg.chatId,
+            operatorOpenId: msg.senderId,
+            action: `live_input:${input}`,
+            policyFingerprint: "structured",
+            ttlMs: 30 * 60 * 1e3
+          })) }, sendOpts);
+        }
+      }
+    } catch (error) {
+      await channel.send(msg.chatId, { markdown: `\u26A0\uFE0F ${error instanceof Error ? error.message : String(error)}` }, sendOpts);
+    }
+    return;
+  }
   const priorityNativeCommand = isForceLiveAgentCommandMessage(agentMsg) && (nativeInputMode === "command" || nativeInputMode === "side" || nativeInputMode === "side-exit");
   const activeControlHandle = [activeRuns.getSide(scope), activeRuns.get(scope)].find(
     (handle) => Boolean(
@@ -22605,6 +23854,26 @@ async function runAgentBatch(deps) {
     }
   }
   const observeLiveEvent = (evt, opts = {}) => {
+    if (agent.structuredControl) {
+      if (evt.type === "error" && sideInputMode) sideRunFailed = true;
+      if (evt.type === "interactive" && evt.interaction && callbackAuth) {
+        pickerObservedAfterInput = true;
+        const interaction2 = evt.interaction;
+        if (!sentInteractionSignatures.has(interaction2.id)) {
+          sentInteractionSignatures.add(interaction2.id);
+          interactionSends.push(channel.send(chatId, { card: structuredInteractionCard(interaction2, (input) => callbackAuth.sign({
+            runId: interaction2.id,
+            scope,
+            chatId,
+            operatorOpenId: firstMsg.senderId,
+            action: `live_input:${input}`,
+            policyFingerprint: flow.policy.policyFingerprint,
+            ttlMs: 30 * 60 * 1e3
+          })) }, sendOpts).then(() => void 0));
+        }
+      }
+      return;
+    }
     if (sideInputMode && evt.type === "error") sideRunFailed = true;
     if (nativeInputMode === "side-exit" && evt.type === "text") {
       if (evt.delta.includes("\u5DF2\u9000\u51FA Codex btw side conversation")) sideExitConfirmed = true;
@@ -22766,6 +24035,7 @@ ${delta}`.slice(-64e3);
   };
   const prepareStateForReply = (state) => filterForPrefs(withNativeEmptyFallback(state));
   const cardRenderOptions = callbackAuth ? {
+    structuredOnly: Boolean(agent.structuredControl),
     signCallback: (action) => callbackAuth.sign({
       runId: execution.runId,
       scope,
@@ -22776,7 +24046,7 @@ ${delta}`.slice(-64e3);
       ttlMs: 24 * 60 * 60 * 1e3
     })
   } : {};
-  const promptBridge = outputModeAtStart !== "off" && callbackAuth ? consumeInteractivePrompts(execution.subscribe(), {
+  const promptBridge = outputModeAtStart !== "off" && callbackAuth && !agent.structuredControl ? consumeInteractivePrompts(execution.subscribe(), {
     channel,
     chatId,
     scope,
@@ -22806,6 +24076,7 @@ ${delta}`.slice(-64e3);
         observeLiveEvent
       );
       if (handle.detached) return;
+      if (agent.structuredControl && !completeReplyText(finalState).trim()) return;
       controlFooterOnly = liveInputMode === "control" && isControlFooterOnly(completeReplyText(finalState));
       if (controlFooterOnly) {
         log.info("agent-live", "control-footer-only-suppressed", { scope, input: nativeCommand });
@@ -23666,7 +24937,7 @@ async function processAgentStream(handle, events, scope, idleTimeoutMs, progress
     interrupted: handle.interrupted,
     sourceChars: finalSourceText.length,
     sourceBytes: Buffer.byteLength(finalSourceText, "utf8"),
-    sourceSha256: createHash8("sha256").update(finalSourceText).digest("hex"),
+    sourceSha256: createHash11("sha256").update(finalSourceText).digest("hex"),
     renderedMarkdownBytes: Buffer.byteLength(finalMarkdown, "utf8"),
     renderedCardBytes: Buffer.byteLength(finalCard, "utf8")
   });
@@ -23944,7 +25215,7 @@ function detectLiveInteraction(text, allowBareConfirmation = false, autoConfirmA
     // A prefix signature made two long menus look identical whenever they
     // shared their title and early choices. Hash the complete current surface
     // so repeated redraws dedupe, while every genuinely nested menu is sent.
-    signature: createHash8("sha256").update(prompt).update("\0").update(buttons.map((button2) => button2.input).join("|")).digest("hex"),
+    signature: createHash11("sha256").update(prompt).update("\0").update(buttons.map((button2) => button2.input).join("|")).digest("hex"),
     prompt: displayPrompt.slice(0, isCodexModelPickerPrompt(prompt) ? 4e3 : 1200),
     buttons
   };
@@ -24112,7 +25383,7 @@ function renderLiveAwareReplyCard(state, cardRenderOptions = {}, inputRoute = "l
   const body = renderText(state, { activityMode: "none" });
   const liveCard = liveInteractionCardForText(
     body,
-    cardRenderOptions.signCallback,
+    cardRenderOptions.structuredOnly ? void 0 : cardRenderOptions.signCallback,
     inputRoute,
     skipSignatures
   );
@@ -24313,8 +25584,8 @@ async function ensureDeliveredTail(input) {
   });
   log.info("outbound", "delivery-integrity", {
     scope: input.scope,
-    sourceSha256: createHash8("sha256").update(input.source).digest("hex"),
-    deliveredSha256: createHash8("sha256").update(input.delivered).digest("hex"),
+    sourceSha256: createHash11("sha256").update(input.source).digest("hex"),
+    deliveredSha256: createHash11("sha256").update(input.delivered).digest("hex"),
     sourceBytes: Buffer.byteLength(input.source, "utf8"),
     deliveredBytes: Buffer.byteLength(input.delivered, "utf8"),
     tailCovered: covered
@@ -24450,7 +25721,7 @@ function isDefined(value) {
 }
 
 // src/session/store.ts
-import { readFile as readFile16 } from "fs/promises";
+import { readFile as readFile18 } from "fs/promises";
 var SessionStore = class {
   data = {};
   saving = Promise.resolve();
@@ -24460,7 +25731,7 @@ var SessionStore = class {
   }
   async load() {
     try {
-      const text = await readFile16(this.path, "utf8");
+      const text = await readFile18(this.path, "utf8");
       const raw = JSON.parse(text);
       this.data = {};
       for (const [chatId, entry] of Object.entries(raw)) {
@@ -24624,8 +25895,8 @@ function isPersistedLiveInteraction(value) {
 }
 
 // src/session/catalog.ts
-import { randomUUID as randomUUID4 } from "crypto";
-import { open as open3, readFile as readFile17, rename as rename5, mkdir as mkdir17 } from "fs/promises";
+import { randomUUID as randomUUID7 } from "crypto";
+import { open as open4, readFile as readFile19, rename as rename5, mkdir as mkdir20 } from "fs/promises";
 import { dirname as dirname21 } from "path";
 var DEFAULT_MAX_ARCHIVED_AGE_MS = 90 * 24 * 60 * 60 * 1e3;
 var DEFAULT_MAX_ENTRIES_PER_SCOPE = 20;
@@ -24648,7 +25919,7 @@ var SessionCatalog = class {
   }
   async load() {
     try {
-      const raw = JSON.parse(await readFile17(this.path, "utf8"));
+      const raw = JSON.parse(await readFile19(this.path, "utf8"));
       if (!Array.isArray(raw)) {
         this.data.clear();
         return;
@@ -24748,11 +26019,11 @@ var SessionCatalog = class {
     });
   }
   async persist() {
-    await mkdir17(dirname21(this.path), { recursive: true });
-    const tmp = `${this.path}.${process.pid}.${Date.now()}.${randomUUID4()}.tmp`;
+    await mkdir20(dirname21(this.path), { recursive: true });
+    const tmp = `${this.path}.${process.pid}.${Date.now()}.${randomUUID7()}.tmp`;
     const payload = `${JSON.stringify(this.entries(), null, 2)}
 `;
-    const fh = await open3(tmp, "w", 384);
+    const fh = await open4(tmp, "w", 384);
     try {
       await fh.writeFile(payload, "utf8");
       await fh.sync();
@@ -24761,7 +26032,7 @@ var SessionCatalog = class {
     }
     await rename5(tmp, this.path);
     try {
-      const dir = await open3(dirname21(this.path), "r");
+      const dir = await open4(dirname21(this.path), "r");
       try {
         await dir.sync();
       } finally {
@@ -24810,7 +26081,7 @@ function assertAgentIdentity(input) {
 }
 
 // src/workspace/store.ts
-import { readFile as readFile18 } from "fs/promises";
+import { readFile as readFile20 } from "fs/promises";
 var WorkspaceStore = class {
   data = { chats: {}, named: {} };
   saving = Promise.resolve();
@@ -24820,7 +26091,7 @@ var WorkspaceStore = class {
   }
   async load() {
     try {
-      const text = await readFile18(this.path, "utf8");
+      const text = await readFile20(this.path, "utf8");
       const parsed = JSON.parse(text);
       this.data = {
         chats: parsed.chats ?? {},
@@ -25183,6 +26454,16 @@ function createRuntimeAgent(profileConfig, appPaths2) {
     ...appPaths2.larkCliConfigDir ? { larkCliConfigDir: appPaths2.larkCliConfigDir } : {},
     ...appPaths2.larkCliSourceConfigFile ? { larkCliSourceConfigFile: appPaths2.larkCliSourceConfigFile } : {}
   } : void 0;
+  if (profileConfig.preferences?.agentTransport === "structured") {
+    return new StructuredAdapter({
+      kind: profileConfig.agentKind,
+      binary: profileConfig.agentKind === "codex" ? profileConfig.codex?.binaryPath ?? "codex" : "claude",
+      profileDir: appPaths2.profileDir,
+      codexHome: profileConfig.codex?.codexHome ?? (profileConfig.codex?.inheritCodexHome === true ? void 0 : `${appPaths2.profileDir}/codex-home`),
+      nativeView: profileConfig.preferences.structuredNativeView !== false,
+      larkChannel
+    });
+  }
   if (profileConfig.agentKind === "codex") {
     const codex = profileConfig.codex;
     if (!codex?.binaryPath) {

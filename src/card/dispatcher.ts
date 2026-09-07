@@ -21,6 +21,8 @@ import { markNativeAgentCommand } from '../bot/live-input';
 import { commandSessionCatalogIdentity } from '../bot/session-catalog-identity';
 import { lookupMessageThreadId } from '../bot/thread-id';
 import { BRIDGE_PROMPT_CALLBACK_MARKER, PROMPT_CALLBACK_ACTION } from './interactive-prompt';
+import { structuredInteractionCard } from './structured-interaction';
+import type { AgentEvent } from '../agent/types';
 
 /** Marker key on a button's value object that flags the cardAction as
  * a callback that should be forwarded back to the agent instead
@@ -220,7 +222,8 @@ function verifyDeferredInputToken(
     scope,
     chatId: deps.evt.chatId,
     operatorOpenId: operatorId,
-    action,
+    action: action === LIVE_INPUT_CALLBACK_ACTION && deps.agent.structuredControl
+      ? `live_input:${String(payload.input ?? '')}` : action,
   });
   if (!result.ok) {
     log.info('cardAction', 'skip-deferred-input-auth-failed', { scope, action, reason: result.reason });
@@ -231,7 +234,7 @@ function verifyDeferredInputToken(
     });
     return false;
   }
-  if (action === LIVE_INPUT_CALLBACK_ACTION && deps.liveInteractionGeneration) {
+  if (action === LIVE_INPUT_CALLBACK_ACTION && deps.liveInteractionGeneration && !deps.agent.structuredControl) {
     const generation = deps.liveInteractionGeneration(scope);
     if (!generation || result.payload.r !== generation) {
       log.info('cardAction', 'skip-stale-live-input-generation', {
@@ -278,6 +281,14 @@ async function acknowledgeLiveInput(
   }
 }
 
+async function sendStructuredInteraction(deps: CardDispatchDeps, event: Extract<AgentEvent, { type: 'interactive' }>, scope: string, threadId: string | undefined, mode: string): Promise<void> {
+  if (!event.interaction || !deps.callbackAuth) return;
+  await deps.channel.send(deps.evt.chatId, { card: structuredInteractionCard(event.interaction, input => deps.callbackAuth!.sign({
+    runId: event.interaction!.id, scope, chatId: deps.evt.chatId, operatorOpenId: deps.evt.operator.openId,
+    action: `live_input:${input}`, policyFingerprint: 'structured', ttlMs: 30 * 60 * 1000,
+  })) }, { replyTo: deps.evt.messageId, ...(mode === 'topic' && threadId ? { replyInThread: true } : {}) });
+}
+
 async function forwardLiveInput(
   deps: CardDispatchDeps,
   payload: Record<string, unknown>,
@@ -288,6 +299,20 @@ async function forwardLiveInput(
   const input = typeof payload.input === 'string' ? payload.input.trim() : '';
   if (!input) return;
   log.info('cardAction', 'live-input', { scope, input });
+  if (deps.agent.structuredControl) {
+    try {
+      const events = await deps.agent.structuredControl(scope, input);
+      for (const event of events) {
+        if (event.type === 'text') await deps.channel.send(deps.evt.chatId, { markdown: event.delta }, { replyTo: deps.evt.messageId });
+        if (event.type === 'interactive' && event.interaction) {
+          // Queue only presentation of a nested picker through the shared
+          // renderer; the choice itself has already reached the provider.
+          await sendStructuredInteraction(deps, event, scope, threadId, mode);
+        }
+      }
+      return { toast: { type: 'success', content: '已提交选择' } };
+    } catch (error) { return { toast: { type: 'error', content: error instanceof Error ? error.message : String(error) } }; }
+  }
   const synthetic: NormalizedMessage = markNativeAgentCommand(
     {
       messageId: deps.evt.messageId,
@@ -470,6 +495,21 @@ async function resolveScope(
   deps: CardDispatchDeps,
 ): Promise<{ scope: string; threadId: string | undefined; mode: 'p2p' | 'group' | 'topic' }> {
   const chatId = deps.evt.chatId;
+  if (deps.agent.structuredControl) {
+    const payload = deps.evt.action.value as { cmd?: string; bridge_token?: string } | undefined;
+    if (payload?.cmd === 'live.input' && typeof payload.bridge_token === 'string') {
+      try {
+        // This is only a routing hint. The complete HMAC, scope, chat,
+        // operator, input and nonce are verified before the control executes.
+        // A topic card already carries its exact scope, avoiding REST lookups
+        // that can both time out and drop Feishu's thread_id.
+        const hint = JSON.parse(Buffer.from(payload.bridge_token.split('.')[2] ?? '', 'base64url').toString('utf8'));
+        if (typeof hint.s === 'string' && hint.s.startsWith(`${chatId}:`) && hint.s.length > chatId.length + 1) {
+          return { scope: hint.s, threadId: hint.s.slice(chatId.length + 1), mode: 'topic' };
+        }
+      } catch { /* Invalid tokens are rejected by the authorization step. */ }
+    }
+  }
   const mode = await deps.chatModeCache.resolve(deps.channel, chatId);
   if (mode !== 'topic') {
     return { scope: chatId, threadId: undefined, mode };

@@ -185,6 +185,31 @@ describe('signed card callback dispatch', () => {
     expect(h.pending.cancel('oc_group')).toHaveLength(0);
   });
 
+  it('binds a structured approval token to the exact request and choice', async () => {
+    const h = await createHarness();
+    const control = vi.fn(async () => []);
+    h.agent.structuredControl = control;
+    const input = '/answer approval-123 deny';
+    const response = await h.dispatch({ cmd: 'live.input', input, __bridge_cb: true,
+      bridge_token: h.token(`live_input:${input}`, { nonce: 'structured-deny' }) });
+    expect(response).toEqual({ toast: { type: 'success', content: '已提交选择' } });
+    expect(control).toHaveBeenCalledWith('oc_group', input);
+    await h.dispatch({ cmd: 'live.input', input: '/answer approval-123 allow', __bridge_cb: true,
+      bridge_token: h.token(`live_input:${input}`, { nonce: 'structured-tampered' }) });
+    expect(control).toHaveBeenCalledTimes(1);
+    expect(h.pending.cancel('oc_group')).toHaveLength(0);
+  });
+
+  it('routes a signed structured topic card even when chat metadata omits the thread', async () => {
+    const h = await createHarness({ chatMode: 'group' });
+    const control = vi.fn(async () => []);
+    h.agent.structuredControl = control;
+    const input = '/answer topic-request 1';
+    await h.dispatch({ cmd: 'live.input', input, __bridge_cb: true,
+      bridge_token: h.token(`live_input:${input}`, { nonce: 'structured-topic', scope: 'oc_group:th_topic' }) });
+    expect(control).toHaveBeenCalledWith('oc_group:th_topic', input);
+  });
+
   it('rejects a stale live picker click when no active terminal is at a picker', async () => {
     const h = await createHarness({
       liveDiagnostics: async () => ({

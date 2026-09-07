@@ -62,6 +62,7 @@ export type FakeAgentEvents =
   | readonly (readonly AgentEvent[])[];
 
 export class FakeAgentAdapter implements AgentAdapter {
+  structuredControl?: AgentAdapter['structuredControl'];
   readonly id: string;
   readonly displayName: string;
   readonly runs: FakeAgentRun[] = [];
