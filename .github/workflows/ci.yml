@@ -37,7 +37,10 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          pnpm exec vitest run --reporter=json --outputFile=vitest-results.json
+          # Windows fixture startup and filesystem cleanup contend with the
+          # runner's scanner. Keep all assertions, but avoid four concurrent
+          # subprocess-heavy workers exhausting the default 5s/10s budgets.
+          pnpm exec vitest run --maxWorkers=2 --minWorkers=1 --testTimeout=15000 --hookTimeout=30000 --reporter=json --outputFile=vitest-results.json
           $testExit = $LASTEXITCODE
           if ($testExit -ne 0) {
             $failures = @()
