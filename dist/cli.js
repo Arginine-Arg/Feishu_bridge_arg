@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.5.2",
+  version: "1.5.3",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -12786,6 +12786,9 @@ function processArgvTree(rootPid) {
 
 // src/agent/structured/adapter.ts
 var shellQuote3 = (value) => `'${value.replace(/'/g, `'\\''`)}'`;
+var LEGACY_RESUME_TIMEOUT_MS = 18e4;
+var LEGACY_RESUME_PROBE_TIMEOUT_MS = 5e3;
+var LEGACY_RESUME_RECONCILE_MS = 18e4;
 var StructuredAdapter = class {
   constructor(options) {
     this.options = options;
@@ -12932,10 +12935,12 @@ var StructuredAdapter = class {
     const codexHome = target.structured.codexHome ?? this.options.codexHome;
     if (codexHome) env.CODEX_HOME = codexHome;
     else if (this.options.codexHome) env.CODEX_HOME = this.options.codexHome;
-    const { rpc, endpoint } = await connectCodexHost({ binary: this.options.binary, profileDir: this.options.profileDir, scope, cwd: target.paneCurrentPath, env });
+    let { rpc, endpoint } = await connectCodexHost({ binary: this.options.binary, profileDir: this.options.profileDir, scope, cwd: target.paneCurrentPath, env });
     let createdPaneId;
     try {
-      const resumed = await rpc.request("thread/resume", { threadId: target.structured.threadId, excludeTurns: true, cwd: target.paneCurrentPath });
+      const reconciled = await this.resumeLegacyThread(rpc, endpoint, target.structured.threadId, target.paneCurrentPath);
+      rpc = reconciled.rpc;
+      const resumed = reconciled.result;
       if (resumed.thread?.id !== target.structured.threadId) throw new Error("App Server \u8FD4\u56DE\u4E86\u4E0D\u540C\u7684\u65E7 thread\uFF0C\u672A\u521B\u5EFA\u7ED1\u5B9A");
       const command = [
         ...codexHome ? ["env", "CODEX_HOME=" + shellQuote3(codexHome)] : [],
@@ -12971,6 +12976,36 @@ var StructuredAdapter = class {
       throw error;
     } finally {
       rpc.close();
+    }
+  }
+  async resumeLegacyThread(rpc, endpoint, threadId, cwd) {
+    try {
+      return { rpc, result: await rpc.request("thread/resume", { threadId, excludeTurns: true, cwd }, LEGACY_RESUME_TIMEOUT_MS) };
+    } catch (error) {
+      if (!(error instanceof Error) || !/thread\/resume timed out|outcome unknown/iu.test(error.message)) throw error;
+      let observer = rpc;
+      const deadline = Date.now() + LEGACY_RESUME_RECONCILE_MS;
+      while (Date.now() < deadline) {
+        try {
+          const loaded = await observer.request("thread/loaded/list", {}, LEGACY_RESUME_PROBE_TIMEOUT_MS);
+          if (Array.isArray(loaded.data) && loaded.data.includes(threadId)) {
+            if (observer !== rpc) rpc.close();
+            return { rpc: observer, result: { thread: { id: threadId } } };
+          }
+        } catch {
+          if (observer === rpc) {
+            try {
+              observer = await this.connectExisting(endpoint);
+              await observer.initialize();
+            } catch {
+              observer = rpc;
+            }
+          }
+        }
+        await new Promise((resolve6) => setTimeout(resolve6, 500));
+      }
+      if (observer !== rpc) observer.close();
+      throw new Error(`RPC thread/resume timed out; old thread state is still unconfirmed after ${Math.round(LEGACY_RESUME_RECONCILE_MS / 1e3)}s; no pane was created`);
     }
   }
   refreshBindingTarget(binding) {

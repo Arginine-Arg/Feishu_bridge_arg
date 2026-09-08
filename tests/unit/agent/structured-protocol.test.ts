@@ -11,6 +11,27 @@ import { join } from 'node:path';
 import { sendStructuredCard } from '../../../src/card/structured-interaction';
 
 describe('structured transport contracts', () => {
+  it('reconciles a timed-out legacy resume with read-only loaded checks and never retries it', async () => {
+    let probes = 0;
+    const request = vi.fn(async (method: string) => {
+        if (method === 'thread/resume') throw new Error('RPC thread/resume timed out; outcome unknown, not retried');
+        probes += 1;
+        return { data: probes > 1 ? ['thread-1'] : [] };
+      });
+    const rpc = {
+      request,
+      close: vi.fn(),
+    } as unknown as RpcClient;
+    const adapter = new StructuredAdapter({ kind: 'codex', binary: '/nonexistent', profileDir: '/tmp/structured-reconcile-test' });
+    const result = await (adapter as unknown as { resumeLegacyThread: Function }).resumeLegacyThread(rpc, 'unix:///tmp/server.sock', 'thread-1', '/workspace');
+    expect(result.rpc).toBe(rpc);
+    expect(result.result.thread.id).toBe('thread-1');
+    expect(request).toHaveBeenCalledTimes(3);
+    expect(request.mock.calls[0]?.[0]).toBe('thread/resume');
+    expect(request.mock.calls.filter(call => call[0] === 'thread/resume')).toHaveLength(1);
+    await adapter.shutdown();
+  });
+
   it('prepares native side boundaries before sending text and never interrupts the parent', async () => {
     const rpc = new EventEmitter() as EventEmitter & { request: ReturnType<typeof vi.fn> };
     rpc.request = vi.fn(async (method, params) => {

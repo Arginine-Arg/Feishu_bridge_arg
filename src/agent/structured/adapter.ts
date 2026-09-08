@@ -17,12 +17,15 @@ import { ClaudeStructuredSession } from './claude';
 import type { StructuredSession } from './contracts';
 import { textEvent } from './contracts';
 import { StructuredView } from './view';
-import { RpcClient } from './rpc';
+import { RpcClient, type Wire } from './rpc';
 import type { TmuxBindingStatus } from '../tmux-control';
 import { activeStructuredTmuxPane, listStructuredTmuxPanes } from './tmux-discovery';
 import { spawnProcessSync } from '../../platform/spawn';
 
 const shellQuote = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`;
+const LEGACY_RESUME_TIMEOUT_MS = 180_000;
+const LEGACY_RESUME_PROBE_TIMEOUT_MS = 5_000;
+const LEGACY_RESUME_RECONCILE_MS = 180_000;
 
 interface StructuredBinding { target: TmuxPaneTarget; endpoint: string; threadId: string; cwd: string; updatedAt: number }
 interface ScopeSession { main: StructuredSession; view: StructuredView; bound?: StructuredBinding; side?: CodexStructuredSession; sideOpening?: Promise<CodexStructuredSession>; sideExit?: Promise<void>; sideClosing?: boolean; sideView?: StructuredView; cwd: string }
@@ -165,12 +168,14 @@ export class StructuredAdapter implements AgentAdapter {
     const codexHome = target.structured.codexHome ?? this.options.codexHome;
     if (codexHome) env.CODEX_HOME = codexHome;
     else if (this.options.codexHome) env.CODEX_HOME = this.options.codexHome;
-    const { rpc, endpoint } = await connectCodexHost({ binary: this.options.binary, profileDir: this.options.profileDir, scope, cwd: target.paneCurrentPath, env });
+    let { rpc, endpoint } = await connectCodexHost({ binary: this.options.binary, profileDir: this.options.profileDir, scope, cwd: target.paneCurrentPath, env });
     let createdPaneId: string | undefined;
     try {
       // Loading the legacy rollout is the precondition for migration. Do it
       // before creating a pane; a failed resume must leave tmux untouched.
-      const resumed = await rpc.request('thread/resume', { threadId: target.structured.threadId, excludeTurns: true, cwd: target.paneCurrentPath });
+      const reconciled = await this.resumeLegacyThread(rpc, endpoint, target.structured.threadId, target.paneCurrentPath);
+      rpc = reconciled.rpc;
+      const resumed = reconciled.result;
       if (resumed.thread?.id !== target.structured.threadId) throw new Error('App Server 返回了不同的旧 thread，未创建绑定');
       const command = [
         ...(codexHome ? ['env', 'CODEX_HOME=' + shellQuote(codexHome)] : []),
@@ -199,6 +204,38 @@ export class StructuredAdapter implements AgentAdapter {
       if (createdPaneId) spawnProcessSync('tmux', ['-S', target.socketPath, 'kill-pane', '-t', createdPaneId], { stdio: 'ignore' });
       throw error;
     } finally { rpc.close(); }
+  }
+  private async resumeLegacyThread(rpc: RpcClient, endpoint: string, threadId: string, cwd: string): Promise<{ rpc: RpcClient; result: Wire }> {
+    try {
+      return { rpc, result: await rpc.request('thread/resume', { threadId, excludeTurns: true, cwd }, LEGACY_RESUME_TIMEOUT_MS) };
+    } catch (error) {
+      if (!(error instanceof Error) || !/thread\/resume timed out|outcome unknown/iu.test(error.message)) throw error;
+      // A timed-out mutation is never retried. Probe read-only state until the
+      // original request either materializes the thread or the reconciliation
+      // window expires. If the first socket is unhealthy, use a new observer
+      // connection; both paths only read loaded state after the one mutation.
+      let observer = rpc;
+      const deadline = Date.now() + LEGACY_RESUME_RECONCILE_MS;
+      while (Date.now() < deadline) {
+        try {
+          const loaded = await observer.request('thread/loaded/list', {}, LEGACY_RESUME_PROBE_TIMEOUT_MS);
+          if (Array.isArray(loaded.data) && loaded.data.includes(threadId)) {
+            if (observer !== rpc) rpc.close();
+            return { rpc: observer, result: { thread: { id: threadId } } };
+          }
+        } catch {
+          if (observer === rpc) {
+            try {
+              observer = await this.connectExisting(endpoint);
+              await observer.initialize();
+            } catch { observer = rpc; }
+          }
+        }
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+      if (observer !== rpc) observer.close();
+      throw new Error(`RPC thread/resume timed out; old thread state is still unconfirmed after ${Math.round(LEGACY_RESUME_RECONCILE_MS / 1000)}s; no pane was created`);
+    }
   }
   private refreshBindingTarget(binding: StructuredBinding): TmuxPaneTarget | undefined {
     const target = listStructuredTmuxPanes(binding.target.socketPath).find(item => item.paneId === binding.target.paneId);
