@@ -44,6 +44,11 @@ export class PreferredStructuredAdapter implements AgentAdapter {
         const panes = await this.tmux.list(socket);
         const pane = /^\d+$/.test(selector) ? panes[Number(selector) - 1] : panes.find(item => item.paneId === selector || `${item.socketPath}::${item.paneId}` === selector);
         if (!pane) throw new Error('未找到正在运行的 agent；请在该 pane 启动或 resume 后重新 /tmux list。');
+        for (const [owner, target] of this.targets) {
+          if (owner !== scope && target.socketPath === pane.socketPath && target.paneId === pane.paneId) {
+            throw new Error(`该 pane 已绑定到 scope ${owner}，请先解绑原 scope。`);
+          }
+        }
         // Binding never launches a second agent. Record the live target too so
         // a later manual native resume can safely use the same pane.
         await this.live.tmux!.bind(scope, `${pane.socketPath}::${pane.paneId}`);

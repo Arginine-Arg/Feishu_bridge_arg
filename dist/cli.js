@@ -13554,6 +13554,11 @@ var PreferredStructuredAdapter = class {
         const panes = await this.tmux.list(socket);
         const pane = /^\d+$/.test(selector) ? panes[Number(selector) - 1] : panes.find((item) => item.paneId === selector || `${item.socketPath}::${item.paneId}` === selector);
         if (!pane) throw new Error("\u672A\u627E\u5230\u6B63\u5728\u8FD0\u884C\u7684 agent\uFF1B\u8BF7\u5728\u8BE5 pane \u542F\u52A8\u6216 resume \u540E\u91CD\u65B0 /tmux list\u3002");
+        for (const [owner, target] of this.targets) {
+          if (owner !== scope && target.socketPath === pane.socketPath && target.paneId === pane.paneId) {
+            throw new Error(`\u8BE5 pane \u5DF2\u7ED1\u5B9A\u5230 scope ${owner}\uFF0C\u8BF7\u5148\u89E3\u7ED1\u539F scope\u3002`);
+          }
+        }
         await this.live.tmux.bind(scope, `${pane.socketPath}::${pane.paneId}`);
         if (pane.structured?.endpoint) await this.structured.tmux.bind(scope, `${pane.socketPath}::${pane.paneId}`);
         this.targets.set(scope, pane);

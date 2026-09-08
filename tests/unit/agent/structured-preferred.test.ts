@@ -44,6 +44,12 @@ describe('structured first with safe native fallback', () => {
     expect(h.structured.run).toHaveBeenCalledTimes(1);
     expect(h.live.run).not.toHaveBeenCalled();
   });
+  it('does not let another chat bind the same tracked pane', async () => {
+    const h = await setup();
+    await h.adapter.tmux.bind('s', '1');
+    await expect(h.adapter.tmux.bind('other-chat', '1')).rejects.toThrow('已绑定到 scope');
+    expect(h.live.tmux!.bind).toHaveBeenCalledTimes(1);
+  });
   it('does not replay an uncertain structured submission through live', async () => {
     const h = await setup();
     state.panes[0]!.structured = { endpoint: 'unix:///shared.sock', threadId: 'thread' };
