@@ -26,7 +26,7 @@ export function listStructuredTmuxPanes(socket?: string): StructuredTmuxPane[] {
     const argv = [...processArgvTree(pane.panePid), ...shellWords(pane.paneStartCommand ?? '')];
     const identity = parseStructuredAgentArgv(argv, pane.agentKind);
     if (!identity) return [];
-    const codexHome = pane.agentKind === 'codex' ? processEnvironmentForPid(pane.panePid).CODEX_HOME : undefined;
+    const codexHome = pane.agentKind === 'codex' ? processEnvironmentForPidTree(pane.panePid).CODEX_HOME : undefined;
     return [{ ...pane, structured: { ...identity, ...(codexHome ? { codexHome } : {}) } }];
   });
 }
@@ -64,15 +64,33 @@ export function parseStructuredAgentArgv(argv: readonly string[], kind: 'codex' 
   return { ...(endpoint ? { endpoint } : {}), threadId };
 }
 
-function processEnvironmentForPid(rootPid: number): NodeJS.ProcessEnv {
+function processEnvironmentForPidTree(rootPid: number): NodeJS.ProcessEnv {
   if (process.platform !== 'linux') return {};
-  try {
-    const raw = readFileSync(`/proc/${rootPid}/environ`, 'utf8');
-    return Object.fromEntries(raw.split('\0').flatMap(item => {
-      const index = item.indexOf('=');
-      return index > 0 ? [[item.slice(0, index), item.slice(index + 1)]] : [];
-    }));
-  } catch { return {}; }
+  const result = spawnProcessSync('ps', ['-ww', '-eo', 'pid=,ppid='], { encoding: 'utf8', maxBuffer: 2 * 1024 * 1024 });
+  const rows = new Map<number, number>();
+  if (result.status === 0 && typeof result.stdout === 'string') {
+    for (const line of result.stdout.split('\n')) {
+      const match = /^\s*(\d+)\s+(\d+)\s*$/u.exec(line);
+      if (match) rows.set(Number(match[1]), Number(match[2]));
+    }
+  }
+  const ids = new Set<number>([rootPid]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [pid, ppid] of rows) if (!ids.has(pid) && ids.has(ppid)) { ids.add(pid); changed = true; }
+  }
+  for (const pid of ids) {
+    try {
+      const raw = readFileSync(`/proc/${pid}/environ`, 'utf8');
+      const env = Object.fromEntries(raw.split('\0').flatMap(item => {
+        const index = item.indexOf('=');
+        return index > 0 ? [[item.slice(0, index), item.slice(index + 1)]] : [];
+      }));
+      if (env.CODEX_HOME) return env;
+    } catch { /* process exited between ps and /proc read */ }
+  }
+  return {};
 }
 
 function shellWords(value: string): string[] {

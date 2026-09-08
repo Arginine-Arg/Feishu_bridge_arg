@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.5.1",
+  version: "1.5.2",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -12692,7 +12692,7 @@ function listStructuredTmuxPanes(socket) {
     const argv = [...processArgvTree(pane.panePid), ...shellWords(pane.paneStartCommand ?? "")];
     const identity = parseStructuredAgentArgv(argv, pane.agentKind);
     if (!identity) return [];
-    const codexHome = pane.agentKind === "codex" ? processEnvironmentForPid(pane.panePid).CODEX_HOME : void 0;
+    const codexHome = pane.agentKind === "codex" ? processEnvironmentForPidTree(pane.panePid).CODEX_HOME : void 0;
     return [{ ...pane, structured: { ...identity, ...codexHome ? { codexHome } : {} } }];
   });
 }
@@ -12722,17 +12722,37 @@ function parseStructuredAgentArgv(argv, kind) {
   if (kind === "codex" && !endpoint) return { threadId, legacy: true };
   return { ...endpoint ? { endpoint } : {}, threadId };
 }
-function processEnvironmentForPid(rootPid) {
+function processEnvironmentForPidTree(rootPid) {
   if (process.platform !== "linux") return {};
-  try {
-    const raw = readFileSync3(`/proc/${rootPid}/environ`, "utf8");
-    return Object.fromEntries(raw.split("\0").flatMap((item) => {
-      const index = item.indexOf("=");
-      return index > 0 ? [[item.slice(0, index), item.slice(index + 1)]] : [];
-    }));
-  } catch {
-    return {};
+  const result = spawnProcessSync("ps", ["-ww", "-eo", "pid=,ppid="], { encoding: "utf8", maxBuffer: 2 * 1024 * 1024 });
+  const rows = /* @__PURE__ */ new Map();
+  if (result.status === 0 && typeof result.stdout === "string") {
+    for (const line of result.stdout.split("\n")) {
+      const match = /^\s*(\d+)\s+(\d+)\s*$/u.exec(line);
+      if (match) rows.set(Number(match[1]), Number(match[2]));
+    }
   }
+  const ids = /* @__PURE__ */ new Set([rootPid]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [pid, ppid] of rows) if (!ids.has(pid) && ids.has(ppid)) {
+      ids.add(pid);
+      changed = true;
+    }
+  }
+  for (const pid of ids) {
+    try {
+      const raw = readFileSync3(`/proc/${pid}/environ`, "utf8");
+      const env = Object.fromEntries(raw.split("\0").flatMap((item) => {
+        const index = item.indexOf("=");
+        return index > 0 ? [[item.slice(0, index), item.slice(index + 1)]] : [];
+      }));
+      if (env.CODEX_HOME) return env;
+    } catch {
+    }
+  }
+  return {};
 }
 function shellWords(value) {
   return value.split(/\s+/u).map((item) => item.replace(/^['"]|['"]$/gu, "")).filter(Boolean);
@@ -12765,6 +12785,7 @@ function processArgvTree(rootPid) {
 }
 
 // src/agent/structured/adapter.ts
+var shellQuote3 = (value) => `'${value.replace(/'/g, `'\\''`)}'`;
 var StructuredAdapter = class {
   constructor(options) {
     this.options = options;
@@ -12908,14 +12929,29 @@ var StructuredAdapter = class {
   async adoptLegacyPane(scope, target) {
     if (this.id !== "codex" || !target.structured?.threadId) throw new Error("\u53EA\u6709 Codex legacy resume pane \u53EF\u4EE5\u81EA\u52A8\u8FC1\u79FB");
     const env = { ...process.env };
-    if (target.structured.codexHome) env.CODEX_HOME = target.structured.codexHome;
+    const codexHome = target.structured.codexHome ?? this.options.codexHome;
+    if (codexHome) env.CODEX_HOME = codexHome;
     else if (this.options.codexHome) env.CODEX_HOME = this.options.codexHome;
     const { rpc, endpoint } = await connectCodexHost({ binary: this.options.binary, profileDir: this.options.profileDir, scope, cwd: target.paneCurrentPath, env });
+    let createdPaneId;
     try {
-      const command = [this.options.binary, "-c", "check_for_update_on_startup=false", "--remote", endpoint, "resume", target.structured.threadId, "--no-alt-screen"].map((value) => `'${value.replace(/'/g, `'\\''`)}'`).join(" ");
+      const resumed = await rpc.request("thread/resume", { threadId: target.structured.threadId, excludeTurns: true, cwd: target.paneCurrentPath });
+      if (resumed.thread?.id !== target.structured.threadId) throw new Error("App Server \u8FD4\u56DE\u4E86\u4E0D\u540C\u7684\u65E7 thread\uFF0C\u672A\u521B\u5EFA\u7ED1\u5B9A");
+      const command = [
+        ...codexHome ? ["env", "CODEX_HOME=" + shellQuote3(codexHome)] : [],
+        shellQuote3(this.options.binary),
+        "-c",
+        shellQuote3("check_for_update_on_startup=false"),
+        shellQuote3("--remote"),
+        shellQuote3(endpoint),
+        shellQuote3("resume"),
+        shellQuote3(target.structured.threadId),
+        shellQuote3("--no-alt-screen")
+      ].join(" ");
       const created = spawnProcessSync("tmux", ["-S", target.socketPath, "split-window", "-d", "-P", "-F", "#{pane_id}", "-t", target.sessionName, "-c", target.paneCurrentPath, command], { encoding: "utf8" });
       if (created.status !== 0 || typeof created.stdout !== "string" || !created.stdout.trim()) throw new Error(`\u65E0\u6CD5\u5728 tmux \u4E2D\u521B\u5EFA structured pane${typeof created.stderr === "string" && created.stderr.trim() ? `\uFF1A${created.stderr.trim()}` : ""}`);
       const paneId = created.stdout.trim();
+      createdPaneId = paneId;
       let current;
       for (let attempt = 0; attempt < 50; attempt += 1) {
         current = listStructuredTmuxPanes(target.socketPath).find((pane) => pane.paneId === paneId && pane.structured?.threadId === target.structured.threadId && pane.structured.endpoint === endpoint);
@@ -12930,6 +12966,9 @@ var StructuredAdapter = class {
       this.bindings.set(scope, binding);
       await this.saveBindings();
       return current;
+    } catch (error) {
+      if (createdPaneId) spawnProcessSync("tmux", ["-S", target.socketPath, "kill-pane", "-t", createdPaneId], { stdio: "ignore" });
+      throw error;
     } finally {
       rpc.close();
     }

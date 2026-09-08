@@ -22,6 +22,8 @@ import type { TmuxBindingStatus } from '../tmux-control';
 import { activeStructuredTmuxPane, listStructuredTmuxPanes } from './tmux-discovery';
 import { spawnProcessSync } from '../../platform/spawn';
 
+const shellQuote = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`;
+
 interface StructuredBinding { target: TmuxPaneTarget; endpoint: string; threadId: string; cwd: string; updatedAt: number }
 interface ScopeSession { main: StructuredSession; view: StructuredView; bound?: StructuredBinding; side?: CodexStructuredSession; sideOpening?: Promise<CodexStructuredSession>; sideExit?: Promise<void>; sideClosing?: boolean; sideView?: StructuredView; cwd: string }
 export interface StructuredAdapterOptions {
@@ -160,14 +162,25 @@ export class StructuredAdapter implements AgentAdapter {
   private async adoptLegacyPane(scope: string, target: TmuxPaneTarget & { structured?: { threadId: string; legacy?: boolean; codexHome?: string } }): Promise<TmuxPaneTarget> {
     if (this.id !== 'codex' || !target.structured?.threadId) throw new Error('只有 Codex legacy resume pane 可以自动迁移');
     const env = { ...process.env };
-    if (target.structured.codexHome) env.CODEX_HOME = target.structured.codexHome;
+    const codexHome = target.structured.codexHome ?? this.options.codexHome;
+    if (codexHome) env.CODEX_HOME = codexHome;
     else if (this.options.codexHome) env.CODEX_HOME = this.options.codexHome;
     const { rpc, endpoint } = await connectCodexHost({ binary: this.options.binary, profileDir: this.options.profileDir, scope, cwd: target.paneCurrentPath, env });
+    let createdPaneId: string | undefined;
     try {
-      const command = [this.options.binary, '-c', 'check_for_update_on_startup=false', '--remote', endpoint, 'resume', target.structured.threadId, '--no-alt-screen'].map(value => `'${value.replace(/'/g, `'\\''`)}'`).join(' ');
+      // Loading the legacy rollout is the precondition for migration. Do it
+      // before creating a pane; a failed resume must leave tmux untouched.
+      const resumed = await rpc.request('thread/resume', { threadId: target.structured.threadId, excludeTurns: true, cwd: target.paneCurrentPath });
+      if (resumed.thread?.id !== target.structured.threadId) throw new Error('App Server 返回了不同的旧 thread，未创建绑定');
+      const command = [
+        ...(codexHome ? ['env', 'CODEX_HOME=' + shellQuote(codexHome)] : []),
+        shellQuote(this.options.binary), '-c', shellQuote('check_for_update_on_startup=false'),
+        shellQuote('--remote'), shellQuote(endpoint), shellQuote('resume'), shellQuote(target.structured.threadId), shellQuote('--no-alt-screen'),
+      ].join(' ');
       const created = spawnProcessSync('tmux', ['-S', target.socketPath, 'split-window', '-d', '-P', '-F', '#{pane_id}', '-t', target.sessionName, '-c', target.paneCurrentPath, command], { encoding: 'utf8' });
       if (created.status !== 0 || typeof created.stdout !== 'string' || !created.stdout.trim()) throw new Error(`无法在 tmux 中创建 structured pane${typeof created.stderr === 'string' && created.stderr.trim() ? `：${created.stderr.trim()}` : ''}`);
       const paneId = created.stdout.trim();
+      createdPaneId = paneId;
       let current: TmuxPaneTarget | undefined;
       for (let attempt = 0; attempt < 50; attempt += 1) {
         current = listStructuredTmuxPanes(target.socketPath).find(pane => pane.paneId === paneId && pane.structured?.threadId === target.structured!.threadId && pane.structured.endpoint === endpoint);
@@ -182,6 +195,9 @@ export class StructuredAdapter implements AgentAdapter {
       this.bindings.set(scope, binding);
       await this.saveBindings();
       return current;
+    } catch (error) {
+      if (createdPaneId) spawnProcessSync('tmux', ['-S', target.socketPath, 'kill-pane', '-t', createdPaneId], { stdio: 'ignore' });
+      throw error;
     } finally { rpc.close(); }
   }
   private refreshBindingTarget(binding: StructuredBinding): TmuxPaneTarget | undefined {

@@ -1,6 +1,6 @@
-# Structured backend (v1.5.1)
+# Structured backend (v1.5.2)
 
-Version 1.5.1 is a regular release with an opt-in structured backend. The v1.2.7
+Version 1.5.2 is a regular release with an opt-in structured backend. The v1.2.7
 tag remains available for rollback. It does not automatically change any running
 profile or migrate an existing terminal session. The previously validated
 1.4.0 implementation is retained with the limitations below.
@@ -38,9 +38,10 @@ timeout. Explicit new input waits for the existing observed work to finish.
 For structured Codex, a pane running `codex --remote <endpoint> resume <threadId>`
 is discoverable from its process arguments. A legacy pane running plain
 `codex resume <threadId>` is also listed as an adoptable Codex pane. On
-`/tmux bind`, Bridge starts the App Server itself, creates a remote pane beside
-the legacy pane, verifies the loaded thread and persists the mapping; users do
-not need to copy an endpoint or launch App Server manually. `/tmux list` displays
+`/tmux bind`, Bridge starts the App Server itself, first loads and validates the
+legacy thread, and only then creates a remote pane beside the legacy pane. A
+failed validation leaves tmux unchanged; users do not need to copy an endpoint
+or launch App Server manually. `/tmux list` displays
 the discovered identity. Within a Bridge-managed tmux session, the active pane
 is rechecked before an idle turn, so closing one pane and resuming another
 thread in a new pane changes the structured target without starting a second
