@@ -23,7 +23,7 @@ export interface StructuredTmuxPane extends TmuxPaneTarget {
  */
 export function listStructuredTmuxPanes(socket?: string): StructuredTmuxPane[] {
   return listTmuxAgentPanes(socket).flatMap(pane => {
-    const argv = processArgvTree(pane.panePid);
+    const argv = [...processArgvTree(pane.panePid), ...shellWords(pane.paneStartCommand ?? '')];
     const identity = parseStructuredAgentArgv(argv, pane.agentKind);
     if (!identity) return [];
     const codexHome = pane.agentKind === 'codex' ? processEnvironmentForPid(pane.panePid).CODEX_HOME : undefined;
@@ -52,6 +52,10 @@ export function parseStructuredAgentArgv(argv: readonly string[], kind: 'codex' 
   const resumeIndex = normalized.findIndex(item => item === 'resume' || item === '--resume');
   if (resumeIndex < 0 || !normalized[resumeIndex + 1]) return undefined;
   const threadId = normalized[resumeIndex + 1]!;
+  // `codex resume` without an explicit id may be followed by options such as
+  // `-m`/`--model`; those are not session identities. Never bind a pane to a
+  // CLI flag, otherwise a model choice can be mistaken for a thread.
+  if (threadId.startsWith('-')) return undefined;
   const remoteIndex = normalized.findIndex(item => item === '--remote' || item.startsWith('--remote='));
   const endpoint = remoteIndex >= 0
     ? (normalized[remoteIndex]!.slice('--remote='.length) || normalized[remoteIndex + 1])
@@ -69,6 +73,10 @@ function processEnvironmentForPid(rootPid: number): NodeJS.ProcessEnv {
       return index > 0 ? [[item.slice(0, index), item.slice(index + 1)]] : [];
     }));
   } catch { return {}; }
+}
+
+function shellWords(value: string): string[] {
+  return value.split(/\s+/u).map(item => item.replace(/^['"]|['"]$/gu, '')).filter(Boolean);
 }
 
 function processArgvTree(rootPid: number): string[] {

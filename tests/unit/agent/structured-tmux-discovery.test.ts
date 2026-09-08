@@ -23,5 +23,6 @@ describe('structured tmux process discovery', () => {
   it('does not confuse an unrelated executable or a missing resume id for a session', () => {
     expect(parseStructuredAgentArgv(['codex-helper', 'resume', 'thread-1'], 'codex')).toBeUndefined();
     expect(parseStructuredAgentArgv(['codex', '--remote', 'unix:///tmp/codex.sock', 'resume'], 'codex')).toBeUndefined();
+    expect(parseStructuredAgentArgv(['codex', 'resume', '-m', 'gpt-5.6-luna'], 'codex')).toBeUndefined();
   });
 });

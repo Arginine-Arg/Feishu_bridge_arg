@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.5.0",
+  version: "1.5.1",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -6576,7 +6576,8 @@ var TMUX_FORMAT = [
   "#{pane_pid}",
   "#{pane_current_command}",
   "#{pane_current_path}",
-  "#{@argbridge_managed}"
+  "#{@argbridge_managed}",
+  "#{pane_start_command}"
 ].join("	");
 var TmuxBindingController = class {
   constructor(profileStateDir, profile2, agentKind) {
@@ -7001,7 +7002,7 @@ function listPanesOnSocket(socketPath) {
   const out = [];
   for (const line of result.stdout.split("\n")) {
     if (!line.trim()) continue;
-    const [sessionName, windowIndex, paneIndex, paneId, rawPid, command, cwd, managed] = line.split("	");
+    const [sessionName, windowIndex, paneIndex, paneId, rawPid, command, cwd, managed, startCommand] = line.split("	");
     if (!sessionName || !windowIndex || !paneIndex || !paneId || !rawPid || !command || !cwd) continue;
     const panePid = Number.parseInt(rawPid, 10);
     if (!Number.isSafeInteger(panePid) || panePid <= 0) continue;
@@ -7015,6 +7016,7 @@ function listPanesOnSocket(socketPath) {
       paneId,
       panePid,
       paneCurrentCommand: command,
+      ...startCommand ? { paneStartCommand: startCommand } : {},
       paneCurrentPath: cwd,
       agentKind,
       ownership: managed === "1" ? "managed" : "external",
@@ -12687,7 +12689,7 @@ import { basename as basename5 } from "path";
 import { readFileSync as readFileSync3 } from "fs";
 function listStructuredTmuxPanes(socket) {
   return listTmuxAgentPanes(socket).flatMap((pane) => {
-    const argv = processArgvTree(pane.panePid);
+    const argv = [...processArgvTree(pane.panePid), ...shellWords(pane.paneStartCommand ?? "")];
     const identity = parseStructuredAgentArgv(argv, pane.agentKind);
     if (!identity) return [];
     const codexHome = pane.agentKind === "codex" ? processEnvironmentForPid(pane.panePid).CODEX_HOME : void 0;
@@ -12714,6 +12716,7 @@ function parseStructuredAgentArgv(argv, kind) {
   const resumeIndex = normalized.findIndex((item) => item === "resume" || item === "--resume");
   if (resumeIndex < 0 || !normalized[resumeIndex + 1]) return void 0;
   const threadId = normalized[resumeIndex + 1];
+  if (threadId.startsWith("-")) return void 0;
   const remoteIndex = normalized.findIndex((item) => item === "--remote" || item.startsWith("--remote="));
   const endpoint = remoteIndex >= 0 ? normalized[remoteIndex].slice("--remote=".length) || normalized[remoteIndex + 1] : void 0;
   if (kind === "codex" && !endpoint) return { threadId, legacy: true };
@@ -12730,6 +12733,9 @@ function processEnvironmentForPid(rootPid) {
   } catch {
     return {};
   }
+}
+function shellWords(value) {
+  return value.split(/\s+/u).map((item) => item.replace(/^['"]|['"]$/gu, "")).filter(Boolean);
 }
 function processArgvTree(rootPid) {
   if (process.platform === "win32") return [];

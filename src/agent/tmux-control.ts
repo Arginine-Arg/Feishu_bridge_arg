@@ -23,6 +23,7 @@ export interface TmuxPaneTarget {
   paneId: string;
   panePid: number;
   paneCurrentCommand: string;
+  paneStartCommand?: string;
   paneCurrentPath: string;
   agentKind: TmuxAgentKind;
   ownership: TmuxOwnership;
@@ -125,6 +126,7 @@ const TMUX_FORMAT = [
   '#{pane_current_command}',
   '#{pane_current_path}',
   '#{@argbridge_managed}',
+  '#{pane_start_command}',
 ].join('\t');
 
 export class TmuxBindingController {
@@ -647,7 +649,7 @@ function listPanesOnSocket(socketPath: string): TmuxPaneTarget[] {
   const out: TmuxPaneTarget[] = [];
   for (const line of result.stdout.split('\n')) {
     if (!line.trim()) continue;
-    const [sessionName, windowIndex, paneIndex, paneId, rawPid, command, cwd, managed] = line.split('\t');
+    const [sessionName, windowIndex, paneIndex, paneId, rawPid, command, cwd, managed, startCommand] = line.split('\t');
     if (!sessionName || !windowIndex || !paneIndex || !paneId || !rawPid || !command || !cwd) continue;
     const panePid = Number.parseInt(rawPid, 10);
     if (!Number.isSafeInteger(panePid) || panePid <= 0) continue;
@@ -661,6 +663,7 @@ function listPanesOnSocket(socketPath: string): TmuxPaneTarget[] {
       paneId,
       panePid,
       paneCurrentCommand: command,
+      ...(startCommand ? { paneStartCommand: startCommand } : {}),
       paneCurrentPath: cwd,
       agentKind,
       ownership: managed === '1' ? 'managed' : 'external',

@@ -1,6 +1,6 @@
-# Structured backend (v1.5.0)
+# Structured backend (v1.5.1)
 
-Version 1.5.0 is a regular release with an opt-in structured backend. The v1.2.7
+Version 1.5.1 is a regular release with an opt-in structured backend. The v1.2.7
 tag remains available for rollback. It does not automatically change any running
 profile or migrate an existing terminal session. The previously validated
 1.4.0 implementation is retained with the limitations below.
