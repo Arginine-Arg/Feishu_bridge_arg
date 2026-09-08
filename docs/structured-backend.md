@@ -1,6 +1,6 @@
-# Structured backend (v1.5.3)
+# Structured backend (v1.5.4)
 
-Version 1.5.3 is a regular release with an opt-in structured backend. The v1.2.7
+Version 1.5.4 is a regular release with an opt-in structured backend. The v1.2.7
 tag remains available for rollback. It does not automatically change any running
 profile or migrate an existing terminal session. The previously validated
 1.4.0 implementation is retained with the limitations below.
@@ -45,7 +45,11 @@ or launch App Server manually. `/tmux list` displays
 the discovered identity. Within a Bridge-managed tmux session, the active pane
 is rechecked before an idle turn, so closing one pane and resuming another
 thread in a new pane changes the structured target without starting a second
-model task. `/tmux unbind` persists an opt-out from automatic rediscovery.
+model task. `/tmux unbind` persists an opt-out from automatic rediscovery. Once
+a Codex `resume <threadId>` pane has been observed, its candidate is retained
+for 30 days. If the pane exits or becomes a shell, `/tmux list` still shows the
+saved candidate; `/tmux bind` can validate the old thread and recreate the
+structured pane, without creating anything before validation succeeds.
 See the v1.5.0 release notes for the Claude limitation and migration behavior.
 
 Claude uses the official Agent SDK streaming-input mode with one persistent

@@ -4,7 +4,7 @@
 
 [English README](./README.md)
 
-正式版 `1.5.3` 修复慢速 legacy pane 迁移：`thread/resume` 超时后只通过只读状态确认，不会重复提交；确认成功后才创建 remote pane。默认仍使用现有终端后端。启用前请阅读[配置方式、已验证能力与限制](./docs/structured-backend.md)。升级不会自动迁移旧终端会话。
+正式版 `1.5.4` 会持久保存已发现的 tmux thread 候选，即使 Codex pane 已退出，也可以继续选择迁移；同时修复慢速 legacy pane 迁移：`thread/resume` 超时后只通过只读状态确认，不会重复提交，确认成功后才创建 remote pane。默认仍使用现有终端后端。启用前请阅读[配置方式、已验证能力与限制](./docs/structured-backend.md)。升级不会自动迁移旧终端会话。
 
 关于能实现的效果，详情可以阅读[飞书文档](https://larkcommunity.feishu.cn/docx/OaRIdFIRFoLM3xxTmKwcetHqn5e)
 
@@ -46,7 +46,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.5.3
+sh /tmp/install-arg-bridge.sh --version 1.5.4
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -90,10 +90,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.5.3"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.5.4"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.5.3`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.5.4`。
 
 ### 4. Node 或 npm 全局目录错误
 

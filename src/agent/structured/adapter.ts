@@ -27,7 +27,10 @@ const LEGACY_RESUME_TIMEOUT_MS = 180_000;
 const LEGACY_RESUME_PROBE_TIMEOUT_MS = 5_000;
 const LEGACY_RESUME_RECONCILE_MS = 180_000;
 
+const candidateKey = (socketPath: string, sessionName: string, threadId: string): string => `${socketPath}\0${sessionName}\0${threadId}`;
+
 interface StructuredBinding { target: TmuxPaneTarget; endpoint: string; threadId: string; cwd: string; updatedAt: number }
+interface StructuredCandidate extends StructuredBinding { savedAt: number }
 interface ScopeSession { main: StructuredSession; view: StructuredView; bound?: StructuredBinding; side?: CodexStructuredSession; sideOpening?: Promise<CodexStructuredSession>; sideExit?: Promise<void>; sideClosing?: boolean; sideView?: StructuredView; cwd: string }
 export interface StructuredAdapterOptions {
   kind: 'codex' | 'claude'; binary: string; profileDir: string; codexHome?: string;
@@ -43,11 +46,15 @@ export class StructuredAdapter implements AgentAdapter {
   private bindings = new Map<string, StructuredBinding>();
   private autoDiscoveryDisabled = new Set<string>();
   private readonly bindingsFile: string;
+  private readonly candidatesFile: string;
+  private candidates = new Map<string, StructuredCandidate>();
   constructor(private readonly options: StructuredAdapterOptions) {
     this.id = options.kind;
     this.displayName = options.kind === 'codex' ? 'Codex App Server' : 'Claude Agent SDK';
     this.bindingsFile = join(options.profileDir, 'structured', 'tmux-bindings.json');
+    this.candidatesFile = join(options.profileDir, 'structured', 'tmux-candidates.json');
     this.loadBindings();
+    this.loadCandidates();
     this.tmux = {
       list: async (socket?: string) => this.listStructuredPanes(socket),
       bind: async (scope, selector) => this.bindTmuxPane(scope, selector),
@@ -103,7 +110,7 @@ export class StructuredAdapter implements AgentAdapter {
       },
     };
   }
-  private listStructuredPanes(socket?: string): TmuxPaneTarget[] {
+  private async listStructuredPanes(socket?: string): Promise<TmuxPaneTarget[]> {
     if (this.id !== 'codex') return listTmuxAgentPanes(socket);
     const sockets = socket
       ? [socket]
@@ -116,7 +123,33 @@ export class StructuredAdapter implements AgentAdapter {
           ...[...this.bindings.values()].map(binding => binding.target.socketPath),
         ])];
     const seen = new Set<string>();
-    const result = sockets.flatMap(item => listStructuredTmuxPanes(item));
+    const live = sockets.flatMap(item => listStructuredTmuxPanes(item));
+    let candidateChanged = false;
+    for (const pane of live) {
+      if (!pane.structured) continue;
+      const key = candidateKey(pane.socketPath, pane.sessionName, pane.structured.threadId);
+      const saved: StructuredCandidate = {
+        target: pane,
+        endpoint: pane.structured.endpoint ?? '',
+        threadId: pane.structured.threadId,
+        cwd: pane.paneCurrentPath,
+        updatedAt: Date.now(),
+        savedAt: Date.now(),
+      };
+      const previous = this.candidates.get(key);
+      if (!previous || JSON.stringify(previous) !== JSON.stringify(saved)) { this.candidates.set(key, saved); candidateChanged = true; }
+    }
+    if (candidateChanged) await this.saveCandidates();
+    const result = [...live];
+    const liveKeys = new Set(live.flatMap(pane => pane.structured ? [candidateKey(pane.socketPath, pane.sessionName, pane.structured.threadId)] : []));
+    const expiry = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    for (const [key, candidate] of this.candidates) {
+      if (candidate.savedAt < expiry) { this.candidates.delete(key); candidateChanged = true; continue; }
+      if (socket && candidate.target.socketPath !== socket) continue;
+      if (liveKeys.has(key)) continue;
+      result.push({ ...candidate.target, structured: { ...candidate.target.structured, threadId: candidate.threadId, ...(candidate.endpoint ? { endpoint: candidate.endpoint } : {}), legacy: !candidate.endpoint, persisted: true } });
+    }
+    if (candidateChanged) await this.saveCandidates();
     return result.filter(pane => {
       if (seen.has(`${pane.socketPath}\0${pane.paneId}`)) return false;
       seen.add(`${pane.socketPath}\0${pane.paneId}`);
@@ -140,6 +173,19 @@ export class StructuredAdapter implements AgentAdapter {
       }
     } catch { /* first run or stale state */ }
   }
+  private loadCandidates(): void {
+    try {
+      const parsed = JSON.parse(readFileSync(this.candidatesFile, 'utf8')) as { version?: number; candidates?: Record<string, StructuredCandidate> };
+      if (parsed.version !== 1) return;
+      for (const [key, candidate] of Object.entries(parsed.candidates ?? {})) {
+        if (candidate?.threadId && candidate.cwd && candidate.target?.socketPath && candidate.target?.sessionName) this.candidates.set(key, candidate);
+      }
+    } catch { /* first run */ }
+  }
+  private async saveCandidates(): Promise<void> {
+    await mkdir(join(this.options.profileDir, 'structured'), { recursive: true, mode: 0o700 });
+    await writeFileAtomic(this.candidatesFile, JSON.stringify({ version: 1, candidates: Object.fromEntries(this.candidates) }, null, 2) + '\n', { mode: 0o600 });
+  }
   private async saveBindings(): Promise<void> {
     await mkdir(join(this.options.profileDir, 'structured'), { recursive: true, mode: 0o700 });
     await writeFileAtomic(this.bindingsFile, JSON.stringify({ version: 1, bindings: Object.fromEntries(this.bindings), disabled: [...this.autoDiscoveryDisabled] }, null, 2) + '\n', { mode: 0o600 });
@@ -147,7 +193,7 @@ export class StructuredAdapter implements AgentAdapter {
   private async bindTmuxPane(scope: string, selector: string): Promise<TmuxPaneTarget> {
     if (this.id !== 'codex') throw new Error('Claude 结构化会话暂不支持接管任意 tmux resume；请使用 terminal 后端。');
     const explicitSocket = selector.includes('::') ? selector.slice(0, selector.lastIndexOf('::')) : undefined;
-    const candidates = this.listStructuredPanes(explicitSocket);
+    const candidates = await this.listStructuredPanes(explicitSocket);
     const key = selector.trim();
     const target = /^\d+$/u.test(key)
       ? candidates[Number.parseInt(key, 10) - 1]
@@ -182,7 +228,11 @@ export class StructuredAdapter implements AgentAdapter {
         shellQuote(this.options.binary), '-c', shellQuote('check_for_update_on_startup=false'),
         shellQuote('--remote'), shellQuote(endpoint), shellQuote('resume'), shellQuote(target.structured.threadId), shellQuote('--no-alt-screen'),
       ].join(' ');
-      const created = spawnProcessSync('tmux', ['-S', target.socketPath, 'split-window', '-d', '-P', '-F', '#{pane_id}', '-t', target.sessionName, '-c', target.paneCurrentPath, command], { encoding: 'utf8' });
+      const sessionAlive = spawnProcessSync('tmux', ['-S', target.socketPath, 'has-session', '-t', target.sessionName], { stdio: 'ignore' }).status === 0;
+      const createArgs = sessionAlive
+        ? ['split-window', '-d', '-P', '-F', '#{pane_id}', '-t', target.sessionName, '-c', target.paneCurrentPath, command]
+        : ['new-session', '-d', '-P', '-F', '#{pane_id}', '-s', target.sessionName, '-c', target.paneCurrentPath, command];
+      const created = spawnProcessSync('tmux', ['-S', target.socketPath, ...createArgs], { encoding: 'utf8' });
       if (created.status !== 0 || typeof created.stdout !== 'string' || !created.stdout.trim()) throw new Error(`无法在 tmux 中创建 structured pane${typeof created.stderr === 'string' && created.stderr.trim() ? `：${created.stderr.trim()}` : ''}`);
       const paneId = created.stdout.trim();
       createdPaneId = paneId;

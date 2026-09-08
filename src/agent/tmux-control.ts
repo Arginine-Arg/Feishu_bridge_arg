@@ -34,6 +34,7 @@ export interface TmuxPaneTarget {
     threadId: string;
     legacy?: boolean;
     codexHome?: string;
+    persisted?: boolean;
   };
 }
 

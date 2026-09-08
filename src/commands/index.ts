@@ -1372,7 +1372,7 @@ function formatTmuxList(panes: TmuxPaneTarget[]): string {
     '可绑定的本机 tmux agent panes：',
     '',
     ...panes.flatMap((pane, index) => [
-      `${index + 1}. ${pane.agentKind} \`${pane.paneId}\` (${pane.ownership})`,
+      `${index + 1}. ${pane.agentKind} \`${pane.paneId}\` (${pane.ownership}${pane.structured?.persisted ? '，已保存候选' : ''})`,
       `   cwd: \`${pane.paneCurrentPath}\``,
       ...(pane.structured
         ? [`   structured thread: \`${pane.structured.threadId}\``, `   endpoint: \`${pane.structured.endpoint ?? (pane.structured.legacy ? '待 Bridge 自动迁移' : 'native')}\``]

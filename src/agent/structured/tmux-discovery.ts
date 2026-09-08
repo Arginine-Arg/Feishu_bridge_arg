@@ -12,6 +12,7 @@ export interface StructuredTmuxPane extends TmuxPaneTarget {
     threadId: string;
     legacy?: boolean;
     codexHome?: string;
+    persisted?: boolean;
   };
 }
 
