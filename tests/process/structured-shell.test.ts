@@ -15,6 +15,10 @@ it.skipIf(!available)('keeps an interactive shell after the native program exits
     expect(terminal).toBeDefined();
     const tmux = (...args: string[]) => spawnSync('tmux', ['-S', terminal.socketPath, ...args], { encoding: 'utf8' });
     await expect.poll(() => tmux('capture-pane', '-p', '-t', terminal.target).stdout, { timeout: 10000 }).toContain('shell remains');
+    // The exit notice precedes exec'ing the user's interactive shell. Wait
+    // for its real prompt before injecting keys; otherwise Ctrl-C can race
+    // shell startup/readline initialization rather than exercise an idle shell.
+    await expect.poll(() => tmux('capture-pane', '-p', '-t', terminal.target).stdout.trimEnd(), { timeout: 15000 }).toMatch(/[$#]$/);
     tmux('send-keys', '-t', terminal.target, 'C-c');
     tmux('send-keys', '-t', terminal.target, 'C-c');
     tmux('send-keys', '-t', terminal.target, '-l', "printf 'SHELL_%s\\n' 'USABLE'");
