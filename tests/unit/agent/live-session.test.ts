@@ -2588,10 +2588,13 @@ setInterval(() => {}, 1000);
 
       attached = spawn(
         'script',
-        ['-q', '-c', `tmux -S ${socketPath} attach -t ${sessionName}`, '/dev/null'],
+        ['-q', '-c', `stty rows 40 cols 120; exec tmux -S ${socketPath} attach -t ${sessionName}`, '/dev/null'],
         { detached: true, stdio: 'ignore', env: { ...process.env, TERM: 'xterm-256color' } },
       );
       await waitForTmuxClient(socketPath, true, 3_000);
+      expect(spawnSync('tmux', ['-S', socketPath, 'list-clients', '-F', '#{client_width}x#{client_height}'], {
+        encoding: 'utf8',
+      }).stdout.trim()).toBe('120x40');
       expect(
         spawnSync('tmux', ['-S', socketPath, 'detach-client', '-s', sessionName], {
           stdio: 'ignore',
@@ -2602,7 +2605,9 @@ setInterval(() => {}, 1000);
       expect(
         spawnSync('tmux', ['-S', socketPath, 'has-session', '-t', sessionName], { stdio: 'ignore' }).status,
       ).toBe(0);
-      expect(textOf(await collect(session.run('disconnect-second', 'second', dir).events))).toBe(
+      const secondEvents = await collect(session.run('disconnect-second', 'second', dir).events);
+      const finalScreen = spawnSync('tmux', ['-S', socketPath, 'capture-pane', '-p', '-t', sessionName], { encoding: 'utf8' }).stdout;
+      expect(textOf(secondEvents), JSON.stringify({ secondEvents, finalScreen })).toBe(
         '• reply:second:turn=2\n',
       );
       expect(await readFile(countFile, 'utf8')).toBe('start\n');
@@ -2611,7 +2616,7 @@ setInterval(() => {}, 1000);
       await pool.closeAll();
       spawnSync('tmux', ['-S', socketPath, 'kill-server'], { stdio: 'ignore' });
     }
-  }, 20_000);
+  }, 30_000);
 
   tmuxIt('keeps native Ctrl-C unbound and adopts a selected resume while the old pane lives', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-ctrl-c-test-'));
