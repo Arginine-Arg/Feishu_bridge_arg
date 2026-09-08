@@ -46,6 +46,7 @@ export interface CodexAdapterOptions {
   liveUsePty?: boolean;
   liveTerminalBackend?: LiveTerminalBackend;
   liveIdleMs?: number;
+  allowManagedBinding?: boolean;
 }
 
 type CodexChild = SpawnedProcessByStdio<Writable, Readable, Readable>;
@@ -89,6 +90,7 @@ export class CodexAdapter implements AgentAdapter {
       opts.profileStateDir,
       opts.larkChannel?.profile ?? 'codex',
       'codex',
+      opts.allowManagedBinding,
     );
     this.tmux = {
       list: (socket) => this.tmuxBindings.list(socket),

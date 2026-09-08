@@ -24,8 +24,13 @@ export interface StructuredTmuxPane extends TmuxPaneTarget {
  */
 export function listStructuredTmuxPanes(socket?: string): StructuredTmuxPane[] {
   return listTmuxAgentPanes(socket).flatMap(pane => {
-    const argv = [...processArgvTree(pane.panePid), ...shellWords(pane.paneStartCommand ?? '')];
-    const identity = parseStructuredAgentArgv(argv, pane.agentKind);
+    // Inspect each live process separately. A shell's original launch string
+    // can still mention the old thread after the user resumes a different one.
+    const identities = processArgvTree(pane.panePid)
+      .map(argv => parseStructuredAgentArgv(argv, pane.agentKind))
+      .filter((identity): identity is NonNullable<typeof identity> => Boolean(identity));
+    const unique = new Map(identities.map(identity => [JSON.stringify(identity), identity]));
+    const identity = unique.size === 1 ? [...unique.values()][0] : undefined;
     if (!identity) return [];
     const codexHome = pane.agentKind === 'codex' ? processEnvironmentForPidTree(pane.panePid).CODEX_HOME : undefined;
     return [{ ...pane, structured: { ...identity, ...(codexHome ? { codexHome } : {}) } }];
@@ -45,7 +50,7 @@ export function activeStructuredTmuxPane(socket: string, sessionName: string): S
 
 export function parseStructuredAgentArgv(argv: readonly string[], kind: 'codex' | 'claude'): { endpoint?: string; threadId: string; legacy?: boolean } | undefined {
   const normalized = argv.map(item => item.trim()).filter(Boolean);
-  const hasAgent = normalized.some(item => {
+  const hasAgent = normalized.slice(0, 2).some(item => {
     const name = basename(item).replace(/\.(?:cmd|exe)$/iu, '').toLowerCase();
     return name === kind;
   });
@@ -65,7 +70,7 @@ export function parseStructuredAgentArgv(argv: readonly string[], kind: 'codex' 
   return { ...(endpoint ? { endpoint } : {}), threadId };
 }
 
-function processEnvironmentForPidTree(rootPid: number): NodeJS.ProcessEnv {
+export function processEnvironmentForPidTree(rootPid: number): NodeJS.ProcessEnv {
   if (process.platform !== 'linux') return {};
   const result = spawnProcessSync('ps', ['-ww', '-eo', 'pid=,ppid='], { encoding: 'utf8', maxBuffer: 2 * 1024 * 1024 });
   const rows = new Map<number, number>();
@@ -81,6 +86,7 @@ function processEnvironmentForPidTree(rootPid: number): NodeJS.ProcessEnv {
     changed = false;
     for (const [pid, ppid] of rows) if (!ids.has(pid) && ids.has(ppid)) { ids.add(pid); changed = true; }
   }
+  let fallback: NodeJS.ProcessEnv = {};
   for (const pid of ids) {
     try {
       const raw = readFileSync(`/proc/${pid}/environ`, 'utf8');
@@ -88,17 +94,15 @@ function processEnvironmentForPidTree(rootPid: number): NodeJS.ProcessEnv {
         const index = item.indexOf('=');
         return index > 0 ? [[item.slice(0, index), item.slice(index + 1)]] : [];
       }));
-      if (env.CODEX_HOME) return env;
+      if (!Object.keys(fallback).length) fallback = env;
+      const argv = readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter(Boolean);
+      if (argv.slice(0, 2).some(arg => basename(arg) === 'codex')) return env;
     } catch { /* process exited between ps and /proc read */ }
   }
-  return {};
+  return fallback;
 }
 
-function shellWords(value: string): string[] {
-  return value.split(/\s+/u).map(item => item.replace(/^['"]|['"]$/gu, '')).filter(Boolean);
-}
-
-function processArgvTree(rootPid: number): string[] {
+function processArgvTree(rootPid: number): string[][] {
   if (process.platform === 'win32') return [];
   const result = spawnProcessSync('ps', ['-ww', '-eo', 'pid=,ppid=,args='], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 });
   if (result.status !== 0 || typeof result.stdout !== 'string') return [];
@@ -117,7 +121,11 @@ function processArgvTree(rootPid: number): string[] {
     }
   }
   return [...ids].flatMap(pid => {
+    if (process.platform === 'linux') {
+      try { return [readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter(Boolean)]; }
+      catch { return []; }
+    }
     const args = rows.get(pid)?.args;
-    return args ? args.split(/\s+/u) : [];
+    return args ? [args.split(/\s+/u)] : [];
   });
 }

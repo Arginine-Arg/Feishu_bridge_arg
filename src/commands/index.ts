@@ -1375,8 +1375,8 @@ function formatTmuxList(panes: TmuxPaneTarget[]): string {
       `${index + 1}. ${pane.agentKind} \`${pane.paneId}\` (${pane.ownership}${pane.structured?.persisted ? '，已保存候选' : ''})`,
       `   cwd: \`${pane.paneCurrentPath}\``,
       ...(pane.structured
-        ? [`   structured thread: \`${pane.structured.threadId}\``, `   endpoint: \`${pane.structured.endpoint ?? (pane.structured.legacy ? '待 Bridge 自动迁移' : 'native')}\``]
-        : ['   structured: 未识别（普通 terminal pane）']),
+        ? [`   thread: \`${pane.structured.threadId}\``, `   endpoint: \`${pane.structured.endpoint ?? 'live 回退（无共享 endpoint）'}\``]
+        : ['   structured: 未识别（无共享接口时使用 live 转发）']),
       `   id: \`${tmuxTargetKey(pane)}\``,
       `   attach: \`${pane.attachCommand}\``,
     ]),
@@ -1388,6 +1388,7 @@ function formatTmuxList(panes: TmuxPaneTarget[]): string {
 function formatTmuxStatus(status: TmuxBindingStatus | undefined): string {
   if (!status || status.state === 'none') return '';
   if (status.state === 'invalid') {
+    if (status.message?.includes('绑定保留')) return `tmux：${status.message}\n在原 pane 手动 resume 后可继续，无需解绑。`;
     return `tmux 绑定状态：失效（${status.message ?? '目标不可用'}）\n请运行 \`/tmux unbind\`。`;
   }
   const terminal = status.terminal ?? (status.target
@@ -1403,6 +1404,7 @@ function formatTmuxStatus(status: TmuxBindingStatus | undefined): string {
     `tmux 状态：${status.state === 'external' ? '外部绑定' : 'bridge 托管'}`,
     `socket：\`${terminal.socketPath}\``,
     `target：\`${terminal.target}\``,
+    ...(status.message ? [`连接：${status.message}`] : []),
     `监督命令：\`${terminal.attachCommand}\``,
   ].join('\n');
 }

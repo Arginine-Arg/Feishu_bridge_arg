@@ -38,6 +38,7 @@ export interface ClaudeAdapterOptions {
   liveUsePty?: boolean;
   liveTerminalBackend?: LiveTerminalBackend;
   liveIdleMs?: number;
+  allowManagedBinding?: boolean;
 }
 
 type ClaudeChild = SpawnedProcessByStdio<Writable, Readable, Readable>;
@@ -68,6 +69,7 @@ export class ClaudeAdapter implements AgentAdapter {
       profileStateDir,
       opts.larkChannel?.profile ?? 'claude',
       'claude',
+      opts.allowManagedBinding,
     );
     this.tmux = {
       list: (socket) => this.tmuxBindings.list(socket),

@@ -15,7 +15,7 @@ describe('start runtime agent factory', () => {
       const profile = createDefaultProfileConfig({ agentKind, accounts: appAccount(), preferences: { agentTransport: 'structured' }, ...(agentKind === 'codex' ? { codex: codexConfig() } : {}) });
       const agent = createRuntimeAgent(profile, { profileDir: tmpdir() });
       expect(agent.id).toBe(agentKind);
-      expect(agent.structuredControl).toBeTypeOf('function');
+      expect((agent.forScope?.('test') ?? agent).structuredControl).toBeTypeOf('function');
     }
   });
   it('keeps Claude as the default runtime agent', () => {

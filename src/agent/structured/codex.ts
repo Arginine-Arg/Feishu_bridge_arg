@@ -3,6 +3,7 @@ import type { AgentEvent, AgentRunOptions, LiveSessionDiagnostics } from '../typ
 import { interactionEvent, textEvent, type StructuredSession } from './contracts';
 import { RpcClient, type Wire } from './rpc';
 import { SIDE_BOUNDARY_PROMPT, SIDE_DEVELOPER_INSTRUCTIONS } from './side-boundary';
+import { codexTurnPermissionOverrides } from './permissions';
 
 const toolItems = new Set(['commandExecution', 'fileChange', 'mcpToolCall', 'collabAgentToolCall', 'webSearch', 'imageGeneration', 'dynamicToolCall']);
 
@@ -162,7 +163,11 @@ export class CodexStructuredSession implements StructuredSession {
         const input: Wire[] = [{ type: 'text', text: this.selectedSkill ? `$${this.selectedSkill.name}\n${options.prompt}` : options.prompt }];
         if (this.selectedSkill) { input.push({ type: 'skill', ...this.selectedSkill }); this.selectedSkill = undefined; }
         for (const path of options.images ?? []) input.push({ type: 'localImage', path });
-        const result = await this.rpc.request('turn/start', { threadId: this.id, input });
+        const result = await this.rpc.request('turn/start', {
+          threadId: this.id,
+          input,
+          ...codexTurnPermissionOverrides(options.sandbox, options.cwd),
+        });
         if (!this.finishedTurns.has(result.turn?.id)) this.turnId = result.turn?.id ?? this.turnId;
         if (signal.aborted) await this.interrupt();
       }

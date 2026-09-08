@@ -149,6 +149,22 @@ describe('structured transport contracts', () => {
     expect(session.diagnostics().phase).toBe('idle');
     await session.close();
   });
+  it('passes the selected YOLO permission policy to every structured turn', async () => {
+    const rpc = new EventEmitter() as EventEmitter & { request: ReturnType<typeof vi.fn> };
+    rpc.request = vi.fn(async () => ({ turn: { id: 'turn-yolo' } }));
+    const session = new CodexStructuredSession('main', 'unix:///test', rpc as unknown as RpcClient);
+    const done = session.submit({ runId: 'run-yolo', prompt: 'task', cwd: '/repo', sandbox: 'danger-full-access' }, () => {}, new AbortController().signal);
+    await Promise.resolve();
+    expect(rpc.request).toHaveBeenCalledWith('turn/start', {
+      threadId: 'main',
+      input: [{ type: 'text', text: 'task' }],
+      sandboxPolicy: { type: 'dangerFullAccess' },
+      approvalPolicy: 'never',
+    });
+    rpc.emit('message', { method: 'turn/completed', params: { threadId: 'main', turn: { id: 'turn-yolo', status: 'completed' } } });
+    await done;
+    await session.close();
+  });
   it('matches approvals by request ID and never turns a choice into a prompt', async () => {
     const rpc = new EventEmitter() as EventEmitter & { request: ReturnType<typeof vi.fn>; respond: ReturnType<typeof vi.fn> };
     rpc.request = vi.fn(async () => ({ turn: { id: 't' } }));

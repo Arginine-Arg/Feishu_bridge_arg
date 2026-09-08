@@ -755,7 +755,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   const {
     callbackAuth,
     channel,
-    agent,
+    agent: rootAgent,
     sessions,
     sessionCatalog,
     workspaces,
@@ -830,6 +830,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   let scope = chatMode === 'topic' && threadId
     ? `${msg.chatId}:${threadId}`
     : msg.chatId;
+  let agent = rootAgent.forScope?.(scope) ?? rootAgent;
   log.info('intake', 'enter', {
     scope,
     chatType: msg.chatType,
@@ -902,6 +903,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     if (recovery.scope && recovery.scope !== scope) {
       const requestedScope = scope;
       scope = recovery.scope;
+      agent = rootAgent.forScope?.(scope) ?? rootAgent;
       const recoveredThreadId = threadIdForChatScope(msg.chatId, scope);
       if (!threadId && recoveredThreadId) {
         threadId = recoveredThreadId;
@@ -943,6 +945,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     }
     if (recovery.scope && recovery.scope !== scope) {
       scope = recovery.scope;
+      agent = rootAgent.forScope?.(scope) ?? rootAgent;
       const recoveredThreadId = threadIdForChatScope(msg.chatId, scope);
       if (!threadId && recoveredThreadId) {
         threadId = recoveredThreadId;

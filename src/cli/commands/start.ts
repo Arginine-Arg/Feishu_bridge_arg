@@ -5,6 +5,7 @@ import pkg from '../../../package.json';
 import { ClaudeAdapter } from '../../agent/claude/adapter';
 import { CodexAdapter } from '../../agent/codex/adapter';
 import { StructuredAdapter } from '../../agent/structured/adapter';
+import { PreferredStructuredAdapter } from '../../agent/structured/preferred';
 import {
   AgentPreflightError,
   formatAgentPreflightDiagnostic,
@@ -430,14 +431,21 @@ export function createRuntimeAgent(
         }
       : undefined;
   if (profileConfig.preferences?.agentTransport === 'structured') {
-    return new StructuredAdapter({
+    const structured = new StructuredAdapter({
       kind: profileConfig.agentKind,
       binary: profileConfig.agentKind === 'codex' ? profileConfig.codex?.binaryPath ?? 'codex' : 'claude',
       profileDir: appPaths.profileDir,
       codexHome: profileConfig.codex?.codexHome ?? (profileConfig.codex?.inheritCodexHome === true ? undefined : `${appPaths.profileDir}/codex-home`),
       nativeView: profileConfig.preferences.structuredNativeView !== false,
+      sandbox: profileConfig.sandbox.defaultMode,
       larkChannel,
     });
+    const live = profileConfig.agentKind === 'codex'
+      ? new CodexAdapter({ binary: profileConfig.codex?.binaryPath ?? 'codex', profileStateDir: appPaths.profileDir,
+        codexHome: profileConfig.codex?.codexHome, inheritCodexHome: profileConfig.codex?.inheritCodexHome,
+        sandbox: profileConfig.sandbox.defaultMode, sessionMode: 'live', liveTerminalBackend: 'tmux', allowManagedBinding: true, larkChannel })
+      : new ClaudeAdapter({ profileStateDir: appPaths.profileDir, sessionMode: 'live', liveTerminalBackend: 'tmux', allowManagedBinding: true, larkChannel });
+    return new PreferredStructuredAdapter(structured, live, appPaths.profileDir);
   }
   if (profileConfig.agentKind === 'codex') {
     const codex = profileConfig.codex;

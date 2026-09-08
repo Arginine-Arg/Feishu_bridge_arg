@@ -146,6 +146,8 @@ export interface AgentBotIdentity {
 }
 
 export interface AgentAdapter {
+  /** Resolve transport before intake/control handling for this scope. */
+  forScope?(scopeId: string): AgentAdapter;
   /** Optional structured control plane; no terminal input or model call. */
   structuredControl?: (scopeId: string, input: string) => Promise<AgentEvent[]>;
   structuredQuestion?: (scopeId: string) => string | undefined;

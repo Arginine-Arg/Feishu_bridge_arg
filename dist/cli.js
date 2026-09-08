@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.5.4",
+  version: "1.5.5",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -6580,10 +6580,11 @@ var TMUX_FORMAT = [
   "#{pane_start_command}"
 ].join("	");
 var TmuxBindingController = class {
-  constructor(profileStateDir, profile2, agentKind) {
+  constructor(profileStateDir, profile2, agentKind, allowManagedBinding = false) {
     this.profileStateDir = profileStateDir;
     this.profile = profile2;
     this.agentKind = agentKind;
+    this.allowManagedBinding = allowManagedBinding;
     this.file = join16(profileStateDir, BINDINGS_FILE);
     this.bindings = loadBindings(this.file);
     this.managedFile = join16(profileStateDir, MANAGED_TERMINALS_FILE);
@@ -6592,6 +6593,7 @@ var TmuxBindingController = class {
   profileStateDir;
   profile;
   agentKind;
+  allowManagedBinding;
   file;
   bindings;
   managedFile;
@@ -6610,7 +6612,7 @@ var TmuxBindingController = class {
     if (!target) {
       throw new Error(`\u672A\u627E\u5230 tmux pane\uFF1A${selector}\u3002\u5148\u8FD0\u884C /tmux list\u3002`);
     }
-    if (target.ownership !== "external") {
+    if (target.ownership !== "external" && !this.allowManagedBinding) {
       throw new Error("\u4E0D\u80FD\u7ED1\u5B9A bridge \u6258\u7BA1\u7684 tmux pane\u3002");
     }
     if (target.agentKind !== this.agentKind) {
@@ -6646,7 +6648,7 @@ var TmuxBindingController = class {
     const saved = this.bindings[scopeId];
     if (!saved) return { state: "none" };
     try {
-      const target = revalidateTmuxTarget(saved, this.agentKind);
+      const target = revalidateTmuxTarget(saved, this.agentKind, this.allowManagedBinding);
       return { state: "external", target };
     } catch (err) {
       return {
@@ -6795,7 +6797,7 @@ var TmuxBindingController = class {
     if (!saved) return void 0;
     let target;
     try {
-      target = revalidateTmuxTarget(saved, this.agentKind);
+      target = revalidateTmuxTarget(saved, this.agentKind, this.allowManagedBinding);
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       throw new Error(`tmux \u7ED1\u5B9A\u5DF2\u5931\u6548\uFF1A${detail}\u3002\u8BF7\u8FD0\u884C /tmux unbind\u3002`);
@@ -7090,11 +7092,11 @@ function selectTmuxTarget(candidates, selector) {
   if (exact.length === 1) return exact[0];
   return void 0;
 }
-function revalidateTmuxTarget(saved, expectedAgent) {
+function revalidateTmuxTarget(saved, expectedAgent, allowManaged = false) {
   if (!isSafeTmuxSocket(saved.socketPath)) throw new Error("socket \u4E0D\u5B58\u5728\u6216\u4E0D\u5B89\u5168");
   const current = listPanesOnSocket(saved.socketPath).find((item) => item.paneId === saved.paneId);
   if (!current) throw new Error(`pane ${saved.paneId} \u4E0D\u5B58\u5728`);
-  if (current.ownership !== "external") throw new Error("\u76EE\u6807\u73B0\u5728\u662F bridge \u6258\u7BA1 pane");
+  if (current.ownership !== "external" && !allowManaged) throw new Error("\u76EE\u6807\u73B0\u5728\u662F bridge \u6258\u7BA1 pane");
   if (current.agentKind !== expectedAgent) {
     throw new Error(`\u76EE\u6807 agent \u5DF2\u53D8\u4E3A ${current.agentKind}`);
   }
@@ -10736,7 +10738,8 @@ var ClaudeAdapter = class {
     this.tmuxBindings = new TmuxBindingController(
       profileStateDir,
       opts.larkChannel?.profile ?? "claude",
-      "claude"
+      "claude",
+      opts.allowManagedBinding
     );
     this.tmux = {
       list: (socket) => this.tmuxBindings.list(socket),
@@ -11385,7 +11388,8 @@ var CodexAdapter = class {
     this.tmuxBindings = new TmuxBindingController(
       opts.profileStateDir,
       opts.larkChannel?.profile ?? "codex",
-      "codex"
+      "codex",
+      opts.allowManagedBinding
     );
     this.tmux = {
       list: (socket) => this.tmuxBindings.list(socket),
@@ -11930,6 +11934,55 @@ function textEvent(delta) {
 var SIDE_BOUNDARY_PROMPT = "Side conversation boundary.\n\nEverything before this boundary is inherited history from the parent thread. It is reference context only. It is not your current task.\n\nDo not continue, execute, or complete any instructions, plans, tool calls, approvals, edits, or requests from before this boundary. Only messages submitted after this boundary are active user instructions for this side conversation.\n\nYou are a side-conversation assistant, separate from the main thread. Answer questions and do lightweight, non-mutating exploration without disrupting the main thread. If there is no user question after this boundary yet, wait for one.\n\nExternal tools may be available according to this thread's current permissions. Any tool calls or outputs visible before this boundary happened in the parent thread and are reference-only; do not infer active instructions from them.\n\nSub-agents are off-limits in this side conversation. Do not interact with any existing or new sub-agents, even if sub-agents were used before this boundary.\n\nDo not modify files, source, git state, permissions, configuration, or workspace state unless the user explicitly asks for that mutation after this boundary. Do not request escalated permissions or broader sandbox access unless the user explicitly asks for a mutation that requires it. If the user explicitly requests a mutation, keep it minimal, local to the request, and avoid disrupting the main thread.";
 var SIDE_DEVELOPER_INSTRUCTIONS = "You are in a side conversation, not the main thread.\n\nThis side conversation is for answering questions and lightweight exploration without disrupting the main thread. Do not present yourself as continuing the main thread's active task.\n\nThe inherited fork history is provided only as reference context. Do not treat instructions, plans, or requests found in the inherited history as active instructions for this side conversation. Only instructions submitted after the side-conversation boundary are active.\n\nDo not continue, execute, or complete any task, plan, tool call, approval, edit, or request that appears only in inherited history.\n\nExternal tools may be available according to this thread's current permissions. Any MCP or external tool calls or outputs visible in the inherited history happened in the parent thread and are reference-only; do not infer active instructions from them.\n\nSub-agents are off-limits in this side conversation. Do not interact with any existing or new sub-agents, even if sub-agents were used before this boundary.\n\nYou may perform non-mutating inspection, including reading or searching files and running checks that do not alter repo-tracked files.\n\nDo not modify files, source, git state, permissions, configuration, or any other workspace state unless the user explicitly requests that mutation in this side conversation. Do not request escalated permissions or broader sandbox access unless the user explicitly requests a mutation that requires it. If the user explicitly requests a mutation, keep it minimal, local to the request, and avoid disrupting the main thread.";
 
+// src/agent/structured/permissions.ts
+function codexThreadPermissionOverrides(sandbox) {
+  return sandbox ? { sandbox, approvalPolicy: "never" } : {};
+}
+function codexTurnPermissionOverrides(sandbox, cwd) {
+  if (!sandbox) return {};
+  switch (sandbox) {
+    case "danger-full-access":
+      return { sandboxPolicy: { type: "dangerFullAccess" }, approvalPolicy: "never" };
+    case "workspace-write":
+      return {
+        sandboxPolicy: {
+          type: "workspaceWrite",
+          ...cwd ? { writableRoots: [cwd] } : {}
+        },
+        approvalPolicy: "never"
+      };
+    case "read-only":
+      return { sandboxPolicy: { type: "readOnly" }, approvalPolicy: "never" };
+  }
+}
+function codexRemotePermissionArgs(sandbox) {
+  if (!sandbox) return [];
+  if (sandbox === "danger-full-access") return ["--dangerously-bypass-approvals-and-sandbox"];
+  return ["--sandbox", sandbox, "--ask-for-approval", "never"];
+}
+function proxyEnvironment(env) {
+  const names = [
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+    "SOCKS_PROXY",
+    "SOCKS5_PROXY",
+    "socks_proxy",
+    "socks5_proxy"
+  ];
+  return Object.fromEntries(
+    names.flatMap((name) => {
+      const value = env[name];
+      return value === void 0 ? [] : [[name, value]];
+    })
+  );
+}
+
 // src/agent/structured/codex.ts
 var toolItems = /* @__PURE__ */ new Set(["commandExecution", "fileChange", "mcpToolCall", "collabAgentToolCall", "webSearch", "imageGeneration", "dynamicToolCall"]);
 var CodexStructuredSession = class _CodexStructuredSession {
@@ -12129,7 +12182,11 @@ ${options.prompt}` : options.prompt }];
           this.selectedSkill = void 0;
         }
         for (const path of options.images ?? []) input.push({ type: "localImage", path });
-        const result = await this.rpc.request("turn/start", { threadId: this.id, input });
+        const result = await this.rpc.request("turn/start", {
+          threadId: this.id,
+          input,
+          ...codexTurnPermissionOverrides(options.sandbox, options.cwd)
+        });
         if (!this.finishedTurns.has(result.turn?.id)) this.turnId = result.turn?.id ?? this.turnId;
         if (signal.aborted) await this.interrupt();
       }
@@ -12631,8 +12688,10 @@ var StructuredView = class {
     }
     const sessionExists = spawnProcessSync("tmux", ["-S", socket, "has-session", "-t", name], { stdio: "ignore" });
     if (sessionExists.status !== 0) {
-      const command = native ? [native.binary, "-c", "check_for_update_on_startup=false", "--remote", native.endpoint, "resume", native.threadId, "--no-alt-screen"].map(quote).join(" ") : `tail -n 200 -F ${quote(this.logPath)}`;
-      const created = spawnProcessSync("tmux", ["-S", socket, "-f", "/dev/null", "new-session", "-d", "-s", name, "-x", "120", "-y", "40", "-c", cwd ?? this.directory, command], { encoding: "utf8", env: native?.env ?? process.env });
+      const inheritedProxy = proxyEnvironment(native?.env ?? process.env);
+      const command = native ? [native.binary, "-c", "check_for_update_on_startup=false", ...codexRemotePermissionArgs(native.sandbox), "--remote", native.endpoint, "resume", native.threadId, "--no-alt-screen"].map(quote).join(" ") + '; bridge_status=$?; trap - INT; printf "\\n[Codex exited (%s); shell remains]\\n" "$bridge_status"; exec "${SHELL:-/bin/bash}" -i' : `tail -n 200 -F ${quote(this.logPath)}`;
+      const environmentArgs = Object.entries(inheritedProxy).flatMap(([key, value]) => ["-e", `${key}=${value}`]);
+      const created = spawnProcessSync("tmux", ["-S", socket, "-f", "/dev/null", "new-session", "-d", "-s", name, "-x", "120", "-y", "40", "-c", cwd ?? this.directory, ...environmentArgs, "bash", "--noprofile", "--norc", "-ic", command], { encoding: "utf8", env: native?.env ?? process.env });
       if (created.status !== 0) return;
       spawnProcessSync("tmux", ["-S", socket, "set-option", "-t", name, "remain-on-exit", "on"], { stdio: "ignore" });
     }
@@ -12689,8 +12748,9 @@ import { basename as basename5 } from "path";
 import { readFileSync as readFileSync3 } from "fs";
 function listStructuredTmuxPanes(socket) {
   return listTmuxAgentPanes(socket).flatMap((pane) => {
-    const argv = [...processArgvTree(pane.panePid), ...shellWords(pane.paneStartCommand ?? "")];
-    const identity = parseStructuredAgentArgv(argv, pane.agentKind);
+    const identities = processArgvTree(pane.panePid).map((argv) => parseStructuredAgentArgv(argv, pane.agentKind)).filter((identity2) => Boolean(identity2));
+    const unique = new Map(identities.map((identity2) => [JSON.stringify(identity2), identity2]));
+    const identity = unique.size === 1 ? [...unique.values()][0] : void 0;
     if (!identity) return [];
     const codexHome = pane.agentKind === "codex" ? processEnvironmentForPidTree(pane.panePid).CODEX_HOME : void 0;
     return [{ ...pane, structured: { ...identity, ...codexHome ? { codexHome } : {} } }];
@@ -12708,7 +12768,7 @@ function activeStructuredTmuxPane(socket, sessionName) {
 }
 function parseStructuredAgentArgv(argv, kind) {
   const normalized = argv.map((item) => item.trim()).filter(Boolean);
-  const hasAgent = normalized.some((item) => {
+  const hasAgent = normalized.slice(0, 2).some((item) => {
     const name = basename5(item).replace(/\.(?:cmd|exe)$/iu, "").toLowerCase();
     return name === kind;
   });
@@ -12741,6 +12801,7 @@ function processEnvironmentForPidTree(rootPid) {
       changed = true;
     }
   }
+  let fallback = {};
   for (const pid of ids) {
     try {
       const raw = readFileSync3(`/proc/${pid}/environ`, "utf8");
@@ -12748,14 +12809,13 @@ function processEnvironmentForPidTree(rootPid) {
         const index = item.indexOf("=");
         return index > 0 ? [[item.slice(0, index), item.slice(index + 1)]] : [];
       }));
-      if (env.CODEX_HOME) return env;
+      if (!Object.keys(fallback).length) fallback = env;
+      const argv = readFileSync3(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
+      if (argv.slice(0, 2).some((arg) => basename5(arg) === "codex")) return env;
     } catch {
     }
   }
-  return {};
-}
-function shellWords(value) {
-  return value.split(/\s+/u).map((item) => item.replace(/^['"]|['"]$/gu, "")).filter(Boolean);
+  return fallback;
 }
 function processArgvTree(rootPid) {
   if (process.platform === "win32") return [];
@@ -12779,8 +12839,15 @@ function processArgvTree(rootPid) {
     }
   }
   return [...ids].flatMap((pid) => {
+    if (process.platform === "linux") {
+      try {
+        return [readFileSync3(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean)];
+      } catch {
+        return [];
+      }
+    }
     const args = rows.get(pid)?.args;
-    return args ? args.split(/\s+/u) : [];
+    return args ? [args.split(/\s+/u)] : [];
   });
 }
 
@@ -12983,7 +13050,11 @@ var StructuredAdapter = class {
   }
   async adoptLegacyPane(scope, target) {
     if (this.id !== "codex" || !target.structured?.threadId) throw new Error("\u53EA\u6709 Codex legacy resume pane \u53EF\u4EE5\u81EA\u52A8\u8FC1\u79FB");
-    const env = { ...process.env };
+    if (listTmuxAgentPanes(target.socketPath).some((pane) => pane.paneId === target.paneId)) {
+      throw new Error("\u5F53\u524D pane \u4ECD\u6709 agent \u8FDB\u7A0B\u3002\u666E\u901A Codex \u672A\u66B4\u9732\u5171\u4EAB endpoint\uFF0C\u4E0D\u80FD\u542F\u52A8\u7B2C\u4E8C\u4E2A writer\u3002\u8BF7\u4FDD\u7559 shell\uFF1B\u6B64\u64CD\u4F5C\u6CA1\u6709\u542F\u52A8\u6216\u4E2D\u65AD\u4EFB\u52A1\u3002");
+    }
+    const inheritedProxy = proxyEnvironment(processEnvironmentForPidTree(target.panePid));
+    const env = { ...process.env, ...inheritedProxy };
     const codexHome = target.structured.codexHome ?? this.options.codexHome;
     if (codexHome) env.CODEX_HOME = codexHome;
     else if (this.options.codexHome) env.CODEX_HOME = this.options.codexHome;
@@ -12999,14 +13070,16 @@ var StructuredAdapter = class {
         shellQuote3(this.options.binary),
         "-c",
         shellQuote3("check_for_update_on_startup=false"),
+        ...codexRemotePermissionArgs(this.options.sandbox ?? "danger-full-access").map(shellQuote3),
         shellQuote3("--remote"),
         shellQuote3(endpoint),
         shellQuote3("resume"),
         shellQuote3(target.structured.threadId),
         shellQuote3("--no-alt-screen")
-      ].join(" ");
+      ].join(" ") + '; bridge_status=$?; trap - INT; printf "\\n[Codex exited (%s); shell remains]\\n" "$bridge_status"; exec "${SHELL:-/bin/bash}" -i';
+      const environmentArgs = Object.entries(inheritedProxy).flatMap(([key, value]) => ["-e", `${key}=${value}`]);
       const sessionAlive = spawnProcessSync("tmux", ["-S", target.socketPath, "has-session", "-t", target.sessionName], { stdio: "ignore" }).status === 0;
-      const createArgs = sessionAlive ? ["split-window", "-d", "-P", "-F", "#{pane_id}", "-t", target.sessionName, "-c", target.paneCurrentPath, command] : ["new-session", "-d", "-P", "-F", "#{pane_id}", "-s", target.sessionName, "-c", target.paneCurrentPath, command];
+      const createArgs = sessionAlive ? ["split-window", "-d", "-P", "-F", "#{pane_id}", "-t", target.sessionName, "-c", target.paneCurrentPath, ...environmentArgs, "bash", "--noprofile", "--norc", "-ic", command] : ["new-session", "-d", "-P", "-F", "#{pane_id}", "-s", target.sessionName, "-c", target.paneCurrentPath, ...environmentArgs, "bash", "--noprofile", "--norc", "-ic", command];
       const created = spawnProcessSync("tmux", ["-S", target.socketPath, ...createArgs], { encoding: "utf8" });
       if (created.status !== 0 || typeof created.stdout !== "string" || !created.stdout.trim()) throw new Error(`\u65E0\u6CD5\u5728 tmux \u4E2D\u521B\u5EFA structured pane${typeof created.stderr === "string" && created.stderr.trim() ? `\uFF1A${created.stderr.trim()}` : ""}`);
       const paneId = created.stdout.trim();
@@ -13027,6 +13100,9 @@ var StructuredAdapter = class {
       return current;
     } catch (error) {
       if (createdPaneId) spawnProcessSync("tmux", ["-S", target.socketPath, "kill-pane", "-t", createdPaneId], { stdio: "ignore" });
+      if (error instanceof Error && /active writer/iu.test(error.message)) {
+        throw new Error("\u8BE5 pane \u91CC\u7684\u666E\u901A Codex \u4ECD\u5728\u5199\u5165\u6B64 thread\uFF08active writer\uFF09\u3002\u4E0D\u80FD\u5E76\u884C\u63A5\u7BA1\uFF1B\u8BF7\u5148\u5728\u539F pane \u9000\u51FA Codex \u4F46\u4FDD\u7559 tmux shell\uFF0C\u518D\u91CD\u8BD5 /tmux bind\u3002Bridge \u4E0D\u4F1A\u81EA\u52A8\u4E2D\u65AD\u5F53\u524D\u4EFB\u52A1\u3002");
+      }
       throw error;
     } finally {
       rpc.close();
@@ -13034,7 +13110,12 @@ var StructuredAdapter = class {
   }
   async resumeLegacyThread(rpc, endpoint, threadId, cwd) {
     try {
-      return { rpc, result: await rpc.request("thread/resume", { threadId, excludeTurns: true, cwd }, LEGACY_RESUME_TIMEOUT_MS) };
+      return { rpc, result: await rpc.request("thread/resume", {
+        threadId,
+        excludeTurns: true,
+        cwd,
+        ...codexThreadPermissionOverrides(this.options.sandbox ?? "danger-full-access")
+      }, LEGACY_RESUME_TIMEOUT_MS) };
     } catch (error) {
       if (!(error instanceof Error) || !/thread\/resume timed out|outcome unknown/iu.test(error.message)) throw error;
       let observer = rpc;
@@ -13262,19 +13343,23 @@ ${prompt}
     if (!scope || !options.cwd) throw new Error("Structured session requires scope and cwd");
     let found = this.sessions.get(scope);
     let binding = this.bindings.get(scope);
-    if (found && !this.autoDiscoveryDisabled.has(scope) && this.id === "codex" && found.main.diagnostics().inputState === "empty" && !found.side) {
+    if (binding && this.id === "codex") {
+      const pane = listStructuredTmuxPanes(binding.target.socketPath).find((item) => item.paneId === binding.target.paneId && item.sessionName === binding.target.sessionName);
+      if (!pane?.structured?.endpoint) {
+        throw new Error("\u7ED1\u5B9A pane \u5F53\u524D\u6CA1\u6709\u53EF\u8FDE\u63A5\u7684 structured Codex\u3002\u53EF\u80FD\u5DF2\u9000\u51FA\u5230 shell\uFF0C\u6216\u542F\u52A8\u4E86\u666E\u901A Codex\uFF1B\u6D88\u606F\u672A\u63D0\u4EA4\u5230\u65E7 thread\u3002\u8BF7\u5728\u8BE5 pane \u6062\u590D\u5171\u4EAB\u8FDE\u63A5\u540E\u91CD\u8BD5\u3002");
+      }
+      binding = { target: pane, endpoint: pane.structured.endpoint, threadId: pane.structured.threadId, cwd: pane.paneCurrentPath, updatedAt: Date.now() };
+      this.bindings.set(scope, binding);
+      await this.saveBindings();
+    }
+    if (!binding && found && !this.autoDiscoveryDisabled.has(scope) && this.id === "codex" && found.main.diagnostics().inputState === "empty" && !found.side) {
       const terminal = found.bound?.target ? { socketPath: found.bound.target.socketPath, target: found.bound.target.sessionName } : found.view.status().terminal;
-      const canInspectCurrentView = !binding || found.bound?.target.sessionName === terminal?.target || binding.target.sessionName === terminal?.target;
-      const pane = canInspectCurrentView && terminal ? activeStructuredTmuxPane(terminal.socketPath, terminal.target) : void 0;
-      if (pane?.structured) {
+      const pane = terminal ? activeStructuredTmuxPane(terminal.socketPath, terminal.target) : void 0;
+      if (pane?.structured?.endpoint) {
         const discovered = { target: pane, endpoint: pane.structured.endpoint, threadId: pane.structured.threadId, cwd: pane.paneCurrentPath, updatedAt: Date.now() };
-        if (!binding || binding.threadId !== discovered.threadId || binding.endpoint !== discovered.endpoint || binding.target.paneId !== discovered.target.paneId) {
-          binding = discovered;
-          this.bindings.set(scope, binding);
-          await this.saveBindings();
-        } else {
-          binding.target = pane;
-        }
+        binding = discovered;
+        this.bindings.set(scope, binding);
+        await this.saveBindings();
       }
     }
     if (binding && resolve4(binding.cwd) !== resolve4(options.cwd)) throw new Error(`tmux pane workspace (${binding.cwd}) \u4E0E\u5F53\u524D workspace (${options.cwd}) \u4E0D\u4E00\u81F4`);
@@ -13289,7 +13374,7 @@ ${prompt}
     if (found) {
       const currentThreadId = found.main instanceof CodexStructuredSession ? found.main.id : void 0;
       const currentEndpoint = found.main instanceof CodexStructuredSession ? found.main.endpoint : void 0;
-      if (found.cwd === options.cwd && (!binding || found.bound?.threadId === binding.threadId || currentThreadId === binding.threadId && currentEndpoint === binding.endpoint)) return found;
+      if (found.cwd === options.cwd && (!binding || currentThreadId === binding.threadId && currentEndpoint === binding.endpoint)) return found;
       if (found.main.diagnostics().inputState === "submitted" || found.side) throw new Error("\u5F53\u524D\u4F1A\u8BDD\u4ECD\u6709\u4EFB\u52A1\u6216 side\uFF0C\u8BF7\u7ED3\u675F\u540E\u518D\u5207\u6362\u5DE5\u4F5C\u76EE\u5F55");
       await found.main.close();
       if (found.main instanceof CodexStructuredSession) found.main.disconnect();
@@ -13318,7 +13403,7 @@ ${prompt}
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
     }
-    if (!saved && options.liveInputMode === "control") throw new Error("\u6CA1\u6709\u53EF\u6062\u590D\u7684\u7ED3\u6784\u5316\u4F1A\u8BDD\uFF1B\u9009\u62E9\u64CD\u4F5C\u672A\u542F\u52A8\u65B0\u4EFB\u52A1");
+    if (!saved && !bound2 && options.liveInputMode === "control") throw new Error("\u6CA1\u6709\u53EF\u6062\u590D\u7684\u7ED3\u6784\u5316\u4F1A\u8BDD\uFF1B\u9009\u62E9\u64CD\u4F5C\u672A\u542F\u52A8\u65B0\u4EFB\u52A1");
     const env = withArtifactDeliveryEnv({ ...process.env, ...buildLarkChannelEnv(this.options.larkChannel) }, options.artifactDelivery);
     let main;
     const view = this.makeView(`${scope}\0${cwd}`);
@@ -13326,7 +13411,7 @@ ${prompt}
       if (this.options.codexHome) env.CODEX_HOME = this.options.codexHome;
       if (!bound2 && !this.autoDiscoveryDisabled.has(scope) && saved?.view?.terminal) {
         const pane = activeStructuredTmuxPane(saved.view.terminal.socketPath, saved.view.terminal.target);
-        if (pane?.structured) {
+        if (pane?.structured?.endpoint) {
           bound2 = { target: pane, endpoint: pane.structured.endpoint, threadId: pane.structured.threadId, cwd: pane.paneCurrentPath, updatedAt: Date.now() };
           this.bindings.set(scope, bound2);
           await this.saveBindings();
@@ -13338,7 +13423,12 @@ ${prompt}
           await rpc2.initialize();
           const loaded = await rpc2.request("thread/loaded/list", {});
           if (!Array.isArray(loaded.data) || !loaded.data.includes(bound2.threadId)) throw new Error("tmux \u5F53\u524D resume \u7684 thread \u4E0D\u5728\u5BF9\u5E94 App Server \u4E2D");
-          const resumed = await rpc2.request("thread/resume", { threadId: bound2.threadId, excludeTurns: true, cwd });
+          const resumed = await rpc2.request("thread/resume", {
+            threadId: bound2.threadId,
+            excludeTurns: true,
+            cwd,
+            ...!options.liveInputMode ? codexThreadPermissionOverrides(options.sandbox ?? this.options.sandbox) : {}
+          });
           if (resumed.thread?.id !== bound2.threadId) throw new Error("App Server \u8FD4\u56DE\u4E86\u4E0D\u540C\u7684 thread");
           const attached = new CodexStructuredSession(bound2.threadId, bound2.endpoint, rpc2);
           await attached.syncState();
@@ -13371,14 +13461,23 @@ ${prompt}
           ...saved ? { threadId: saved.id, excludeTurns: true } : {},
           cwd,
           ...!saved && options.model ? { model: options.model } : {},
-          ...!readOnlyReconnect ? { sandbox: options.sandbox ?? "read-only", approvalPolicy: "on-request" } : {},
+          // Match the terminal backend's profile policy. In particular, a
+          // full-access profile must not silently downgrade structured runs
+          // to read-only/on-request when a new App Server thread is created.
+          ...!readOnlyReconnect ? codexThreadPermissionOverrides(options.sandbox ?? this.options.sandbox ?? "read-only") : {},
           ...!saved && options.reasoningEffort ? { config: { model_reasoning_effort: options.reasoningEffort } } : {}
         });
         const id = result.thread?.id;
         if (typeof id !== "string") throw new Error("Codex did not return a thread ID");
         main = restored ?? new CodexStructuredSession(id, endpoint, rpc);
         await main.syncState();
-        await view.start(this.options.nativeView !== false ? { binary: this.options.binary, endpoint, threadId: id, env } : void 0, cwd);
+        await view.start(this.options.nativeView !== false ? {
+          binary: this.options.binary,
+          endpoint,
+          threadId: id,
+          env,
+          sandbox: options.sandbox ?? this.options.sandbox
+        } : void 0, cwd);
         await writeFileAtomic(stateFile, JSON.stringify({ id, cwd, scope, kind: this.id, endpoint, view: view.status() }));
       } catch (error) {
         await restored?.close();
@@ -13417,11 +13516,189 @@ ${prompt}
   }
 };
 
+// src/agent/structured/preferred.ts
+import { readFileSync as readFileSync5 } from "fs";
+import { join as join24 } from "path";
+import { mkdir as mkdir17 } from "fs/promises";
+var PreferredStructuredAdapter = class {
+  constructor(structured, live, directory) {
+    this.structured = structured;
+    this.live = live;
+    this.directory = directory;
+    this.id = structured.id;
+    this.displayName = `${structured.displayName} (live fallback)`;
+    this.file = join24(directory, "preferred-panes.json");
+    try {
+      const data = JSON.parse(readFileSync5(this.file, "utf8"));
+      if (data.version === 1) for (const [scope, target] of Object.entries(data.targets ?? {})) this.targets.set(scope, target);
+    } catch {
+      try {
+        const old = JSON.parse(readFileSync5(join24(directory, "structured", "tmux-bindings.json"), "utf8"));
+        if (old.version === 1) for (const [scope, binding] of Object.entries(old.bindings ?? {})) {
+          const target = binding.target;
+          if (target?.paneId) this.targets.set(scope, target);
+        }
+      } catch {
+      }
+    }
+    this.tmux = {
+      list: async (socket) => {
+        const protocol = (await this.structured.tmux.list(socket)).filter((pane) => !pane.structured?.persisted && pane.agentKind === this.id);
+        const raw = [...listTmuxAgentPanes(socket).filter((pane) => pane.agentKind === this.id), ...protocol];
+        const merged = /* @__PURE__ */ new Map();
+        for (const pane of raw) merged.set(`${pane.socketPath}::${pane.paneId}`, protocol.find((item) => item.socketPath === pane.socketPath && item.paneId === pane.paneId) ?? pane);
+        return [...merged.values()];
+      },
+      bind: async (scope, selector) => {
+        const socket = selector.includes("::") ? selector.slice(0, selector.lastIndexOf("::")) : void 0;
+        const panes = await this.tmux.list(socket);
+        const pane = /^\d+$/.test(selector) ? panes[Number(selector) - 1] : panes.find((item) => item.paneId === selector || `${item.socketPath}::${item.paneId}` === selector);
+        if (!pane) throw new Error("\u672A\u627E\u5230\u6B63\u5728\u8FD0\u884C\u7684 agent\uFF1B\u8BF7\u5728\u8BE5 pane \u542F\u52A8\u6216 resume \u540E\u91CD\u65B0 /tmux list\u3002");
+        await this.live.tmux.bind(scope, `${pane.socketPath}::${pane.paneId}`);
+        if (pane.structured?.endpoint) await this.structured.tmux.bind(scope, `${pane.socketPath}::${pane.paneId}`);
+        this.targets.set(scope, pane);
+        await this.save();
+        return pane;
+      },
+      unbind: async (scope) => {
+        const removed = this.targets.delete(scope);
+        await this.live.tmux.unbind(scope);
+        await this.structured.tmux.unbind(scope);
+        await this.save();
+        return removed;
+      },
+      status: async (scope, cwd) => {
+        const saved = this.targets.get(scope);
+        if (!saved) return this.structured.tmux.status(scope, cwd);
+        const current = this.current(scope);
+        return current ? { state: "external", target: current, message: current.structured?.endpoint ? "structured" : "live fallback: native process has no shared endpoint" } : { state: "invalid", target: saved, message: "pane \u5DF2\u9000\u51FA agent\uFF1B\u7ED1\u5B9A\u4FDD\u7559\uFF0C\u7B49\u5F85\u624B\u52A8 resume" };
+      },
+      tail: (scope, lines, cwd) => this.selected(scope).tmux.tail(scope, lines, cwd),
+      diagnostics: (scope, cwd) => this.selected(scope).tmux.diagnostics(scope, cwd),
+      sendInput: (scope, input, cwd, active2) => this.selected(scope).tmux.sendInput?.(scope, input, cwd, active2) ?? Promise.resolve(false),
+      interrupt: (scope, cwd, options) => this.selected(scope).tmux.interrupt(scope, cwd, options)
+    };
+  }
+  structured;
+  live;
+  directory;
+  id;
+  displayName;
+  tmux;
+  targets = /* @__PURE__ */ new Map();
+  file;
+  async save() {
+    await mkdir17(this.directory, { recursive: true, mode: 448 });
+    await writeFileAtomic(this.file, JSON.stringify({ version: 1, targets: Object.fromEntries(this.targets) }), { mode: 384 });
+  }
+  current(scope) {
+    const target = this.targets.get(scope);
+    if (!target) return void 0;
+    const raw = listTmuxAgentPanes(target.socketPath).find((pane) => pane.paneId === target.paneId && pane.sessionName === target.sessionName && pane.agentKind === this.id);
+    if (!raw) return void 0;
+    return this.id === "codex" ? listStructuredTmuxPanes(target.socketPath).find((pane) => pane.paneId === raw.paneId) ?? raw : raw;
+  }
+  selected(scope) {
+    if (!this.targets.has(scope)) return this.structured;
+    return this.current(scope)?.structured?.endpoint ? this.structured : this.live;
+  }
+  forScope(scope) {
+    const selected = this.selected(scope);
+    const identity = this.current(scope)?.structured;
+    return {
+      id: this.id,
+      displayName: this.displayName,
+      tmux: this.tmux,
+      isAvailable: () => selected.isAvailable(),
+      prepareRun: (options) => selected.prepareRun?.(options) ?? Promise.resolve(),
+      run: (options) => this.run(options),
+      runSide: (options) => this.runSide(options),
+      ...selected.structuredControl ? {
+        structuredControl: async (scopeId, input) => {
+          const now = this.current(scopeId)?.structured;
+          if (this.targets.has(scopeId) && (!now?.endpoint || now.endpoint !== identity?.endpoint || now.threadId !== identity?.threadId)) {
+            throw new Error("pane \u4E2D\u7684\u4F1A\u8BDD\u5DF2\u7ECF\u6539\u53D8\uFF0C\u65E7\u9009\u62E9\u672A\u53D1\u9001\u3002\u8BF7\u4F7F\u7528\u5F53\u524D\u4F1A\u8BDD\u7684\u65B0\u5361\u7247\u3002");
+          }
+          return selected.structuredControl(scopeId, input);
+        },
+        structuredReady: (scopeId) => selected.structuredReady?.(scopeId) ?? false,
+        structuredQuestion: (scopeId) => selected.structuredQuestion?.(scopeId)
+      } : {}
+    };
+  }
+  isAvailable() {
+    return this.structured.isAvailable();
+  }
+  prepareRun(options) {
+    return this.selected(options.scopeId ?? options.cwd ?? "").prepareRun?.(options) ?? Promise.resolve();
+  }
+  run(options) {
+    return this.submit(options, false);
+  }
+  runSide(options) {
+    return this.submit(options, true);
+  }
+  submit(options, side) {
+    const events = new AsyncEventQueue();
+    let actual;
+    let stopped = false;
+    let detached = false;
+    const operation = (async () => {
+      try {
+        const scope = options.scopeId ?? options.cwd ?? "";
+        const pane = this.current(scope);
+        if (this.targets.has(scope) && !pane) throw new Error("\u7ED1\u5B9A pane \u5F53\u524D\u6CA1\u6709 agent\u3002\u8BF7\u5728\u539F shell \u4E2D\u542F\u52A8\u6216 resume\uFF1B\u6B63\u6587\u5C1A\u672A\u53D1\u9001\u3002");
+        const selected = !this.targets.has(scope) || pane?.structured?.endpoint ? this.structured : this.live;
+        if (pane?.structured?.endpoint) {
+          const status = await this.structured.tmux.status(scope, options.cwd);
+          if (status.target?.structured?.endpoint !== pane.structured.endpoint || status.target?.structured?.threadId !== pane.structured.threadId) {
+            await this.structured.tmux.bind(scope, `${pane.socketPath}::${pane.paneId}`);
+          }
+        } else if (pane) {
+          const status = await this.live.tmux.status(scope, options.cwd);
+          if (status.target?.paneId !== pane.paneId || status.target?.socketPath !== pane.socketPath) {
+            await this.live.tmux.bind(scope, `${pane.socketPath}::${pane.paneId}`);
+          }
+        }
+        if (stopped || detached) return;
+        actual = side ? selected.runSide({ ...options, sessionMode: "live" }) : selected.run({ ...options, sessionMode: "live" });
+        for await (const event of actual.events) if (!detached) events.push(event);
+      } catch (error) {
+        if (!detached) events.push({ type: "error", message: error instanceof Error ? error.message : String(error), terminationReason: "failed" });
+      } finally {
+        events.close();
+      }
+    })();
+    return {
+      runId: options.runId,
+      events,
+      stop: async (opts) => {
+        stopped = true;
+        await actual?.stop(opts);
+      },
+      detach: async () => {
+        detached = true;
+        await actual?.detach?.();
+        events.close();
+      },
+      waitForExit: async (timeout) => {
+        if (actual) return actual.waitForExit(timeout);
+        await operation;
+        return true;
+      }
+    };
+  }
+  async shutdown() {
+    await this.structured.shutdown?.();
+    await this.live.shutdown?.();
+  }
+};
+
 // src/bot/channel.ts
 import { createLarkChannel } from "@larksuite/channel";
 import { createHash as createHash11 } from "crypto";
 import { homedir as homedir8 } from "os";
-import { dirname as dirname20, join as join27 } from "path";
+import { dirname as dirname20, join as join28 } from "path";
 
 // src/agent/bridge-system-prompt.ts
 var BRIDGE_SYSTEM_PROMPT = `# arg-bridge \u8FD0\u884C\u7EA6\u5B9A
@@ -15804,7 +16081,7 @@ function finalizeIfRunning(state) {
 import { createReadStream } from "fs";
 import { readdir as readdir4, stat as stat6 } from "fs/promises";
 import { homedir as homedir6 } from "os";
-import { join as join24 } from "path";
+import { join as join25 } from "path";
 import { createInterface as createInterface5 } from "readline";
 
 // src/session/preview.ts
@@ -15843,7 +16120,7 @@ function encodeCwd(cwd) {
   return cwd.replace(/[^A-Za-z0-9]/g, "-");
 }
 function claudeProjectDir(cwd) {
-  return join24(homedir6(), ".claude", "projects", encodeCwd(cwd));
+  return join25(homedir6(), ".claude", "projects", encodeCwd(cwd));
 }
 async function listRecentSessions(cwd, limit = 5) {
   const dir = claudeProjectDir(cwd);
@@ -15857,7 +16134,7 @@ async function listRecentSessions(cwd, limit = 5) {
   const jsonls = files.filter((f) => f.endsWith(".jsonl"));
   const withStats = await Promise.all(
     jsonls.map(async (f) => {
-      const path = join24(dir, f);
+      const path = join25(dir, f);
       try {
         const st = await stat6(path);
         return { file: f, path, mtime: st.mtimeMs };
@@ -15928,7 +16205,7 @@ function formatRelTime(mtime) {
 
 // src/session/codex-history.ts
 import { createInterface as createInterface6 } from "readline";
-import { join as join25 } from "path";
+import { join as join26 } from "path";
 var CodexHistoryError = class extends Error {
   code;
   constructor(code, message, options) {
@@ -16043,7 +16320,7 @@ function spawnCodexAppServer(options) {
   if (options.codexHome) {
     envOverrides.CODEX_HOME = options.codexHome;
   } else if (options.inheritCodexHome === false) {
-    envOverrides.CODEX_HOME = join25(options.profileStateDir, "codex-home");
+    envOverrides.CODEX_HOME = join26(options.profileStateDir, "codex-home");
   }
   return spawnProcess(options.binary, ["app-server", "--listen", "stdio://"], {
     env: mergeProcessEnv(process.env, envOverrides),
@@ -17222,7 +17499,7 @@ function formatTmuxList(panes) {
     ...panes.flatMap((pane, index) => [
       `${index + 1}. ${pane.agentKind} \`${pane.paneId}\` (${pane.ownership}${pane.structured?.persisted ? "\uFF0C\u5DF2\u4FDD\u5B58\u5019\u9009" : ""})`,
       `   cwd: \`${pane.paneCurrentPath}\``,
-      ...pane.structured ? [`   structured thread: \`${pane.structured.threadId}\``, `   endpoint: \`${pane.structured.endpoint ?? (pane.structured.legacy ? "\u5F85 Bridge \u81EA\u52A8\u8FC1\u79FB" : "native")}\``] : ["   structured: \u672A\u8BC6\u522B\uFF08\u666E\u901A terminal pane\uFF09"],
+      ...pane.structured ? [`   thread: \`${pane.structured.threadId}\``, `   endpoint: \`${pane.structured.endpoint ?? "live \u56DE\u9000\uFF08\u65E0\u5171\u4EAB endpoint\uFF09"}\``] : ["   structured: \u672A\u8BC6\u522B\uFF08\u65E0\u5171\u4EAB\u63A5\u53E3\u65F6\u4F7F\u7528 live \u8F6C\u53D1\uFF09"],
       `   id: \`${tmuxTargetKey(pane)}\``,
       `   attach: \`${pane.attachCommand}\``
     ]),
@@ -17233,6 +17510,8 @@ function formatTmuxList(panes) {
 function formatTmuxStatus(status) {
   if (!status || status.state === "none") return "";
   if (status.state === "invalid") {
+    if (status.message?.includes("\u7ED1\u5B9A\u4FDD\u7559")) return `tmux\uFF1A${status.message}
+\u5728\u539F pane \u624B\u52A8 resume \u540E\u53EF\u7EE7\u7EED\uFF0C\u65E0\u9700\u89E3\u7ED1\u3002`;
     return `tmux \u7ED1\u5B9A\u72B6\u6001\uFF1A\u5931\u6548\uFF08${status.message ?? "\u76EE\u6807\u4E0D\u53EF\u7528"}\uFF09
 \u8BF7\u8FD0\u884C \`/tmux unbind\`\u3002`;
   }
@@ -17247,6 +17526,7 @@ function formatTmuxStatus(status) {
     `tmux \u72B6\u6001\uFF1A${status.state === "external" ? "\u5916\u90E8\u7ED1\u5B9A" : "bridge \u6258\u7BA1"}`,
     `socket\uFF1A\`${terminal.socketPath}\``,
     `target\uFF1A\`${terminal.target}\``,
+    ...status.message ? [`\u8FDE\u63A5\uFF1A${status.message}`] : [],
     `\u76D1\u7763\u547D\u4EE4\uFF1A\`${terminal.attachCommand}\``
   ].join("\n");
 }
@@ -18730,6 +19010,7 @@ async function handleCardAction(deps) {
     });
     return;
   }
+  deps = { ...deps, agent: deps.agent.forScope?.(scope) ?? deps.agent };
   if (LEGACY_CLAUDE_CALLBACK_MARKER in payload) {
     log.info("cardAction", "skip-legacy-callback-marker", { scope });
     return;
@@ -19848,8 +20129,8 @@ function footerLine(status) {
 // src/media/cache.ts
 import { createHash as createHash8 } from "crypto";
 import { createReadStream as createReadStream2 } from "fs";
-import { mkdir as mkdir17, readdir as readdir5, rename as rename4, rm as rm11, stat as stat7 } from "fs/promises";
-import { join as join26 } from "path";
+import { mkdir as mkdir18, readdir as readdir5, rename as rename4, rm as rm11, stat as stat7 } from "fs/promises";
+import { join as join27 } from "path";
 
 // src/media/attachment.ts
 var DEFAULT_POLICY = {
@@ -19955,7 +20236,7 @@ var MediaCache = class {
   }
   async resolve(items, options = {}) {
     if (items.length === 0) return [];
-    await mkdir17(this.rootDir, { recursive: true });
+    await mkdir18(this.rootDir, { recursive: true });
     const candidates = [];
     for (const item of items) {
       try {
@@ -19985,7 +20266,7 @@ var MediaCache = class {
       return null;
     }
     const kind = r.type;
-    const tmpPath = join26(
+    const tmpPath = join27(
       this.rootDir,
       `.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`
     );
@@ -19999,7 +20280,7 @@ var MediaCache = class {
     const hash = await hashFile(tmpPath);
     const mime = contentType ?? defaultMime(kind);
     const ext = safeExtensionForMime(mime);
-    const absPath = join26(this.rootDir, `${hash}.${ext}`);
+    const absPath = join27(this.rootDir, `${hash}.${ext}`);
     try {
       await stat7(absPath);
       await rm11(tmpPath, { force: true });
@@ -20062,7 +20343,7 @@ async function listFiles(root) {
   const out = [];
   const entries = await readdir5(root, { withFileTypes: true }).catch(() => []);
   for (const entry of entries) {
-    const full = join26(root, entry.name);
+    const full = join27(root, entry.name);
     if (entry.isDirectory()) {
       out.push(...await listFiles(full));
     } else if (entry.isFile()) {
@@ -20935,7 +21216,7 @@ var ChatModeCache = class {
 
 // src/bot/comments.ts
 import { randomUUID as randomUUID6 } from "crypto";
-import { mkdir as mkdir18 } from "fs/promises";
+import { mkdir as mkdir19 } from "fs/promises";
 import { dirname as dirname18 } from "path";
 
 // src/bot/run-flow.ts
@@ -21516,7 +21797,7 @@ async function resolveCommentWorkingDirectory(configuredCwd, defaultCwd, managed
 }
 async function resolveManagedCommentWorkingDirectory(managedFallbackCwd, fallbackFrom, fallbackReason, failures) {
   try {
-    await mkdir18(managedFallbackCwd, { recursive: true, mode: 448 });
+    await mkdir19(managedFallbackCwd, { recursive: true, mode: 448 });
   } catch (err) {
     return {
       ok: false,
@@ -22105,7 +22386,7 @@ async function removeReaction(channel, messageId, reactionId) {
 
 // src/bot/artifact-broker.ts
 import { createHash as createHash10, randomBytes as randomBytes5 } from "crypto";
-import { lstat as lstat5, mkdir as mkdir19, readFile as readFile16, realpath as realpath5, rm as rm12 } from "fs/promises";
+import { lstat as lstat5, mkdir as mkdir20, readFile as readFile16, realpath as realpath5, rm as rm12 } from "fs/promises";
 import { createServer } from "net";
 import { basename as basename7, dirname as dirname19, isAbsolute as isAbsolute4, relative as relative2, resolve as resolve5, sep as sep2 } from "path";
 var ArtifactBroker = class {
@@ -22126,7 +22407,7 @@ var ArtifactBroker = class {
   async start() {
     await this.loadPersistentGrants();
     if (process.platform !== "win32") {
-      await mkdir19(dirname19(this.socketPath), { recursive: true });
+      await mkdir20(dirname19(this.socketPath), { recursive: true });
       await rm12(this.socketPath, { force: true }).catch(() => {
       });
     }
@@ -22902,7 +23183,7 @@ function stringifyArgs(args) {
 }
 function expandHomeDirectory(path) {
   if (path === "~") return homedir8();
-  return path.startsWith("~/") ? join27(homedir8(), path.slice(2)) : path;
+  return path.startsWith("~/") ? join28(homedir8(), path.slice(2)) : path;
 }
 async function startChannel(deps) {
   const { cfg, agent, sessions, sessionCatalog, workspaces, controls } = deps;
@@ -22912,10 +23193,10 @@ async function startChannel(deps) {
   const pool = new ProcessPool(() => getMaxConcurrentRuns(controls.cfg));
   const executor = new RunExecutor({ agent, pool, activeRuns });
   const appSecret = await resolveAppSecret(cfg, deps.appPaths);
-  const callbackNonceStore = deps.appPaths?.mediaDir ? new CallbackNonceStore(join27(dirname20(deps.appPaths.mediaDir), "callback-nonces.json")) : void 0;
+  const callbackNonceStore = deps.appPaths?.mediaDir ? new CallbackNonceStore(join28(dirname20(deps.appPaths.mediaDir), "callback-nonces.json")) : void 0;
   await callbackNonceStore?.load();
   const inboundMessages = new InboundMessageLedger(
-    deps.appPaths?.mediaDir ? join27(dirname20(deps.appPaths.mediaDir), "inbound-message-ledger.json") : void 0
+    deps.appPaths?.mediaDir ? join28(dirname20(deps.appPaths.mediaDir), "inbound-message-ledger.json") : void 0
   );
   await inboundMessages.load();
   const callbackAuth = callbackNonceStore ? new CallbackAuth({
@@ -23006,10 +23287,10 @@ async function startChannel(deps) {
   const media = new MediaCache(channel, deps.appPaths?.mediaDir);
   const artifactStateDir = deps.appPaths?.mediaDir ? dirname20(deps.appPaths.mediaDir) : void 0;
   const artifactBroker = new ArtifactBroker(
-    join27(artifactStateDir ?? join27(process.cwd(), ".arg-bridge-media"), "artifact-broker.sock"),
+    join28(artifactStateDir ?? join28(process.cwd(), ".arg-bridge-media"), "artifact-broker.sock"),
     channel,
     allowLocalFileRoot,
-    artifactStateDir ? join27(artifactStateDir, "artifact-grants.json") : void 0
+    artifactStateDir ? join28(artifactStateDir, "artifact-grants.json") : void 0
   );
   await artifactBroker.start();
   if (agent.tmux?.restoreArtifactDelivery) {
@@ -23306,7 +23587,7 @@ async function intakeMessage(deps) {
   const {
     callbackAuth,
     channel,
-    agent,
+    agent: rootAgent,
     sessions,
     sessionCatalog,
     workspaces,
@@ -23353,6 +23634,7 @@ async function intakeMessage(deps) {
     });
   }
   let scope = chatMode === "topic" && threadId ? `${msg.chatId}:${threadId}` : msg.chatId;
+  let agent = rootAgent.forScope?.(scope) ?? rootAgent;
   log.info("intake", "enter", {
     scope,
     chatType: msg.chatType,
@@ -23409,6 +23691,7 @@ async function intakeMessage(deps) {
     if (recovery.scope && recovery.scope !== scope) {
       const requestedScope = scope;
       scope = recovery.scope;
+      agent = rootAgent.forScope?.(scope) ?? rootAgent;
       const recoveredThreadId = threadIdForChatScope(msg.chatId, scope);
       if (!threadId && recoveredThreadId) {
         threadId = recoveredThreadId;
@@ -23450,6 +23733,7 @@ async function intakeMessage(deps) {
     }
     if (recovery.scope && recovery.scope !== scope) {
       scope = recovery.scope;
+      agent = rootAgent.forScope?.(scope) ?? rootAgent;
       const recoveredThreadId = threadIdForChatScope(msg.chatId, scope);
       if (!threadId && recoveredThreadId) {
         threadId = recoveredThreadId;
@@ -26452,7 +26736,7 @@ function isPersistedLiveInteraction(value) {
 
 // src/session/catalog.ts
 import { randomUUID as randomUUID7 } from "crypto";
-import { open as open4, readFile as readFile19, rename as rename5, mkdir as mkdir20 } from "fs/promises";
+import { open as open4, readFile as readFile19, rename as rename5, mkdir as mkdir21 } from "fs/promises";
 import { dirname as dirname21 } from "path";
 var DEFAULT_MAX_ARCHIVED_AGE_MS = 90 * 24 * 60 * 60 * 1e3;
 var DEFAULT_MAX_ENTRIES_PER_SCOPE = 20;
@@ -26575,7 +26859,7 @@ var SessionCatalog = class {
     });
   }
   async persist() {
-    await mkdir20(dirname21(this.path), { recursive: true });
+    await mkdir21(dirname21(this.path), { recursive: true });
     const tmp = `${this.path}.${process.pid}.${Date.now()}.${randomUUID7()}.tmp`;
     const payload = `${JSON.stringify(this.entries(), null, 2)}
 `;
@@ -27011,14 +27295,27 @@ function createRuntimeAgent(profileConfig, appPaths2) {
     ...appPaths2.larkCliSourceConfigFile ? { larkCliSourceConfigFile: appPaths2.larkCliSourceConfigFile } : {}
   } : void 0;
   if (profileConfig.preferences?.agentTransport === "structured") {
-    return new StructuredAdapter({
+    const structured = new StructuredAdapter({
       kind: profileConfig.agentKind,
       binary: profileConfig.agentKind === "codex" ? profileConfig.codex?.binaryPath ?? "codex" : "claude",
       profileDir: appPaths2.profileDir,
       codexHome: profileConfig.codex?.codexHome ?? (profileConfig.codex?.inheritCodexHome === true ? void 0 : `${appPaths2.profileDir}/codex-home`),
       nativeView: profileConfig.preferences.structuredNativeView !== false,
+      sandbox: profileConfig.sandbox.defaultMode,
       larkChannel
     });
+    const live = profileConfig.agentKind === "codex" ? new CodexAdapter({
+      binary: profileConfig.codex?.binaryPath ?? "codex",
+      profileStateDir: appPaths2.profileDir,
+      codexHome: profileConfig.codex?.codexHome,
+      inheritCodexHome: profileConfig.codex?.inheritCodexHome,
+      sandbox: profileConfig.sandbox.defaultMode,
+      sessionMode: "live",
+      liveTerminalBackend: "tmux",
+      allowManagedBinding: true,
+      larkChannel
+    }) : new ClaudeAdapter({ profileStateDir: appPaths2.profileDir, sessionMode: "live", liveTerminalBackend: "tmux", allowManagedBinding: true, larkChannel });
+    return new PreferredStructuredAdapter(structured, live, appPaths2.profileDir);
   }
   if (profileConfig.agentKind === "codex") {
     const codex = profileConfig.codex;
@@ -27202,9 +27499,100 @@ function readTmuxSessionEnvironment(name, env) {
   return line.startsWith(prefix) ? line.slice(prefix.length) || void 0 : void 0;
 }
 
+// src/cli/commands/native.ts
+import { readFile as readFile21, lstat as lstat6 } from "fs/promises";
+import { join as join29 } from "path";
+async function runNative(thread, opts) {
+  const rootPaths = resolveAppPaths();
+  const root = JSON.parse(await readFile21(rootPaths.configFile, "utf8"));
+  const profileName = opts.profile ?? root.activeProfile;
+  const paths2 = resolveAppPaths({ profile: profileName });
+  if (!root.profiles?.[profileName]) throw new Error(`Unknown profile: ${profileName}`);
+  const config = normalizeProfileConfig(root.profiles[profileName]);
+  const env = { ...process.env };
+  const cwd = process.cwd();
+  const sandbox = config.sandbox.defaultMode;
+  if (config.agentKind === "claude") {
+    const child = spawnProcess("claude", [...thread ? ["--resume", thread] : [], ...config.preferences.model ? ["--model", config.preferences.model] : [], ...sandbox === "danger-full-access" ? ["--dangerously-skip-permissions"] : []], { cwd, env, stdio: "inherit" });
+    await waitChild(child);
+    return;
+  }
+  const binary = config.codex?.binaryPath ?? "codex";
+  if (config.codex?.codexHome) env.CODEX_HOME = config.codex.codexHome;
+  if (!env.CODEX_HOME && config.codex?.inheritCodexHome === false) env.CODEX_HOME = `${paths2.profileDir}/codex-home`;
+  if (!thread) {
+    console.log("New native conversation (live fallback); use native <thread-id> to share a saved conversation.");
+    await waitChild(spawnProcess(binary, [...codexRemotePermissionArgs(sandbox)], { cwd, env, stdio: "inherit" }));
+    return;
+  }
+  const existing = thread ? listStructuredTmuxPanes().filter((pane) => pane.structured.threadId === thread && pane.structured.endpoint) : [];
+  const candidates = new Set(existing.map((pane) => pane.structured.endpoint));
+  for (const file of [join29(paths2.profileDir, "structured", "tmux-bindings.json"), join29(paths2.profileDir, "preferred-panes.json")]) {
+    try {
+      const stored = JSON.parse(await readFile21(file, "utf8"));
+      for (const entry of Object.values(stored.bindings ?? stored.targets ?? {})) {
+        const identity = entry.structured ?? entry;
+        if (identity.threadId === thread && identity.endpoint) candidates.add(identity.endpoint);
+      }
+    } catch {
+    }
+  }
+  const endpoints = [];
+  for (const endpoint of candidates) {
+    if (!endpoint.startsWith("unix:///")) continue;
+    let observer;
+    try {
+      const stat8 = await lstat6(endpoint.slice("unix://".length));
+      if (!stat8.isSocket() || process.getuid && stat8.uid !== process.getuid()) continue;
+      observer = await RpcClient.connect(`ws+unix://${endpoint.slice("unix://".length)}:/`);
+      await observer.initialize();
+      const loaded = await observer.request("thread/loaded/list", {});
+      if (loaded.data?.includes(thread)) endpoints.push(endpoint);
+    } catch {
+    } finally {
+      observer?.close();
+    }
+  }
+  if (endpoints.length > 1) throw new Error("Multiple endpoints own this thread; no new writer was started.");
+  const host = endpoints[0] ? { endpoint: endpoints[0], rpc: await RpcClient.connect(`ws+unix://${endpoints[0].slice("unix://".length)}:/`) } : await connectCodexHost({ binary, profileDir: paths2.profileDir, scope: `native:${thread ?? process.env.TMUX_PANE ?? "new"}`, cwd, env });
+  try {
+    if (endpoints[0]) await host.rpc.initialize();
+    const result = await host.rpc.request("thread/resume", {
+      threadId: thread,
+      excludeTurns: true,
+      cwd,
+      ...codexThreadPermissionOverrides(sandbox)
+    }, 18e4);
+    const id = result.thread?.id;
+    if (typeof id !== "string" || thread && id !== thread) throw new Error("Thread identity mismatch; TUI was not started.");
+    console.log(`Shared Codex thread: ${id}`);
+    const child = spawnProcess(binary, ["-c", "check_for_update_on_startup=false", ...codexRemotePermissionArgs(sandbox), "--remote", host.endpoint, "resume", id, "--no-alt-screen"], { cwd, env, stdio: "inherit" });
+    await waitChild(child);
+  } finally {
+    host.rpc.close();
+  }
+}
+async function waitChild(child) {
+  const handle = () => {
+  };
+  process.on("SIGINT", handle);
+  try {
+    await new Promise((resolve6, reject4) => {
+      child.once("error", reject4);
+      child.once("exit", (code) => {
+        process.exitCode = code ?? 0;
+        resolve6();
+      });
+    });
+  } finally {
+    process.off("SIGINT", handle);
+  }
+}
+
 // src/cli/index.ts
 var program = new Command();
 program.name("arg-bridge").description("Bridge Feishu/Lark messenger with local CLI coding agents").version(package_default.version, "-v, --version");
+program.command("native [thread]").description("Open or resume an agent in this shell; Codex shares an App Server with Bridge").option("--profile <name>", "profile whose agent and permissions to use").action(async (thread, opts) => runNative(thread, opts));
 program.command("run").description("Run the bridge in the foreground (was `start` in older versions)").option("-c, --config <path>", "path to config file").option("--profile <name>", "profile name to run").option("--agent <kind>", "agent kind for a new profile (claude or codex)").option("--workspace <path>", "initial working directory for first-run profile bootstrap").option("--app-id <id>", "use an existing Lark/Feishu app instead of QR app creation").option("--app-secret <secret>", "App Secret for --app-id; prefer interactive input on shared machines").option("--tenant <tenant>", "tenant for --app-id (feishu or lark; default feishu)").option("--skip-check-lark-cli", "skip lark-cli pre-flight check (auto-install + bind)").action(async (opts) => {
   await runStart(opts);
 });

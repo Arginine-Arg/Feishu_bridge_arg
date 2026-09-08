@@ -1,6 +1,6 @@
-# Structured backend (v1.5.4)
+# Structured backend (v1.5.5)
 
-Version 1.5.4 is a regular release with an opt-in structured backend. The v1.2.7
+Version 1.5.5 provides an opt-in structured-first backend with native fallback. The v1.2.7
 tag remains available for rollback. It does not automatically change any running
 profile or migrate an existing terminal session. The previously validated
 1.4.0 implementation is retained with the limitations below.
@@ -25,6 +25,14 @@ Do not switch a profile containing a running legacy session: legacy TUI threads
 are not silently imported into a new server. Existing stable terminals remain
 accessible using their original profile and tmux attachment.
 
+For Codex, the profile's `full` access is carried through as App Server
+`sandbox: "danger-full-access"` and `approvalPolicy: "never"` on thread
+creation/resume, and as `sandboxPolicy: { type: "dangerFullAccess" }` on each
+turn. The native tmux TUI receives the matching
+`--dangerously-bypass-approvals-and-sandbox` flag, so the terminal and Feishu
+controls use the same YOLO permission. Lower profile modes remain explicit and
+are never widened.
+
 Codex uses an owner-private Unix socket and the official App Server JSON-RPC
 protocol. The native tmux TUI connects to the same endpoint and thread ID.
 The view does not submit the user task a second time. The server persists
@@ -35,22 +43,32 @@ timeout. Explicit new input waits for the existing observed work to finish.
 
 ### Dynamic tmux panes
 
-For structured Codex, a pane running `codex --remote <endpoint> resume <threadId>`
-is discoverable from its process arguments. A legacy pane running plain
-`codex resume <threadId>` is also listed as an adoptable Codex pane. On
-`/tmux bind`, Bridge starts the App Server itself, first loads and validates the
-legacy thread, and only then creates a remote pane beside the legacy pane. A
-failed validation leaves tmux unchanged; users do not need to copy an endpoint
-or launch App Server manually. `/tmux list` displays
-the discovered identity. Within a Bridge-managed tmux session, the active pane
-is rechecked before an idle turn, so closing one pane and resuming another
-thread in a new pane changes the structured target without starting a second
-model task. `/tmux unbind` persists an opt-out from automatic rediscovery. Once
-a Codex `resume <threadId>` pane has been observed, its candidate is retained
-for 30 days. If the pane exits or becomes a shell, `/tmux list` still shows the
-saved candidate; `/tmux bind` can validate the old thread and recreate the
-structured pane, without creating anything before validation succeeds.
-See the v1.5.0 release notes for the Claude limitation and migration behavior.
+In v1.5.5, `/tmux bind` never migrates a running native writer. It binds the
+selected pane and prefers structured transport when a shared endpoint is
+available. Ordinary Codex and Claude processes are attached through live
+transport. A shared endpoint's submission failure is not retried through live.
+
+To create a shared Codex in your existing shell, run `clash on` if needed, then:
+
+```sh
+arg-bridge native 019f8e13-6f7a-7403-8742-06688b2adf05 --profile codex
+```
+
+Omit the ID for a new native conversation using live fallback (older servers
+cannot share an empty, unmaterialized thread). With an existing ID, the command
+uses structured transport. This command inherits the current environment and
+returns to the same shell when Codex exits. Bind that pane from Feishu with
+`/tmux list` and `/tmux bind <number>`. Manual resume through the same command is
+detected on the next message. The binding follows the exact pane, not another
+pane selected elsewhere in the tmux session. A plain `codex resume` remains
+usable through live fallback. Claude's native entry uses `--profile claude` and
+the optional Claude session ID, and retains native live transport.
+
+An empty shell is not automatically overwritten: run the native command there
+when ready. Proxy environment changes cannot modify an already-running server.
+Use the intended proxy environment before first starting its server. Shared
+thread context does not imply that idle terminal-originated output is always
+pushed unsolicited to Feishu; the Bridge relay forwards its active requests.
 
 Claude uses the official Agent SDK streaming-input mode with one persistent
 Claude process per scope. The default `claude_code` preset and normal user/project

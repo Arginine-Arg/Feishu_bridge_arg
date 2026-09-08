@@ -141,6 +141,7 @@ export class TmuxBindingController {
     private readonly profileStateDir: string,
     private readonly profile: string,
     private readonly agentKind: TmuxAgentKind,
+    private readonly allowManagedBinding = false,
   ) {
     this.file = join(profileStateDir, BINDINGS_FILE);
     this.bindings = loadBindings(this.file);
@@ -163,7 +164,7 @@ export class TmuxBindingController {
     if (!target) {
       throw new Error(`未找到 tmux pane：${selector}。先运行 /tmux list。`);
     }
-    if (target.ownership !== 'external') {
+    if (target.ownership !== 'external' && !this.allowManagedBinding) {
       throw new Error('不能绑定 bridge 托管的 tmux pane。');
     }
     if (target.agentKind !== this.agentKind) {
@@ -203,7 +204,7 @@ export class TmuxBindingController {
     const saved = this.bindings[scopeId];
     if (!saved) return { state: 'none' };
     try {
-      const target = revalidateTmuxTarget(saved, this.agentKind);
+      const target = revalidateTmuxTarget(saved, this.agentKind, this.allowManagedBinding);
       return { state: 'external', target };
     } catch (err) {
       return {
@@ -379,7 +380,7 @@ export class TmuxBindingController {
     if (!saved) return undefined;
     let target: TmuxPaneTarget;
     try {
-      target = revalidateTmuxTarget(saved, this.agentKind);
+      target = revalidateTmuxTarget(saved, this.agentKind, this.allowManagedBinding);
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       throw new Error(`tmux 绑定已失效：${detail}。请运行 /tmux unbind。`);
@@ -748,11 +749,11 @@ function selectTmuxTarget(candidates: TmuxPaneTarget[], selector: string): TmuxP
   return undefined;
 }
 
-function revalidateTmuxTarget(saved: TmuxPaneTarget, expectedAgent: TmuxAgentKind): TmuxPaneTarget {
+function revalidateTmuxTarget(saved: TmuxPaneTarget, expectedAgent: TmuxAgentKind, allowManaged = false): TmuxPaneTarget {
   if (!isSafeTmuxSocket(saved.socketPath)) throw new Error('socket 不存在或不安全');
   const current = listPanesOnSocket(saved.socketPath).find((item) => item.paneId === saved.paneId);
   if (!current) throw new Error(`pane ${saved.paneId} 不存在`);
-  if (current.ownership !== 'external') throw new Error('目标现在是 bridge 托管 pane');
+  if (current.ownership !== 'external' && !allowManaged) throw new Error('目标现在是 bridge 托管 pane');
   if (current.agentKind !== expectedAgent) {
     throw new Error(`目标 agent 已变为 ${current.agentKind}`);
   }

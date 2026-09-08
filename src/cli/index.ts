@@ -25,6 +25,7 @@ import {
 } from './commands/service';
 import { runStart } from './commands/start';
 import { runAgentSendFile } from './commands/agent-sendfile';
+import { runNative } from './commands/native';
 
 const program = new Command();
 
@@ -34,6 +35,11 @@ program
   .version(pkg.version, '-v, --version');
 
 // === process-level commands (work directly on bridge processes) ===
+
+program.command('native [thread]')
+  .description('Open or resume an agent in this shell; Codex shares an App Server with Bridge')
+  .option('--profile <name>', 'profile whose agent and permissions to use')
+  .action(async (thread: string | undefined, opts: { profile?: string }) => runNative(thread, opts));
 
 program
   .command('run')

@@ -19,8 +19,14 @@ import { textEvent } from './contracts';
 import { StructuredView } from './view';
 import { RpcClient, type Wire } from './rpc';
 import type { TmuxBindingStatus } from '../tmux-control';
-import { activeStructuredTmuxPane, listStructuredTmuxPanes } from './tmux-discovery';
+import { activeStructuredTmuxPane, listStructuredTmuxPanes, processEnvironmentForPidTree } from './tmux-discovery';
 import { spawnProcessSync } from '../../platform/spawn';
+import type { CodexSandboxMode } from '../../config/permissions';
+import {
+  codexRemotePermissionArgs,
+  codexThreadPermissionOverrides,
+  proxyEnvironment,
+} from './permissions';
 
 const shellQuote = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`;
 const LEGACY_RESUME_TIMEOUT_MS = 180_000;
@@ -34,7 +40,7 @@ interface StructuredCandidate extends StructuredBinding { savedAt: number }
 interface ScopeSession { main: StructuredSession; view: StructuredView; bound?: StructuredBinding; side?: CodexStructuredSession; sideOpening?: Promise<CodexStructuredSession>; sideExit?: Promise<void>; sideClosing?: boolean; sideView?: StructuredView; cwd: string }
 export interface StructuredAdapterOptions {
   kind: 'codex' | 'claude'; binary: string; profileDir: string; codexHome?: string;
-  larkChannel?: LarkChannelEnvContext; nativeView?: boolean;
+  larkChannel?: LarkChannelEnvContext; nativeView?: boolean; sandbox?: CodexSandboxMode;
 }
 
 export class StructuredAdapter implements AgentAdapter {
@@ -210,7 +216,15 @@ export class StructuredAdapter implements AgentAdapter {
   }
   private async adoptLegacyPane(scope: string, target: TmuxPaneTarget & { structured?: { threadId: string; legacy?: boolean; codexHome?: string } }): Promise<TmuxPaneTarget> {
     if (this.id !== 'codex' || !target.structured?.threadId) throw new Error('只有 Codex legacy resume pane 可以自动迁移');
-    const env = { ...process.env };
+    if (listTmuxAgentPanes(target.socketPath).some(pane => pane.paneId === target.paneId)) {
+      throw new Error('当前 pane 仍有 agent 进程。普通 Codex 未暴露共享 endpoint，不能启动第二个 writer。请保留 shell；此操作没有启动或中断任务。');
+    }
+    // A legacy pane may have been prepared with `clash on`.  Its pane root is
+    // normally the shell that launched Codex, so copy only proxy variables to
+    // the App Server and the replacement remote TUI.  Arbitrary environment
+    // values are intentionally excluded because they may contain credentials.
+    const inheritedProxy = proxyEnvironment(processEnvironmentForPidTree(target.panePid));
+    const env = { ...process.env, ...inheritedProxy };
     const codexHome = target.structured.codexHome ?? this.options.codexHome;
     if (codexHome) env.CODEX_HOME = codexHome;
     else if (this.options.codexHome) env.CODEX_HOME = this.options.codexHome;
@@ -226,12 +240,14 @@ export class StructuredAdapter implements AgentAdapter {
       const command = [
         ...(codexHome ? ['env', 'CODEX_HOME=' + shellQuote(codexHome)] : []),
         shellQuote(this.options.binary), '-c', shellQuote('check_for_update_on_startup=false'),
+        ...codexRemotePermissionArgs(this.options.sandbox ?? 'danger-full-access').map(shellQuote),
         shellQuote('--remote'), shellQuote(endpoint), shellQuote('resume'), shellQuote(target.structured.threadId), shellQuote('--no-alt-screen'),
-      ].join(' ');
+      ].join(' ') + '; bridge_status=$?; trap - INT; printf "\\n[Codex exited (%s); shell remains]\\n" "$bridge_status"; exec "${SHELL:-/bin/bash}" -i';
+      const environmentArgs = Object.entries(inheritedProxy).flatMap(([key, value]) => ['-e', `${key}=${value}`]);
       const sessionAlive = spawnProcessSync('tmux', ['-S', target.socketPath, 'has-session', '-t', target.sessionName], { stdio: 'ignore' }).status === 0;
       const createArgs = sessionAlive
-        ? ['split-window', '-d', '-P', '-F', '#{pane_id}', '-t', target.sessionName, '-c', target.paneCurrentPath, command]
-        : ['new-session', '-d', '-P', '-F', '#{pane_id}', '-s', target.sessionName, '-c', target.paneCurrentPath, command];
+        ? ['split-window', '-d', '-P', '-F', '#{pane_id}', '-t', target.sessionName, '-c', target.paneCurrentPath, ...environmentArgs, 'bash', '--noprofile', '--norc', '-ic', command]
+        : ['new-session', '-d', '-P', '-F', '#{pane_id}', '-s', target.sessionName, '-c', target.paneCurrentPath, ...environmentArgs, 'bash', '--noprofile', '--norc', '-ic', command];
       const created = spawnProcessSync('tmux', ['-S', target.socketPath, ...createArgs], { encoding: 'utf8' });
       if (created.status !== 0 || typeof created.stdout !== 'string' || !created.stdout.trim()) throw new Error(`无法在 tmux 中创建 structured pane${typeof created.stderr === 'string' && created.stderr.trim() ? `：${created.stderr.trim()}` : ''}`);
       const paneId = created.stdout.trim();
@@ -252,12 +268,18 @@ export class StructuredAdapter implements AgentAdapter {
       return current;
     } catch (error) {
       if (createdPaneId) spawnProcessSync('tmux', ['-S', target.socketPath, 'kill-pane', '-t', createdPaneId], { stdio: 'ignore' });
+      if (error instanceof Error && /active writer/iu.test(error.message)) {
+        throw new Error('该 pane 里的普通 Codex 仍在写入此 thread（active writer）。不能并行接管；请先在原 pane 退出 Codex 但保留 tmux shell，再重试 /tmux bind。Bridge 不会自动中断当前任务。');
+      }
       throw error;
     } finally { rpc.close(); }
   }
   private async resumeLegacyThread(rpc: RpcClient, endpoint: string, threadId: string, cwd: string): Promise<{ rpc: RpcClient; result: Wire }> {
     try {
-      return { rpc, result: await rpc.request('thread/resume', { threadId, excludeTurns: true, cwd }, LEGACY_RESUME_TIMEOUT_MS) };
+      return { rpc, result: await rpc.request('thread/resume', {
+        threadId, excludeTurns: true, cwd,
+        ...codexThreadPermissionOverrides(this.options.sandbox ?? 'danger-full-access'),
+      }, LEGACY_RESUME_TIMEOUT_MS) };
     } catch (error) {
       if (!(error instanceof Error) || !/thread\/resume timed out|outcome unknown/iu.test(error.message)) throw error;
       // A timed-out mutation is never retried. Probe read-only state until the
@@ -435,24 +457,29 @@ export class StructuredAdapter implements AgentAdapter {
     if (!scope || !options.cwd) throw new Error('Structured session requires scope and cwd');
     let found = this.sessions.get(scope);
     let binding = this.bindings.get(scope);
-    if (found && !this.autoDiscoveryDisabled.has(scope) && this.id === 'codex' && found.main.diagnostics().inputState === 'empty' && !found.side) {
+    if (binding && this.id === 'codex') {
+      const pane = listStructuredTmuxPanes(binding.target.socketPath).find(item =>
+        item.paneId === binding!.target.paneId && item.sessionName === binding!.target.sessionName);
+      if (!pane?.structured?.endpoint) {
+        throw new Error('绑定 pane 当前没有可连接的 structured Codex。可能已退出到 shell，或启动了普通 Codex；消息未提交到旧 thread。请在该 pane 恢复共享连接后重试。');
+      }
+      binding = { target: pane, endpoint: pane.structured.endpoint, threadId: pane.structured.threadId, cwd: pane.paneCurrentPath, updatedAt: Date.now() };
+      this.bindings.set(scope, binding);
+      await this.saveBindings();
+    }
+    if (!binding && found && !this.autoDiscoveryDisabled.has(scope) && this.id === 'codex' && found.main.diagnostics().inputState === 'empty' && !found.side) {
       const terminal = found.bound?.target
         ? { socketPath: found.bound.target.socketPath, target: found.bound.target.sessionName }
         : found.view.status().terminal;
       // An explicit binding to a different tmux session must not be replaced
       // by the old managed view's active pane. Auto-discovery is limited to
       // the session that owns the current structured view.
-      const canInspectCurrentView = !binding || found.bound?.target.sessionName === terminal?.target || binding.target.sessionName === terminal?.target;
-      const pane = canInspectCurrentView && terminal ? activeStructuredTmuxPane(terminal.socketPath, terminal.target) : undefined;
-      if (pane?.structured) {
+      const pane = terminal ? activeStructuredTmuxPane(terminal.socketPath, terminal.target) : undefined;
+      if (pane?.structured?.endpoint) {
         const discovered = { target: pane, endpoint: pane.structured.endpoint!, threadId: pane.structured.threadId, cwd: pane.paneCurrentPath, updatedAt: Date.now() };
-        if (!binding || binding.threadId !== discovered.threadId || binding.endpoint !== discovered.endpoint || binding.target.paneId !== discovered.target.paneId) {
-          binding = discovered;
-          this.bindings.set(scope, binding);
-          await this.saveBindings();
-        } else {
-          binding.target = pane;
-        }
+        binding = discovered;
+        this.bindings.set(scope, binding);
+        await this.saveBindings();
       }
     }
     if (binding && resolve(binding.cwd) !== resolve(options.cwd)) throw new Error(`tmux pane workspace (${binding.cwd}) 与当前 workspace (${options.cwd}) 不一致`);
@@ -467,7 +494,7 @@ export class StructuredAdapter implements AgentAdapter {
     if (found) {
       const currentThreadId = found.main instanceof CodexStructuredSession ? found.main.id : undefined;
       const currentEndpoint = found.main instanceof CodexStructuredSession ? found.main.endpoint : undefined;
-      if (found.cwd === options.cwd && (!binding || found.bound?.threadId === binding.threadId || (currentThreadId === binding.threadId && currentEndpoint === binding.endpoint))) return found;
+      if (found.cwd === options.cwd && (!binding || (currentThreadId === binding.threadId && currentEndpoint === binding.endpoint))) return found;
       if (found.main.diagnostics().inputState === 'submitted' || found.side) throw new Error('当前会话仍有任务或 side，请结束后再切换工作目录');
       await found.main.close();
       if (found.main instanceof CodexStructuredSession) found.main.disconnect();
@@ -487,7 +514,7 @@ export class StructuredAdapter implements AgentAdapter {
     const stateFile = this.stateFile(scope, cwd);
     let saved: { id: string; endpoint?: string; view?: TmuxBindingStatus } | undefined;
     try { saved = JSON.parse(await readFile(stateFile, 'utf8')); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-    if (!saved && options.liveInputMode === 'control') throw new Error('没有可恢复的结构化会话；选择操作未启动新任务');
+    if (!saved && !bound && options.liveInputMode === 'control') throw new Error('没有可恢复的结构化会话；选择操作未启动新任务');
     const env = withArtifactDeliveryEnv({ ...process.env, ...buildLarkChannelEnv(this.options.larkChannel) }, options.artifactDelivery);
     let main: StructuredSession;
     const view = this.makeView(`${scope}\0${cwd}`);
@@ -495,7 +522,7 @@ export class StructuredAdapter implements AgentAdapter {
       if (this.options.codexHome) env.CODEX_HOME = this.options.codexHome;
       if (!bound && !this.autoDiscoveryDisabled.has(scope) && saved?.view?.terminal) {
         const pane = activeStructuredTmuxPane(saved.view.terminal.socketPath, saved.view.terminal.target);
-        if (pane?.structured) {
+        if (pane?.structured?.endpoint) {
           bound = { target: pane, endpoint: pane.structured.endpoint!, threadId: pane.structured.threadId, cwd: pane.paneCurrentPath, updatedAt: Date.now() };
           this.bindings.set(scope, bound);
           await this.saveBindings();
@@ -507,7 +534,12 @@ export class StructuredAdapter implements AgentAdapter {
           await rpc.initialize();
           const loaded = await rpc.request('thread/loaded/list', {});
           if (!Array.isArray(loaded.data) || !loaded.data.includes(bound.threadId)) throw new Error('tmux 当前 resume 的 thread 不在对应 App Server 中');
-          const resumed = await rpc.request('thread/resume', { threadId: bound.threadId, excludeTurns: true, cwd });
+          const resumed = await rpc.request('thread/resume', {
+            threadId: bound.threadId,
+            excludeTurns: true,
+            cwd,
+            ...(!options.liveInputMode ? codexThreadPermissionOverrides(options.sandbox ?? this.options.sandbox) : {}),
+          });
           if (resumed.thread?.id !== bound.threadId) throw new Error('App Server 返回了不同的 thread');
           const attached = new CodexStructuredSession(bound.threadId, bound.endpoint, rpc);
           await attached.syncState();
@@ -532,14 +564,24 @@ export class StructuredAdapter implements AgentAdapter {
       try {
         const result = await rpc.request(saved ? 'thread/resume' : 'thread/start', {
           ...(saved ? { threadId: saved.id, excludeTurns: true } : {}), cwd,
-          ...(!saved && options.model ? { model: options.model } : {}), ...(!readOnlyReconnect ? { sandbox: options.sandbox ?? 'read-only', approvalPolicy: 'on-request' } : {}),
+          ...(!saved && options.model ? { model: options.model } : {}),
+          // Match the terminal backend's profile policy. In particular, a
+          // full-access profile must not silently downgrade structured runs
+          // to read-only/on-request when a new App Server thread is created.
+          ...(!readOnlyReconnect ? codexThreadPermissionOverrides(options.sandbox ?? this.options.sandbox ?? 'read-only') : {}),
           ...(!saved && options.reasoningEffort ? { config: { model_reasoning_effort: options.reasoningEffort } } : {}),
         });
         const id = result.thread?.id;
         if (typeof id !== 'string') throw new Error('Codex did not return a thread ID');
         main = restored ?? new CodexStructuredSession(id, endpoint, rpc);
         await (main as CodexStructuredSession).syncState();
-        await view.start(this.options.nativeView !== false ? { binary: this.options.binary, endpoint, threadId: id, env } : undefined, cwd);
+        await view.start(this.options.nativeView !== false ? {
+          binary: this.options.binary,
+          endpoint,
+          threadId: id,
+          env,
+          sandbox: options.sandbox ?? this.options.sandbox,
+        } : undefined, cwd);
         await writeFileAtomic(stateFile, JSON.stringify({ id, cwd, scope, kind: this.id, endpoint, view: view.status() }));
       } catch (error) { await restored?.close(); rpc.close(); throw error; }
     } else {

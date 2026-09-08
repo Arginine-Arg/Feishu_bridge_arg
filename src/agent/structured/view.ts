@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import { spawnProcessSync } from '../../platform/spawn';
 import type { AgentEvent } from '../types';
 import type { TmuxBindingStatus } from '../tmux-control';
+import { codexRemotePermissionArgs, proxyEnvironment } from './permissions';
+import type { CodexSandboxMode } from '../../config/permissions';
 
 const quote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
 
@@ -12,10 +14,10 @@ export class StructuredView {
   private tail: Promise<void> = Promise.resolve();
   private statusValue: TmuxBindingStatus = { state: 'none' };
   private logPath = '';
-  private nativeSpec?: { binary: string; endpoint: string; threadId: string; env?: NodeJS.ProcessEnv };
+  private nativeSpec?: { binary: string; endpoint: string; threadId: string; env?: NodeJS.ProcessEnv; sandbox?: CodexSandboxMode };
   private nativeCwd?: string;
   constructor(private readonly directory: string, private readonly key: string) {}
-  async start(native?: { binary: string; endpoint: string; threadId: string; env?: NodeJS.ProcessEnv }, cwd?: string): Promise<void> {
+  async start(native?: { binary: string; endpoint: string; threadId: string; env?: NodeJS.ProcessEnv; sandbox?: CodexSandboxMode }, cwd?: string): Promise<void> {
     if (native) this.nativeSpec = native;
     if (cwd) this.nativeCwd = cwd;
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
@@ -37,10 +39,12 @@ export class StructuredView {
     }
     const sessionExists = spawnProcessSync('tmux', ['-S', socket, 'has-session', '-t', name], { stdio: 'ignore' });
     if (sessionExists.status !== 0) {
+      const inheritedProxy = proxyEnvironment(native?.env ?? process.env);
       const command = native
-        ? [native.binary, '-c', 'check_for_update_on_startup=false', '--remote', native.endpoint, 'resume', native.threadId, '--no-alt-screen'].map(quote).join(' ')
+        ? [native.binary, '-c', 'check_for_update_on_startup=false', ...codexRemotePermissionArgs(native.sandbox), '--remote', native.endpoint, 'resume', native.threadId, '--no-alt-screen'].map(quote).join(' ') + '; bridge_status=$?; trap - INT; printf "\\n[Codex exited (%s); shell remains]\\n" "$bridge_status"; exec "${SHELL:-/bin/bash}" -i'
         : `tail -n 200 -F ${quote(this.logPath)}`;
-      const created = spawnProcessSync('tmux', ['-S', socket, '-f', '/dev/null', 'new-session', '-d', '-s', name, '-x', '120', '-y', '40', '-c', cwd ?? this.directory, command], { encoding: 'utf8', env: native?.env ?? process.env });
+      const environmentArgs = Object.entries(inheritedProxy).flatMap(([key, value]) => ['-e', `${key}=${value}`]);
+      const created = spawnProcessSync('tmux', ['-S', socket, '-f', '/dev/null', 'new-session', '-d', '-s', name, '-x', '120', '-y', '40', '-c', cwd ?? this.directory, ...environmentArgs, 'bash', '--noprofile', '--norc', '-ic', command], { encoding: 'utf8', env: native?.env ?? process.env });
       if (created.status !== 0) return;
       spawnProcessSync('tmux', ['-S', socket, 'set-option', '-t', name, 'remain-on-exit', 'on'], { stdio: 'ignore' });
     }

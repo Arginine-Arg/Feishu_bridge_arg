@@ -99,6 +99,8 @@ export async function handleCardAction(deps: CardDispatchDeps): Promise<CardActi
     return;
   }
 
+  deps = { ...deps, agent: deps.agent.forScope?.(scope) ?? deps.agent };
+
   if (LEGACY_CLAUDE_CALLBACK_MARKER in payload) {
     log.info('cardAction', 'skip-legacy-callback-marker', { scope });
     return;
