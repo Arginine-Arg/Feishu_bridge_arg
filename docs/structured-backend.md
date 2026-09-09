@@ -1,6 +1,6 @@
-# Structured backend (v1.5.7)
+# Structured backend (v1.5.8)
 
-Version 1.5.7 provides an opt-in structured-first backend with native fallback. The v1.2.7
+Version 1.5.8 provides an opt-in structured-first backend with native fallback. The v1.2.7
 tag remains available for rollback. It does not automatically change any running
 profile or migrate an existing terminal session. The previously validated
 1.4.0 implementation is retained with the limitations below.
