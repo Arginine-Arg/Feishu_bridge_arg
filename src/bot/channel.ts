@@ -454,9 +454,10 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
           const runStopGenerationTarget =
             runInputMode === 'side' || runInputMode === 'side-exit' ? 'side' : 'main';
           const runStopGeneration = activeRuns.currentStopGeneration(scope, runStopGenerationTarget);
+          const scopedAgent = agent.forScope?.(scope) ?? agent;
           await runAgentBatch({
             channel,
-            agent,
+            agent: scopedAgent,
             activeRuns,
             executor,
             bridgeAgent,

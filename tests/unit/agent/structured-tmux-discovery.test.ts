@@ -29,7 +29,8 @@ describe('structured tmux process discovery', () => {
     expect(parseStructuredAgentArgv(['codex-helper', 'resume', 'thread-1'], 'codex')).toBeUndefined();
     expect(parseStructuredAgentArgv(['codex', '--remote', 'unix:///tmp/codex.sock', 'resume'], 'codex')).toBeUndefined();
     expect(parseStructuredAgentArgv(['codex', 'resume', '-m', 'gpt-5.6-luna'], 'codex')).toBeUndefined();
-    expect(parseStructuredAgentArgv(['bash', '-c', 'codex', '--remote', 'unix:///old.sock', 'resume', 'old'], 'codex')).toBeUndefined();
+    expect(parseStructuredAgentArgv(['bash', '-c', 'codex'], 'codex')).toBeUndefined();
+    expect(parseStructuredAgentArgv(['bash', '-lc', 'codex', '--remote', 'unix:///current.sock', 'resume', 'new'], 'codex')).toEqual({ endpoint: 'unix:///current.sock', threadId: 'new' });
     expect(parseStructuredAgentArgv(['node', '/usr/bin/codex', '--remote', 'unix:///current.sock', 'resume', 'new'], 'codex')).toEqual({ endpoint: 'unix:///current.sock', threadId: 'new' });
   });
 

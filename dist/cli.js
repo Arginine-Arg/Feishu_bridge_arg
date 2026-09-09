@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.5.6",
+  version: "1.5.7",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -36,6 +36,7 @@ var package_default = {
     "skills",
     "README.md",
     "README.zh.md",
+    "scripts/sync_parquet.sh",
     "docs/structured-backend.md",
     "THIRD_PARTY_CODEX_NOTICE",
     "LICENSE"
@@ -12748,9 +12749,16 @@ import { basename as basename5 } from "path";
 import { readFileSync as readFileSync3 } from "fs";
 function listStructuredTmuxPanes(socket) {
   return listTmuxAgentPanes(socket).flatMap((pane) => {
-    const identities = processArgvTree(pane.panePid).map((argv) => parseStructuredAgentArgv(argv, pane.agentKind)).filter((identity2) => Boolean(identity2));
+    const processArgs = processArgvTree(pane.panePid);
+    const identities = [
+      ...processArgs,
+      ...pane.paneStartCommand ? [shellWords(pane.paneStartCommand)] : []
+    ].map((argv) => parseStructuredAgentArgv(argv, pane.agentKind)).filter((identity2) => Boolean(identity2));
     const unique = new Map(identities.map((identity2) => [JSON.stringify(identity2), identity2]));
-    const identity = unique.size === 1 ? [...unique.values()][0] : void 0;
+    const remote = new Map(
+      identities.filter((identity2) => identity2.endpoint).map((identity2) => [JSON.stringify(identity2), identity2])
+    );
+    const identity = unique.size === 1 ? [...unique.values()][0] : remote.size === 1 ? [...remote.values()][0] : void 0;
     if (!identity) return [];
     const codexHome = pane.agentKind === "codex" ? processEnvironmentForPidTree(pane.panePid).CODEX_HOME : void 0;
     return [{ ...pane, structured: { ...identity, ...codexHome ? { codexHome } : {} } }];
@@ -12768,12 +12776,12 @@ function activeStructuredTmuxPane(socket, sessionName) {
 }
 function parseStructuredAgentArgv(argv, kind) {
   const normalized = argv.map((item) => item.trim()).filter(Boolean);
-  const hasAgent = normalized.slice(0, 2).some((item) => {
+  const agentIndex = normalized.findIndex((item) => {
     const name = basename5(item).replace(/\.(?:cmd|exe)$/iu, "").toLowerCase();
     return name === kind;
   });
-  if (!hasAgent) return void 0;
-  const resumeIndex = normalized.findIndex((item) => item === "resume" || item === "--resume");
+  if (agentIndex < 0) return void 0;
+  const resumeIndex = normalized.findIndex((item, index) => index > agentIndex && (item === "resume" || item === "--resume"));
   if (resumeIndex < 0 || !normalized[resumeIndex + 1]) return void 0;
   const threadId = normalized[resumeIndex + 1];
   if (threadId.startsWith("-")) return void 0;
@@ -12781,6 +12789,9 @@ function parseStructuredAgentArgv(argv, kind) {
   const endpoint = remoteIndex >= 0 ? normalized[remoteIndex].slice("--remote=".length) || normalized[remoteIndex + 1] : void 0;
   if (kind === "codex" && !endpoint) return { threadId, legacy: true };
   return { ...endpoint ? { endpoint } : {}, threadId };
+}
+function shellWords(value) {
+  return value.split(/\s+/u).map((item) => item.replace(/^['"]|['"]$/gu, "")).filter(Boolean);
 }
 function processEnvironmentForPidTree(rootPid) {
   if (process.platform !== "linux") return {};
@@ -12841,9 +12852,9 @@ function processArgvTree(rootPid) {
   return [...ids].flatMap((pid) => {
     if (process.platform === "linux") {
       try {
-        return [readFileSync3(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean)];
+        const argv = readFileSync3(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
+        if (argv.length) return [argv];
       } catch {
-        return [];
       }
     }
     const args = rows.get(pid)?.args;
@@ -17386,7 +17397,7 @@ async function handleTmux(args, ctx) {
         await reply(ctx, "\u6CA1\u6709\u53D1\u73B0\u6B63\u5728\u8FD0\u884C\u7684 Codex/Claude tmux pane\u3002\u666E\u901A shell \u4E0D\u4F1A\u5217\u51FA\u3002");
         return;
       }
-      await reply(ctx, formatTmuxList(panes));
+      await reply(ctx, formatTmuxList(panes, ctx.controls.profile));
       return;
     }
     if (action === "bind") {
@@ -17401,13 +17412,18 @@ async function handleTmux(args, ctx) {
       const target = await tmux.bind(ctx.scope, value);
       ctx.workspaces.setCwd(ctx.scope, target.paneCurrentPath);
       ctx.sessions.clear(ctx.scope);
+      const structured = target.structured;
+      const structuredCommand = structured?.threadId && target.agentKind === "codex" ? buildStructuredPaneCommand(target, ctx.controls.profile) : void 0;
+      const connection = structured?.endpoint ? "structured\uFF08\u5171\u4EAB App Server\uFF09" : "live fallback\uFF08\u5F53\u524D pane \u6CA1\u6709\u5171\u4EAB endpoint\uFF09";
       await reply(
         ctx,
         [
           `\u5DF2\u7ED1\u5B9A ${target.agentKind} pane \`${target.paneId}\`\u3002`,
+          `\u8F6C\u53D1\u65B9\u5F0F\uFF1A${connection}`,
           `cwd\uFF1A\`${target.paneCurrentPath}\``,
           `socket\uFF1A\`${target.socketPath}\``,
           `\u76D1\u7763\u547D\u4EE4\uFF1A\`${target.attachCommand}\``,
+          ...structuredCommand && !structured?.endpoint ? ["", "\u5982\u679C\u8981\u5207\u6362\u4E3A structured\uFF0C\u8BF7\u5148\u5728\u8FD9\u4E2A pane \u9000\u51FA\u666E\u901A Codex\u3001\u4FDD\u7559 shell\uFF0C\u7136\u540E\u6267\u884C\uFF1A", fencedCodeBlock(structuredCommand), "\u6267\u884C\u540E\u91CD\u65B0\u53D1\u9001 `/tmux list`\uFF0C\u518D\u7ED1\u5B9A\u663E\u793A endpoint \u7684\u540C\u4E00 pane\u3002"] : [],
           "",
           "bridge \u53EA\u8FDE\u63A5\u8BE5 pane\uFF0C\u4E0D\u4F1A\u5728 `/stop`\u3001\u89E3\u7ED1\u3001\u91CD\u542F\u6216\u9000\u51FA\u65F6\u5220\u9664\u5B83\u3002"
         ].join("\n")
@@ -17497,20 +17513,36 @@ function parseTmuxSocketArgument(parts) {
   if (parts.length === 2 && parts[0] === "-S") return isAbsolute3(parts[1]) ? parts[1] : null;
   return null;
 }
-function formatTmuxList(panes) {
+function formatTmuxList(panes, profile2 = "codex") {
   return [
     "\u53EF\u7ED1\u5B9A\u7684\u672C\u673A tmux agent panes\uFF1A",
     "",
     ...panes.flatMap((pane, index) => [
       `${index + 1}. ${pane.agentKind} \`${pane.paneId}\` (${pane.ownership}${pane.structured?.persisted ? "\uFF0C\u5DF2\u4FDD\u5B58\u5019\u9009" : ""})`,
       `   cwd: \`${pane.paneCurrentPath}\``,
-      ...pane.structured ? [`   thread: \`${pane.structured.threadId}\``, `   endpoint: \`${pane.structured.endpoint ?? "live \u56DE\u9000\uFF08\u65E0\u5171\u4EAB endpoint\uFF09"}\``] : ["   structured: \u672A\u8BC6\u522B\uFF08\u65E0\u5171\u4EAB\u63A5\u53E3\u65F6\u4F7F\u7528 live \u8F6C\u53D1\uFF09"],
+      ...pane.structured ? [
+        `   thread: \`${pane.structured.threadId}\``,
+        `   endpoint: \`${pane.structured.endpoint ?? "live \u56DE\u9000\uFF08\u65E0\u5171\u4EAB endpoint\uFF09"}\``,
+        ...!pane.structured.endpoint && pane.agentKind === "codex" ? ["   structured \u547D\u4EE4\uFF1A", fencedCodeBlock(buildStructuredPaneCommand(pane, profile2))] : []
+      ] : ["   structured: \u672A\u8BC6\u522B\uFF08\u65E0\u5171\u4EAB\u63A5\u53E3\u65F6\u4F7F\u7528 live \u8F6C\u53D1\uFF09"],
       `   id: \`${tmuxTargetKey(pane)}\``,
       `   attach: \`${pane.attachCommand}\``
     ]),
     "",
     "\u4F7F\u7528 `/tmux bind <\u7F16\u53F7>` \u7ED1\u5B9A\u5F53\u524D scope\u3002\u7F16\u53F7\u6309\u672C\u6B21\u5217\u8868\u8BA1\u7B97\u3002"
   ].join("\n");
+}
+function buildStructuredPaneCommand(pane, profile2) {
+  const threadId = pane.structured?.threadId;
+  if (!threadId || pane.agentKind !== "codex") return "";
+  return [
+    `cd ${shellQuoteForCommand(pane.paneCurrentPath)}`,
+    "clash on",
+    `arg-bridge native ${shellQuoteForCommand(threadId)} --profile ${shellQuoteForCommand(profile2)}`
+  ].join("\n");
+}
+function shellQuoteForCommand(value) {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 function formatTmuxStatus(status) {
   if (!status || status.state === "none") return "";
@@ -23347,9 +23379,10 @@ async function startChannel(deps) {
           const runInputMode = liveInputModeForMessage(runBatch[0]);
           const runStopGenerationTarget = runInputMode === "side" || runInputMode === "side-exit" ? "side" : "main";
           const runStopGeneration = activeRuns.currentStopGeneration(scope, runStopGenerationTarget);
+          const scopedAgent = agent.forScope?.(scope) ?? agent;
           await runAgentBatch({
             channel,
-            agent,
+            agent: scopedAgent,
             activeRuns,
             executor,
             bridgeAgent,

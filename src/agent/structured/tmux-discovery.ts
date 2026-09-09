@@ -26,11 +26,22 @@ export function listStructuredTmuxPanes(socket?: string): StructuredTmuxPane[] {
   return listTmuxAgentPanes(socket).flatMap(pane => {
     // Inspect each live process separately. A shell's original launch string
     // can still mention the old thread after the user resumes a different one.
-    const identities = processArgvTree(pane.panePid)
+    const processArgs = processArgvTree(pane.panePid);
+    const identities = [
+      ...processArgs,
+      ...(pane.paneStartCommand ? [shellWords(pane.paneStartCommand)] : []),
+    ]
       .map(argv => parseStructuredAgentArgv(argv, pane.agentKind))
       .filter((identity): identity is NonNullable<typeof identity> => Boolean(identity));
     const unique = new Map(identities.map(identity => [JSON.stringify(identity), identity]));
-    const identity = unique.size === 1 ? [...unique.values()][0] : undefined;
+    const remote = new Map(
+      identities.filter(identity => identity.endpoint).map(identity => [JSON.stringify(identity), identity]),
+    );
+    const identity = unique.size === 1
+      ? [...unique.values()][0]
+      : remote.size === 1
+        ? [...remote.values()][0]
+        : undefined;
     if (!identity) return [];
     const codexHome = pane.agentKind === 'codex' ? processEnvironmentForPidTree(pane.panePid).CODEX_HOME : undefined;
     return [{ ...pane, structured: { ...identity, ...(codexHome ? { codexHome } : {}) } }];
@@ -50,12 +61,12 @@ export function activeStructuredTmuxPane(socket: string, sessionName: string): S
 
 export function parseStructuredAgentArgv(argv: readonly string[], kind: 'codex' | 'claude'): { endpoint?: string; threadId: string; legacy?: boolean } | undefined {
   const normalized = argv.map(item => item.trim()).filter(Boolean);
-  const hasAgent = normalized.slice(0, 2).some(item => {
+  const agentIndex = normalized.findIndex(item => {
     const name = basename(item).replace(/\.(?:cmd|exe)$/iu, '').toLowerCase();
     return name === kind;
   });
-  if (!hasAgent) return undefined;
-  const resumeIndex = normalized.findIndex(item => item === 'resume' || item === '--resume');
+  if (agentIndex < 0) return undefined;
+  const resumeIndex = normalized.findIndex((item, index) => index > agentIndex && (item === 'resume' || item === '--resume'));
   if (resumeIndex < 0 || !normalized[resumeIndex + 1]) return undefined;
   const threadId = normalized[resumeIndex + 1]!;
   // `codex resume` without an explicit id may be followed by options such as
@@ -68,6 +79,10 @@ export function parseStructuredAgentArgv(argv: readonly string[], kind: 'codex' 
     : undefined;
   if (kind === 'codex' && !endpoint) return { threadId, legacy: true };
   return { ...(endpoint ? { endpoint } : {}), threadId };
+}
+
+function shellWords(value: string): string[] {
+  return value.split(/\s+/u).map(item => item.replace(/^['"]|['"]$/gu, '')).filter(Boolean);
 }
 
 export function processEnvironmentForPidTree(rootPid: number): NodeJS.ProcessEnv {
@@ -122,8 +137,10 @@ function processArgvTree(rootPid: number): string[][] {
   }
   return [...ids].flatMap(pid => {
     if (process.platform === 'linux') {
-      try { return [readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter(Boolean)]; }
-      catch { return []; }
+      try {
+        const argv = readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter(Boolean);
+        if (argv.length) return [argv];
+      } catch { /* systemd/hidepid may deny /proc; use ps below */ }
     }
     const args = rows.get(pid)?.args;
     return args ? [args.split(/\s+/u)] : [];

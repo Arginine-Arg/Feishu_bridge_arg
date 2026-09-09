@@ -1251,7 +1251,7 @@ async function handleTmux(args: string, ctx: CommandContext): Promise<void> {
         await reply(ctx, '没有发现正在运行的 Codex/Claude tmux pane。普通 shell 不会列出。');
         return;
       }
-      await reply(ctx, formatTmuxList(panes));
+      await reply(ctx, formatTmuxList(panes, ctx.controls.profile));
       return;
     }
     if (action === 'bind') {
@@ -1266,13 +1266,24 @@ async function handleTmux(args: string, ctx: CommandContext): Promise<void> {
       const target = await tmux.bind(ctx.scope, value);
       ctx.workspaces.setCwd(ctx.scope, target.paneCurrentPath);
       ctx.sessions.clear(ctx.scope);
+      const structured = target.structured;
+      const structuredCommand = structured?.threadId && target.agentKind === 'codex'
+        ? buildStructuredPaneCommand(target, ctx.controls.profile)
+        : undefined;
+      const connection = structured?.endpoint
+        ? 'structured（共享 App Server）'
+        : 'live fallback（当前 pane 没有共享 endpoint）';
       await reply(
         ctx,
         [
           `已绑定 ${target.agentKind} pane \`${target.paneId}\`。`,
+          `转发方式：${connection}`,
           `cwd：\`${target.paneCurrentPath}\``,
           `socket：\`${target.socketPath}\``,
           `监督命令：\`${target.attachCommand}\``,
+          ...(structuredCommand && !structured?.endpoint
+            ? ['', '如果要切换为 structured，请先在这个 pane 退出普通 Codex、保留 shell，然后执行：', fencedCodeBlock(structuredCommand), '执行后重新发送 `/tmux list`，再绑定显示 endpoint 的同一 pane。']
+            : []),
           '',
           'bridge 只连接该 pane，不会在 `/stop`、解绑、重启或退出时删除它。',
         ].join('\n'),
@@ -1367,7 +1378,7 @@ function parseTmuxSocketArgument(parts: string[]): string | null {
   return null;
 }
 
-function formatTmuxList(panes: TmuxPaneTarget[]): string {
+function formatTmuxList(panes: TmuxPaneTarget[], profile = 'codex'): string {
   return [
     '可绑定的本机 tmux agent panes：',
     '',
@@ -1375,7 +1386,13 @@ function formatTmuxList(panes: TmuxPaneTarget[]): string {
       `${index + 1}. ${pane.agentKind} \`${pane.paneId}\` (${pane.ownership}${pane.structured?.persisted ? '，已保存候选' : ''})`,
       `   cwd: \`${pane.paneCurrentPath}\``,
       ...(pane.structured
-        ? [`   thread: \`${pane.structured.threadId}\``, `   endpoint: \`${pane.structured.endpoint ?? 'live 回退（无共享 endpoint）'}\``]
+        ? [
+            `   thread: \`${pane.structured.threadId}\``,
+            `   endpoint: \`${pane.structured.endpoint ?? 'live 回退（无共享 endpoint）'}\``,
+            ...(!pane.structured.endpoint && pane.agentKind === 'codex'
+              ? ['   structured 命令：', fencedCodeBlock(buildStructuredPaneCommand(pane, profile))]
+              : []),
+          ]
         : ['   structured: 未识别（无共享接口时使用 live 转发）']),
       `   id: \`${tmuxTargetKey(pane)}\``,
       `   attach: \`${pane.attachCommand}\``,
@@ -1383,6 +1400,23 @@ function formatTmuxList(panes: TmuxPaneTarget[]): string {
     '',
     '使用 `/tmux bind <编号>` 绑定当前 scope。编号按本次列表计算。',
   ].join('\n');
+}
+
+function buildStructuredPaneCommand(
+  pane: Pick<TmuxPaneTarget, 'paneCurrentPath' | 'agentKind'> & { structured?: { threadId: string } },
+  profile: string,
+): string {
+  const threadId = pane.structured?.threadId;
+  if (!threadId || pane.agentKind !== 'codex') return '';
+  return [
+    `cd ${shellQuoteForCommand(pane.paneCurrentPath)}`,
+    'clash on',
+    `arg-bridge native ${shellQuoteForCommand(threadId)} --profile ${shellQuoteForCommand(profile)}`,
+  ].join('\n');
+}
+
+function shellQuoteForCommand(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
 function formatTmuxStatus(status: TmuxBindingStatus | undefined): string {
