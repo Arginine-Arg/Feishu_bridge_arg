@@ -67,6 +67,8 @@ export interface AgentTmuxControl {
   list(socket?: string): Promise<TmuxPaneTarget[]>;
   bind(scopeId: string, selector: string): Promise<TmuxPaneTarget>;
   unbind(scopeId: string): Promise<boolean>;
+  /** Release a Bridge-managed tmux session without killing its pane/process. */
+  releaseManaged?(scopeId: string, cwd?: string): Promise<boolean>;
   status(scopeId: string, cwd?: string): Promise<TmuxBindingStatus>;
   /** Lists persisted bridge-managed scopes sharing a chat id. */
   managedScopesForChat?(chatId: string): Promise<string[]>;
@@ -197,6 +199,38 @@ export class TmuxBindingController {
     if (!this.bindings[scopeId]) return false;
     delete this.bindings[scopeId];
     await this.flush();
+    return true;
+  }
+
+  async releaseManaged(scopeId: string, cwd?: string): Promise<boolean> {
+    let saved = this.managedTerminals[scopeId];
+    if (!saved && cwd) {
+      await this.managedStatus(scopeId, cwd);
+      saved = this.managedTerminals[scopeId];
+    }
+    if (!saved) return false;
+    if (cwd && resolve(saved.cwdRealpath) !== resolve(cwd)) {
+      throw new Error(`managed tmux workspace (${saved.cwdRealpath}) 与当前 workspace (${cwd}) 不一致`);
+    }
+    // Validate ownership before clearing metadata. A stale record must not
+    // cause us to rewrite an unrelated session that reused the same name.
+    const terminal = revalidateManagedTerminal(saved, scopeId, this.profile, this.agentKind);
+    const sessionName = saved.sessionName;
+    const keys = [
+      '@argbridge_managed',
+      '@argbridge_owner_pid',
+      '@argbridge_profile',
+      '@argbridge_scope',
+      '@argbridge_agent',
+      '@argbridge_cwd',
+      '@argbridge_active_target',
+    ];
+    for (const key of keys) {
+      const result = spawnProcessSync('tmux', ['-S', terminal.socketPath, 'set-option', '-u', '-t', sessionName, key], { stdio: 'ignore' });
+      if (result.status !== 0) throw new Error(`无法清除 managed tmux 元数据：${key}`);
+    }
+    delete this.managedTerminals[scopeId];
+    await this.flushManaged();
     return true;
   }
 

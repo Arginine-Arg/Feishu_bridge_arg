@@ -104,6 +104,11 @@ export class CodexAdapter implements AgentAdapter {
         if (removed) await this.liveSessions.close(scopeId, 'tmux-unbind');
         return removed;
       },
+      releaseManaged: async (scopeId, cwd) => {
+        const released = await this.tmuxBindings.releaseManaged(scopeId, cwd);
+        if (released) await this.liveSessions.release(scopeId, 'tmux-release');
+        return released;
+      },
       status: (scopeId, cwd) => this.tmuxStatus(scopeId, cwd),
       managedScopesForChat: (chatId) => this.tmuxBindings.managedScopesForChat(chatId),
       tail: async (scopeId, lineCount, cwd) => {

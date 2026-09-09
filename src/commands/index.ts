@@ -1343,6 +1343,13 @@ async function handleTmux(args: string, ctx: CommandContext): Promise<void> {
         return;
       }
       const removed = await tmux.unbind(ctx.scope);
+      if (!removed) {
+        const current = await tmux.status(ctx.scope, effectiveWorkspaceCwd(ctx)).catch(() => undefined);
+        if (current?.state === 'managed') {
+          await reply(ctx, '当前是 Bridge 托管 tmux，请使用 `/tmux release` 释放托管（保留 pane 和 Codex 进程）。');
+          return;
+        }
+      }
       await reply(
         ctx,
         removed
@@ -1351,7 +1358,22 @@ async function handleTmux(args: string, ctx: CommandContext): Promise<void> {
       );
       return;
     }
-    await reply(ctx, `用法：\`/tmux [list|bind <编号或 id>|status|attach|tail [1-${MAX_TMUX_TAIL_LINES}]|unbind]\``);
+    if (action === 'release' || action === 'unmanage') {
+      if (ctx.activeRuns.get(ctx.scope)) {
+        await reply(ctx, '当前 scope 有运行中的任务，请先 `/stop`，等待任务结束后再释放托管。');
+        return;
+      }
+      if (!tmux.releaseManaged) {
+        await reply(ctx, '当前 agent 不支持释放托管 tmux。');
+        return;
+      }
+      const released = await tmux.releaseManaged(ctx.scope, effectiveWorkspaceCwd(ctx));
+      await reply(ctx, released
+        ? '已解除 Bridge 托管。tmux session、pane 和 Codex/Claude 进程保持运行；现在可按 external pane 重新绑定。'
+        : '当前 scope 没有 Bridge 托管的 tmux session。');
+      return;
+    }
+    await reply(ctx, `用法：\`/tmux [list|bind <编号或 id>|status|attach|tail [1-${MAX_TMUX_TAIL_LINES}]|unbind|release]\``);
   } catch (err) {
     await reply(ctx, `tmux 操作失败：${err instanceof Error ? err.message : String(err)}`);
   }

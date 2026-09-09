@@ -64,6 +64,7 @@ export class PreferredStructuredAdapter implements AgentAdapter {
         await this.save();
         return removed;
       },
+      releaseManaged: async (scope, cwd) => this.live.tmux!.releaseManaged?.(scope, cwd) ?? false,
       status: async (scope, cwd) => {
         const saved = this.targets.get(scope);
         if (!saved) return this.structured.tmux!.status(scope, cwd);

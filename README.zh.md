@@ -4,7 +4,7 @@
 
 [English README](./README.md)
 
-干净版 `1.5.8` 只包含 Feishubridge structured/tmux 功能。它修复 Linux 主机无法读取 `/proc/<pid>/cmdline` 时的 structured 识别问题。共享 Codex pane 现在会回退使用 `ps`，支持 shell 包装命令，并优先采用唯一的 remote endpoint。`arg-bridge native <thread-id> --profile codex` 可在当前 shell 恢复共享会话，继承代理环境，并在退出后回到原 shell；绑定不会另建 pane 或 writer。详见[配置方式、已验证能力与限制](./docs/structured-backend.md)。
+干净版 `1.5.9` 只包含 Feishubridge structured/tmux 功能，并新增 `/tmux release`：解除 Bridge 托管但保留 tmux session、pane 和 agent 进程。它修复 Linux 主机无法读取 `/proc/<pid>/cmdline` 时的 structured 识别问题。共享 Codex pane 现在会回退使用 `ps`，支持 shell 包装命令，并优先采用唯一的 remote endpoint。`arg-bridge native <thread-id> --profile codex` 可在当前 shell 恢复共享会话，继承代理环境，并在退出后回到原 shell；绑定不会另建 pane 或 writer。详见[配置方式、已验证能力与限制](./docs/structured-backend.md)。
 
 关于能实现的效果，详情可以阅读[飞书文档](https://larkcommunity.feishu.cn/docx/OaRIdFIRFoLM3xxTmKwcetHqn5e)
 
@@ -46,7 +46,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.5.8
+sh /tmp/install-arg-bridge.sh --version 1.5.9
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -90,10 +90,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.5.8"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.5.9"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.5.8`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.5.9`。
 
 ### 4. Node 或 npm 全局目录错误
 

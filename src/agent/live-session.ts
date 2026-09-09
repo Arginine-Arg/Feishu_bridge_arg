@@ -184,6 +184,15 @@ export class LiveSessionPool {
     await session.close(reason);
   }
 
+  /** Stop only the Bridge helper and forget the handle; leave the managed
+   * tmux pane and its agent process alive for manual use. */
+  async release(key: string, reason = 'release'): Promise<void> {
+    const session = this.sessions.get(key);
+    if (!session) return;
+    this.sessions.delete(key);
+    await session.detach(reason);
+  }
+
   terminalInfo(key: string): LiveTerminalInfo | undefined {
     return this.sessions.get(key)?.getTerminalInfo();
   }

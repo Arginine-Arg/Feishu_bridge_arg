@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.5.8",
+  version: "1.5.9",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -6644,6 +6644,35 @@ var TmuxBindingController = class {
     await this.flush();
     return true;
   }
+  async releaseManaged(scopeId, cwd) {
+    let saved = this.managedTerminals[scopeId];
+    if (!saved && cwd) {
+      await this.managedStatus(scopeId, cwd);
+      saved = this.managedTerminals[scopeId];
+    }
+    if (!saved) return false;
+    if (cwd && resolve2(saved.cwdRealpath) !== resolve2(cwd)) {
+      throw new Error(`managed tmux workspace (${saved.cwdRealpath}) \u4E0E\u5F53\u524D workspace (${cwd}) \u4E0D\u4E00\u81F4`);
+    }
+    const terminal = revalidateManagedTerminal(saved, scopeId, this.profile, this.agentKind);
+    const sessionName = saved.sessionName;
+    const keys = [
+      "@argbridge_managed",
+      "@argbridge_owner_pid",
+      "@argbridge_profile",
+      "@argbridge_scope",
+      "@argbridge_agent",
+      "@argbridge_cwd",
+      "@argbridge_active_target"
+    ];
+    for (const key of keys) {
+      const result = spawnProcessSync("tmux", ["-S", terminal.socketPath, "set-option", "-u", "-t", sessionName, key], { stdio: "ignore" });
+      if (result.status !== 0) throw new Error(`\u65E0\u6CD5\u6E05\u9664 managed tmux \u5143\u6570\u636E\uFF1A${key}`);
+    }
+    delete this.managedTerminals[scopeId];
+    await this.flushManaged();
+    return true;
+  }
   async status(scopeId) {
     const saved = this.bindings[scopeId];
     if (!saved) return { state: "none" };
@@ -7342,6 +7371,14 @@ var LiveSessionPool = class {
     if (!session) return;
     this.sessions.delete(key);
     await session.close(reason);
+  }
+  /** Stop only the Bridge helper and forget the handle; leave the managed
+   * tmux pane and its agent process alive for manual use. */
+  async release(key, reason = "release") {
+    const session = this.sessions.get(key);
+    if (!session) return;
+    this.sessions.delete(key);
+    await session.detach(reason);
   }
   terminalInfo(key) {
     return this.sessions.get(key)?.getTerminalInfo();
@@ -10753,6 +10790,11 @@ var ClaudeAdapter = class {
         if (removed) await this.liveSessions.close(scopeId, "tmux-unbind");
         return removed;
       },
+      releaseManaged: async (scopeId, cwd) => {
+        const released = await this.tmuxBindings.releaseManaged(scopeId, cwd);
+        if (released) await this.liveSessions.release(scopeId, "tmux-release");
+        return released;
+      },
       status: (scopeId, cwd) => this.tmuxStatus(scopeId, cwd),
       managedScopesForChat: (chatId) => this.tmuxBindings.managedScopesForChat(chatId),
       tail: async (scopeId, lineCount, cwd) => {
@@ -11402,6 +11444,11 @@ var CodexAdapter = class {
         const removed = await this.tmuxBindings.unbind(scopeId);
         if (removed) await this.liveSessions.close(scopeId, "tmux-unbind");
         return removed;
+      },
+      releaseManaged: async (scopeId, cwd) => {
+        const released = await this.tmuxBindings.releaseManaged(scopeId, cwd);
+        if (released) await this.liveSessions.release(scopeId, "tmux-release");
+        return released;
       },
       status: (scopeId, cwd) => this.tmuxStatus(scopeId, cwd),
       managedScopesForChat: (chatId) => this.tmuxBindings.managedScopesForChat(chatId),
@@ -13582,6 +13629,7 @@ var PreferredStructuredAdapter = class {
         await this.save();
         return removed;
       },
+      releaseManaged: async (scope, cwd) => this.live.tmux.releaseManaged?.(scope, cwd) ?? false,
       status: async (scope, cwd) => {
         const saved = this.targets.get(scope);
         if (!saved) return this.structured.tmux.status(scope, cwd);
@@ -17481,13 +17529,33 @@ ${fencedCodeBlock(content)}`
         return;
       }
       const removed = await tmux.unbind(ctx.scope);
+      if (!removed) {
+        const current = await tmux.status(ctx.scope, effectiveWorkspaceCwd(ctx)).catch(() => void 0);
+        if (current?.state === "managed") {
+          await reply(ctx, "\u5F53\u524D\u662F Bridge \u6258\u7BA1 tmux\uFF0C\u8BF7\u4F7F\u7528 `/tmux release` \u91CA\u653E\u6258\u7BA1\uFF08\u4FDD\u7559 pane \u548C Codex \u8FDB\u7A0B\uFF09\u3002");
+          return;
+        }
+      }
       await reply(
         ctx,
         removed ? "\u5DF2\u89E3\u9664\u5916\u90E8 tmux \u7ED1\u5B9A\u3002\u76EE\u6807 pane/session/server \u4FDD\u6301\u8FD0\u884C\uFF1B\u4E0B\u4E00\u6B21\u4EFB\u52A1\u4F1A\u521B\u5EFA bridge \u6258\u7BA1 session\u3002" : "\u5F53\u524D scope \u6CA1\u6709\u5916\u90E8 tmux \u7ED1\u5B9A\u3002"
       );
       return;
     }
-    await reply(ctx, `\u7528\u6CD5\uFF1A\`/tmux [list|bind <\u7F16\u53F7\u6216 id>|status|attach|tail [1-${MAX_TMUX_TAIL_LINES}]|unbind]\``);
+    if (action === "release" || action === "unmanage") {
+      if (ctx.activeRuns.get(ctx.scope)) {
+        await reply(ctx, "\u5F53\u524D scope \u6709\u8FD0\u884C\u4E2D\u7684\u4EFB\u52A1\uFF0C\u8BF7\u5148 `/stop`\uFF0C\u7B49\u5F85\u4EFB\u52A1\u7ED3\u675F\u540E\u518D\u91CA\u653E\u6258\u7BA1\u3002");
+        return;
+      }
+      if (!tmux.releaseManaged) {
+        await reply(ctx, "\u5F53\u524D agent \u4E0D\u652F\u6301\u91CA\u653E\u6258\u7BA1 tmux\u3002");
+        return;
+      }
+      const released = await tmux.releaseManaged(ctx.scope, effectiveWorkspaceCwd(ctx));
+      await reply(ctx, released ? "\u5DF2\u89E3\u9664 Bridge \u6258\u7BA1\u3002tmux session\u3001pane \u548C Codex/Claude \u8FDB\u7A0B\u4FDD\u6301\u8FD0\u884C\uFF1B\u73B0\u5728\u53EF\u6309 external pane \u91CD\u65B0\u7ED1\u5B9A\u3002" : "\u5F53\u524D scope \u6CA1\u6709 Bridge \u6258\u7BA1\u7684 tmux session\u3002");
+      return;
+    }
+    await reply(ctx, `\u7528\u6CD5\uFF1A\`/tmux [list|bind <\u7F16\u53F7\u6216 id>|status|attach|tail [1-${MAX_TMUX_TAIL_LINES}]|unbind|release]\``);
   } catch (err) {
     await reply(ctx, `tmux \u64CD\u4F5C\u5931\u8D25\uFF1A${err instanceof Error ? err.message : String(err)}`);
   }
