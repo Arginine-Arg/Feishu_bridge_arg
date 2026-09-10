@@ -1,5 +1,5 @@
-import { basename } from 'node:path';
-import { readFileSync } from 'node:fs';
+import { basename, resolve as resolvePath } from 'node:path';
+import { readFileSync, readlinkSync } from 'node:fs';
 import { spawnProcessSync } from '../../platform/spawn';
 import {
   listTmuxAgentPanes,
@@ -26,7 +26,10 @@ export function listStructuredTmuxPanes(socket?: string): StructuredTmuxPane[] {
   return listTmuxAgentPanes(socket).flatMap(pane => {
     // Inspect each live process separately. A shell's original launch string
     // can still mention the old thread after the user resumes a different one.
-    const processArgs = processArgvTree(pane.panePid);
+    const processArgs = [
+      ...processArgvTree(pane.panePid),
+      ...processArgvForPane(pane),
+    ];
     const identities = [
       ...processArgs,
       ...(pane.paneStartCommand ? [shellWords(pane.paneStartCommand)] : []),
@@ -145,4 +148,56 @@ function processArgvTree(rootPid: number): string[][] {
     const args = rows.get(pid)?.args;
     return args ? [args.split(/\s+/u)] : [];
   });
+}
+
+/**
+ * A tmux server can launch a shell under a different PID namespace or with a
+ * restricted /proc mount. In that case the pane's parent tree is incomplete
+ * even though `ps` still shows the Codex child (the same situation seen on
+ * some worker hosts). Use tmux's inherited TMUX_PANE marker as the primary
+ * association, and cwd only as a conservative fallback.
+ */
+function processArgvForPane(pane: TmuxPaneTarget): string[][] {
+  if (process.platform !== 'linux') return [];
+  const result = spawnProcessSync('ps', ['-ww', '-eo', 'pid=,args='], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 });
+  if (result.status !== 0 || typeof result.stdout !== 'string') return [];
+  const candidates: Array<{ pid: number; args: string; paneMatch: boolean; tmuxMatch: boolean; cwdMatch: boolean }> = [];
+  for (const line of result.stdout.split('\n')) {
+    const match = /^\s*(\d+)\s+(.*)$/u.exec(line);
+    if (!match) continue;
+    const pid = Number(match[1]);
+    const args = match[2] ?? '';
+    if (!Number.isSafeInteger(pid) || !/(?:^|[\s/])codex(?:\.js)?(?:[\s]|$)/iu.test(args)) continue;
+    if (!/(?:^|\s)(?:--remote(?:=|\s)|resume(?:\s|$))/iu.test(args)) continue;
+    let paneMatch = false;
+    let tmuxMatch = false;
+    let cwdMatch = false;
+    try {
+      const env = readFileSync(`/proc/${pid}/environ`, 'utf8');
+      const values = new Map<string, string>();
+      for (const item of env.split('\0')) {
+        const equals = item.indexOf('=');
+        if (equals > 0) values.set(item.slice(0, equals), item.slice(equals + 1));
+      }
+      paneMatch = values.get('TMUX_PANE') === pane.paneId;
+      // Pane IDs are only unique inside one tmux server. `%0` can therefore
+      // occur in several sockets on the same host; require the server socket
+      // from TMUX as well whenever it is available, otherwise a worker with
+      // multiple native sessions gets an ambiguous identity and is hidden.
+      const tmuxSocket = values.get('TMUX')?.split(',', 1)[0]?.trim();
+      tmuxMatch = paneMatch && Boolean(tmuxSocket) && resolvePath(tmuxSocket!) === resolvePath(pane.socketPath);
+    } catch { /* hidepid or process exited */ }
+    try { cwdMatch = readlinkSync(`/proc/${pid}/cwd`) === pane.paneCurrentPath; }
+    catch { /* process exited or inaccessible */ }
+    if (paneMatch || cwdMatch) candidates.push({ pid, args, paneMatch, tmuxMatch, cwdMatch });
+  }
+  const tmuxMatches = candidates.filter(candidate => candidate.tmuxMatch);
+  const paneMatches = candidates.filter(candidate => candidate.paneMatch);
+  const selected = tmuxMatches.length > 0
+    ? tmuxMatches
+    : paneMatches.length > 0
+      ? paneMatches
+      : candidates.filter(candidate => candidate.cwdMatch);
+  selected.sort((a, b) => Number(b.tmuxMatch) - Number(a.tmuxMatch) || Number(b.paneMatch) - Number(a.paneMatch) || Number(b.cwdMatch) - Number(a.cwdMatch));
+  return selected.map(candidate => candidate.args.split(/\s+/u));
 }

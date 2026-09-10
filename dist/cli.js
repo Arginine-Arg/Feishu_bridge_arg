@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.5.9",
+  version: "1.5.10",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -12791,11 +12791,14 @@ ${event.output}
 };
 
 // src/agent/structured/tmux-discovery.ts
-import { basename as basename5 } from "path";
-import { readFileSync as readFileSync3 } from "fs";
+import { basename as basename5, resolve as resolvePath } from "path";
+import { readFileSync as readFileSync3, readlinkSync } from "fs";
 function listStructuredTmuxPanes(socket) {
   return listTmuxAgentPanes(socket).flatMap((pane) => {
-    const processArgs = processArgvTree(pane.panePid);
+    const processArgs = [
+      ...processArgvTree(pane.panePid),
+      ...processArgvForPane(pane)
+    ];
     const identities = [
       ...processArgs,
       ...pane.paneStartCommand ? [shellWords(pane.paneStartCommand)] : []
@@ -12906,6 +12909,45 @@ function processArgvTree(rootPid) {
     const args = rows.get(pid)?.args;
     return args ? [args.split(/\s+/u)] : [];
   });
+}
+function processArgvForPane(pane) {
+  if (process.platform !== "linux") return [];
+  const result = spawnProcessSync("ps", ["-ww", "-eo", "pid=,args="], { encoding: "utf8", maxBuffer: 4 * 1024 * 1024 });
+  if (result.status !== 0 || typeof result.stdout !== "string") return [];
+  const candidates = [];
+  for (const line of result.stdout.split("\n")) {
+    const match = /^\s*(\d+)\s+(.*)$/u.exec(line);
+    if (!match) continue;
+    const pid = Number(match[1]);
+    const args = match[2] ?? "";
+    if (!Number.isSafeInteger(pid) || !/(?:^|[\s/])codex(?:\.js)?(?:[\s]|$)/iu.test(args)) continue;
+    if (!/(?:^|\s)(?:--remote(?:=|\s)|resume(?:\s|$))/iu.test(args)) continue;
+    let paneMatch = false;
+    let tmuxMatch = false;
+    let cwdMatch = false;
+    try {
+      const env = readFileSync3(`/proc/${pid}/environ`, "utf8");
+      const values = /* @__PURE__ */ new Map();
+      for (const item of env.split("\0")) {
+        const equals = item.indexOf("=");
+        if (equals > 0) values.set(item.slice(0, equals), item.slice(equals + 1));
+      }
+      paneMatch = values.get("TMUX_PANE") === pane.paneId;
+      const tmuxSocket = values.get("TMUX")?.split(",", 1)[0]?.trim();
+      tmuxMatch = paneMatch && Boolean(tmuxSocket) && resolvePath(tmuxSocket) === resolvePath(pane.socketPath);
+    } catch {
+    }
+    try {
+      cwdMatch = readlinkSync(`/proc/${pid}/cwd`) === pane.paneCurrentPath;
+    } catch {
+    }
+    if (paneMatch || cwdMatch) candidates.push({ pid, args, paneMatch, tmuxMatch, cwdMatch });
+  }
+  const tmuxMatches = candidates.filter((candidate) => candidate.tmuxMatch);
+  const paneMatches = candidates.filter((candidate) => candidate.paneMatch);
+  const selected = tmuxMatches.length > 0 ? tmuxMatches : paneMatches.length > 0 ? paneMatches : candidates.filter((candidate) => candidate.cwdMatch);
+  selected.sort((a, b) => Number(b.tmuxMatch) - Number(a.tmuxMatch) || Number(b.paneMatch) - Number(a.paneMatch) || Number(b.cwdMatch) - Number(a.cwdMatch));
+  return selected.map((candidate) => candidate.args.split(/\s+/u));
 }
 
 // src/agent/structured/adapter.ts

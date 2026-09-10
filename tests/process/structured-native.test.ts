@@ -45,12 +45,12 @@ for (const kind of ['codex', 'claude'] as const) {
         if (kind === 'codex' && process.env.ARG_BRIDGE_NATIVE_DISCOVERY === '1') {
           let discovered = await adapter.tmux.list();
           const discoveryDeadline = Date.now() + 10000;
-          while (!discovered.some(pane => pane.structured?.threadId) && Date.now() < discoveryDeadline) {
+          while (!discovered.some(pane => pane.paneCurrentPath === directory && pane.structured?.threadId && pane.structured.endpoint) && Date.now() < discoveryDeadline) {
             await new Promise(resolve => setTimeout(resolve, 200));
             discovered = await adapter.tmux.list();
           }
-          expect(discovered.some(pane => pane.structured?.threadId)).toBe(true);
-          const bound = discovered.find(pane => pane.structured?.threadId);
+          expect(discovered.some(pane => pane.paneCurrentPath === directory && pane.structured?.threadId && pane.structured.endpoint)).toBe(true);
+          const bound = discovered.find(pane => pane.paneCurrentPath === directory && pane.structured?.threadId && pane.structured.endpoint);
           expect(bound?.structured?.endpoint).toMatch(/^unix:\/\//);
           expect(bound?.structured?.threadId).toMatch(/\S/);
           if (process.env.ARG_BRIDGE_NATIVE_REBIND === '1' && bound) {

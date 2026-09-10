@@ -22,6 +22,11 @@ native('native launcher shares a YOLO thread and leaves the original shell usabl
     expect(started?.thread_id).toBeTruthy();
     expect(tmux('new-session', '-d', '-s', 'test', '-c', dir, '-e', `LARK_CHANNEL_HOME=${dir}`,
       'bash', '--noprofile', '--norc', '-i').status).toBe(0);
+    // Do not inject the native command while the detached shell is still
+    // initializing. A key sent before readline owns the tty can be echoed but
+    // never become a command, which would make this test exercise startup
+    // timing instead of the native/structured discovery contract.
+    await expect.poll(() => tmux('capture-pane', '-p', '-t', 'test').stdout.trimEnd(), { timeout: 15000 }).toMatch(/[$#]$/);
     const quote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
     const command = `${quote(process.execPath)} ${quote(join(process.cwd(), 'dist/cli.js'))} native ${quote(started.thread_id)} --profile codex`;
     tmux('send-keys', '-t', 'test', '-l', command);

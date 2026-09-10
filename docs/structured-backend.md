@@ -1,6 +1,6 @@
-# Structured backend (v1.5.9)
+# Structured backend (v1.5.10)
 
-Version 1.5.9 provides an opt-in structured-first backend with native fallback. The v1.2.7
+Version 1.5.10 provides an opt-in structured-first backend with native fallback. The v1.2.7
 tag remains available for rollback. It does not automatically change any running
 profile or migrate an existing terminal session. The previously validated
 1.4.0 implementation is retained with the limitations below.
@@ -43,10 +43,14 @@ timeout. Explicit new input waits for the existing observed work to finish.
 
 ### Dynamic tmux panes
 
-In v1.5.7, `/tmux bind` never migrates a running native writer. It binds the
+In v1.5.10, `/tmux bind` never migrates a running native writer. It binds the
 selected pane and prefers structured transport when a shared endpoint is
 available. Ordinary Codex and Claude processes are attached through live
 transport. A shared endpoint's submission failure is not retried through live.
+On Linux, discovery associates a process with both its `TMUX` server socket and
+`TMUX_PANE`; this is important because `%0`/`%1` are reused by different tmux
+servers on one host. If `/proc` is restricted, the same association falls back
+to the process working directory without guessing among multiple endpoints.
 
 To create a shared Codex in your existing shell, run `clash on` if needed, then:
 

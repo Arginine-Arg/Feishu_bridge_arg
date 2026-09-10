@@ -10,7 +10,12 @@ it.skipIf(!available)('keeps an interactive shell after the native program exits
   const dir = await mkdtemp(join(tmpdir(), 'ab-shell-'));
   const view = new StructuredView(dir, dir);
   try {
-    await view.start({ binary: '/bin/true', endpoint: 'unix:///unused', threadId: 'unused', env: { ...process.env, SHELL: '/bin/bash' } }, dir);
+    // Keep the shell hand-off deterministic: the worker's real .bashrc may
+    // initialize Conda/modules and delay (or suppress) the first prompt for a
+    // detached tmux pane. Production sessions still inherit the user's HOME;
+    // this process contract only needs to prove that the shell remains alive
+    // and interactive after the native program exits.
+    await view.start({ binary: '/bin/true', endpoint: 'unix:///unused', threadId: 'unused', env: { ...process.env, HOME: dir, SHELL: '/bin/bash' } }, dir);
     const terminal = view.status().terminal!;
     expect(terminal).toBeDefined();
     const tmux = (...args: string[]) => spawnSync('tmux', ['-S', terminal.socketPath, ...args], { encoding: 'utf8' });
