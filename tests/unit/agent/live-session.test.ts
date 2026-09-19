@@ -3004,6 +3004,60 @@ setInterval(() => {}, 1000);
     }
   }, 20_000);
 
+  tmuxIt('injects provider credentials into the tmux agent pane', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-credentials-test-'));
+    const bin = join(dir, 'fake-tmux-credentials-agent.mjs');
+    const observedFile = join(dir, 'observed-key.txt');
+    const codexHome = join(dir, 'codex-home');
+    await mkdir(codexHome, { recursive: true });
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+import { writeFileSync } from 'node:fs';
+writeFileSync(${JSON.stringify(observedFile)}, [
+  process.env.OPENAI_API_KEY || '',
+  process.env.CODEX_HOME || '',
+].join('\\t'));
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', () => process.stdout.write('ready\\n\\u203a\\n'));
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    try {
+      const session = pool.getOrCreate('tmux-credential-scope', {
+        command: process.execPath,
+        args: [bin],
+        cwd: dir,
+        env: { CODEX_HOME: codexHome },
+        credentialEnv: { OPENAI_API_KEY: 'sk-third-party-token' },
+        signature: 'tmux-credential-signature',
+        tmuxScopeId: 'tmux-credential-scope',
+        tmuxAgentKind: 'codex',
+        usePty: true,
+        backend: 'tmux',
+        idleMs: 200,
+        outputFlushMs: 30,
+        startupTimeoutMs: 2_000,
+      });
+
+      await collect(session.run('tmux-credential-run', 'hello', dir).events);
+      await waitForFileText(observedFile, 'sk-third-party-token', 5_000);
+      const observed = (await readFile(observedFile, 'utf8')).trim().split('\t');
+      expect(observed[0]).toBe('sk-third-party-token');
+      expect(observed[1]).toBe(codexHome);
+    } finally {
+      await pool.closeAll();
+      const terminal = pool.terminalInfo('tmux-credential-scope');
+      if (terminal?.socketPath) {
+        spawnSync('tmux', ['-S', terminal.socketPath, 'kill-server'], { stdio: 'ignore' });
+      }
+    }
+  }, 20_000);
+
   tmuxIt('can run live sessions through tmux capture-pane and send-keys', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-test-'));
     const bin = join(dir, 'fake-tmux-agent.mjs');

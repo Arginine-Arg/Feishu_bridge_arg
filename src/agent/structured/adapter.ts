@@ -30,6 +30,14 @@ import {
   resumeCodexThread,
 } from './permissions';
 import { proxyEnvironmentArgs, sanitizeAgentEnv } from '../../platform/network-env';
+import {
+  applyCodexCredentialEnv,
+  codexCredentialCommandPrefix,
+  codexCredentialEnvironmentArgs,
+  defaultCodexHome,
+  resolveCodexCredentialEnv,
+  type CodexCredentialResolution,
+} from '../codex/credentials';
 
 const shellQuote = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`;
 const LEGACY_RESUME_TIMEOUT_MS = 180_000;
@@ -58,6 +66,7 @@ export class StructuredAdapter implements AgentAdapter {
   private readonly bindingsFile: string;
   private readonly candidatesFile: string;
   private candidates = new Map<string, StructuredCandidate>();
+  private credentialResolution: CodexCredentialResolution = { env: {}, injected: false, missingToken: false };
   constructor(private readonly options: StructuredAdapterOptions) {
     this.id = options.kind;
     this.displayName = options.kind === 'codex' ? 'Codex App Server' : 'Claude Agent SDK';
@@ -172,6 +181,12 @@ export class StructuredAdapter implements AgentAdapter {
     const available = await this.checkAvailability();
     if (!available.ok) throw available.error;
     if (this.id === 'codex') await ensureBundledCodexSkill(this.options.codexHome ?? process.env.CODEX_HOME);
+    if (this.id === 'codex') {
+      this.credentialResolution = await resolveCodexCredentialEnv(
+        this.options.codexHome ?? defaultCodexHome(),
+        { baseEnv: process.env },
+      );
+    }
   }
   private loadBindings(): void {
     try {
@@ -235,6 +250,7 @@ export class StructuredAdapter implements AgentAdapter {
     const codexHome = target.structured.codexHome ?? this.options.codexHome;
     if (codexHome) env.CODEX_HOME = codexHome;
     else if (this.options.codexHome) env.CODEX_HOME = this.options.codexHome;
+    applyCodexCredentialEnv(this.credentialResolution, env);
     let { rpc, endpoint } = await connectCodexHost({ binary: this.options.binary, profileDir: this.options.profileDir, scope, cwd: target.paneCurrentPath, env });
     let createdPaneId: string | undefined;
     try {
@@ -244,18 +260,25 @@ export class StructuredAdapter implements AgentAdapter {
       rpc = reconciled.rpc;
       const resumed = reconciled.result;
       if (resumed.thread?.id !== target.structured.threadId) throw new Error('App Server 返回了不同的旧 thread，未创建绑定');
+      const credentialCommandPrefix = codexCredentialCommandPrefix(this.credentialResolution.env);
       const command = [
         ...(codexHome ? ['env', 'CODEX_HOME=' + shellQuote(codexHome)] : []),
+        ...(credentialCommandPrefix
+          ? [credentialCommandPrefix]
+          : []),
         shellQuote(this.options.binary),
         ...codexRemoteResumeArgs(endpoint, target.structured.threadId).map(shellQuote),
       ].join(' ') + '; bridge_status=$?; trap - INT; printf "\\n[Codex exited (%s); shell remains]\\n" "$bridge_status"; exec "${SHELL:-/bin/bash}" -i';
       // Pin every proxy variable, including empty values. The target tmux
       // server may still hold a stale proxy in its global environment from an
       // older session; omitting a key here would let that value leak in.
-      const environmentArgs = proxyEnvironmentArgs(env, {
-        mode: this.options.network?.mode,
-        strippedKeys: strippedProxyKeys,
-      });
+      const environmentArgs = [
+        ...proxyEnvironmentArgs(env, {
+          mode: this.options.network?.mode,
+          strippedKeys: strippedProxyKeys,
+        }),
+        ...codexCredentialEnvironmentArgs(this.credentialResolution.env),
+      ];
       const sessionAlive = spawnProcessSync('tmux', ['-S', target.socketPath, 'has-session', '-t', target.sessionName], { stdio: 'ignore' }).status === 0;
       const createArgs = sessionAlive
         ? ['split-window', '-d', '-P', '-F', '#{pane_id}', '-t', target.sessionName, '-c', target.paneCurrentPath, ...environmentArgs, 'bash', '--noprofile', '--norc', '-ic', command]

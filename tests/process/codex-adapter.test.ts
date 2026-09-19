@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -16,6 +16,7 @@ describe('CodexAdapter process contract', () => {
   const cleanup: string[] = [];
   const oldCodexHome = process.env.CODEX_HOME;
   const oldAppSecret = process.env.APP_SECRET;
+  const oldOpenAiKey = process.env.OPENAI_API_KEY;
 
   afterEach(async () => {
     if (oldCodexHome === undefined) {
@@ -27,6 +28,11 @@ describe('CodexAdapter process contract', () => {
       delete process.env.APP_SECRET;
     } else {
       process.env.APP_SECRET = oldAppSecret;
+    }
+    if (oldOpenAiKey === undefined) {
+      delete process.env.OPENAI_API_KEY;
+    } else {
+      process.env.OPENAI_API_KEY = oldOpenAiKey;
     }
     await Promise.all(
       cleanup.splice(0).map((dir) =>
@@ -243,6 +249,103 @@ describe('CodexAdapter process contract', () => {
     await collect(run.events);
     const record = await readRecord(fake.recordPath);
     expect(record.env.CODEX_HOME).toBe(join(fake.dir, 'codex-home'));
+  });
+
+  it('restores a third-party provider key when startup files left OPENAI_API_KEY empty', async () => {
+    process.env.OPENAI_API_KEY = '';
+    const fake = await createFakeCodex({
+      lines: [{ type: 'turn.completed' }],
+    });
+    cleanup.push(fake.dir);
+    const codexHome = await writeCodexHome(fake.dir, {
+      modelProvider: 'deepseek',
+      providers: `
+[model_providers.deepseek]
+name = "deepseek"
+base_url = "https://api.xinlab-ioz.cn/v1"
+wire_api = "responses"
+requires_openai_auth = false
+experimental_bearer_token = "sk-third-party-key"
+env_key = "OPENAI_API_KEY"
+`,
+    });
+
+    const run = new CodexAdapter({
+      binary: fake.path,
+      profileStateDir: fake.dir,
+      codexHome,
+    }).run({
+      runId: 'run-third-party-key',
+      prompt: 'third party',
+      cwd: await realpath(fake.dir),
+    });
+
+    await collect(run.events);
+    const record = await readRecord(fake.recordPath);
+    expect(record.env.OPENAI_API_KEY).toBe('sk-third-party-key');
+    expect(record.env.CODEX_HOME).toBe(codexHome);
+  });
+
+  it('never injects a key for the official OpenAI provider', async () => {
+    process.env.OPENAI_API_KEY = '';
+    const fake = await createFakeCodex({
+      lines: [{ type: 'turn.completed' }],
+    });
+    cleanup.push(fake.dir);
+    const codexHome = await writeCodexHome(fake.dir, {
+      modelProvider: 'openai',
+      providers: `
+[model_providers.openai]
+name = "openai"
+base_url = "https://api.openai.com/v1"
+env_key = "OPENAI_API_KEY"
+`,
+    });
+
+    const run = new CodexAdapter({
+      binary: fake.path,
+      profileStateDir: fake.dir,
+      codexHome,
+    }).run({
+      runId: 'run-official-provider',
+      prompt: 'official',
+      cwd: await realpath(fake.dir),
+    });
+
+    await collect(run.events);
+    const record = await readRecord(fake.recordPath);
+    expect(record.env.OPENAI_API_KEY).toBe('');
+  });
+
+  it('keeps an inherited third-party key instead of overriding it', async () => {
+    process.env.OPENAI_API_KEY = 'sk-inherited-key';
+    const fake = await createFakeCodex({
+      lines: [{ type: 'turn.completed' }],
+    });
+    cleanup.push(fake.dir);
+    const codexHome = await writeCodexHome(fake.dir, {
+      modelProvider: 'deepseek',
+      providers: `
+[model_providers.deepseek]
+base_url = "https://api.xinlab-ioz.cn/v1"
+requires_openai_auth = false
+experimental_bearer_token = "sk-config-key"
+`,
+    });
+
+    const run = new CodexAdapter({
+      binary: fake.path,
+      profileStateDir: fake.dir,
+      codexHome,
+    }).run({
+      runId: 'run-inherited-key',
+      prompt: 'inherited',
+      cwd: await realpath(fake.dir),
+    });
+
+    await collect(run.events);
+    const record = await readRecord(fake.recordPath);
+    expect(record.env.OPENAI_API_KEY).toBe('sk-inherited-key');
   });
 
   it('passes configured Codex ignore flags through the argv builder', async () => {
@@ -462,6 +565,26 @@ async function collect(events: AsyncIterable<AgentEvent>): Promise<AgentEvent[]>
   return out;
 }
 
+async function writeCodexHome(
+  root: string,
+  options: { modelProvider: string; providers: string; preferredAuthMethod?: string; auth?: unknown },
+): Promise<string> {
+  const codexHome = join(root, 'codex-home');
+  await mkdir(codexHome, { recursive: true });
+  const config = [
+    `model_provider = "${options.modelProvider}"`,
+    ...(options.preferredAuthMethod
+      ? [`preferred_auth_method = "${options.preferredAuthMethod}"`]
+      : []),
+    options.providers.trim(),
+  ].join('\n');
+  await writeFile(join(codexHome, 'config.toml'), `${config}\n`, 'utf8');
+  if (options.auth !== undefined) {
+    await writeFile(join(codexHome, 'auth.json'), `${JSON.stringify(options.auth, null, 2)}\n`, 'utf8');
+  }
+  return codexHome;
+}
+
 async function createFakeInteractiveCodex(): Promise<FakeBinary> {
   const dir = await mkdtemp(join(tmpdir(), 'codex-live-adapter-test-'));
   const path = join(dir, 'fake-codex-live.mjs');
@@ -486,6 +609,7 @@ async function createFakeInteractiveCodex(): Promise<FakeBinary> {
       '      LARKSUITE_CLI_CONFIG_DIR: process.env.LARKSUITE_CLI_CONFIG_DIR,',
       '      CODEX_HOME: process.env.CODEX_HOME,',
       '      APP_SECRET: process.env.APP_SECRET,',
+      '      OPENAI_API_KEY: process.env.OPENAI_API_KEY,',
       '      PATH: process.env.PATH,',
       '    },',
       '  }),',
@@ -535,6 +659,7 @@ async function createFakeCodex(options: {
       '      LARKSUITE_CLI_CONFIG_DIR: process.env.LARKSUITE_CLI_CONFIG_DIR,',
       '      CODEX_HOME: process.env.CODEX_HOME,',
       '      APP_SECRET: process.env.APP_SECRET,',
+      '      OPENAI_API_KEY: process.env.OPENAI_API_KEY,',
       '      PATH: process.env.PATH,',
       '    },',
       '  }));',
@@ -562,6 +687,7 @@ async function readRecord(path: string): Promise<{
     LARKSUITE_CLI_CONFIG_DIR?: string;
     CODEX_HOME?: string;
     APP_SECRET?: string;
+    OPENAI_API_KEY?: string;
     PATH?: string;
   };
 }> {
@@ -575,9 +701,10 @@ async function readRecord(path: string): Promise<{
       LARK_CHANNEL_HOME?: string;
       LARK_CHANNEL_CONFIG?: string;
       LARKSUITE_CLI_CONFIG_DIR?: string;
-      CODEX_HOME?: string;
-      APP_SECRET?: string;
-      PATH?: string;
+    CODEX_HOME?: string;
+    APP_SECRET?: string;
+    OPENAI_API_KEY?: string;
+    PATH?: string;
     };
   };
 }

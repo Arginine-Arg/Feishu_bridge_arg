@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.6.0",
+  version: "1.6.1",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -5794,7 +5794,7 @@ import { createInterface as createInterface7 } from "readline";
 
 // src/agent/claude/adapter.ts
 import { tmpdir as tmpdir2 } from "os";
-import { join as join18 } from "path";
+import { join as join19 } from "path";
 import { createInterface as createInterface3 } from "readline";
 
 // src/agent/event-queue.ts
@@ -5834,7 +5834,276 @@ var AsyncEventQueue = class {
 import { EventEmitter } from "events";
 import { createHash as createHash2 } from "crypto";
 import { chmodSync, lstatSync as lstatSync2, mkdirSync as mkdirSync3 } from "fs";
-import { dirname as dirname15, join as join17, resolve as resolve3 } from "path";
+import { dirname as dirname15, join as join18, resolve as resolve3 } from "path";
+
+// src/agent/codex/credentials.ts
+import { readFileSync as readFileSync2 } from "fs";
+import { readFile as readFile11 } from "fs/promises";
+import { homedir as homedir5 } from "os";
+import { isAbsolute as isAbsolute2, join as join16 } from "path";
+var OFFICIAL_PROVIDER_IDS = /* @__PURE__ */ new Set(["openai", "codex"]);
+var DEFAULT_THIRD_PARTY_ENV_KEY = "OPENAI_API_KEY";
+var OFFICIAL_HOSTS = /* @__PURE__ */ new Set([
+  "api.openai.com",
+  "openai.com",
+  "chatgpt.com",
+  "chat.openai.com"
+]);
+var INTERESTING_PROVIDER_KEYS = /* @__PURE__ */ new Set([
+  "base_url",
+  "env_key",
+  "experimental_bearer_token"
+]);
+async function resolveCodexCredentialEnv(codexHome, defaults) {
+  const home = codexHome ?? defaultCodexHome();
+  if (!home) return emptyResolution();
+  const config = parseCodexConfigSummary(await readText(join16(home, "config.toml")) ?? "");
+  const auth = defaults?.auth ?? parseJsonObject2(await readText(join16(home, "auth.json")));
+  return resolveFromConfig(home, config, {
+    baseEnv: defaults?.baseEnv ?? process.env,
+    ...auth !== void 0 ? { auth } : {}
+  });
+}
+function resolveCodexCredentialEnvSync(codexHome, baseEnv = process.env) {
+  const home = codexHome ?? defaultCodexHome();
+  if (!home) return emptyResolution();
+  const config = parseCodexConfigSummary(readTextSync(join16(home, "config.toml")) ?? "");
+  const auth = parseJsonObject2(readTextSync(join16(home, "auth.json")));
+  return resolveFromConfig(home, config, {
+    baseEnv,
+    ...auth !== void 0 ? { auth } : {}
+  });
+}
+function resolveFromConfig(home, config, inputs) {
+  const providerId = (config.modelProvider ?? "").trim();
+  const provider = providerId ? config.providers.get(providerId) : void 0;
+  if (config.preferredAuthMethod === "chatgpt") return emptyResolution(providerId);
+  if (!isThirdPartyProvider(providerId, provider)) return emptyResolution(providerId);
+  const envKey = (provider?.envKey ?? "").trim() || DEFAULT_THIRD_PARTY_ENV_KEY;
+  const inherited = nonEmpty2(inputs.baseEnv[envKey]);
+  if (inherited) {
+    return {
+      env: { [envKey]: inherited },
+      provider: providerId,
+      envKey,
+      source: "process-env",
+      injected: false,
+      missingToken: false
+    };
+  }
+  const configToken = nonEmpty2(provider?.bearerToken);
+  let token = configToken;
+  let source = configToken ? "config" : void 0;
+  if (!token) {
+    const authToken = inputs.auth ? nonEmpty2(inputs.auth[envKey]) ?? nonEmpty2(inputs.auth.OPENAI_API_KEY) : void 0;
+    if (authToken) {
+      token = authToken;
+      source = "auth";
+    }
+  }
+  if (!token) {
+    log.warn("agent", "codex-credential-missing", {
+      provider: providerId,
+      envKey,
+      codexHome: home
+    });
+    return { env: {}, provider: providerId, envKey, injected: false, missingToken: true };
+  }
+  return {
+    env: { [envKey]: token },
+    provider: providerId,
+    envKey,
+    source,
+    injected: true,
+    missingToken: false
+  };
+}
+function emptyResolution(provider) {
+  return {
+    env: {},
+    ...provider ? { provider } : {},
+    injected: false,
+    missingToken: false
+  };
+}
+function applyCodexCredentialEnv(resolution, env = {}) {
+  for (const [key, value] of Object.entries(resolution.env)) {
+    if (value === void 0) continue;
+    for (const existing of Object.keys(env)) {
+      if (existing.toLowerCase() === key.toLowerCase()) delete env[existing];
+    }
+    env[key] = value;
+  }
+  return env;
+}
+function codexCredentialEnvironmentArgs(env) {
+  return Object.entries(env).flatMap(
+    ([key, value]) => value === void 0 ? [] : ["-e", `${key}=${value}`]
+  );
+}
+function codexCredentialCommandPrefix(env) {
+  return Object.entries(env).filter(([, value]) => value !== void 0).map(([key, value]) => `${key}=${singleQuote(value)}`).join(" ");
+}
+function isThirdPartyProvider(providerId, provider) {
+  if (!providerId) return false;
+  if (provider?.baseUrl) return !isOfficialBaseUrl(provider.baseUrl);
+  if (OFFICIAL_PROVIDER_IDS.has(providerId.toLowerCase())) return false;
+  return true;
+}
+function isOfficialBaseUrl(baseUrl) {
+  try {
+    const host = new URL(baseUrl).hostname.toLowerCase();
+    return [...OFFICIAL_HOSTS].some((official) => host === official || host.endsWith(`.${official}`));
+  } catch {
+    return false;
+  }
+}
+function defaultCodexHome(env = process.env, home = homedir5()) {
+  const configured = nonEmpty2(env.CODEX_HOME);
+  if (configured) return isAbsolute2(configured) ? configured : join16(home, configured);
+  return home ? join16(home, ".codex") : void 0;
+}
+function parseCodexConfigSummary(raw) {
+  const topLevel = /* @__PURE__ */ new Map();
+  const profiles = /* @__PURE__ */ new Map();
+  const providers = /* @__PURE__ */ new Map();
+  let section = "";
+  let profileName = "";
+  let providerName = "";
+  let providerEntry;
+  const finishProvider = () => {
+    if (providerName && providerEntry) providers.set(providerName, providerEntry);
+    providerName = "";
+    providerEntry = void 0;
+  };
+  for (const rawLine of raw.split(/\r?\n/u)) {
+    const line = stripComment(rawLine).trim();
+    if (!line) continue;
+    const header = /^\[\s*([^\]]+?)\s*\]$/u.exec(line);
+    if (header) {
+      finishProvider();
+      section = header[1].trim();
+      profileName = /^profiles\.["']?(.+?)["']?$/u.exec(section)?.[1] ?? "";
+      const providerHeader = /^model_providers\.(?:["'](.+?)["']|([^\s"']+))$/u.exec(section);
+      providerName = providerHeader ? providerHeader[1] ?? providerHeader[2] ?? "" : "";
+      providerEntry = providerName ? {} : void 0;
+      continue;
+    }
+    const assignment = /^([A-Za-z0-9_-]+)\s*=\s*(.+)$/u.exec(line);
+    if (!assignment) continue;
+    const key = assignment[1];
+    const value = parseTomlScalar(assignment[2]);
+    if (value === void 0) continue;
+    if (providerName && providerEntry) {
+      if (!INTERESTING_PROVIDER_KEYS.has(key)) continue;
+      if (key === "base_url") providerEntry.baseUrl = value;
+      else if (key === "env_key") providerEntry.envKey = value;
+      else providerEntry.bearerToken = value;
+      continue;
+    }
+    if (profileName) {
+      const profile3 = profiles.get(profileName) ?? /* @__PURE__ */ new Map();
+      profile3.set(key, value);
+      profiles.set(profileName, profile3);
+      continue;
+    }
+    topLevel.set(key, value);
+  }
+  finishProvider();
+  const selectedProfile = nonEmpty2(topLevel.get("profile"));
+  const profile2 = selectedProfile ? profiles.get(selectedProfile) : void 0;
+  return {
+    modelProvider: profile2?.get("model_provider") ?? topLevel.get("model_provider"),
+    preferredAuthMethod: topLevel.get("preferred_auth_method") ?? profile2?.get("preferred_auth_method"),
+    providers
+  };
+}
+function readTextSync(path) {
+  try {
+    return readFileSync2(path, "utf8");
+  } catch {
+    return void 0;
+  }
+}
+async function readText(path) {
+  try {
+    return await readFile11(path, "utf8");
+  } catch {
+    return void 0;
+  }
+}
+function parseJsonObject2(raw) {
+  if (raw === void 0) return void 0;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return void 0;
+    return parsed;
+  } catch {
+    return void 0;
+  }
+}
+function stripComment(line) {
+  let quote2;
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    if (quote2) {
+      if (char === "\\" && quote2 === '"') index += 1;
+      else if (char === quote2) quote2 = void 0;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote2 = char;
+      continue;
+    }
+    if (char === "#") return line.slice(0, index);
+  }
+  return line;
+}
+function parseTomlScalar(rawValue) {
+  const value = rawValue.trim();
+  if (!value) return void 0;
+  if (value.startsWith('"')) {
+    const end = value.indexOf('"', 1);
+    if (end < 0) return void 0;
+    return unescapeBasicString(value.slice(1, end));
+  }
+  if (value.startsWith("'")) {
+    const end = value.indexOf("'", 1);
+    if (end < 0) return void 0;
+    return value.slice(1, end);
+  }
+  return void 0;
+}
+function unescapeBasicString(value) {
+  return value.replace(/\\(u[0-9A-Fa-f]{4}|.)/gu, (_match, escape) => {
+    switch (escape) {
+      case "n":
+        return "\n";
+      case "t":
+        return "	";
+      case "r":
+        return "\r";
+      case '"':
+        return '"';
+      case "\\":
+        return "\\";
+      default:
+        if (escape.startsWith("u")) {
+          const code = Number.parseInt(escape.slice(1), 16);
+          return Number.isNaN(code) ? escape : String.fromCodePoint(code);
+        }
+        return escape;
+    }
+  });
+}
+function singleQuote(value) {
+  return `'${value.replace(/'/gu, `'\\''`)}'`;
+}
+function nonEmpty2(value) {
+  if (typeof value !== "string") return void 0;
+  const trimmed = value.trim();
+  return trimmed === "" ? void 0 : trimmed;
+}
 
 // src/agent/terminal-text.ts
 function novelTerminalTextSuffix(delivered, candidate) {
@@ -6597,11 +6866,11 @@ function isCodexResumeControlLine(line) {
 import { createHash } from "crypto";
 import {
   lstatSync,
-  readFileSync as readFileSync2,
+  readFileSync as readFileSync3,
   readdirSync,
   unlinkSync as unlinkSync2
 } from "fs";
-import { basename as basename4, dirname as dirname14, isAbsolute as isAbsolute2, join as join16, resolve as resolve2 } from "path";
+import { basename as basename4, dirname as dirname14, isAbsolute as isAbsolute3, join as join17, resolve as resolve2 } from "path";
 var BINDINGS_FILE = "tmux-bindings.json";
 var MANAGED_TERMINALS_FILE = "tmux-managed-terminals.json";
 var MAX_TMUX_TAIL_CHARS = 12e3;
@@ -6622,9 +6891,9 @@ var TmuxBindingController = class {
     this.profile = profile2;
     this.agentKind = agentKind;
     this.allowManagedBinding = allowManagedBinding;
-    this.file = join16(profileStateDir, BINDINGS_FILE);
+    this.file = join17(profileStateDir, BINDINGS_FILE);
     this.bindings = loadBindings(this.file);
-    this.managedFile = join16(profileStateDir, MANAGED_TERMINALS_FILE);
+    this.managedFile = join17(profileStateDir, MANAGED_TERMINALS_FILE);
     this.managedTerminals = loadManagedTerminals(this.managedFile, agentKind);
   }
   profileStateDir;
@@ -6897,9 +7166,9 @@ var TmuxBindingController = class {
 };
 function defaultTmuxSocketPath(env = process.env) {
   const current = env.TMUX?.split(",")[0];
-  if (current && isAbsolute2(current)) return current;
+  if (current && isAbsolute3(current)) return current;
   const uid = typeof process.getuid === "function" ? process.getuid() : 0;
-  return join16(env.TMUX_TMPDIR || "/tmp", `tmux-${uid}`, "default");
+  return join17(env.TMUX_TMPDIR || "/tmp", `tmux-${uid}`, "default");
 }
 function tmuxAttachCommand(target) {
   const pane = `${target.sessionName}:${target.windowIndex}.${target.paneIndex}`;
@@ -6922,11 +7191,11 @@ function discoverTmuxSockets() {
   const found = /* @__PURE__ */ new Set();
   found.add(defaultTmuxSocketPath());
   const current = process.env.TMUX?.split(",")[0];
-  if (current && isAbsolute2(current)) found.add(current);
+  if (current && isAbsolute3(current)) found.add(current);
   if (process.platform === "linux") {
     try {
       const standardDir2 = dirname14(defaultTmuxSocketPath({ ...process.env, TMUX: void 0 }));
-      const lines = readFileSync2("/proc/net/unix", "utf8").split("\n");
+      const lines = readFileSync3("/proc/net/unix", "utf8").split("\n");
       for (const line of lines) {
         const path = line.trim().split(/\s+/).at(-1);
         if (path?.startsWith(`${standardDir2}/`)) found.add(path);
@@ -6936,7 +7205,7 @@ function discoverTmuxSockets() {
   }
   const standardDir = dirname14(defaultTmuxSocketPath({ ...process.env, TMUX: void 0 }));
   try {
-    for (const name of readdirSync(standardDir)) found.add(join16(standardDir, name));
+    for (const name of readdirSync(standardDir)) found.add(join17(standardDir, name));
   } catch {
   }
   for (const path of [...found]) {
@@ -6957,7 +7226,7 @@ function tmuxServerAlive(socketPath) {
   return result.status === 0;
 }
 function isSafeTmuxSocket(path) {
-  if (!isAbsolute2(path)) return false;
+  if (!isAbsolute3(path)) return false;
   try {
     const info = lstatSync(path);
     if (info.isSymbolicLink() || !info.isSocket()) return false;
@@ -7054,9 +7323,9 @@ ${tail.slice(-MAX_TMUX_TAIL_CHARS)}`;
 }
 function resolveSocketSelector(selector) {
   const trimmed = selector.trim();
-  if (isAbsolute2(trimmed)) return trimmed;
+  if (isAbsolute3(trimmed)) return trimmed;
   if (/^[A-Za-z0-9_.-]+$/.test(trimmed)) {
-    return join16(dirname14(defaultTmuxSocketPath({ ...process.env, TMUX: void 0 })), trimmed);
+    return join17(dirname14(defaultTmuxSocketPath({ ...process.env, TMUX: void 0 })), trimmed);
   }
   return trimmed;
 }
@@ -7231,7 +7500,7 @@ function recoverManagedTerminal(cwd, scopeId, profile2, agentKind) {
   }
   const sockets = [
     defaultTmuxSocketPath({ ...process.env, TMUX: void 0 }),
-    ...names.sort().filter((name) => /^\.ab-live-[a-f0-9]{12}\.sock$/u.test(name)).map((name) => join16(cwd, name))
+    ...names.sort().filter((name) => /^\.ab-live-[a-f0-9]{12}\.sock$/u.test(name)).map((name) => join17(cwd, name))
   ];
   for (const socketPath of [...new Set(sockets)]) {
     if (!isSafeTmuxSocket(socketPath)) continue;
@@ -7279,7 +7548,7 @@ function managedSessionNameFor(profile2, agentKind, scopeId) {
 }
 function loadBindings(file) {
   try {
-    const parsed = JSON.parse(readFileSync2(file, "utf8"));
+    const parsed = JSON.parse(readFileSync3(file, "utf8"));
     if (parsed.version !== 1 || !parsed.bindings || typeof parsed.bindings !== "object") return {};
     return parsed.bindings;
   } catch {
@@ -7288,7 +7557,7 @@ function loadBindings(file) {
 }
 function loadManagedTerminals(file, expectedAgent) {
   try {
-    const parsed = JSON.parse(readFileSync2(file, "utf8"));
+    const parsed = JSON.parse(readFileSync3(file, "utf8"));
     if (parsed.version !== 1 || !parsed.terminals || typeof parsed.terminals !== "object") return {};
     const out = {};
     for (const [scopeId, raw] of Object.entries(parsed.terminals)) {
@@ -7314,9 +7583,9 @@ function findCrossProfileBinding(profileStateDir, target, scopeId) {
   const profilesDir = dirname14(profileStateDir);
   try {
     for (const profile2 of readdirSync(profilesDir)) {
-      const dir = join16(profilesDir, profile2);
+      const dir = join17(profilesDir, profile2);
       if (resolve2(dir) === resolve2(profileStateDir)) continue;
-      const bindings = loadBindings(join16(dir, BINDINGS_FILE));
+      const bindings = loadBindings(join17(dir, BINDINGS_FILE));
       if (Object.entries(bindings).some(([scope, item]) => scope !== scopeId && samePane(item, target))) {
         return profile2;
       }
@@ -8646,6 +8915,7 @@ function spawnLiveProcess(opts) {
   const env = mergeProcessEnv(opts.baseEnv ?? process.env, {
     TERM: process.env.TERM || "xterm-256color",
     ...agentEnv,
+    ...opts.credentialEnv,
     ...opts.networkEnv ? {
       ARG_BRIDGE_NETWORK_MODE: opts.networkEnv.mode,
       ARG_BRIDGE_PROXY_STRIPPED: opts.networkEnv.strippedProxyKeys.join(",")
@@ -8655,7 +8925,13 @@ function spawnLiveProcess(opts) {
   });
   const backend = opts.usePty === false ? "pipe" : opts.backend ?? "auto";
   if (backend !== "pipe" && process.platform === "linux") {
-    const commandLine = liveCommandLine(opts.command, opts.args, ptyRows, ptyColumns);
+    const commandLine = liveCommandLine(
+      opts.command,
+      opts.args,
+      ptyRows,
+      ptyColumns,
+      opts.credentialEnv
+    );
     if ((backend === "auto" || backend === "tmux") && isTmuxAvailable()) {
       return spawnTmuxLiveProcess(opts, env, commandLine, ptyRows, ptyColumns);
     }
@@ -8684,8 +8960,10 @@ function spawnLiveProcess(opts) {
     })
   };
 }
-function liveCommandLine(command, args, rows, columns) {
-  return `stty rows ${shellQuote2(rows)} cols ${shellQuote2(columns)} -echo 2>/dev/null; COLUMNS=${shellQuote2(columns)} LINES=${shellQuote2(rows)} ${[
+function liveCommandLine(command, args, rows, columns, credentialEnv) {
+  const credentialPrefix = codexCredentialCommandPrefix(credentialEnv ?? {});
+  const commandPrefix = credentialPrefix ? `${credentialPrefix} ` : "";
+  return `stty rows ${shellQuote2(rows)} cols ${shellQuote2(columns)} -echo 2>/dev/null; COLUMNS=${shellQuote2(columns)} LINES=${shellQuote2(rows)} ${commandPrefix}${[
     command,
     ...args
   ].map(shellQuote2).join(" ")}`;
@@ -8769,7 +9047,7 @@ function isDefaultTmuxSocket(socketPath) {
 function liveTmuxIdentity(cwd, sessionKey, signature, preferredSessionName) {
   const hash = createHash2("sha256").update(cwd).update("\0").update(sessionKey).update("\0").update(signature).digest("hex").slice(0, 20);
   return {
-    socketPath: join17(cwd, `.ab-live-${hash.slice(0, 12)}.sock`),
+    socketPath: join18(cwd, `.ab-live-${hash.slice(0, 12)}.sock`),
     sessionName: preferredSessionName ?? `argbridge-live-${hash}`
   };
 }
@@ -10979,7 +11257,7 @@ var ClaudeAdapter = class {
     this.liveTerminalBackend = opts.liveTerminalBackend;
     this.liveIdleMs = opts.liveIdleMs;
     this.network = opts.network;
-    const profileStateDir = opts.profileStateDir ?? join18(tmpdir2(), `arg-bridge-${process.pid}-claude`);
+    const profileStateDir = opts.profileStateDir ?? join19(tmpdir2(), `arg-bridge-${process.pid}-claude`);
     this.tmuxBindings = new TmuxBindingController(
       profileStateDir,
       opts.larkChannel?.profile ?? "claude",
@@ -11329,7 +11607,7 @@ function isWindowsCommandNotFoundLine(line) {
 
 // src/agent/codex/adapter.ts
 import { createInterface as createInterface4 } from "readline";
-import { join as join20 } from "path";
+import { join as join21 } from "path";
 
 // src/runtime/errors.ts
 var RunRejected = class extends Error {
@@ -11354,19 +11632,19 @@ var SpawnFailed = class extends Error {
 };
 
 // src/agent/bundled-skill.ts
-import { copyFile as copyFile2, mkdir as mkdir13, readFile as readFile11 } from "fs/promises";
-import { homedir as homedir5 } from "os";
-import { dirname as dirname16, join as join19 } from "path";
+import { copyFile as copyFile2, mkdir as mkdir13, readFile as readFile12 } from "fs/promises";
+import { homedir as homedir6 } from "os";
+import { dirname as dirname16, join as join20 } from "path";
 import { fileURLToPath } from "url";
 var SKILL_NAME = "arg-bridge-sendfile";
 async function ensureBundledCodexSkill(codexHome) {
   const source = await bundledSkillSource();
   if (!source) return;
-  const root = codexHome ?? process.env.CODEX_HOME ?? join19(homedir5(), ".codex");
-  const target = join19(root, "skills", SKILL_NAME, "SKILL.md");
+  const root = codexHome ?? process.env.CODEX_HOME ?? join20(homedir6(), ".codex");
+  const target = join20(root, "skills", SKILL_NAME, "SKILL.md");
   try {
-    const sourceContent = await readFile11(source, "utf8");
-    const current = await readFile11(target, "utf8").catch(() => void 0);
+    const sourceContent = await readFile12(source, "utf8");
+    const current = await readFile12(target, "utf8").catch(() => void 0);
     if (current === sourceContent) return;
     await mkdir13(dirname16(target), { recursive: true, mode: 448 });
     await copyFile2(source, target);
@@ -11381,12 +11659,12 @@ async function ensureBundledCodexSkill(codexHome) {
 async function bundledSkillSource() {
   const moduleDir = dirname16(fileURLToPath(import.meta.url));
   const candidates = [
-    join19(moduleDir, "..", "..", "skills", SKILL_NAME, "SKILL.md"),
-    join19(moduleDir, "..", "skills", SKILL_NAME, "SKILL.md")
+    join20(moduleDir, "..", "..", "skills", SKILL_NAME, "SKILL.md"),
+    join20(moduleDir, "..", "skills", SKILL_NAME, "SKILL.md")
   ];
   for (const candidate of candidates) {
     try {
-      await readFile11(candidate, "utf8");
+      await readFile12(candidate, "utf8");
       return candidate;
     } catch {
     }
@@ -11633,6 +11911,12 @@ var CodexAdapter = class {
   liveIdleMs;
   network;
   baseEnv;
+  credentialResolution = {
+    env: {},
+    injected: false,
+    missingToken: false
+  };
+  credentialResolved = false;
   strippedProxyKeys = [];
   liveSessions = new LiveSessionPool();
   tmuxBindings;
@@ -11746,11 +12030,54 @@ var CodexAdapter = class {
         if (item.type === "stripped" && item.keys) this.strippedProxyKeys = item.keys;
       }
     });
+    await this.loadCredentialEnv();
+  }
+  /**
+   * Third-party Codex providers read their key from `$CODEX_HOME/auth.json` or
+   * `experimental_bearer_token`, but `env_key = "OPENAI_API_KEY"` must still be
+   * set to a non-empty value. Bridge children inherit the service/tmux
+   * environment, where `cc-switch`-style startup files can leave it empty, so
+   * restore the configured token before spawning. Official providers are left
+   * untouched.
+   */
+  async loadCredentialEnv() {
+    const resolution = await resolveCodexCredentialEnv(this.codexHome ?? defaultCodexHome(), {
+      baseEnv: process.env
+    });
+    this.credentialResolution = resolution;
+    this.credentialResolved = true;
+    this.logCredentialInjection(resolution);
+    return resolution;
+  }
+  /**
+   * Callers that run the adapter without `prepareRun()` still get the
+   * provider credential, because the config read is cheap and local.
+   */
+  credentialEnv() {
+    if (!this.credentialResolved) {
+      this.credentialResolution = resolveCodexCredentialEnvSync(
+        this.codexHome ?? defaultCodexHome()
+      );
+      this.credentialResolved = true;
+      this.logCredentialInjection(this.credentialResolution);
+    }
+    return this.credentialResolution;
+  }
+  logCredentialInjection(resolution) {
+    if (!resolution.injected) return;
+    log.info("agent", "codex-credential-injected", {
+      provider: resolution.provider ?? null,
+      envKey: resolution.envKey ?? null,
+      source: resolution.source ?? null
+    });
   }
   effectiveCodexHome() {
     if (this.codexHome) return this.codexHome;
-    if (!this.inheritCodexHome) return join20(this.profileStateDir, "codex-home");
+    if (!this.inheritCodexHome) return join21(this.profileStateDir, "codex-home");
     return process.env.CODEX_HOME;
+  }
+  applyCredentialOverride(env) {
+    applyCodexCredentialEnv(this.credentialEnv(), env);
   }
   run(opts) {
     if (!opts.cwd) {
@@ -11776,6 +12103,7 @@ var CodexAdapter = class {
     );
     const codexHome = this.effectiveCodexHome();
     if (codexHome) envOverrides.CODEX_HOME = codexHome;
+    this.applyCredentialOverride(envOverrides);
     const child = spawnProcess(this.binary, args, {
       cwd: opts.cwd,
       env: mergeProcessEnv(this.baseEnv ?? process.env, envOverrides),
@@ -11895,6 +12223,7 @@ var CodexAdapter = class {
     );
     const codexHome = this.effectiveCodexHome();
     if (codexHome) envOverrides.CODEX_HOME = codexHome;
+    this.applyCredentialOverride(envOverrides);
     const signature = JSON.stringify({
       cwd: opts.cwd,
       sandbox,
@@ -11910,6 +12239,7 @@ var CodexAdapter = class {
       cwd: opts.cwd,
       env: envOverrides,
       baseEnv: this.baseEnv,
+      ...Object.keys(this.credentialEnv().env).length > 0 ? { credentialEnv: this.credentialEnv().env } : {},
       networkEnv: { mode: this.network?.mode ?? "inherit", strippedProxyKeys: this.strippedProxyKeys },
       signature: liveSignature,
       usePty: this.liveUsePty,
@@ -12043,16 +12373,16 @@ function isWindowsCommandNotFoundLine2(line) {
 
 // src/agent/structured/adapter.ts
 import { createHash as createHash5, randomUUID as randomUUID3 } from "crypto";
-import { readFile as readFile13, mkdir as mkdir16, lstat as lstat3 } from "fs/promises";
-import { readFileSync as readFileSync4 } from "fs";
+import { readFile as readFile14, mkdir as mkdir16, lstat as lstat3 } from "fs/promises";
+import { readFileSync as readFileSync5 } from "fs";
 import { tmpdir as tmpdir4 } from "os";
-import { join as join23, resolve as resolve4 } from "path";
+import { join as join24, resolve as resolve4 } from "path";
 
 // src/agent/structured/host.ts
 import { createHash as createHash3 } from "crypto";
 import { mkdir as mkdir14, lstat, chmod as chmod5, open as open3 } from "fs/promises";
 import { tmpdir as tmpdir3 } from "os";
-import { join as join21 } from "path";
+import { join as join22 } from "path";
 
 // src/agent/structured/rpc.ts
 import { EventEmitter as EventEmitter2 } from "events";
@@ -12180,12 +12510,12 @@ function clearHostFailure(directory) {
 async function connectCodexHost(options) {
   if (process.platform === "win32") throw new Error("Codex structured shared-terminal backend currently requires Unix sockets; keep terminal transport on Windows");
   const hash = createHash3("sha256").update(options.profileDir).update("\0").update(options.scope).update("\0").update(options.cwd).digest("hex").slice(0, 20);
-  const directory = join21(tmpdir3(), `argbridge-rpc-${process.getuid?.() ?? "user"}-${hash}`);
+  const directory = join22(tmpdir3(), `argbridge-rpc-${process.getuid?.() ?? "user"}-${hash}`);
   await mkdir14(directory, { recursive: true, mode: 448 });
   const stat8 = await lstat(directory);
   if (stat8.isSymbolicLink() || !stat8.isDirectory() || process.getuid && stat8.uid !== process.getuid()) throw new Error("Unsafe structured runtime directory");
   await chmod5(directory, 448);
-  const path = join21(directory, "server.sock");
+  const path = join22(directory, "server.sock");
   const endpoint = `unix://${path}`;
   const url = `ws+unix://${path}:/`;
   let rpc;
@@ -12200,7 +12530,7 @@ async function connectCodexHost(options) {
         `Codex App Server \u8FDE\u7EED\u542F\u52A8\u5931\u8D25 ${paused.failures} \u6B21\uFF1B\u5DF2\u6682\u505C ${Math.ceil(pausedForMs / 1e3)}s\uFF0C\u907F\u514D\u7EE7\u7EED\u5EFA\u7ACB\u65B0\u4F1A\u8BDD\u89E6\u53D1\u4F9B\u5E94\u5546\u98CE\u63A7\u3002\u8BF7\u68C0\u67E5 profile \u7684\u7F51\u7EDC/\u4EE3\u7406\u914D\u7F6E\uFF0C\u6216\u4FEE\u590D\u540E\u8FD0\u884C \`arg-bridge restart\`\u3002`
       );
     }
-    const logFile = await open3(join21(directory, "server.log"), "a", 384);
+    const logFile = await open3(join22(directory, "server.log"), "a", 384);
     const child = spawnProcess(options.binary, ["app-server", "--listen", endpoint], {
       cwd: options.cwd,
       env: options.env,
@@ -12228,7 +12558,7 @@ async function connectCodexHost(options) {
       const breaker = recordHostFailure(directory);
       const retryInMs = Math.max(0, breaker.nextAttemptAt - Date.now());
       throw failure ?? new Error(
-        `Codex App Server did not become ready (failure ${breaker.failures}); next attempt in ${Math.ceil(retryInMs / 1e3)}s; inspect ${join21(directory, "server.log")}`
+        `Codex App Server did not become ready (failure ${breaker.failures}); next attempt in ${Math.ceil(retryInMs / 1e3)}s; inspect ${join22(directory, "server.log")}`
       );
     }
     clearHostFailure(directory);
@@ -12726,7 +13056,7 @@ ${options.prompt}` : options.prompt }];
 
 // src/agent/structured/claude.ts
 import { randomUUID as randomUUID2 } from "crypto";
-import { readFile as readFile12 } from "fs/promises";
+import { readFile as readFile13 } from "fs/promises";
 import { extname as extname2 } from "path";
 var ClaudeStructuredSession = class _ClaudeStructuredSession {
   constructor(id, options, query) {
@@ -12877,7 +13207,7 @@ ${JSON.stringify(input, null, 2)}`,
       for (const path of options.images ?? []) {
         const mime = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif" }[extname2(path).toLowerCase()];
         if (!mime) throw new Error("Unsupported image format");
-        content.push({ type: "image", source: { type: "base64", media_type: mime, data: await readFile12(path, "base64") } });
+        content.push({ type: "image", source: { type: "base64", media_type: mime, data: await readFile13(path, "base64") } });
       }
       if (signal.aborted) return;
       this.phase = "busy";
@@ -13002,7 +13332,7 @@ ${JSON.stringify(input, null, 2)}`,
 // src/agent/structured/view.ts
 import { createHash as createHash4 } from "crypto";
 import { mkdir as mkdir15, appendFile, lstat as lstat2, chmod as chmod6 } from "fs/promises";
-import { join as join22 } from "path";
+import { join as join23 } from "path";
 var quote = (value) => `'${value.replace(/'/g, `'\\''`)}'`;
 var StructuredView = class {
   constructor(directory, key) {
@@ -13024,10 +13354,10 @@ var StructuredView = class {
     if (info.isSymbolicLink() || !info.isDirectory() || process.getuid && info.uid !== process.getuid()) throw new Error("Unsafe terminal view directory");
     await chmod6(this.directory, 448);
     const name = `argbridge-api-${createHash4("sha256").update(this.key).digest("hex").slice(0, 16)}`;
-    this.logPath = join22(this.directory, `${name}.log`);
+    this.logPath = join23(this.directory, `${name}.log`);
     await appendFile(this.logPath, "", { mode: 384 });
     if (process.platform === "win32" || spawnProcessSync("tmux", ["-V"], { stdio: "ignore" }).status !== 0) return;
-    const socket = join22(this.directory, "view.sock");
+    const socket = join23(this.directory, "view.sock");
     if (Buffer.byteLength(socket) > 100) return;
     const exists2 = spawnProcessSync("tmux", ["-S", socket, "has-session", "-t", name], { stdio: "ignore" });
     if (exists2.status === 0 && native) {
@@ -13095,7 +13425,7 @@ ${event.output}
 
 // src/agent/structured/tmux-discovery.ts
 import { basename as basename5, resolve as resolvePath } from "path";
-import { readFileSync as readFileSync3, readlinkSync } from "fs";
+import { readFileSync as readFileSync4, readlinkSync } from "fs";
 function listStructuredTmuxPanes(socket) {
   return listTmuxAgentPanes(socket).flatMap((pane) => {
     const processArgs = [
@@ -13167,13 +13497,13 @@ function processEnvironmentForPidTree(rootPid) {
   let fallback = {};
   for (const pid of ids) {
     try {
-      const raw = readFileSync3(`/proc/${pid}/environ`, "utf8");
+      const raw = readFileSync4(`/proc/${pid}/environ`, "utf8");
       const env = Object.fromEntries(raw.split("\0").flatMap((item) => {
         const index = item.indexOf("=");
         return index > 0 ? [[item.slice(0, index), item.slice(index + 1)]] : [];
       }));
       if (!Object.keys(fallback).length) fallback = env;
-      const argv = readFileSync3(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
+      const argv = readFileSync4(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
       if (argv.slice(0, 2).some((arg) => basename5(arg) === "codex")) return env;
     } catch {
     }
@@ -13204,7 +13534,7 @@ function processArgvTree(rootPid) {
   return [...ids].flatMap((pid) => {
     if (process.platform === "linux") {
       try {
-        const argv = readFileSync3(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
+        const argv = readFileSync4(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
         if (argv.length) return [argv];
       } catch {
       }
@@ -13229,7 +13559,7 @@ function processArgvForPane(pane) {
     let tmuxMatch = false;
     let cwdMatch = false;
     try {
-      const env = readFileSync3(`/proc/${pid}/environ`, "utf8");
+      const env = readFileSync4(`/proc/${pid}/environ`, "utf8");
       const values = /* @__PURE__ */ new Map();
       for (const item of env.split("\0")) {
         const equals = item.indexOf("=");
@@ -13264,8 +13594,8 @@ var StructuredAdapter = class {
     this.options = options;
     this.id = options.kind;
     this.displayName = options.kind === "codex" ? "Codex App Server" : "Claude Agent SDK";
-    this.bindingsFile = join23(options.profileDir, "structured", "tmux-bindings.json");
-    this.candidatesFile = join23(options.profileDir, "structured", "tmux-candidates.json");
+    this.bindingsFile = join24(options.profileDir, "structured", "tmux-bindings.json");
+    this.candidatesFile = join24(options.profileDir, "structured", "tmux-candidates.json");
     this.loadBindings();
     this.loadCandidates();
     this.tmux = {
@@ -13343,6 +13673,7 @@ var StructuredAdapter = class {
   bindingsFile;
   candidatesFile;
   candidates = /* @__PURE__ */ new Map();
+  credentialResolution = { env: {}, injected: false, missingToken: false };
   async listStructuredPanes(socket) {
     if (this.id !== "codex") return listTmuxAgentPanes(socket);
     const sockets = socket ? [socket] : [.../* @__PURE__ */ new Set([
@@ -13404,10 +13735,16 @@ var StructuredAdapter = class {
     const available = await this.checkAvailability();
     if (!available.ok) throw available.error;
     if (this.id === "codex") await ensureBundledCodexSkill(this.options.codexHome ?? process.env.CODEX_HOME);
+    if (this.id === "codex") {
+      this.credentialResolution = await resolveCodexCredentialEnv(
+        this.options.codexHome ?? defaultCodexHome(),
+        { baseEnv: process.env }
+      );
+    }
   }
   loadBindings() {
     try {
-      const parsed = JSON.parse(readFileSync4(this.bindingsFile, "utf8"));
+      const parsed = JSON.parse(readFileSync5(this.bindingsFile, "utf8"));
       if (parsed.version !== 1) return;
       for (const scope of parsed.disabled ?? []) if (typeof scope === "string") this.autoDiscoveryDisabled.add(scope);
       for (const [scope, binding] of Object.entries(parsed.bindings ?? {})) {
@@ -13418,7 +13755,7 @@ var StructuredAdapter = class {
   }
   loadCandidates() {
     try {
-      const parsed = JSON.parse(readFileSync4(this.candidatesFile, "utf8"));
+      const parsed = JSON.parse(readFileSync5(this.candidatesFile, "utf8"));
       if (parsed.version !== 1) return;
       for (const [key, candidate] of Object.entries(parsed.candidates ?? {})) {
         if (candidate?.threadId && candidate.cwd && candidate.target?.socketPath && candidate.target?.sessionName) this.candidates.set(key, candidate);
@@ -13427,11 +13764,11 @@ var StructuredAdapter = class {
     }
   }
   async saveCandidates() {
-    await mkdir16(join23(this.options.profileDir, "structured"), { recursive: true, mode: 448 });
+    await mkdir16(join24(this.options.profileDir, "structured"), { recursive: true, mode: 448 });
     await writeFileAtomic(this.candidatesFile, JSON.stringify({ version: 1, candidates: Object.fromEntries(this.candidates) }, null, 2) + "\n", { mode: 384 });
   }
   async saveBindings() {
-    await mkdir16(join23(this.options.profileDir, "structured"), { recursive: true, mode: 448 });
+    await mkdir16(join24(this.options.profileDir, "structured"), { recursive: true, mode: 448 });
     await writeFileAtomic(this.bindingsFile, JSON.stringify({ version: 1, bindings: Object.fromEntries(this.bindings), disabled: [...this.autoDiscoveryDisabled] }, null, 2) + "\n", { mode: 384 });
   }
   async bindTmuxPane(scope, selector) {
@@ -13465,6 +13802,7 @@ var StructuredAdapter = class {
     const codexHome = target.structured.codexHome ?? this.options.codexHome;
     if (codexHome) env.CODEX_HOME = codexHome;
     else if (this.options.codexHome) env.CODEX_HOME = this.options.codexHome;
+    applyCodexCredentialEnv(this.credentialResolution, env);
     let { rpc, endpoint } = await connectCodexHost({ binary: this.options.binary, profileDir: this.options.profileDir, scope, cwd: target.paneCurrentPath, env });
     let createdPaneId;
     try {
@@ -13472,15 +13810,20 @@ var StructuredAdapter = class {
       rpc = reconciled.rpc;
       const resumed = reconciled.result;
       if (resumed.thread?.id !== target.structured.threadId) throw new Error("App Server \u8FD4\u56DE\u4E86\u4E0D\u540C\u7684\u65E7 thread\uFF0C\u672A\u521B\u5EFA\u7ED1\u5B9A");
+      const credentialCommandPrefix = codexCredentialCommandPrefix(this.credentialResolution.env);
       const command = [
         ...codexHome ? ["env", "CODEX_HOME=" + shellQuote3(codexHome)] : [],
+        ...credentialCommandPrefix ? [credentialCommandPrefix] : [],
         shellQuote3(this.options.binary),
         ...codexRemoteResumeArgs(endpoint, target.structured.threadId).map(shellQuote3)
       ].join(" ") + '; bridge_status=$?; trap - INT; printf "\\n[Codex exited (%s); shell remains]\\n" "$bridge_status"; exec "${SHELL:-/bin/bash}" -i';
-      const environmentArgs = proxyEnvironmentArgs(env, {
-        mode: this.options.network?.mode,
-        strippedKeys: strippedProxyKeys
-      });
+      const environmentArgs = [
+        ...proxyEnvironmentArgs(env, {
+          mode: this.options.network?.mode,
+          strippedKeys: strippedProxyKeys
+        }),
+        ...codexCredentialEnvironmentArgs(this.credentialResolution.env)
+      ];
       const sessionAlive = spawnProcessSync("tmux", ["-S", target.socketPath, "has-session", "-t", target.sessionName], { stdio: "ignore" }).status === 0;
       const createArgs = sessionAlive ? ["split-window", "-d", "-P", "-F", "#{pane_id}", "-t", target.sessionName, "-c", target.paneCurrentPath, ...environmentArgs, "bash", "--noprofile", "--norc", "-ic", command] : ["new-session", "-d", "-P", "-F", "#{pane_id}", "-s", target.sessionName, "-c", target.paneCurrentPath, ...environmentArgs, "bash", "--noprofile", "--norc", "-ic", command];
       const created = spawnProcessSync("tmux", ["-S", target.socketPath, ...createArgs], { encoding: "utf8" });
@@ -13726,15 +14069,15 @@ ${prompt}
   }
   makeView(scope) {
     const key = `${this.options.profileDir}\0${scope}`;
-    const directory = join23(tmpdir4(), `ab-view-${process.getuid?.() ?? "user"}-${createHash5("sha256").update(key).digest("hex").slice(0, 12)}`);
+    const directory = join24(tmpdir4(), `ab-view-${process.getuid?.() ?? "user"}-${createHash5("sha256").update(key).digest("hex").slice(0, 12)}`);
     return new StructuredView(directory, key);
   }
   stateFile(scope, cwd) {
-    return join23(this.options.profileDir, "structured", `${createHash5("sha256").update(scope).update("\0").update(cwd).digest("hex")}.json`);
+    return join24(this.options.profileDir, "structured", `${createHash5("sha256").update(scope).update("\0").update(cwd).digest("hex")}.json`);
   }
   async saved(scope, cwd) {
     try {
-      const value = JSON.parse(await readFile13(this.stateFile(scope, cwd), "utf8"));
+      const value = JSON.parse(await readFile14(this.stateFile(scope, cwd), "utf8"));
       return value.scope === scope && value.cwd === cwd && value.kind === this.id && typeof value.id === "string" ? value : void 0;
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
@@ -13798,11 +14141,11 @@ ${prompt}
   }
   async createSession(scope, options, bound2) {
     const cwd = options.cwd;
-    const directory = join23(this.options.profileDir, "structured");
+    const directory = join24(this.options.profileDir, "structured");
     const stateFile = this.stateFile(scope, cwd);
     let saved;
     try {
-      saved = JSON.parse(await readFile13(stateFile, "utf8"));
+      saved = JSON.parse(await readFile14(stateFile, "utf8"));
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
     }
@@ -13919,8 +14262,8 @@ ${prompt}
 };
 
 // src/agent/structured/preferred.ts
-import { readFileSync as readFileSync5 } from "fs";
-import { join as join24 } from "path";
+import { readFileSync as readFileSync6 } from "fs";
+import { join as join25 } from "path";
 import { mkdir as mkdir17 } from "fs/promises";
 var PreferredStructuredAdapter = class {
   constructor(structured, live, directory) {
@@ -13929,13 +14272,13 @@ var PreferredStructuredAdapter = class {
     this.directory = directory;
     this.id = structured.id;
     this.displayName = `${structured.displayName} (live fallback)`;
-    this.file = join24(directory, "preferred-panes.json");
+    this.file = join25(directory, "preferred-panes.json");
     try {
-      const data = JSON.parse(readFileSync5(this.file, "utf8"));
+      const data = JSON.parse(readFileSync6(this.file, "utf8"));
       if (data.version === 1) for (const [scope, target] of Object.entries(data.targets ?? {})) this.targets.set(scope, target);
     } catch {
       try {
-        const old = JSON.parse(readFileSync5(join24(directory, "structured", "tmux-bindings.json"), "utf8"));
+        const old = JSON.parse(readFileSync6(join25(directory, "structured", "tmux-bindings.json"), "utf8"));
         if (old.version === 1) for (const [scope, binding] of Object.entries(old.bindings ?? {})) {
           const target = binding.target;
           if (target?.paneId) this.targets.set(scope, target);
@@ -14105,8 +14448,8 @@ var PreferredStructuredAdapter = class {
 // src/bot/channel.ts
 import { createLarkChannel } from "@larksuite/channel";
 import { createHash as createHash11 } from "crypto";
-import { homedir as homedir8 } from "os";
-import { dirname as dirname20, join as join28 } from "path";
+import { homedir as homedir9 } from "os";
+import { dirname as dirname20, join as join29 } from "path";
 
 // src/agent/bridge-system-prompt.ts
 var BRIDGE_SYSTEM_PROMPT = `# arg-bridge \u8FD0\u884C\u7EA6\u5B9A
@@ -14502,9 +14845,9 @@ function safeJsonStringify(value) {
 
 // src/commands/index.ts
 import { randomUUID as randomUUID4 } from "crypto";
-import { lstat as lstat4, readFile as readFile14, realpath as realpath4 } from "fs/promises";
-import { homedir as homedir7 } from "os";
-import { basename as basename6, dirname as dirname17, isAbsolute as isAbsolute3, relative, sep } from "path";
+import { lstat as lstat4, readFile as readFile15, realpath as realpath4 } from "fs/promises";
+import { homedir as homedir8 } from "os";
+import { basename as basename6, dirname as dirname17, isAbsolute as isAbsolute4, relative, sep } from "path";
 
 // src/card/account-cards.ts
 function maskAppId(id) {
@@ -15354,7 +15697,7 @@ function helpCard(agentName = "Agent") {
         "- `/btw <\u5185\u5BB9>` \u2014 Codex \u4E2D\u5F00\u542F side conversation \u540E\u63D0\u4EA4\u5185\u5BB9\uFF1B`/codex /btw <\u5185\u5BB9>` \u7B49\u4EF7",
         "- `/status` \u2014 \u5F53\u524D\u72B6\u6001",
         "- `/session` \u2014 \u67E5\u770B\u6216\u5207\u6362\u540E\u53F0 agent session \u6A21\u5F0F",
-        "- `/tmux list|bind <\u7F16\u53F7\u6216 pane id>|status|tail [N]|unbind` \u2014 \u7BA1\u7406\u5458\u7BA1\u7406 tmux\uFF1B`tail` \u9ED8\u8BA4\u663E\u793A\u5F53\u524D pane \u672B\u5C3E 27 \u884C",
+        "- `/tmux list [socket]|bind <\u7F16\u53F7\u6216 pane id>|status|attach|tail [N]|unbind|release` \u2014 \u7BA1\u7406\u5458\u7BA1\u7406 tmux\uFF1B`list` \u663E\u793A\u5171\u4EAB endpoint \u4E0E structured \u547D\u4EE4\uFF0C`tail` \u9ED8\u8BA4\u663E\u793A\u5F53\u524D pane \u672B\u5C3E 27 \u884C",
         "- `/sendfile <path>` \u2014 \u7BA1\u7406\u5458\u76F4\u63A5\u56DE\u590D\u5F53\u524D\u6D88\u606F\u53D1\u9001\u5DE5\u4F5C\u76EE\u5F55\u5185\u7684\u6587\u4EF6",
         "- `/output [live|final|off|status]` \u2014 \u8BBE\u7F6E\u5F53\u524D\u4F1A\u8BDD\u7684\u8F93\u51FA\u6295\u9012\u7B56\u7565\uFF0C\u4E0D\u5F71\u54CD agent \u7EE7\u7EED\u8FD0\u884C",
         "- `/stop` \u2014 \u7ED3\u675F\u5F53\u524D\u6B63\u5728\u8DD1\u7684\u4EFB\u52A1\uFF08\u4E5F\u53EF\u70B9\u5361\u7247\u5E95\u90E8 \u23F9 \u7EC8\u6B62 \u6309\u94AE\uFF09",
@@ -16488,8 +16831,8 @@ function finalizeIfRunning(state) {
 // src/session/history.ts
 import { createReadStream } from "fs";
 import { readdir as readdir4, stat as stat6 } from "fs/promises";
-import { homedir as homedir6 } from "os";
-import { join as join25 } from "path";
+import { homedir as homedir7 } from "os";
+import { join as join26 } from "path";
 import { createInterface as createInterface5 } from "readline";
 
 // src/session/preview.ts
@@ -16501,7 +16844,7 @@ function normalizeSessionPreview(input, maxChars = DEFAULT_PREVIEW_MAX_CHARS) {
 function extractBridgeUserInput(input) {
   const section = readPromptSection(input, "user_input");
   if (!section) return void 0;
-  const parsed = parseJsonObject2(section);
+  const parsed = parseJsonObject3(section);
   const text = typeof parsed?.text === "string" ? parsed.text : void 0;
   return text?.trim() ? text : void 0;
 }
@@ -16509,7 +16852,7 @@ function readPromptSection(input, tag) {
   const match = input.match(new RegExp(`<${tag}>\\n([\\s\\S]*?)\\n</${tag}>`));
   return match?.[1];
 }
-function parseJsonObject2(input) {
+function parseJsonObject3(input) {
   try {
     const value = JSON.parse(input);
     return value && typeof value === "object" && !Array.isArray(value) ? value : void 0;
@@ -16528,7 +16871,7 @@ function encodeCwd(cwd) {
   return cwd.replace(/[^A-Za-z0-9]/g, "-");
 }
 function claudeProjectDir(cwd) {
-  return join25(homedir6(), ".claude", "projects", encodeCwd(cwd));
+  return join26(homedir7(), ".claude", "projects", encodeCwd(cwd));
 }
 async function listRecentSessions(cwd, limit = 5) {
   const dir = claudeProjectDir(cwd);
@@ -16542,7 +16885,7 @@ async function listRecentSessions(cwd, limit = 5) {
   const jsonls = files.filter((f) => f.endsWith(".jsonl"));
   const withStats = await Promise.all(
     jsonls.map(async (f) => {
-      const path = join25(dir, f);
+      const path = join26(dir, f);
       try {
         const st = await stat6(path);
         return { file: f, path, mtime: st.mtimeMs };
@@ -16613,7 +16956,7 @@ function formatRelTime(mtime) {
 
 // src/session/codex-history.ts
 import { createInterface as createInterface6 } from "readline";
-import { join as join26 } from "path";
+import { join as join27 } from "path";
 var CodexHistoryError = class extends Error {
   code;
   constructor(code, message, options) {
@@ -16728,7 +17071,7 @@ function spawnCodexAppServer(options) {
   if (options.codexHome) {
     envOverrides.CODEX_HOME = options.codexHome;
   } else if (options.inheritCodexHome === false) {
-    envOverrides.CODEX_HOME = join26(options.profileStateDir, "codex-home");
+    envOverrides.CODEX_HOME = join27(options.profileStateDir, "codex-home");
   }
   return spawnProcess(options.binary, ["app-server", "--listen", "stdio://"], {
     env: mergeProcessEnv(process.env, envOverrides),
@@ -17054,12 +17397,12 @@ function isMessageAuditReject(err) {
   return /not pass the audit/i.test(message);
 }
 function expandTilde(p3) {
-  if (p3 === "~") return homedir7();
-  if (p3.startsWith("~/")) return `${homedir7()}${p3.slice(1)}`;
+  if (p3 === "~") return homedir8();
+  if (p3.startsWith("~/")) return `${homedir8()}${p3.slice(1)}`;
   return p3;
 }
 function isAbsoluteOrTilde(p3) {
-  return isAbsolute3(p3) || p3 === "~" || p3.startsWith("~/");
+  return isAbsolute4(p3) || p3 === "~" || p3.startsWith("~/");
 }
 async function handleSendFile(args, ctx) {
   const input = args.trim();
@@ -17138,7 +17481,7 @@ function sendFileFailureMessage(err) {
 }
 function isPathWithinRoot(path, root) {
   const pathRelative = relative(root, path);
-  return pathRelative === "" || pathRelative !== ".." && !pathRelative.startsWith(`..${sep}`) && !isAbsolute3(pathRelative);
+  return pathRelative === "" || pathRelative !== ".." && !pathRelative.startsWith(`..${sep}`) && !isAbsolute4(pathRelative);
 }
 function formatByteLimit(bytes) {
   if (bytes >= 1024 * 1024) return `${Math.floor(bytes / (1024 * 1024))} MiB`;
@@ -17538,7 +17881,7 @@ function runtimeAccessStatus(profileConfig) {
 async function larkCliStatus(ctx) {
   const appPaths2 = commandProfilePaths(ctx);
   try {
-    const raw = JSON.parse(await readFile14(appPaths2.larkCliTargetConfigFile, "utf8"));
+    const raw = JSON.parse(await readFile15(appPaths2.larkCliTargetConfigFile, "utf8"));
     const app = raw.apps?.find(
       (candidate) => candidate.appId === ctx.controls.profileConfig.accounts.app.id && candidate.brand === ctx.controls.profileConfig.accounts.app.tenant
     );
@@ -17920,9 +18263,9 @@ ${fence}`;
 }
 function parseTmuxSocketArgument(parts) {
   if (parts.length === 0) return "";
-  if (parts.length === 1) return isAbsolute3(parts[0]) ? parts[0] : null;
+  if (parts.length === 1) return isAbsolute4(parts[0]) ? parts[0] : null;
   if (parts.length === 2 && parts[0] === "-L") return parts[1];
-  if (parts.length === 2 && parts[0] === "-S") return isAbsolute3(parts[1]) ? parts[1] : null;
+  if (parts.length === 2 && parts[0] === "-S") return isAbsolute4(parts[1]) ? parts[1] : null;
   return null;
 }
 function formatTmuxList(panes, profile2 = "codex") {
@@ -20018,7 +20361,7 @@ function signatureMatches(actual, expected) {
 }
 
 // src/card/callback-store.ts
-import { readFile as readFile15 } from "fs/promises";
+import { readFile as readFile16 } from "fs/promises";
 var CallbackNonceStore = class {
   path;
   nonces = /* @__PURE__ */ new Map();
@@ -20028,7 +20371,7 @@ var CallbackNonceStore = class {
   }
   async load() {
     try {
-      const raw = JSON.parse(await readFile15(this.path, "utf8"));
+      const raw = JSON.parse(await readFile16(this.path, "utf8"));
       if (!raw || typeof raw !== "object") return;
       this.nonces.clear();
       for (const [nonce, state] of Object.entries(raw)) {
@@ -20579,7 +20922,7 @@ function footerLine(status) {
 import { createHash as createHash8 } from "crypto";
 import { createReadStream as createReadStream2 } from "fs";
 import { mkdir as mkdir18, readdir as readdir5, rename as rename4, rm as rm11, stat as stat7 } from "fs/promises";
-import { join as join27 } from "path";
+import { join as join28 } from "path";
 
 // src/media/attachment.ts
 var DEFAULT_POLICY = {
@@ -20715,7 +21058,7 @@ var MediaCache = class {
       return null;
     }
     const kind = r.type;
-    const tmpPath = join27(
+    const tmpPath = join28(
       this.rootDir,
       `.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`
     );
@@ -20729,7 +21072,7 @@ var MediaCache = class {
     const hash = await hashFile(tmpPath);
     const mime = contentType ?? defaultMime(kind);
     const ext = safeExtensionForMime(mime);
-    const absPath = join27(this.rootDir, `${hash}.${ext}`);
+    const absPath = join28(this.rootDir, `${hash}.${ext}`);
     try {
       await stat7(absPath);
       await rm11(tmpPath, { force: true });
@@ -20792,7 +21135,7 @@ async function listFiles(root) {
   const out = [];
   const entries = await readdir5(root, { withFileTypes: true }).catch(() => []);
   for (const entry of entries) {
-    const full = join27(root, entry.name);
+    const full = join28(root, entry.name);
     if (entry.isDirectory()) {
       out.push(...await listFiles(full));
     } else if (entry.isFile()) {
@@ -22835,9 +23178,9 @@ async function removeReaction(channel, messageId, reactionId) {
 
 // src/bot/artifact-broker.ts
 import { createHash as createHash10, randomBytes as randomBytes5 } from "crypto";
-import { lstat as lstat5, mkdir as mkdir20, readFile as readFile16, realpath as realpath5, rm as rm12 } from "fs/promises";
+import { lstat as lstat5, mkdir as mkdir20, readFile as readFile17, realpath as realpath5, rm as rm12 } from "fs/promises";
 import { createServer } from "net";
-import { basename as basename7, dirname as dirname19, isAbsolute as isAbsolute4, relative as relative2, resolve as resolve5, sep as sep2 } from "path";
+import { basename as basename7, dirname as dirname19, isAbsolute as isAbsolute5, relative as relative2, resolve as resolve5, sep as sep2 } from "path";
 var ArtifactBroker = class {
   constructor(socketPath, channel, allowLocalFileRoot, persistentStatePath) {
     this.channel = channel;
@@ -22966,7 +23309,7 @@ var ArtifactBroker = class {
     if (typeof request.path !== "string" || !request.path.trim()) {
       throw new Error("\u8BF7\u63D0\u4F9B\u8981\u53D1\u9001\u7684\u6587\u4EF6\u8DEF\u5F84");
     }
-    if (isAbsolute4(request.path)) throw new Error("\u6587\u4EF6\u8DEF\u5F84\u5FC5\u987B\u76F8\u5BF9\u5F53\u524D\u5DE5\u4F5C\u76EE\u5F55");
+    if (isAbsolute5(request.path)) throw new Error("\u6587\u4EF6\u8DEF\u5F84\u5FC5\u987B\u76F8\u5BF9\u5F53\u524D\u5DE5\u4F5C\u76EE\u5F55");
     if (request.path.split(/[\\/]+/u).some((part) => part === "..")) {
       throw new Error("\u6587\u4EF6\u8DEF\u5F84\u4E0D\u80FD\u5305\u542B ..");
     }
@@ -23006,7 +23349,7 @@ var ArtifactBroker = class {
   async loadPersistentGrants() {
     if (!this.persistentStatePath) return;
     try {
-      const raw = JSON.parse(await readFile16(this.persistentStatePath, "utf8"));
+      const raw = JSON.parse(await readFile17(this.persistentStatePath, "utf8"));
       if (raw.version !== 1 || !Array.isArray(raw.grants)) return;
       for (const item of raw.grants) {
         if (!isPersistentGrant(item)) continue;
@@ -23042,7 +23385,7 @@ var ArtifactBroker = class {
 };
 function isPathWithinRoot2(path, root) {
   const pathRelative = relative2(root, path);
-  return pathRelative === "" || pathRelative !== ".." && !pathRelative.startsWith(`..${sep2}`) && !isAbsolute4(pathRelative);
+  return pathRelative === "" || pathRelative !== ".." && !pathRelative.startsWith(`..${sep2}`) && !isAbsolute5(pathRelative);
 }
 function artifactBrokerSocketPath(socketPath) {
   if (process.platform !== "win32") return socketPath;
@@ -23059,7 +23402,7 @@ async function findCanonicalAllowedRoot(path, roots) {
 function isPersistentGrant(value) {
   if (!value || typeof value !== "object") return false;
   const grant = value;
-  return grant.persistent === true && typeof grant.token === "string" && /^[A-Za-z0-9_-]{16,200}$/u.test(grant.token) && typeof grant.scope === "string" && grant.scope.length > 0 && typeof grant.chatId === "string" && grant.chatId.length > 0 && typeof grant.replyTo === "string" && grant.replyTo.length > 0 && Array.isArray(grant.allowedRoots) && grant.allowedRoots.every((root) => typeof root === "string" && isAbsolute4(root)) && typeof grant.maxFileBytes === "number" && Number.isSafeInteger(grant.maxFileBytes) && grant.maxFileBytes > 0;
+  return grant.persistent === true && typeof grant.token === "string" && /^[A-Za-z0-9_-]{16,200}$/u.test(grant.token) && typeof grant.scope === "string" && grant.scope.length > 0 && typeof grant.chatId === "string" && grant.chatId.length > 0 && typeof grant.replyTo === "string" && grant.replyTo.length > 0 && Array.isArray(grant.allowedRoots) && grant.allowedRoots.every((root) => typeof root === "string" && isAbsolute5(root)) && typeof grant.maxFileBytes === "number" && Number.isSafeInteger(grant.maxFileBytes) && grant.maxFileBytes > 0;
 }
 function normalizeCaption(value) {
   if (value === void 0) return void 0;
@@ -23071,7 +23414,7 @@ function normalizeCaption(value) {
 }
 
 // src/bot/inbound-message-ledger.ts
-import { readFile as readFile17 } from "fs/promises";
+import { readFile as readFile18 } from "fs/promises";
 var FILE_VERSION2 = 1;
 var DEFAULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1e3;
 var DEFAULT_MAX_ENTRIES = 5e4;
@@ -23087,7 +23430,7 @@ var InboundMessageLedger = class {
   async load() {
     if (!this.path) return;
     try {
-      const raw = JSON.parse(await readFile17(this.path, "utf8"));
+      const raw = JSON.parse(await readFile18(this.path, "utf8"));
       if (raw.version !== FILE_VERSION2 || !raw.entries || typeof raw.entries !== "object") return;
       for (const [messageId, acceptedAt] of Object.entries(raw.entries)) {
         if (typeof acceptedAt === "number" && Number.isFinite(acceptedAt) && messageId) {
@@ -23631,8 +23974,8 @@ function stringifyArgs(args) {
   }).join(" ");
 }
 function expandHomeDirectory(path) {
-  if (path === "~") return homedir8();
-  return path.startsWith("~/") ? join28(homedir8(), path.slice(2)) : path;
+  if (path === "~") return homedir9();
+  return path.startsWith("~/") ? join29(homedir9(), path.slice(2)) : path;
 }
 async function startChannel(deps) {
   const { cfg, agent, sessions, sessionCatalog, workspaces, controls } = deps;
@@ -23642,10 +23985,10 @@ async function startChannel(deps) {
   const pool = new ProcessPool(() => getMaxConcurrentRuns(controls.cfg));
   const executor = new RunExecutor({ agent, pool, activeRuns });
   const appSecret = await resolveAppSecret(cfg, deps.appPaths);
-  const callbackNonceStore = deps.appPaths?.mediaDir ? new CallbackNonceStore(join28(dirname20(deps.appPaths.mediaDir), "callback-nonces.json")) : void 0;
+  const callbackNonceStore = deps.appPaths?.mediaDir ? new CallbackNonceStore(join29(dirname20(deps.appPaths.mediaDir), "callback-nonces.json")) : void 0;
   await callbackNonceStore?.load();
   const inboundMessages = new InboundMessageLedger(
-    deps.appPaths?.mediaDir ? join28(dirname20(deps.appPaths.mediaDir), "inbound-message-ledger.json") : void 0
+    deps.appPaths?.mediaDir ? join29(dirname20(deps.appPaths.mediaDir), "inbound-message-ledger.json") : void 0
   );
   await inboundMessages.load();
   const callbackAuth = callbackNonceStore ? new CallbackAuth({
@@ -23736,10 +24079,10 @@ async function startChannel(deps) {
   const media = new MediaCache(channel, deps.appPaths?.mediaDir);
   const artifactStateDir = deps.appPaths?.mediaDir ? dirname20(deps.appPaths.mediaDir) : void 0;
   const artifactBroker = new ArtifactBroker(
-    join28(artifactStateDir ?? join28(process.cwd(), ".arg-bridge-media"), "artifact-broker.sock"),
+    join29(artifactStateDir ?? join29(process.cwd(), ".arg-bridge-media"), "artifact-broker.sock"),
     channel,
     allowLocalFileRoot,
-    artifactStateDir ? join28(artifactStateDir, "artifact-grants.json") : void 0
+    artifactStateDir ? join29(artifactStateDir, "artifact-grants.json") : void 0
   );
   await artifactBroker.start();
   if (agent.tmux?.restoreArtifactDelivery) {
@@ -27011,7 +27354,7 @@ function isDefined(value) {
 }
 
 // src/session/store.ts
-import { readFile as readFile18 } from "fs/promises";
+import { readFile as readFile19 } from "fs/promises";
 var SessionStore = class {
   data = {};
   saving = Promise.resolve();
@@ -27021,7 +27364,7 @@ var SessionStore = class {
   }
   async load() {
     try {
-      const text = await readFile18(this.path, "utf8");
+      const text = await readFile19(this.path, "utf8");
       const raw = JSON.parse(text);
       this.data = {};
       for (const [chatId, entry] of Object.entries(raw)) {
@@ -27186,7 +27529,7 @@ function isPersistedLiveInteraction(value) {
 
 // src/session/catalog.ts
 import { randomUUID as randomUUID7 } from "crypto";
-import { open as open4, readFile as readFile19, rename as rename5, mkdir as mkdir21 } from "fs/promises";
+import { open as open4, readFile as readFile20, rename as rename5, mkdir as mkdir21 } from "fs/promises";
 import { dirname as dirname21 } from "path";
 var DEFAULT_MAX_ARCHIVED_AGE_MS = 90 * 24 * 60 * 60 * 1e3;
 var DEFAULT_MAX_ENTRIES_PER_SCOPE = 20;
@@ -27209,7 +27552,7 @@ var SessionCatalog = class {
   }
   async load() {
     try {
-      const raw = JSON.parse(await readFile19(this.path, "utf8"));
+      const raw = JSON.parse(await readFile20(this.path, "utf8"));
       if (!Array.isArray(raw)) {
         this.data.clear();
         return;
@@ -27371,7 +27714,7 @@ function assertAgentIdentity(input) {
 }
 
 // src/workspace/store.ts
-import { readFile as readFile20 } from "fs/promises";
+import { readFile as readFile21 } from "fs/promises";
 var WorkspaceStore = class {
   data = { chats: {}, named: {} };
   saving = Promise.resolve();
@@ -27381,7 +27724,7 @@ var WorkspaceStore = class {
   }
   async load() {
     try {
-      const text = await readFile20(this.path, "utf8");
+      const text = await readFile21(this.path, "utf8");
       const parsed = JSON.parse(text);
       this.data = {
         chats: parsed.chats ?? {},
@@ -27961,11 +28304,11 @@ function readTmuxSessionEnvironment(name, env) {
 }
 
 // src/cli/commands/native.ts
-import { readFile as readFile21, lstat as lstat6 } from "fs/promises";
-import { join as join29 } from "path";
+import { readFile as readFile22, lstat as lstat6 } from "fs/promises";
+import { join as join30 } from "path";
 async function runNative(thread, opts) {
   const rootPaths = resolveAppPaths();
-  const root = JSON.parse(await readFile21(rootPaths.configFile, "utf8"));
+  const root = JSON.parse(await readFile22(rootPaths.configFile, "utf8"));
   const profileName = opts.profile ?? root.activeProfile;
   const paths2 = resolveAppPaths({ profile: profileName });
   if (!root.profiles?.[profileName]) throw new Error(`Unknown profile: ${profileName}`);
@@ -27981,6 +28324,10 @@ async function runNative(thread, opts) {
   const binary = config.codex?.binaryPath ?? "codex";
   if (config.codex?.codexHome) env.CODEX_HOME = config.codex.codexHome;
   if (!env.CODEX_HOME && config.codex?.inheritCodexHome === false) env.CODEX_HOME = `${paths2.profileDir}/codex-home`;
+  applyCodexCredentialEnv(
+    await resolveCodexCredentialEnv(env.CODEX_HOME, { baseEnv: env }),
+    env
+  );
   if (!thread) {
     console.log("New native conversation (live fallback); use native <thread-id> to share a saved conversation.");
     await waitChild(spawnProcess(binary, [...codexRemotePermissionArgs(sandbox)], { cwd, env, stdio: "inherit" }));
@@ -27988,9 +28335,9 @@ async function runNative(thread, opts) {
   }
   const existing = thread ? listStructuredTmuxPanes().filter((pane) => pane.structured.threadId === thread && pane.structured.endpoint) : [];
   const candidates = new Set(existing.map((pane) => pane.structured.endpoint));
-  for (const file of [join29(paths2.profileDir, "structured", "tmux-bindings.json"), join29(paths2.profileDir, "preferred-panes.json")]) {
+  for (const file of [join30(paths2.profileDir, "structured", "tmux-bindings.json"), join30(paths2.profileDir, "preferred-panes.json")]) {
     try {
-      const stored = JSON.parse(await readFile21(file, "utf8"));
+      const stored = JSON.parse(await readFile22(file, "utf8"));
       for (const entry of Object.values(stored.bindings ?? stored.targets ?? {})) {
         const identity = entry.structured ?? entry;
         if (identity.threadId === thread && identity.endpoint) candidates.add(identity.endpoint);

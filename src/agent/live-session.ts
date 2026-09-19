@@ -4,6 +4,7 @@ import { chmodSync, lstatSync, mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
 import { log } from '../core/logger';
+import { codexCredentialCommandPrefix } from './codex/credentials';
 import {
   mergeProcessEnv,
   spawnProcess,
@@ -82,6 +83,12 @@ export interface LiveSessionCommand {
    */
   baseEnv?: NodeJS.ProcessEnv;
   env?: NodeJS.ProcessEnv;
+  /**
+   * Provider-aware Codex credentials resolved by the adapter. Applied after
+   * `baseEnv`, so a `cc-switch`-style startup file that left `OPENAI_API_KEY`
+   * empty for a third-party provider cannot poison the tmux agent.
+   */
+  credentialEnv?: NodeJS.ProcessEnv;
   /**
    * Network policy metadata for tmux pane creation. `direct`/`proxy` own the
    * pane environment; `inherit` clears only keys that sanitization removed.
@@ -1805,6 +1812,7 @@ function spawnLiveProcess(opts: LiveSessionCommand): {
   const env = mergeProcessEnv(opts.baseEnv ?? process.env, {
     TERM: process.env.TERM || 'xterm-256color',
     ...agentEnv,
+    ...opts.credentialEnv,
     ...(opts.networkEnv ? {
       ARG_BRIDGE_NETWORK_MODE: opts.networkEnv.mode,
       ARG_BRIDGE_PROXY_STRIPPED: opts.networkEnv.strippedProxyKeys.join(','),
@@ -1814,7 +1822,13 @@ function spawnLiveProcess(opts: LiveSessionCommand): {
   });
   const backend = opts.usePty === false ? 'pipe' : opts.backend ?? 'auto';
   if (backend !== 'pipe' && process.platform === 'linux') {
-    const commandLine = liveCommandLine(opts.command, opts.args, ptyRows, ptyColumns);
+    const commandLine = liveCommandLine(
+      opts.command,
+      opts.args,
+      ptyRows,
+      ptyColumns,
+      opts.credentialEnv,
+    );
     if ((backend === 'auto' || backend === 'tmux') && isTmuxAvailable()) {
       return spawnTmuxLiveProcess(opts, env, commandLine, ptyRows, ptyColumns);
     }
@@ -1844,8 +1858,20 @@ function spawnLiveProcess(opts: LiveSessionCommand): {
   };
 }
 
-function liveCommandLine(command: string, args: string[], rows: string, columns: string): string {
-  return `stty rows ${shellQuote(rows)} cols ${shellQuote(columns)} -echo 2>/dev/null; COLUMNS=${shellQuote(columns)} LINES=${shellQuote(rows)} ${[
+function liveCommandLine(
+  command: string,
+  args: string[],
+  rows: string,
+  columns: string,
+  credentialEnv?: NodeJS.ProcessEnv,
+): string {
+  // `env` adds or overrides variables while inheriting the rest of the pane
+  // environment, so an empty value held by the tmux server cannot win.
+  // tmux `respawn-pane` has no `-e` flag, so the explicit prefix keeps
+  // provider credentials attached to every path that starts the agent.
+  const credentialPrefix = codexCredentialCommandPrefix(credentialEnv ?? {});
+  const commandPrefix = credentialPrefix ? `${credentialPrefix} ` : '';
+  return `stty rows ${shellQuote(rows)} cols ${shellQuote(columns)} -echo 2>/dev/null; COLUMNS=${shellQuote(columns)} LINES=${shellQuote(rows)} ${commandPrefix}${[
     command,
     ...args,
   ]

@@ -30,6 +30,13 @@ import type {
   AgentRunOptions,
 } from '../types';
 import { buildCodexArgs } from './argv';
+import {
+  applyCodexCredentialEnv,
+  defaultCodexHome,
+  resolveCodexCredentialEnv,
+  resolveCodexCredentialEnvSync,
+  type CodexCredentialResolution,
+} from './credentials';
 import { CodexJsonlTranslator, type CodexFinishReason } from './jsonl';
 import { sanitizeAgentEnv } from '../../platform/network-env';
 
@@ -73,6 +80,12 @@ export class CodexAdapter implements AgentAdapter {
   private readonly liveIdleMs: number | undefined;
   private readonly network: NetworkConfig | undefined;
   private baseEnv: NodeJS.ProcessEnv | undefined;
+  private credentialResolution: CodexCredentialResolution = {
+    env: {},
+    injected: false,
+    missingToken: false,
+  };
+  private credentialResolved = false;
   private strippedProxyKeys: string[] = [];
   private readonly liveSessions = new LiveSessionPool();
   private readonly tmuxBindings: TmuxBindingController;
@@ -195,12 +208,59 @@ export class CodexAdapter implements AgentAdapter {
     this.baseEnv = await sanitizeAgentEnv(process.env, this.network, {
       onDiagnostic: (item) => { if (item.type === 'stripped' && item.keys) this.strippedProxyKeys = item.keys; },
     });
+    await this.loadCredentialEnv();
+  }
+
+  /**
+   * Third-party Codex providers read their key from `$CODEX_HOME/auth.json` or
+   * `experimental_bearer_token`, but `env_key = "OPENAI_API_KEY"` must still be
+   * set to a non-empty value. Bridge children inherit the service/tmux
+   * environment, where `cc-switch`-style startup files can leave it empty, so
+   * restore the configured token before spawning. Official providers are left
+   * untouched.
+   */
+  private async loadCredentialEnv(): Promise<CodexCredentialResolution> {
+    const resolution = await resolveCodexCredentialEnv(this.codexHome ?? defaultCodexHome(), {
+      baseEnv: process.env,
+    });
+    this.credentialResolution = resolution;
+    this.credentialResolved = true;
+    this.logCredentialInjection(resolution);
+    return resolution;
+  }
+
+  /**
+   * Callers that run the adapter without `prepareRun()` still get the
+   * provider credential, because the config read is cheap and local.
+   */
+  private credentialEnv(): CodexCredentialResolution {
+    if (!this.credentialResolved) {
+      this.credentialResolution = resolveCodexCredentialEnvSync(
+        this.codexHome ?? defaultCodexHome(),
+      );
+      this.credentialResolved = true;
+      this.logCredentialInjection(this.credentialResolution);
+    }
+    return this.credentialResolution;
+  }
+
+  private logCredentialInjection(resolution: CodexCredentialResolution): void {
+    if (!resolution.injected) return;
+    log.info('agent', 'codex-credential-injected', {
+      provider: resolution.provider ?? null,
+      envKey: resolution.envKey ?? null,
+      source: resolution.source ?? null,
+    });
   }
 
   private effectiveCodexHome(): string | undefined {
     if (this.codexHome) return this.codexHome;
     if (!this.inheritCodexHome) return join(this.profileStateDir, 'codex-home');
     return process.env.CODEX_HOME;
+  }
+
+  private applyCredentialOverride(env: NodeJS.ProcessEnv): void {
+    applyCodexCredentialEnv(this.credentialEnv(), env);
   }
 
   run(opts: AgentRunOptions): AgentRun {
@@ -228,6 +288,7 @@ export class CodexAdapter implements AgentAdapter {
     );
     const codexHome = this.effectiveCodexHome();
     if (codexHome) envOverrides.CODEX_HOME = codexHome;
+    this.applyCredentialOverride(envOverrides);
     const child = spawnProcess(this.binary, args, {
       cwd: opts.cwd,
       env: mergeProcessEnv(this.baseEnv ?? process.env, envOverrides),
@@ -359,6 +420,7 @@ export class CodexAdapter implements AgentAdapter {
     );
     const codexHome = this.effectiveCodexHome();
     if (codexHome) envOverrides.CODEX_HOME = codexHome;
+    this.applyCredentialOverride(envOverrides);
     const signature = JSON.stringify({
       cwd: opts.cwd,
       sandbox,
@@ -376,6 +438,9 @@ export class CodexAdapter implements AgentAdapter {
       cwd: opts.cwd,
       env: envOverrides,
       baseEnv: this.baseEnv,
+      ...(Object.keys(this.credentialEnv().env).length > 0
+        ? { credentialEnv: this.credentialEnv().env }
+        : {}),
       networkEnv: { mode: this.network?.mode ?? 'inherit', strippedProxyKeys: this.strippedProxyKeys },
       signature: liveSignature,
       usePty: this.liveUsePty,

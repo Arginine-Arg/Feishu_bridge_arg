@@ -4,7 +4,9 @@ A lightweight bot that bridges Feishu / Lark messenger with your local Claude Co
 
 [中文 README](./README.zh.md)
 
-Version 1.6.0 adapts the Codex CLI 0.154+ remote-resume contract and hardens agent supervision. A TUI attaching to an existing App Server task no longer receives permission overrides, so `--dangerously-bypass-approvals-and-sandbox` / `--sandbox` cannot break bootstrap; the task keeps the permissions frozen when it was created. Per-profile `network.mode` (`direct` / `proxy` / `inherit`) controls the environment of agent children, strips a provably dead loopback proxy, and verifies an explicit proxy before starting. App Server start failures back off at 3s / 6s / 12s / ... up to 60s, and the service definitions add a restart throttle and failure limit instead of respawning in a tight loop. Structured pane discovery and `/tmux release` remain unchanged. See [configuration, validated capabilities, and limitations](./docs/structured-backend.md).
+Version 1.6.1 fixes third-party Codex providers that failed to start when a `cc-switch`-style startup file left `OPENAI_API_KEY` empty: the bridge now restores the provider's declared `env_key` from `experimental_bearer_token` or `auth.json`, while official API keys and ChatGPT OAuth logins are never modified. It also documents `/tmux list`, `/tmux bind`, `/tmux unbind`, and `/tmux release` below.
+
+Version 1.6.0 adapts the Codex CLI 0.154+ remote-resume contract and hardens agent supervision. A TUI attaching to an existing App Server task no longer receives permission overrides, so `--dangerously-bypass-approvals-and-sandbox` / `--sandbox` cannot break bootstrap; the task keeps the permissions frozen when it was created. Per-profile `network.mode` (`direct` / `proxy` / `inherit`) controls the environment of agent children, strips a provably dead loopback proxy, and verifies an explicit proxy before starting. App Server start failures back off at 3s / 6s / 12s / ... up to 60s, and the service definitions add a restart throttle and failure limit instead of respawning in a tight loop. See [configuration, validated capabilities, and limitations](./docs/structured-backend.md).
 
 For a product walkthrough, see the [Feishu document](https://larkcommunity.feishu.cn/docx/OaRIdFIRFoLM3xxTmKwcetHqn5e).
 
@@ -46,7 +48,7 @@ Install a pinned release or use a writable custom npm prefix when required:
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.6.0
+sh /tmp/install-arg-bridge.sh --version 1.6.1
 # Example for a machine without permission to write npm's configured global prefix:
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -90,10 +92,10 @@ Release tarballs are preferred. If a Git install is required, keep both compatib
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.0"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.1"
 ```
 
-`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.0`.
+`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.1`.
 
 ### 4. Node or npm global-prefix errors
 
@@ -248,8 +250,13 @@ If a profile was created with the wrong agent kind, stop or unregister any match
 | `/model` | Choose the model; Codex uses its native model/reasoning picker and syncs the result to the active profile. `/codex model` is a shorthand for `/codex /model`. |
 | `/btw [<text>]` | Codex only: open or reuse a side conversation; with text, submit it as a separate prompt, or send the text in a follow-up message. `/codex /btw [<text>]` is equivalent. |
 | `/session [status\|live\|turn]` | Inspect terminal execution. tmux/live is the default; `turn` remains a legacy compatibility fallback |
+| `/tmux list [socket]` | Admin-only: list every live Codex/Claude tmux pane on this host, including working directory, agent kind, adopted thread, shared App Server endpoint, and attach command. Optional `-S <absolute socket path>` or `-L <socket name>` selects one tmux server; plain shells are never listed |
+| `/tmux bind <number\|pane id\|socket::pane id>` | Admin-only: bind the current chat/topic scope to a listed pane. A pane with a shared Codex endpoint is driven through structured transport; a plain Codex/Claude pane falls back to live transport. `/tmux list` numbers are only valid for the most recent listing |
+| `/tmux status` | Admin-only: show the current scope's tmux binding state, ownership (managed/external), socket, pane, and attach command |
 | `/tmux tail [N]` | Admin-only: display the final `N` lines from the current scope's tmux pane (default: 27; maximum: 200) |
 | `/tmux attach` | Admin-only: return a ready-to-run, read-only tmux attach command for the current live session |
+| `/tmux unbind` | Admin-only: drop an external binding without touching the pane, session, or agent. A bridge-managed session answers with a pointer to `/tmux release` |
+| `/tmux release` | Admin-only: release bridge management of a managed session while leaving the tmux session, panes, and Codex/Claude processes running; the same session can later be adopted with `/tmux bind` |
 | `/output [live\|final\|off\|status]` | Set per-scope delivery: stream progress, deliver final only, or mute agent-originated output without stopping execution |
 | `/invite user @name` | Allow a user to use the bot in DMs |
 | `/invite admin @name` | Add an access-control admin |
@@ -277,6 +284,28 @@ Only user-provided context is appended when needed: a reply quote, card content,
 If a native picker was left open by an earlier command, a new ordinary task or a new native slash command first dismisses that stale picker and then submits the requested input. Only an explicit picker control (`1`, `down`, `enter`, `esc`, `ctrl+c`, and so on) continues an active picker.
 
 **Interactive prompts become cards**: when the agent calls `AskUserQuestion` (pick one) or `ExitPlanMode` (approve a plan), the bridge renders it as a Lark card with buttons; click to answer and your choice resumes the session on the next turn — no hand-rolled card needed.
+
+## tmux panes and the structured Codex connection
+
+Every scope runs its agent inside tmux, and the bridge can also adopt a Codex/Claude pane you started yourself. `/tmux list` is the entry point: it scans the tmux servers of this host and shows only panes whose foreground process is a Codex or Claude agent.
+
+```text
+/tmux list                        # every discoverable tmux server
+/tmux list -S /tmp/tmux-1000/default
+/tmux list -L work                # tmux -L <name> socket
+```
+
+Each entry reports the pane id (`ns::%pane` key), working directory, agent kind, ownership, attach command, and, for Codex:
+
+| Shown field | Meaning |
+|---|---|
+| `thread` | The Codex thread id read from the running process |
+| `endpoint` | A shared App Server socket when the pane runs `arg-bridge native` |
+| `structured 命令` | The exact command to turn a plain Codex pane into a shared-endpoint pane |
+
+A pane without a shared endpoint still works: `/tmux bind` uses live transport, which types into the pane and reads the screen. A pane with an endpoint is routed through structured transport, so the bridge talks to the same App Server that the TUI is attached to instead of screen-scraping it. The bridge never starts a second writer for one thread, and `/tmux bind` never migrates a pane that still has a plain Codex process running; exit Codex there but keep the shell, run the printed `arg-bridge native <thread-id>` command, then list and bind the same pane again.
+
+`/tmux bind` claims the pane for the current chat/topic scope only. `/tmux unbind` releases an external binding, and `/tmux release` returns a bridge-managed session to manual control; both leave the tmux session and the agent process alive, so a long task is never interrupted by re-binding. See [structured backend](./docs/structured-backend.md) for the protocol-level details and limitations.
 
 ## Long-running tasks and stability
 
@@ -373,6 +402,19 @@ How to choose:
 - If the machine connects directly and stale systemd/shell proxy variables keep appearing, use `direct`.
 
 When Bridge creates a tmux pane, it pins only proxy values it actually owns plus the keys it stripped as dead (pinned empty). Keys Bridge never managed are left untouched, so a proxy you configured in the tmux environment is not overwritten. When a dead proxy is stripped, Bridge logs `network.proxy-stripped`.
+
+### API keys and third-party providers
+
+Codex reads the active provider from `$CODEX_HOME/config.toml` (`model_provider` plus `[model_providers.<id>]`) and `auth.json`. A third-party provider that declares `env_key = "OPENAI_API_KEY"` fails with `Missing environment variable: OPENAI_API_KEY` when the inherited value is empty or unset, even though `experimental_bearer_token` is configured. This happens when a tool such as `cc-switch` writes `export OPENAI_API_KEY="${token:-$OPENAI_API_KEY}"` into a shell startup file and the bridge, tmux server, or service manager starts without a token: the variable exists but carries an empty string.
+
+arg-bridge resolves this before every Codex run:
+
+- A **third-party provider** (`base_url` outside `api.openai.com`/`chatgpt.com`, or a custom provider id) gets its declared `env_key` (`OPENAI_API_KEY` by default) filled from `experimental_bearer_token`, then from `auth.json`. A non-empty inherited value always wins, so an explicit export is never overwritten.
+- **Official providers and ChatGPT OAuth logins are never touched.** No key is injected for `model_provider = "openai"` or `preferred_auth_method = "chatgpt"`.
+- Injected values reach all bridge launch paths: turn-mode `codex exec`, live tmux panes (including panes created later and panes replaced after Ctrl-C), migrated structured panes, and `arg-bridge native`.
+- If a third-party provider is selected and no token can be found, the bridge logs `codex-credential-missing` and continues; the provider error is left for Codex to report rather than failing the bridge preflight.
+
+A shell wrapper is still useful for terminals you start yourself (`arg-bridge native` in your own shell, plain `codex`), but it is not required by the bridge. Keep `OPENAI_API_KEY` out of systemd units and service environments: if you need a fixed token there, prefer `experimental_bearer_token` in the Codex config, which the bridge reads directly.
 
 Codex CLI 0.154.0 and later reject permission overrides on `codex --remote ... resume <id>`; a remote task keeps the permissions frozen when it was created. Bridge now attaches to that contract, and the old bypass flags are used only for a brand-new local session. App Server start failures back off at 3s / 6s / 12s / ... up to 60s and pause instead of retrying immediately, and the systemd/launchd service definitions set a minimum restart interval and failure limit so a crash loop cannot create a burst of new provider sessions.
 

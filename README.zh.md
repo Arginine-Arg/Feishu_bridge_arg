@@ -4,7 +4,9 @@
 
 [English README](./README.md)
 
-`1.6.0` 适配 Codex CLI 0.154+ 的 remote resume 权限契约，并加固 agent 进程守护。TUI 附着到已有 App Server 任务时不再携带 `--dangerously-bypass-approvals-and-sandbox` / `--sandbox` 等权限覆盖，避免 bootstrap 直接退出；远程任务沿用创建时固化的权限。新增 profile 级 `network.mode`（`direct` / `proxy` / `inherit`）：可强制直连、指定显式代理并做启动前预检，或在 `inherit` 下自动剥离已经失效的本机代理，避免子进程死锁在旧端口。App Server 启动失败改为 3s / 6s / 12s …（上限 60s）指数退避并暂停，systemd/launchd 同时增加重启节流与失败上限，防止无退避拉起触发供应商风控。structured pane 识别与 `/tmux release` 保持不变。详见[配置方式、已验证能力与限制](./docs/structured-backend.md)。
+`1.6.1` 修复第三方 API 配置下的 Codex 启动失败：当 `cc-switch` 等工具把 `OPENAI_API_KEY` 留成空值时，Bridge 会按 `experimental_bearer_token` / `auth.json` 自动补齐 provider 声明的 `env_key`，官方 API key 与 ChatGPT OAuth 登录完全不受影响。同时补齐 `/tmux list`、`/tmux bind`、`/tmux unbind`、`/tmux release` 的完整文档。
+
+`1.6.0` 适配 Codex CLI 0.154+ 的 remote resume 权限契约，并加固 agent 进程守护。TUI 附着到已有 App Server 任务时不再携带 `--dangerously-bypass-approvals-and-sandbox` / `--sandbox` 等权限覆盖，避免 bootstrap 直接退出；远程任务沿用创建时固化的权限。新增 profile 级 `network.mode`（`direct` / `proxy` / `inherit`）：可强制直连、指定显式代理并做启动前预检，或在 `inherit` 下自动剥离已经失效的本机代理，避免子进程死锁在旧端口。App Server 启动失败改为 3s / 6s / 12s …（上限 60s）指数退避并暂停，systemd/launchd 同时增加重启节流与失败上限，防止无退避拉起触发供应商风控。详见[配置方式、已验证能力与限制](./docs/structured-backend.md)。
 
 关于能实现的效果，详情可以阅读[飞书文档](https://larkcommunity.feishu.cn/docx/OaRIdFIRFoLM3xxTmKwcetHqn5e)
 
@@ -46,7 +48,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.6.0
+sh /tmp/install-arg-bridge.sh --version 1.6.1
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -90,10 +92,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.0"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.1"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.0`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.1`。
 
 ### 4. Node 或 npm 全局目录错误
 
@@ -248,8 +250,13 @@ arg-bridge profile export <name> --include-secrets --yes
 | `/model` | 选择模型；Codex 直接使用 CLI 原生模型/reasoning 选项，并把结果同步到当前 profile。`/codex model` 等价于 `/codex /model`。 |
 | `/btw [<内容>]` | 仅 Codex：开启或复用 side conversation；带内容时立即提交，省略内容时先进入 side，再用下一条消息发送正文。`/codex /btw [<内容>]` 等价。 |
 | `/session [status\|live\|turn]` | 查看终端执行状态。tmux/live 为默认模式；`turn` 仅作为兼容回退 |
+| `/tmux list [socket]` | 仅管理员：列出本机所有存活的 Codex/Claude tmux pane，包含工作目录、agent 类型、已识别 thread、共享 App Server endpoint 和 attach 命令。可选 `-S <绝对 socket 路径>` 或 `-L <名称>` 只扫描一个 tmux server；普通 shell 不会列出 |
+| `/tmux bind <编号\|pane id\|socket::pane id>` | 仅管理员：把当前 chat/topic scope 绑定到列表中的 pane。带有共享 Codex endpoint 的 pane 走 structured 转发，普通 Codex/Claude pane 回退到 live 转发。编号只在最近一次 `/tmux list` 结果内有效 |
+| `/tmux status` | 仅管理员：显示当前 scope 的绑定状态、归属（managed/external）、socket、pane 与接入命令 |
 | `/tmux tail [N]` | 仅管理员：显示当前 scope tmux pane 的末尾 `N` 行（默认 27，最大 200） |
 | `/tmux attach` | 仅管理员：返回当前 live 会话可直接执行的只读 tmux 接入命令 |
+| `/tmux unbind` | 仅管理员：解除外部绑定，不影响 pane、session 与 agent。托管 session 会提示改用 `/tmux release` |
+| `/tmux release` | 仅管理员：解除 Bridge 对托管 session 的管理，tmux session、pane 与 Codex/Claude 进程继续运行；之后可以用 `/tmux bind` 重新接管 |
 | `/output [live\|final\|off\|status]` | 设置当前 scope 的投递策略：流式过程、仅最终答复，或静默 agent 输出但不中断任务 |
 | `/invite user @某人` | 允许用户私聊使用 bot |
 | `/invite admin @某人` | 添加访问控制管理员 |
@@ -277,6 +284,28 @@ arg-bridge profile export <name> --include-secrets --yes
 若此前的原生选择器仍停在屏幕上，新的普通任务或新的原生斜杠命令会先退出这个遗留选择器，再提交当前输入。只有明确的选择器控制输入（如 `1`、`down`、`enter`、`esc`、`ctrl+c`）会继续一个活动选择器。
 
 **交互式提问自动变卡片**：agent 调用 `AskUserQuestion`（多选一）或 `ExitPlanMode`（计划确认）时，bridge 会把它渲染成带按钮的飞书卡片；点按钮即可回答，你的选择会作为下一轮跟进消息续上会话。无需 agent 自己拼卡片。
+
+## tmux pane 与 structured Codex 连接
+
+每个 scope 的 agent 都跑在 tmux 里，同时 bridge 也可以接管你自己启动的 Codex/Claude pane。入口是 `/tmux list`：它会扫描本机的 tmux server，只列出前台正在运行 Codex/Claude 的 pane。
+
+```text
+/tmux list                        # 扫描所有可发现的 tmux server
+/tmux list -S /tmp/tmux-1000/default
+/tmux list -L work                # tmux -L <名称> 的 socket
+```
+
+每条结果会给出 pane id（`ns::%pane` 形式的绑定 key）、工作目录、agent 类型、归属和 attach 命令；对 Codex 还会显示：
+
+| 字段 | 含义 |
+|---|---|
+| `thread` | 从运行中的进程识别出的 Codex thread id |
+| `endpoint` | 该 pane 通过 `arg-bridge native` 启动时暴露的共享 App Server socket |
+| `structured 命令` | 把普通 Codex pane 升级为共享 endpoint pane 的完整命令 |
+
+没有共享 endpoint 的 pane 也能用：`/tmux bind` 会走 live 转发，也就是向 pane 输入并读取屏幕内容。有 endpoint 的 pane 则走 structured 转发，bridge 直接和 TUI 所连的同一个 App Server 通信，不再抓屏。bridge 不会为同一个 thread 启动第二个 writer；如果 pane 里普通 Codex 仍在运行，`/tmux bind` 也不会强行迁移，而是要求你在该 pane 退出 Codex 但保留 shell，执行提示的 `arg-bridge native <thread-id>` 命令后再次 list 并绑定同一个 pane。
+
+`/tmux bind` 只把 pane 绑定到当前 chat/topic scope。`/tmux unbind` 解除外部绑定，`/tmux release` 把托管 session 交回手动管理；两者都保留 tmux session 和 agent 进程，所以重新绑定不会打断长任务。协议层细节与限制见 [structured 后端](./docs/structured-backend.md)。
 
 ## 长任务与稳定性
 
@@ -377,6 +406,19 @@ agent 在任务中产出文件时，应调用 bridge 能力而不是直接上传
 - 机器直连、且旧 systemd / shell 里经常残留死代理变量：用 `direct`。
 
 新建 tmux pane 时，Bridge 只会固定自己实际持有的代理值，以及被判定失效而剥离的 key（固定为空）；Bridge 从未管理过的 key 不会被主动清空，因此不会覆盖你 tmux 环境里本来就配置好的代理。需要排查时，Bridge 会在剥离失效代理时记录 `network.proxy-stripped` 日志。
+
+### API key 与第三方 provider
+
+Codex 从 `$CODEX_HOME/config.toml`（`model_provider` 加 `[model_providers.<id>]`）和 `auth.json` 读取当前 provider。声明了 `env_key = "OPENAI_API_KEY"` 的第三方 provider，在该环境变量为空或缺失时会直接报 `Missing environment variable: OPENAI_API_KEY`，即使同时配置了 `experimental_bearer_token` 也一样。当 `cc-switch` 这类工具把 `export OPENAI_API_KEY="${token:-$OPENAI_API_KEY}"` 写进 shell 启动文件、而 bridge、tmux server 或服务管理器启动时拿不到 token 时，这个变量就会以空字符串的形式存在，于是每次启动都失败。
+
+arg-bridge 会在每次 Codex 运行前处理这个问题：
+
+- **第三方 provider**（`base_url` 不在 `api.openai.com` / `chatgpt.com`，或使用自定义 provider id）：把它声明的 `env_key`（默认 `OPENAI_API_KEY`）用 `experimental_bearer_token` 补齐，再回退到 `auth.json`。环境里已存在的非空值始终优先，不会覆盖你显式导出的 key。
+- **官方 provider 与 ChatGPT OAuth 登录完全不动**：`model_provider = "openai"` 或 `preferred_auth_method = "chatgpt"` 时不会注入任何 key。
+- 注入对 bridge 的所有启动路径都生效：turn 模式的 `codex exec`、live tmux pane（包括之后新建的 pane 和 Ctrl-C 后重建的 pane）、迁移后的 structured pane，以及 `arg-bridge native`。
+- 如果确认是第三方 provider 但找不到任何 token，bridge 只记录 `codex-credential-missing` 并继续启动，把报错留给 Codex，而不是直接让 preflight 失败。
+
+shell 包装函数对**你自己开的终端**（自己 shell 里的 `arg-bridge native`、直接运行 `codex`）仍然有用，但 bridge 不再依赖它。不要把 `OPENAI_API_KEY` 写进 systemd unit 或服务环境；如果那里需要固定 token，建议写在 Codex 配置的 `experimental_bearer_token` 里，bridge 会直接读取。
 
 Codex CLI 0.154.0 起，`codex --remote ... resume <id>` 不再接受 `--sandbox`、`--ask-for-approval`、`--dangerously-bypass-approvals-and-sandbox` 等权限覆盖；远程任务必须继承创建时固化的权限。Bridge 现在按这个规则附加 TUI，旧的绕过参数只用于新建本地会话。App Server 启动连续失败时使用 3s / 6s / 12s …（上限 60s）退避并暂停，systemd/launchd 也配置了最小重启间隔和失败上限，避免短时间内重复建立会话触发供应商风控。
 

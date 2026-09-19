@@ -13,6 +13,7 @@ import { spawnProcess } from '../../platform/spawn';
 import { listStructuredTmuxPanes } from '../../agent/structured/tmux-discovery';
 import { RpcClient } from '../../agent/structured/rpc';
 import { sanitizeAgentEnv } from '../../platform/network-env';
+import { applyCodexCredentialEnv, resolveCodexCredentialEnv } from '../../agent/codex/credentials';
 
 /** Run as an ordinary foreground shell command. The caller's shell (and its
  * Clash/Conda environment) survives both normal exit and Ctrl-C. */
@@ -34,6 +35,13 @@ export async function runNative(thread: string | undefined, opts: { profile?: st
   const binary = config.codex?.binaryPath ?? 'codex';
   if (config.codex?.codexHome) env.CODEX_HOME = config.codex.codexHome;
   if (!env.CODEX_HOME && config.codex?.inheritCodexHome === false) env.CODEX_HOME = `${paths.profileDir}/codex-home`;
+  // `arg-bridge native` starts the Codex App Server and TUI without a login
+  // shell, so a `cc-switch`-style empty OPENAI_API_KEY would reach the CLI
+  // even when config.toml declares a third-party provider token.
+  applyCodexCredentialEnv(
+    await resolveCodexCredentialEnv(env.CODEX_HOME, { baseEnv: env }),
+    env,
+  );
   if (!thread) {
     // Older servers cannot resume a newly allocated thread before its first
     // turn is materialized. Let native TUI own this blank conversation; it
