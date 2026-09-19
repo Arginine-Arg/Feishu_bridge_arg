@@ -75,7 +75,18 @@ export interface LiveSessionCommand {
   command: string;
   args: string[];
   cwd: string;
+  /**
+   * Base environment for the native agent. Adapters may pre-sanitize this so
+   * inherited proxy variables cannot poison a long-lived session; `env`
+   * remains the per-run override layer.
+   */
+  baseEnv?: NodeJS.ProcessEnv;
   env?: NodeJS.ProcessEnv;
+  /**
+   * Network policy metadata for tmux pane creation. `direct`/`proxy` own the
+   * pane environment; `inherit` clears only keys that sanitization removed.
+   */
+  networkEnv?: { mode: string; strippedProxyKeys: string[] };
   signature: string;
   usePty?: boolean;
   backend?: LiveTerminalBackend;
@@ -1791,9 +1802,13 @@ function spawnLiveProcess(opts: LiveSessionCommand): {
   const ptyRows = positiveIntString(opts.env?.LINES) ?? DEFAULT_PTY_ROWS;
   const ptyColumns = positiveIntString(opts.env?.COLUMNS) ?? DEFAULT_PTY_COLUMNS;
   const { COLUMNS: _ignoredColumns, LINES: _ignoredLines, ...agentEnv } = opts.env ?? {};
-  const env = mergeProcessEnv(process.env, {
+  const env = mergeProcessEnv(opts.baseEnv ?? process.env, {
     TERM: process.env.TERM || 'xterm-256color',
     ...agentEnv,
+    ...(opts.networkEnv ? {
+      ARG_BRIDGE_NETWORK_MODE: opts.networkEnv.mode,
+      ARG_BRIDGE_PROXY_STRIPPED: opts.networkEnv.strippedProxyKeys.join(','),
+    } : {}),
     COLUMNS: ptyColumns,
     LINES: ptyRows,
   });
@@ -2135,6 +2150,25 @@ function setManagedActiveTarget() {
 }
 
 function createAgentWindow(initial) {
+  // tmux reuses its server environment for a new pane, which can retain a
+  // dead proxy long after the bridge sanitized its own child env. Pin the
+  // network policy explicitly on the new session/window; an empty value
+  // clears a stale inherited proxy.
+  const networkMode = process.env.ARG_BRIDGE_NETWORK_MODE || 'inherit';
+  const strippedProxyKeys = new Set(
+    (process.env.ARG_BRIDGE_PROXY_STRIPPED || '').split(',').filter(Boolean),
+  );
+  const networkArgs = [
+    'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
+    'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy',
+    'SOCKS_PROXY', 'SOCKS5_PROXY', 'socks_proxy', 'socks5_proxy',
+  ].flatMap((key) => {
+    if (process.env[key] !== undefined) return ['-e', key + '=' + process.env[key]];
+    if (networkMode === 'direct' || networkMode === 'proxy' || strippedProxyKeys.has(key)) {
+      return ['-e', key + '='];
+    }
+    return [];
+  });
   const args = initial
     ? [
         'new-session',
@@ -2149,6 +2183,7 @@ function createAgentWindow(initial) {
         'agent',
         '-c',
         cwd,
+        ...networkArgs,
         commandLine,
         // Keep the first detached session alive even when the user's tmux
         // configuration enables destroy-unattached. tmux executes this
@@ -2187,6 +2222,7 @@ function createAgentWindow(initial) {
         'agent-' + Date.now(),
         '-c',
         cwd,
+        ...networkArgs,
       ];
   const created = tmux(args);
   if (created.status !== 0) {

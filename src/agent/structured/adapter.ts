@@ -22,11 +22,14 @@ import type { TmuxBindingStatus } from '../tmux-control';
 import { activeStructuredTmuxPane, listStructuredTmuxPanes, processEnvironmentForPidTree } from './tmux-discovery';
 import { spawnProcessSync } from '../../platform/spawn';
 import type { CodexSandboxMode } from '../../config/permissions';
+import type { NetworkConfig } from '../../config/profile-schema';
 import {
-  codexRemotePermissionArgs,
+  codexRemoteResumeArgs,
   codexThreadPermissionOverrides,
   proxyEnvironment,
+  resumeCodexThread,
 } from './permissions';
+import { proxyEnvironmentArgs, sanitizeAgentEnv } from '../../platform/network-env';
 
 const shellQuote = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'`;
 const LEGACY_RESUME_TIMEOUT_MS = 180_000;
@@ -41,6 +44,7 @@ interface ScopeSession { main: StructuredSession; view: StructuredView; bound?: 
 export interface StructuredAdapterOptions {
   kind: 'codex' | 'claude'; binary: string; profileDir: string; codexHome?: string;
   larkChannel?: LarkChannelEnvContext; nativeView?: boolean; sandbox?: CodexSandboxMode;
+  network?: NetworkConfig;
 }
 
 export class StructuredAdapter implements AgentAdapter {
@@ -224,7 +228,10 @@ export class StructuredAdapter implements AgentAdapter {
     // the App Server and the replacement remote TUI.  Arbitrary environment
     // values are intentionally excluded because they may contain credentials.
     const inheritedProxy = proxyEnvironment(processEnvironmentForPidTree(target.panePid));
-    const env = { ...process.env, ...inheritedProxy };
+    let strippedProxyKeys: string[] = [];
+    const env = await sanitizeAgentEnv({ ...process.env, ...inheritedProxy }, this.options.network, {
+      onDiagnostic: (item) => { if (item.type === 'stripped' && item.keys) strippedProxyKeys = item.keys; },
+    });
     const codexHome = target.structured.codexHome ?? this.options.codexHome;
     if (codexHome) env.CODEX_HOME = codexHome;
     else if (this.options.codexHome) env.CODEX_HOME = this.options.codexHome;
@@ -239,11 +246,16 @@ export class StructuredAdapter implements AgentAdapter {
       if (resumed.thread?.id !== target.structured.threadId) throw new Error('App Server 返回了不同的旧 thread，未创建绑定');
       const command = [
         ...(codexHome ? ['env', 'CODEX_HOME=' + shellQuote(codexHome)] : []),
-        shellQuote(this.options.binary), '-c', shellQuote('check_for_update_on_startup=false'),
-        ...codexRemotePermissionArgs(this.options.sandbox ?? 'danger-full-access').map(shellQuote),
-        shellQuote('--remote'), shellQuote(endpoint), shellQuote('resume'), shellQuote(target.structured.threadId), shellQuote('--no-alt-screen'),
+        shellQuote(this.options.binary),
+        ...codexRemoteResumeArgs(endpoint, target.structured.threadId).map(shellQuote),
       ].join(' ') + '; bridge_status=$?; trap - INT; printf "\\n[Codex exited (%s); shell remains]\\n" "$bridge_status"; exec "${SHELL:-/bin/bash}" -i';
-      const environmentArgs = Object.entries(inheritedProxy).flatMap(([key, value]) => ['-e', `${key}=${value}`]);
+      // Pin every proxy variable, including empty values. The target tmux
+      // server may still hold a stale proxy in its global environment from an
+      // older session; omitting a key here would let that value leak in.
+      const environmentArgs = proxyEnvironmentArgs(env, {
+        mode: this.options.network?.mode,
+        strippedKeys: strippedProxyKeys,
+      });
       const sessionAlive = spawnProcessSync('tmux', ['-S', target.socketPath, 'has-session', '-t', target.sessionName], { stdio: 'ignore' }).status === 0;
       const createArgs = sessionAlive
         ? ['split-window', '-d', '-P', '-F', '#{pane_id}', '-t', target.sessionName, '-c', target.paneCurrentPath, ...environmentArgs, 'bash', '--noprofile', '--norc', '-ic', command]
@@ -276,10 +288,12 @@ export class StructuredAdapter implements AgentAdapter {
   }
   private async resumeLegacyThread(rpc: RpcClient, endpoint: string, threadId: string, cwd: string): Promise<{ rpc: RpcClient; result: Wire }> {
     try {
-      return { rpc, result: await rpc.request('thread/resume', {
-        threadId, excludeTurns: true, cwd,
-        ...codexThreadPermissionOverrides(this.options.sandbox ?? 'danger-full-access'),
-      }, LEGACY_RESUME_TIMEOUT_MS) };
+      return { rpc, result: await resumeCodexThread(
+        rpc,
+        { threadId, excludeTurns: true, cwd },
+        codexThreadPermissionOverrides(this.options.sandbox ?? 'danger-full-access'),
+        LEGACY_RESUME_TIMEOUT_MS,
+      ) };
     } catch (error) {
       if (!(error instanceof Error) || !/thread\/resume timed out|outcome unknown/iu.test(error.message)) throw error;
       // A timed-out mutation is never retried. Probe read-only state until the
@@ -515,7 +529,10 @@ export class StructuredAdapter implements AgentAdapter {
     let saved: { id: string; endpoint?: string; view?: TmuxBindingStatus } | undefined;
     try { saved = JSON.parse(await readFile(stateFile, 'utf8')); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     if (!saved && !bound && options.liveInputMode === 'control') throw new Error('没有可恢复的结构化会话；选择操作未启动新任务');
-    const env = withArtifactDeliveryEnv({ ...process.env, ...buildLarkChannelEnv(this.options.larkChannel) }, options.artifactDelivery);
+    const env = withArtifactDeliveryEnv({
+      ...(await sanitizeAgentEnv(process.env, this.options.network)),
+      ...buildLarkChannelEnv(this.options.larkChannel),
+    }, options.artifactDelivery);
     let main: StructuredSession;
     const view = this.makeView(`${scope}\0${cwd}`);
     if (this.id === 'codex') {
@@ -534,12 +551,11 @@ export class StructuredAdapter implements AgentAdapter {
           await rpc.initialize();
           const loaded = await rpc.request('thread/loaded/list', {});
           if (!Array.isArray(loaded.data) || !loaded.data.includes(bound.threadId)) throw new Error('tmux 当前 resume 的 thread 不在对应 App Server 中');
-          const resumed = await rpc.request('thread/resume', {
-            threadId: bound.threadId,
-            excludeTurns: true,
-            cwd,
-            ...(!options.liveInputMode ? codexThreadPermissionOverrides(options.sandbox ?? this.options.sandbox) : {}),
-          });
+          const resumed = await resumeCodexThread(
+            rpc,
+            { threadId: bound.threadId, excludeTurns: true, cwd },
+            options.liveInputMode ? {} : codexThreadPermissionOverrides(options.sandbox ?? this.options.sandbox),
+          );
           if (resumed.thread?.id !== bound.threadId) throw new Error('App Server 返回了不同的 thread');
           const attached = new CodexStructuredSession(bound.threadId, bound.endpoint, rpc);
           await attached.syncState();
@@ -562,15 +578,20 @@ export class StructuredAdapter implements AgentAdapter {
       } else ({ rpc, endpoint } = await connectCodexHost({ binary: this.options.binary, profileDir: this.options.profileDir, scope, cwd, env }));
       const restored = saved ? new CodexStructuredSession(saved.id, endpoint, rpc) : undefined;
       try {
-        const result = await rpc.request(saved ? 'thread/resume' : 'thread/start', {
-          ...(saved ? { threadId: saved.id, excludeTurns: true } : {}), cwd,
+        const common = {
+          cwd,
           ...(!saved && options.model ? { model: options.model } : {}),
-          // Match the terminal backend's profile policy. In particular, a
-          // full-access profile must not silently downgrade structured runs
-          // to read-only/on-request when a new App Server thread is created.
-          ...(!readOnlyReconnect ? codexThreadPermissionOverrides(options.sandbox ?? this.options.sandbox ?? 'read-only') : {}),
           ...(!saved && options.reasoningEffort ? { config: { model_reasoning_effort: options.reasoningEffort } } : {}),
-        });
+        };
+        // Match the terminal backend's profile policy. In particular, a
+        // full-access profile must not silently downgrade structured runs
+        // to read-only/on-request when a new App Server thread is created.
+        const overrides = readOnlyReconnect
+          ? {}
+          : codexThreadPermissionOverrides(options.sandbox ?? this.options.sandbox ?? 'read-only');
+        const result = saved
+          ? await resumeCodexThread(rpc, { ...common, threadId: saved.id, excludeTurns: true }, overrides)
+          : await rpc.request('thread/start', { ...common, ...overrides });
         const id = result.thread?.id;
         if (typeof id !== 'string') throw new Error('Codex did not return a thread ID');
         main = restored ?? new CodexStructuredSession(id, endpoint, rpc);

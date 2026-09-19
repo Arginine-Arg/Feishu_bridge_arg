@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.5.10",
+  version: "1.6.0",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -590,6 +590,7 @@ function normalizeProfileConfig(input) {
     sandbox,
     permissions,
     permissionSource,
+    network: normalizeNetwork(raw.network),
     ...raw.codex ? { codex: normalizeCodex(raw.codex) } : {},
     attachments: {
       maxCount: numberOr(raw.attachments?.maxCount, 10),
@@ -667,6 +668,27 @@ function normalizeCodex(input) {
     ignoreRules: input.ignoreRules !== false
   };
   return codex;
+}
+function normalizeNetwork(input) {
+  const mode = input?.mode === "direct" || input?.mode === "proxy" ? input.mode : "inherit";
+  const proxyUrl = typeof input?.proxyUrl === "string" && input.proxyUrl.trim() ? input.proxyUrl.trim() : void 0;
+  if (mode === "proxy") {
+    if (!proxyUrl) throw new Error('network.proxyUrl is required when network.mode is "proxy"');
+    let parsed;
+    try {
+      parsed = new URL(proxyUrl);
+    } catch {
+      throw new Error("network.proxyUrl must be a valid URL");
+    }
+    if (!["http:", "https:", "socks:", "socks5:", "socks5h:"].includes(parsed.protocol)) {
+      throw new Error("network.proxyUrl must use http, https, socks, socks5, or socks5h");
+    }
+  }
+  return {
+    mode,
+    ...proxyUrl ? { proxyUrl } : {},
+    ...typeof input?.noProxy === "string" && input.noProxy.trim() ? { noProxy: input.noProxy.trim() } : {}
+  };
 }
 function normalizeComments(_input) {
   return {};
@@ -1638,6 +1660,7 @@ function serializeProfileConfig(profile2) {
     access: profile2.access,
     workspaces: profile2.workspaces,
     permissions: profile2.permissions,
+    ...profile2.network ? { network: profile2.network } : {},
     ...profile2.codex ? { codex: profile2.codex } : {},
     attachments: profile2.attachments,
     outbound: profile2.outbound,
@@ -4381,6 +4404,10 @@ function buildPlist(inputs) {
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <!-- Minimum 10s between respawns; prevents a fast crash loop from
+         opening a new provider session on every failure. -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
     <key>StandardOutPath</key>
     <string>${escape(daemonStdoutPath(inputs.profile))}</string>
     <key>StandardErrorPath</key>
@@ -4576,13 +4603,17 @@ function buildUnit(inputs) {
 Description=Arg Bridge bot
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=5
 
 [Service]
 Type=simple
 ExecStart="${escape(inputs.nodePath)}" "${escape(inputs.bridgeEntryPath)}" run --profile "${escape(inputs.profile)}"
 Restart=always
-RestartSec=5
-KillMode=process
+RestartSec=3
+${inputs.restartBackoff === false ? "" : `RestartSteps=6
+RestartMaxDelaySec=60
+`}KillMode=process
 StandardOutput=append:${daemonStdoutPath(inputs.profile)}
 StandardError=append:${daemonStderrPath(inputs.profile)}
 Environment="PATH=${escape(inputs.envPath)}"
@@ -4602,12 +4633,18 @@ async function writeUnit(profile2) {
     bridgeEntryPath,
     envPath: process.env.PATH ?? "",
     profile: profile2,
-    channelHome: paths.rootDir
+    channelHome: paths.rootDir,
+    restartBackoff: systemdSupportsRestartBackoff()
   });
   const unitPath = systemdUnitPath(profile2);
   await mkdir11(dirname13(unitPath), { recursive: true });
   await mkdir11(daemonLogDir(profile2), { recursive: true });
   await writeFile7(unitPath, content, "utf8");
+}
+function systemdSupportsRestartBackoff() {
+  const result = spawnSync3("systemctl", ["--version"], { encoding: "utf8" });
+  const match = /^systemd\s+(\d+)/mu.exec(result.stdout ?? "");
+  return match ? Number.parseInt(match[1], 10) >= 254 : false;
 }
 function unitExists(profile2) {
   return existsSync5(systemdUnitPath(profile2));
@@ -8606,9 +8643,13 @@ function spawnLiveProcess(opts) {
   const ptyRows = positiveIntString(opts.env?.LINES) ?? DEFAULT_PTY_ROWS;
   const ptyColumns = positiveIntString(opts.env?.COLUMNS) ?? DEFAULT_PTY_COLUMNS;
   const { COLUMNS: _ignoredColumns, LINES: _ignoredLines, ...agentEnv } = opts.env ?? {};
-  const env = mergeProcessEnv(process.env, {
+  const env = mergeProcessEnv(opts.baseEnv ?? process.env, {
     TERM: process.env.TERM || "xterm-256color",
     ...agentEnv,
+    ...opts.networkEnv ? {
+      ARG_BRIDGE_NETWORK_MODE: opts.networkEnv.mode,
+      ARG_BRIDGE_PROXY_STRIPPED: opts.networkEnv.strippedProxyKeys.join(",")
+    } : {},
     COLUMNS: ptyColumns,
     LINES: ptyRows
   });
@@ -8885,6 +8926,25 @@ function setManagedActiveTarget() {
 }
 
 function createAgentWindow(initial) {
+  // tmux reuses its server environment for a new pane, which can retain a
+  // dead proxy long after the bridge sanitized its own child env. Pin the
+  // network policy explicitly on the new session/window; an empty value
+  // clears a stale inherited proxy.
+  const networkMode = process.env.ARG_BRIDGE_NETWORK_MODE || 'inherit';
+  const strippedProxyKeys = new Set(
+    (process.env.ARG_BRIDGE_PROXY_STRIPPED || '').split(',').filter(Boolean),
+  );
+  const networkArgs = [
+    'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
+    'http_proxy', 'https_proxy', 'all_proxy', 'no_proxy',
+    'SOCKS_PROXY', 'SOCKS5_PROXY', 'socks_proxy', 'socks5_proxy',
+  ].flatMap((key) => {
+    if (process.env[key] !== undefined) return ['-e', key + '=' + process.env[key]];
+    if (networkMode === 'direct' || networkMode === 'proxy' || strippedProxyKeys.has(key)) {
+      return ['-e', key + '='];
+    }
+    return [];
+  });
   const args = initial
     ? [
         'new-session',
@@ -8899,6 +8959,7 @@ function createAgentWindow(initial) {
         'agent',
         '-c',
         cwd,
+        ...networkArgs,
         commandLine,
         // Keep the first detached session alive even when the user's tmux
         // configuration enables destroy-unattached. tmux executes this
@@ -8937,6 +8998,7 @@ function createAgentWindow(initial) {
         'agent-' + Date.now(),
         '-c',
         cwd,
+        ...networkArgs,
       ];
   const created = tmux(args);
   if (created.status !== 0) {
@@ -10751,6 +10813,148 @@ function* translateEvent(raw) {
   }
 }
 
+// src/platform/network-env.ts
+import { connect } from "net";
+var PROXY_ENV_KEYS = [
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "ALL_PROXY",
+  "NO_PROXY",
+  "http_proxy",
+  "https_proxy",
+  "all_proxy",
+  "no_proxy",
+  "SOCKS_PROXY",
+  "SOCKS5_PROXY",
+  "socks_proxy",
+  "socks5_proxy"
+];
+var DEFAULT_NO_PROXY = "localhost,127.0.0.1,::1";
+var NetworkProxyUnavailableError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "NetworkProxyUnavailableError";
+  }
+};
+async function sanitizeAgentEnv(base, config, options = {}) {
+  const mode = config?.mode ?? "inherit";
+  const diagnostic = options.onDiagnostic ?? ((item) => {
+    if (item.type === "stripped") {
+      log.warn("network", "proxy-stripped", {
+        mode: item.mode,
+        proxy: item.proxy ?? null,
+        reason: item.reason ?? null
+      });
+    } else {
+      log.warn("network", "proxy-unavailable", {
+        mode: item.mode,
+        proxy: item.proxy ?? null,
+        reason: item.reason ?? null
+      });
+    }
+  });
+  if (mode === "direct") {
+    const keys2 = PROXY_ENV_KEYS.filter((key) => base[key] !== void 0);
+    if (keys2.length > 0) diagnostic({ type: "stripped", mode, reason: "direct", keys: keys2 });
+    return stripProxyEnv(base);
+  }
+  if (mode === "proxy") {
+    const proxyUrl = config?.proxyUrl;
+    if (!proxyUrl) {
+      throw new NetworkProxyUnavailableError('network.mode="proxy" requires network.proxyUrl');
+    }
+    const target2 = parseProxyUrl(proxyUrl);
+    if (target2) {
+      const result2 = await (options.probe ?? probeProxy)(target2.host, target2.port, options.timeoutMs ?? 800);
+      if (result2 !== "open") {
+        diagnostic({ type: "unavailable", mode, proxy: proxyUrl, reason: result2 });
+        throw new NetworkProxyUnavailableError(
+          `network proxy ${target2.host}:${target2.port} is not reachable (${result2}); agent start is paused to avoid a retry storm. Fix network.proxyUrl or set network.mode="direct".`
+        );
+      }
+    }
+    const env2 = stripProxyEnv(base);
+    applyProxyEnv(env2, proxyUrl, config?.noProxy ?? DEFAULT_NO_PROXY);
+    return env2;
+  }
+  const env = { ...base };
+  const proxy = firstProxyUrl(base);
+  if (!proxy) return env;
+  const target = parseProxyUrl(proxy);
+  if (!target || !isLoopbackHost(target.host)) return env;
+  const result = await (options.probe ?? probeProxy)(target.host, target.port, options.timeoutMs ?? 400);
+  if (result === "open") return env;
+  const keys = PROXY_ENV_KEYS.filter((key) => base[key] !== void 0);
+  diagnostic({ type: "stripped", mode, proxy, reason: result, keys });
+  return stripProxyEnv(base);
+}
+function stripProxyEnv(base) {
+  const env = { ...base };
+  for (const key of PROXY_ENV_KEYS) delete env[key];
+  return env;
+}
+function proxyEnvironmentArgs(env, options = {}) {
+  const mode = options.mode ?? "inherit";
+  const stripped = new Set(options.strippedKeys ?? []);
+  return PROXY_ENV_KEYS.flatMap((key) => {
+    const value = env[key];
+    if (value !== void 0) return ["-e", `${key}=${value}`];
+    if (mode === "direct" || mode === "proxy" || stripped.has(key)) return ["-e", `${key}=`];
+    return [];
+  });
+}
+function applyProxyEnv(env, proxyUrl, noProxy = DEFAULT_NO_PROXY) {
+  env.HTTP_PROXY = proxyUrl;
+  env.HTTPS_PROXY = proxyUrl;
+  env.ALL_PROXY = proxyUrl;
+  env.NO_PROXY = noProxy;
+  env.http_proxy = proxyUrl;
+  env.https_proxy = proxyUrl;
+  env.all_proxy = proxyUrl;
+  env.no_proxy = noProxy;
+  return env;
+}
+function firstProxyUrl(env) {
+  for (const key of ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy", "HTTP_PROXY", "http_proxy"]) {
+    const value = env[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return void 0;
+}
+function parseProxyUrl(value) {
+  try {
+    const url = new URL(value);
+    const host = url.hostname.replace(/^\[|\]$/gu, "");
+    const port = url.port ? Number.parseInt(url.port, 10) : url.protocol === "https:" ? 443 : url.protocol === "http:" ? 80 : 1080;
+    if (!host || !Number.isSafeInteger(port) || port <= 0 || port > 65535) return void 0;
+    return { host, port };
+  } catch {
+    return void 0;
+  }
+}
+function isLoopbackHost(host) {
+  const normalized = host.toLowerCase();
+  return normalized === "localhost" || normalized === "::1" || normalized === "0:0:0:0:0:0:0:1" || /^127(?:\.\d{1,3}){3}$/u.test(normalized);
+}
+function probeProxy(host, port, timeoutMs) {
+  return new Promise((resolve6) => {
+    const socket = connect({ host, port });
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve6(result);
+    };
+    socket.setTimeout(timeoutMs);
+    socket.once("connect", () => finish("open"));
+    socket.once("timeout", () => finish("unreachable"));
+    socket.once("error", (error) => {
+      finish(error.code === "ECONNREFUSED" ? "refused" : "unreachable");
+    });
+  });
+}
+
 // src/agent/claude/adapter.ts
 var ClaudeAdapter = class {
   id = "claude";
@@ -10762,6 +10966,9 @@ var ClaudeAdapter = class {
   liveUsePty;
   liveTerminalBackend;
   liveIdleMs;
+  network;
+  baseEnv;
+  strippedProxyKeys = [];
   liveSessions = new LiveSessionPool();
   tmuxBindings;
   constructor(opts = {}) {
@@ -10771,6 +10978,7 @@ var ClaudeAdapter = class {
     this.liveUsePty = opts.liveUsePty;
     this.liveTerminalBackend = opts.liveTerminalBackend;
     this.liveIdleMs = opts.liveIdleMs;
+    this.network = opts.network;
     const profileStateDir = opts.profileStateDir ?? join18(tmpdir2(), `arg-bridge-${process.pid}-claude`);
     this.tmuxBindings = new TmuxBindingController(
       profileStateDir,
@@ -10850,6 +11058,16 @@ var ClaudeAdapter = class {
       binaryPath: this.binary
     });
   }
+  async prepareRun() {
+    const availability = await this.checkAvailability();
+    if (!availability.ok) throw availability.error;
+    this.strippedProxyKeys = [];
+    this.baseEnv = await sanitizeAgentEnv(process.env, this.network, {
+      onDiagnostic: (item) => {
+        if (item.type === "stripped" && item.keys) this.strippedProxyKeys = item.keys;
+      }
+    });
+  }
   run(opts) {
     if (!opts.cwd) {
       throw new Error("cwd is required for ClaudeAdapter.run");
@@ -10871,7 +11089,7 @@ var ClaudeAdapter = class {
     const child = spawnProcess(this.binary, args, {
       cwd: opts.cwd,
       env: mergeProcessEnv(
-        process.env,
+        this.baseEnv ?? process.env,
         withArtifactDeliveryEnv(buildLarkChannelEnv(this.larkChannel), opts.artifactDelivery)
       ),
       stdio: ["pipe", "pipe", "pipe"]
@@ -10986,6 +11204,8 @@ var ClaudeAdapter = class {
       args,
       cwd: opts.cwd,
       env: withArtifactDeliveryEnv(buildLarkChannelEnv(this.larkChannel), opts.artifactDelivery),
+      baseEnv: this.baseEnv,
+      networkEnv: { mode: this.network?.mode ?? "inherit", strippedProxyKeys: this.strippedProxyKeys },
       signature: liveSignature,
       usePty: this.liveUsePty,
       backend: this.liveTerminalBackend ?? "tmux",
@@ -11411,6 +11631,9 @@ var CodexAdapter = class {
   liveUsePty;
   liveTerminalBackend;
   liveIdleMs;
+  network;
+  baseEnv;
+  strippedProxyKeys = [];
   liveSessions = new LiveSessionPool();
   tmuxBindings;
   constructor(opts) {
@@ -11427,6 +11650,7 @@ var CodexAdapter = class {
     this.liveUsePty = opts.liveUsePty;
     this.liveTerminalBackend = opts.liveTerminalBackend;
     this.liveIdleMs = opts.liveIdleMs;
+    this.network = opts.network;
     this.tmuxBindings = new TmuxBindingController(
       opts.profileStateDir,
       opts.larkChannel?.profile ?? "codex",
@@ -11516,6 +11740,12 @@ var CodexAdapter = class {
       );
     }
     await ensureBundledCodexSkill(this.effectiveCodexHome());
+    this.strippedProxyKeys = [];
+    this.baseEnv = await sanitizeAgentEnv(process.env, this.network, {
+      onDiagnostic: (item) => {
+        if (item.type === "stripped" && item.keys) this.strippedProxyKeys = item.keys;
+      }
+    });
   }
   effectiveCodexHome() {
     if (this.codexHome) return this.codexHome;
@@ -11548,7 +11778,7 @@ var CodexAdapter = class {
     if (codexHome) envOverrides.CODEX_HOME = codexHome;
     const child = spawnProcess(this.binary, args, {
       cwd: opts.cwd,
-      env: mergeProcessEnv(process.env, envOverrides),
+      env: mergeProcessEnv(this.baseEnv ?? process.env, envOverrides),
       stdio: ["pipe", "pipe", "pipe"]
     });
     log.info("agent", "spawn", {
@@ -11679,6 +11909,8 @@ var CodexAdapter = class {
       args,
       cwd: opts.cwd,
       env: envOverrides,
+      baseEnv: this.baseEnv,
+      networkEnv: { mode: this.network?.mode ?? "inherit", strippedProxyKeys: this.strippedProxyKeys },
       signature: liveSignature,
       usePty: this.liveUsePty,
       backend: this.liveTerminalBackend ?? "tmux",
@@ -11913,6 +12145,38 @@ var RpcClient = class _RpcClient extends EventEmitter2 {
 };
 
 // src/agent/structured/host.ts
+var HOST_FAILURE_BASE_MS = 3e3;
+var HOST_FAILURE_MAX_MS = 6e4;
+var HOST_BREAKER_PAUSE_AT = 5;
+var HOST_BREAKER_RESET_MS = 10 * 6e4;
+var hostBreakers = /* @__PURE__ */ new Map();
+function nextHostRetryDelayMs(failures, random = Math.random) {
+  const exponent = Math.max(0, failures - 1);
+  const delay3 = Math.min(HOST_FAILURE_BASE_MS * 2 ** exponent, HOST_FAILURE_MAX_MS);
+  return delay3 + Math.floor(random() * 1e3);
+}
+function recordHostFailure(directory) {
+  const now = Date.now();
+  const previous = hostBreakers.get(directory);
+  const failures = previous && now - previous.lastFailureAt < HOST_BREAKER_RESET_MS ? previous.failures + 1 : 1;
+  const breaker = {
+    failures,
+    nextAttemptAt: now + nextHostRetryDelayMs(failures),
+    lastFailureAt: now
+  };
+  hostBreakers.set(directory, breaker);
+  if (failures >= HOST_BREAKER_PAUSE_AT) {
+    log.warn("agent", "app-server-degraded-paused", {
+      directory,
+      failures,
+      retryInMs: Math.max(0, breaker.nextAttemptAt - now)
+    });
+  }
+  return breaker;
+}
+function clearHostFailure(directory) {
+  hostBreakers.delete(directory);
+}
 async function connectCodexHost(options) {
   if (process.platform === "win32") throw new Error("Codex structured shared-terminal backend currently requires Unix sockets; keep terminal transport on Windows");
   const hash = createHash3("sha256").update(options.profileDir).update("\0").update(options.scope).update("\0").update(options.cwd).digest("hex").slice(0, 20);
@@ -11927,20 +12191,28 @@ async function connectCodexHost(options) {
   let rpc;
   try {
     rpc = await RpcClient.connect(url);
+    clearHostFailure(directory);
   } catch {
-    const log2 = await open3(join21(directory, "server.log"), "a", 384);
+    const paused = hostBreakers.get(directory);
+    const pausedForMs = paused ? paused.nextAttemptAt - Date.now() : 0;
+    if (pausedForMs > 0) {
+      throw new Error(
+        `Codex App Server \u8FDE\u7EED\u542F\u52A8\u5931\u8D25 ${paused.failures} \u6B21\uFF1B\u5DF2\u6682\u505C ${Math.ceil(pausedForMs / 1e3)}s\uFF0C\u907F\u514D\u7EE7\u7EED\u5EFA\u7ACB\u65B0\u4F1A\u8BDD\u89E6\u53D1\u4F9B\u5E94\u5546\u98CE\u63A7\u3002\u8BF7\u68C0\u67E5 profile \u7684\u7F51\u7EDC/\u4EE3\u7406\u914D\u7F6E\uFF0C\u6216\u4FEE\u590D\u540E\u8FD0\u884C \`arg-bridge restart\`\u3002`
+      );
+    }
+    const logFile = await open3(join21(directory, "server.log"), "a", 384);
     const child = spawnProcess(options.binary, ["app-server", "--listen", endpoint], {
       cwd: options.cwd,
       env: options.env,
       detached: true,
-      stdio: ["ignore", log2.fd, log2.fd]
+      stdio: ["ignore", logFile.fd, logFile.fd]
     });
     let failure;
     child.once("error", (error) => {
       failure = error;
     });
     child.unref();
-    await log2.close();
+    await logFile.close();
     const deadline = Date.now() + 2e4;
     let connected;
     while (Date.now() < deadline && !failure) {
@@ -11953,8 +12225,13 @@ async function connectCodexHost(options) {
     }
     if (!connected) {
       child.kill("SIGTERM");
-      throw failure ?? new Error(`Codex App Server did not become ready; inspect ${join21(directory, "server.log")}`);
+      const breaker = recordHostFailure(directory);
+      const retryInMs = Math.max(0, breaker.nextAttemptAt - Date.now());
+      throw failure ?? new Error(
+        `Codex App Server did not become ready (failure ${breaker.failures}); next attempt in ${Math.ceil(retryInMs / 1e3)}s; inspect ${join21(directory, "server.log")}`
+      );
     }
+    clearHostFailure(directory);
     rpc = connected;
   }
   try {
@@ -12006,6 +12283,32 @@ function codexRemotePermissionArgs(sandbox) {
   if (!sandbox) return [];
   if (sandbox === "danger-full-access") return ["--dangerously-bypass-approvals-and-sandbox"];
   return ["--sandbox", sandbox, "--ask-for-approval", "never"];
+}
+function codexRemoteResumeArgs(endpoint, threadId) {
+  return [
+    "-c",
+    "check_for_update_on_startup=false",
+    "--remote",
+    endpoint,
+    "resume",
+    threadId,
+    "--no-alt-screen"
+  ];
+}
+function isRemotePermissionOverrideError(error) {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return /permission overrides are not supported/i.test(message);
+}
+async function resumeCodexThread(rpc, params, overrides, timeoutMs = 3e4) {
+  if (Object.keys(overrides).length === 0) {
+    return rpc.request("thread/resume", params, timeoutMs);
+  }
+  try {
+    return await rpc.request("thread/resume", { ...params, ...overrides }, timeoutMs);
+  } catch (error) {
+    if (!isRemotePermissionOverrideError(error)) throw error;
+    return rpc.request("thread/resume", params, timeoutMs);
+  }
 }
 function proxyEnvironment(env) {
   const names = [
@@ -12736,7 +13039,7 @@ var StructuredView = class {
     const sessionExists = spawnProcessSync("tmux", ["-S", socket, "has-session", "-t", name], { stdio: "ignore" });
     if (sessionExists.status !== 0) {
       const inheritedProxy = proxyEnvironment(native?.env ?? process.env);
-      const command = native ? [native.binary, "-c", "check_for_update_on_startup=false", ...codexRemotePermissionArgs(native.sandbox), "--remote", native.endpoint, "resume", native.threadId, "--no-alt-screen"].map(quote).join(" ") + '; bridge_status=$?; trap - INT; printf "\\n[Codex exited (%s); shell remains]\\n" "$bridge_status"; exec "${SHELL:-/bin/bash}" -i' : `tail -n 200 -F ${quote(this.logPath)}`;
+      const command = native ? [native.binary, ...codexRemoteResumeArgs(native.endpoint, native.threadId)].map(quote).join(" ") + '; bridge_status=$?; trap - INT; printf "\\n[Codex exited (%s); shell remains]\\n" "$bridge_status"; exec "${SHELL:-/bin/bash}" -i' : `tail -n 200 -F ${quote(this.logPath)}`;
       const environmentArgs = Object.entries(inheritedProxy).flatMap(([key, value]) => ["-e", `${key}=${value}`]);
       const created = spawnProcessSync("tmux", ["-S", socket, "-f", "/dev/null", "new-session", "-d", "-s", name, "-x", "120", "-y", "40", "-c", cwd ?? this.directory, ...environmentArgs, "bash", "--noprofile", "--norc", "-ic", command], { encoding: "utf8", env: native?.env ?? process.env });
       if (created.status !== 0) return;
@@ -13153,7 +13456,12 @@ var StructuredAdapter = class {
       throw new Error("\u5F53\u524D pane \u4ECD\u6709 agent \u8FDB\u7A0B\u3002\u666E\u901A Codex \u672A\u66B4\u9732\u5171\u4EAB endpoint\uFF0C\u4E0D\u80FD\u542F\u52A8\u7B2C\u4E8C\u4E2A writer\u3002\u8BF7\u4FDD\u7559 shell\uFF1B\u6B64\u64CD\u4F5C\u6CA1\u6709\u542F\u52A8\u6216\u4E2D\u65AD\u4EFB\u52A1\u3002");
     }
     const inheritedProxy = proxyEnvironment(processEnvironmentForPidTree(target.panePid));
-    const env = { ...process.env, ...inheritedProxy };
+    let strippedProxyKeys = [];
+    const env = await sanitizeAgentEnv({ ...process.env, ...inheritedProxy }, this.options.network, {
+      onDiagnostic: (item) => {
+        if (item.type === "stripped" && item.keys) strippedProxyKeys = item.keys;
+      }
+    });
     const codexHome = target.structured.codexHome ?? this.options.codexHome;
     if (codexHome) env.CODEX_HOME = codexHome;
     else if (this.options.codexHome) env.CODEX_HOME = this.options.codexHome;
@@ -13167,16 +13475,12 @@ var StructuredAdapter = class {
       const command = [
         ...codexHome ? ["env", "CODEX_HOME=" + shellQuote3(codexHome)] : [],
         shellQuote3(this.options.binary),
-        "-c",
-        shellQuote3("check_for_update_on_startup=false"),
-        ...codexRemotePermissionArgs(this.options.sandbox ?? "danger-full-access").map(shellQuote3),
-        shellQuote3("--remote"),
-        shellQuote3(endpoint),
-        shellQuote3("resume"),
-        shellQuote3(target.structured.threadId),
-        shellQuote3("--no-alt-screen")
+        ...codexRemoteResumeArgs(endpoint, target.structured.threadId).map(shellQuote3)
       ].join(" ") + '; bridge_status=$?; trap - INT; printf "\\n[Codex exited (%s); shell remains]\\n" "$bridge_status"; exec "${SHELL:-/bin/bash}" -i';
-      const environmentArgs = Object.entries(inheritedProxy).flatMap(([key, value]) => ["-e", `${key}=${value}`]);
+      const environmentArgs = proxyEnvironmentArgs(env, {
+        mode: this.options.network?.mode,
+        strippedKeys: strippedProxyKeys
+      });
       const sessionAlive = spawnProcessSync("tmux", ["-S", target.socketPath, "has-session", "-t", target.sessionName], { stdio: "ignore" }).status === 0;
       const createArgs = sessionAlive ? ["split-window", "-d", "-P", "-F", "#{pane_id}", "-t", target.sessionName, "-c", target.paneCurrentPath, ...environmentArgs, "bash", "--noprofile", "--norc", "-ic", command] : ["new-session", "-d", "-P", "-F", "#{pane_id}", "-s", target.sessionName, "-c", target.paneCurrentPath, ...environmentArgs, "bash", "--noprofile", "--norc", "-ic", command];
       const created = spawnProcessSync("tmux", ["-S", target.socketPath, ...createArgs], { encoding: "utf8" });
@@ -13209,12 +13513,12 @@ var StructuredAdapter = class {
   }
   async resumeLegacyThread(rpc, endpoint, threadId, cwd) {
     try {
-      return { rpc, result: await rpc.request("thread/resume", {
-        threadId,
-        excludeTurns: true,
-        cwd,
-        ...codexThreadPermissionOverrides(this.options.sandbox ?? "danger-full-access")
-      }, LEGACY_RESUME_TIMEOUT_MS) };
+      return { rpc, result: await resumeCodexThread(
+        rpc,
+        { threadId, excludeTurns: true, cwd },
+        codexThreadPermissionOverrides(this.options.sandbox ?? "danger-full-access"),
+        LEGACY_RESUME_TIMEOUT_MS
+      ) };
     } catch (error) {
       if (!(error instanceof Error) || !/thread\/resume timed out|outcome unknown/iu.test(error.message)) throw error;
       let observer = rpc;
@@ -13503,7 +13807,10 @@ ${prompt}
       if (error.code !== "ENOENT") throw error;
     }
     if (!saved && !bound2 && options.liveInputMode === "control") throw new Error("\u6CA1\u6709\u53EF\u6062\u590D\u7684\u7ED3\u6784\u5316\u4F1A\u8BDD\uFF1B\u9009\u62E9\u64CD\u4F5C\u672A\u542F\u52A8\u65B0\u4EFB\u52A1");
-    const env = withArtifactDeliveryEnv({ ...process.env, ...buildLarkChannelEnv(this.options.larkChannel) }, options.artifactDelivery);
+    const env = withArtifactDeliveryEnv({
+      ...await sanitizeAgentEnv(process.env, this.options.network),
+      ...buildLarkChannelEnv(this.options.larkChannel)
+    }, options.artifactDelivery);
     let main;
     const view = this.makeView(`${scope}\0${cwd}`);
     if (this.id === "codex") {
@@ -13522,12 +13829,11 @@ ${prompt}
           await rpc2.initialize();
           const loaded = await rpc2.request("thread/loaded/list", {});
           if (!Array.isArray(loaded.data) || !loaded.data.includes(bound2.threadId)) throw new Error("tmux \u5F53\u524D resume \u7684 thread \u4E0D\u5728\u5BF9\u5E94 App Server \u4E2D");
-          const resumed = await rpc2.request("thread/resume", {
-            threadId: bound2.threadId,
-            excludeTurns: true,
-            cwd,
-            ...!options.liveInputMode ? codexThreadPermissionOverrides(options.sandbox ?? this.options.sandbox) : {}
-          });
+          const resumed = await resumeCodexThread(
+            rpc2,
+            { threadId: bound2.threadId, excludeTurns: true, cwd },
+            options.liveInputMode ? {} : codexThreadPermissionOverrides(options.sandbox ?? this.options.sandbox)
+          );
           if (resumed.thread?.id !== bound2.threadId) throw new Error("App Server \u8FD4\u56DE\u4E86\u4E0D\u540C\u7684 thread");
           const attached = new CodexStructuredSession(bound2.threadId, bound2.endpoint, rpc2);
           await attached.syncState();
@@ -13556,16 +13862,13 @@ ${prompt}
       } else ({ rpc, endpoint } = await connectCodexHost({ binary: this.options.binary, profileDir: this.options.profileDir, scope, cwd, env }));
       const restored = saved ? new CodexStructuredSession(saved.id, endpoint, rpc) : void 0;
       try {
-        const result = await rpc.request(saved ? "thread/resume" : "thread/start", {
-          ...saved ? { threadId: saved.id, excludeTurns: true } : {},
+        const common = {
           cwd,
           ...!saved && options.model ? { model: options.model } : {},
-          // Match the terminal backend's profile policy. In particular, a
-          // full-access profile must not silently downgrade structured runs
-          // to read-only/on-request when a new App Server thread is created.
-          ...!readOnlyReconnect ? codexThreadPermissionOverrides(options.sandbox ?? this.options.sandbox ?? "read-only") : {},
           ...!saved && options.reasoningEffort ? { config: { model_reasoning_effort: options.reasoningEffort } } : {}
-        });
+        };
+        const overrides = readOnlyReconnect ? {} : codexThreadPermissionOverrides(options.sandbox ?? this.options.sandbox ?? "read-only");
+        const result = saved ? await resumeCodexThread(rpc, { ...common, threadId: saved.id, excludeTurns: true }, overrides) : await rpc.request("thread/start", { ...common, ...overrides });
         const id = result.thread?.id;
         if (typeof id !== "string") throw new Error("Codex did not return a thread ID");
         main = restored ?? new CodexStructuredSession(id, endpoint, rpc);
@@ -27449,6 +27752,7 @@ function createRuntimeAgent(profileConfig, appPaths2) {
       codexHome: profileConfig.codex?.codexHome ?? (profileConfig.codex?.inheritCodexHome === true ? void 0 : `${appPaths2.profileDir}/codex-home`),
       nativeView: profileConfig.preferences.structuredNativeView !== false,
       sandbox: profileConfig.sandbox.defaultMode,
+      network: profileConfig.network,
       larkChannel
     });
     const live = profileConfig.agentKind === "codex" ? new CodexAdapter({
@@ -27460,8 +27764,16 @@ function createRuntimeAgent(profileConfig, appPaths2) {
       sessionMode: "live",
       liveTerminalBackend: "tmux",
       allowManagedBinding: true,
-      larkChannel
-    }) : new ClaudeAdapter({ profileStateDir: appPaths2.profileDir, sessionMode: "live", liveTerminalBackend: "tmux", allowManagedBinding: true, larkChannel });
+      larkChannel,
+      network: profileConfig.network
+    }) : new ClaudeAdapter({
+      profileStateDir: appPaths2.profileDir,
+      sessionMode: "live",
+      liveTerminalBackend: "tmux",
+      allowManagedBinding: true,
+      larkChannel,
+      network: profileConfig.network
+    });
     return new PreferredStructuredAdapter(structured, live, appPaths2.profileDir);
   }
   if (profileConfig.agentKind === "codex") {
@@ -27477,6 +27789,7 @@ function createRuntimeAgent(profileConfig, appPaths2) {
       ignoreUserConfig: codex.ignoreUserConfig === true,
       ignoreRules: codex.ignoreRules !== false,
       sandbox: profileConfig.sandbox.defaultMode,
+      network: profileConfig.network,
       larkChannel,
       sessionMode: profileConfig.preferences?.agentSessionMode === "turn" ? "turn" : "live",
       liveTerminalBackend: "tmux"
@@ -27484,6 +27797,7 @@ function createRuntimeAgent(profileConfig, appPaths2) {
   }
   return new ClaudeAdapter({
     profileStateDir: appPaths2.profileDir,
+    network: profileConfig.network,
     larkChannel,
     sessionMode: profileConfig.preferences?.agentSessionMode === "turn" ? "turn" : "live",
     liveTerminalBackend: "tmux"
@@ -27593,7 +27907,7 @@ function formatAgo3(ms) {
 
 // src/cli/commands/agent-sendfile.ts
 import { spawnSync as spawnSync4 } from "child_process";
-import { connect } from "net";
+import { connect as connect2 } from "net";
 function resolveAgentArtifactDelivery(env = process.env, readTmuxEnvironment = readTmuxSessionEnvironment) {
   const socketPath = env.ARG_BRIDGE_ARTIFACT_SOCKET;
   const token = env.ARG_BRIDGE_ARTIFACT_TOKEN;
@@ -27608,7 +27922,7 @@ async function runAgentSendFile(path, caption) {
     throw new Error("\u5F53\u524D\u8FDB\u7A0B\u6CA1\u6709 bridge \u6587\u4EF6\u53D1\u9001\u80FD\u529B\uFF1B\u8BF7\u4ECE bridge agent \u4EFB\u52A1\u5185\u8C03\u7528\uFF0C\u6216\u5728\u6258\u7BA1 tmux session \u4E2D\u91CD\u542F bridge \u540E\u91CD\u8BD5");
   }
   const response = await new Promise((resolve6, reject4) => {
-    const socket = connect(artifact.socketPath);
+    const socket = connect2(artifact.socketPath);
     let data = "";
     socket.setEncoding("utf8");
     socket.setTimeout(2e4, () => socket.destroy(new Error("\u7B49\u5F85 bridge \u6587\u4EF6\u53D1\u9001\u8D85\u65F6")));
@@ -27656,7 +27970,7 @@ async function runNative(thread, opts) {
   const paths2 = resolveAppPaths({ profile: profileName });
   if (!root.profiles?.[profileName]) throw new Error(`Unknown profile: ${profileName}`);
   const config = normalizeProfileConfig(root.profiles[profileName]);
-  const env = { ...process.env };
+  const env = await sanitizeAgentEnv({ ...process.env }, config.network);
   const cwd = process.cwd();
   const sandbox = config.sandbox.defaultMode;
   if (config.agentKind === "claude") {
@@ -27704,16 +28018,16 @@ async function runNative(thread, opts) {
   const host = endpoints[0] ? { endpoint: endpoints[0], rpc: await RpcClient.connect(`ws+unix://${endpoints[0].slice("unix://".length)}:/`) } : await connectCodexHost({ binary, profileDir: paths2.profileDir, scope: `native:${thread ?? process.env.TMUX_PANE ?? "new"}`, cwd, env });
   try {
     if (endpoints[0]) await host.rpc.initialize();
-    const result = await host.rpc.request("thread/resume", {
-      threadId: thread,
-      excludeTurns: true,
-      cwd,
-      ...codexThreadPermissionOverrides(sandbox)
-    }, 18e4);
+    const result = await resumeCodexThread(
+      host.rpc,
+      { threadId: thread, excludeTurns: true, cwd },
+      codexThreadPermissionOverrides(sandbox),
+      18e4
+    );
     const id = result.thread?.id;
     if (typeof id !== "string" || thread && id !== thread) throw new Error("Thread identity mismatch; TUI was not started.");
     console.log(`Shared Codex thread: ${id}`);
-    const child = spawnProcess(binary, ["-c", "check_for_update_on_startup=false", ...codexRemotePermissionArgs(sandbox), "--remote", host.endpoint, "resume", id, "--no-alt-screen"], { cwd, env, stdio: "inherit" });
+    const child = spawnProcess(binary, codexRemoteResumeArgs(host.endpoint, id), { cwd, env, stdio: "inherit" });
     await waitChild(child);
   } finally {
     host.rpc.close();

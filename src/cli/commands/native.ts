@@ -3,10 +3,16 @@ import { join } from 'node:path';
 import { resolveAppPaths } from '../../config/app-paths';
 import { normalizeProfileConfig } from '../../config/profile-schema';
 import { connectCodexHost } from '../../agent/structured/host';
-import { codexRemotePermissionArgs, codexThreadPermissionOverrides } from '../../agent/structured/permissions';
+import {
+  codexRemotePermissionArgs,
+  codexRemoteResumeArgs,
+  codexThreadPermissionOverrides,
+  resumeCodexThread,
+} from '../../agent/structured/permissions';
 import { spawnProcess } from '../../platform/spawn';
 import { listStructuredTmuxPanes } from '../../agent/structured/tmux-discovery';
 import { RpcClient } from '../../agent/structured/rpc';
+import { sanitizeAgentEnv } from '../../platform/network-env';
 
 /** Run as an ordinary foreground shell command. The caller's shell (and its
  * Clash/Conda environment) survives both normal exit and Ctrl-C. */
@@ -17,7 +23,7 @@ export async function runNative(thread: string | undefined, opts: { profile?: st
   const paths = resolveAppPaths({ profile: profileName });
   if (!root.profiles?.[profileName]) throw new Error(`Unknown profile: ${profileName}`);
   const config = normalizeProfileConfig(root.profiles[profileName]);
-  const env = { ...process.env };
+  const env = await sanitizeAgentEnv({ ...process.env }, config.network);
   const cwd = process.cwd();
   const sandbox = config.sandbox.defaultMode;
   if (config.agentKind === 'claude') {
@@ -67,14 +73,16 @@ export async function runNative(thread: string | undefined, opts: { profile?: st
     : await connectCodexHost({ binary, profileDir: paths.profileDir, scope: `native:${thread ?? process.env.TMUX_PANE ?? 'new'}`, cwd, env });
   try {
     if (endpoints[0]) await host.rpc.initialize();
-    const result = await host.rpc.request('thread/resume', {
-      threadId: thread, excludeTurns: true, cwd,
-      ...codexThreadPermissionOverrides(sandbox),
-    }, 180000);
+    const result = await resumeCodexThread(
+      host.rpc,
+      { threadId: thread, excludeTurns: true, cwd },
+      codexThreadPermissionOverrides(sandbox),
+      180000,
+    );
     const id = result.thread?.id;
     if (typeof id !== 'string' || (thread && id !== thread)) throw new Error('Thread identity mismatch; TUI was not started.');
     console.log(`Shared Codex thread: ${id}`);
-    const child = spawnProcess(binary, ['-c', 'check_for_update_on_startup=false', ...codexRemotePermissionArgs(sandbox), '--remote', host.endpoint, 'resume', id, '--no-alt-screen'], { cwd, env, stdio: 'inherit' });
+    const child = spawnProcess(binary, codexRemoteResumeArgs(host.endpoint, id), { cwd, env, stdio: 'inherit' });
     await waitChild(child);
   } finally { host.rpc.close(); }
 }

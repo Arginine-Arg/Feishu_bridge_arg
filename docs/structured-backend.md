@@ -1,6 +1,6 @@
-# Structured backend (v1.5.10)
+# Structured backend (v1.6.0)
 
-Version 1.5.10 provides an opt-in structured-first backend with native fallback. The v1.2.7
+Version 1.6.0 provides an opt-in structured-first backend with native fallback. The v1.2.7
 tag remains available for rollback. It does not automatically change any running
 profile or migrate an existing terminal session. The previously validated
 1.4.0 implementation is retained with the limitations below.
@@ -43,7 +43,7 @@ timeout. Explicit new input waits for the existing observed work to finish.
 
 ### Dynamic tmux panes
 
-In v1.5.10, `/tmux bind` never migrates a running native writer. It binds the
+In v1.6.0, `/tmux bind` never migrates a running native writer. It binds the
 selected pane and prefers structured transport when a shared endpoint is
 available. Ordinary Codex and Claude processes are attached through live
 transport. A shared endpoint's submission failure is not retried through live.
@@ -51,6 +51,40 @@ On Linux, discovery associates a process with both its `TMUX` server socket and
 `TMUX_PANE`; this is important because `%0`/`%1` are reused by different tmux
 servers on one host. If `/proc` is restricted, the same association falls back
 to the process working directory without guessing among multiple endpoints.
+
+### Remote resume permissions
+
+Codex CLI 0.154.0 and later reject permission overrides when a TUI attaches to
+an existing App Server task (`--remote ... resume <id>`). The permissions frozen
+when the task was created are authoritative. arg-bridge now builds that TUI
+command without `--sandbox`, `--ask-for-approval`, or
+`--dangerously-bypass-approvals-and-sandbox`; those flags remain only for a
+brand-new local Codex session. `thread/resume` RPC calls still apply the profile
+policy where the server allows it, and fall back once to the frozen remote
+context on the deterministic rejection. Threads created by Bridge itself record
+the profile policy at creation, so a full-access profile keeps
+`dangerFullAccess` across later remote resumes. A thread created elsewhere with
+a weaker policy cannot be upgraded by the TUI; `arg-bridge native` prints a
+notice and attaches with the frozen permissions instead of failing.
+
+### Network policy
+
+A profile may pin the network environment of agent children with
+`network.mode`:
+
+- `direct` removes every inherited proxy variable.
+- `proxy` removes inherited proxies, applies `network.proxyUrl`, and performs a
+  short TCP preflight before starting the agent. An unreachable proxy fails
+  closed with a clear diagnostic instead of retrying.
+- `inherit` (default) keeps host proxies, but drops a loopback proxy whose TCP
+  connection is refused or unreachable. This prevents a stopped local
+  clash/legacy proxy from trapping newly spawned Codex processes on a dead port.
+
+App Server start failures use exponential backoff (3s, 6s, 12s, ... capped at
+60s). After repeated fast failures the bridge pauses new spawns for that runtime
+directory and reports the pause; systemd units additionally set
+`RestartSec`/`RestartSteps`/`RestartMaxDelaySec` plus a start limit, and the
+launchd plist sets `ThrottleInterval`.
 
 To create a shared Codex in your existing shell, run `clash on` if needed, then:
 

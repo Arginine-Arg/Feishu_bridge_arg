@@ -24,11 +24,18 @@ export interface UnitInputs {
   profile: string;
   /** Root directory for config/profile state. */
   channelHome: string;
+  /**
+   * Include systemd 254+ exponential restart options. Older systemd versions
+   * reject `RestartSteps`/`RestartMaxDelaySec`, so callers detect the version
+   * and omit them.
+   */
+  restartBackoff?: boolean;
 }
 
 /**
- * `Restart=always` + `RestartSec=5` matches launchd's KeepAlive=true
- * behaviour with a 5s back-off so a crash-loop doesn't pin the CPU.
+ * Restart back-off is deliberately slow: 3s, then exponential steps up to 60s
+ * (systemd 254+), with a 5-failure start limit that parks the unit in a failed
+ * state instead of hammering the model provider with new sessions.
  *
  * `Type=simple` is the right fit: systemd treats the service as started
  * the moment ExecStart fires (bridge's WS handshake happens later, just
@@ -51,13 +58,17 @@ export function buildUnit(inputs: UnitInputs): string {
 Description=Arg Bridge bot
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=5
 
 [Service]
 Type=simple
 ExecStart="${escape(inputs.nodePath)}" "${escape(inputs.bridgeEntryPath)}" run --profile "${escape(inputs.profile)}"
 Restart=always
-RestartSec=5
-KillMode=process
+RestartSec=3
+${inputs.restartBackoff === false ? '' : `RestartSteps=6
+RestartMaxDelaySec=60
+`}KillMode=process
 StandardOutput=append:${daemonStdoutPath(inputs.profile)}
 StandardError=append:${daemonStderrPath(inputs.profile)}
 Environment="PATH=${escape(inputs.envPath)}"
@@ -79,11 +90,19 @@ export async function writeUnit(profile: string): Promise<void> {
     envPath: process.env.PATH ?? '',
     profile,
     channelHome: paths.rootDir,
+    restartBackoff: systemdSupportsRestartBackoff(),
   });
   const unitPath = systemdUnitPath(profile);
   await mkdir(dirname(unitPath), { recursive: true });
   await mkdir(daemonLogDir(profile), { recursive: true });
   await writeFile(unitPath, content, 'utf8');
+}
+
+/** RestartSteps/RestartMaxDelaySec landed in systemd 254. */
+function systemdSupportsRestartBackoff(): boolean {
+  const result = spawnSync('systemctl', ['--version'], { encoding: 'utf8' });
+  const match = /^systemd\s+(\d+)/mu.exec(result.stdout ?? '');
+  return match ? Number.parseInt(match[1]!, 10) >= 254 : false;
 }
 
 export function unitExists(profile: string): boolean {

@@ -6,7 +6,7 @@ import { listStructuredTmuxPanes } from '../../src/agent/structured/tmux-discove
 import { RpcClient } from '../../src/agent/structured/rpc';
 
 const native = process.env.ARG_BRIDGE_NATIVE_PROTOCOL === '1' ? it : it.skip;
-native('native launcher shares a YOLO thread and leaves the original shell usable', async () => {
+native('native launcher attaches to a frozen remote thread and leaves the original shell usable', async () => {
   const dir = await mkdtemp('/tmp/ab-launch-');
   const socket = join(dir, 'tmux.sock');
   const tmux = (...args: string[]) => spawnSync('tmux', ['-S', socket, ...args], { encoding: 'utf8' });
@@ -41,8 +41,24 @@ native('native launcher shares a YOLO thread and leaves the original shell usabl
       throw new Error(`${error.message}\n${tmux('capture-pane', '-p', '-t', 'test').stdout}`);
     });
     expect(resumed.approvalPolicy).toBe('never');
-    expect(resumed.sandbox.type).toBe('dangerFullAccess');
+    // Codex 0.154+ freezes the permissions of a remote task. This thread was
+    // seeded by `codex exec`, so it must stay on its own sandbox; the TUI may
+    // not crash trying to override it. Bridge-created threads record the
+    // profile policy at creation time, which the dedicated structured-protocol
+    // test covers; an externally created thread cannot be upgraded remotely.
+    expect(['readOnly', 'workspaceWrite', 'dangerFullAccess']).toContain(resumed.sandbox.type);
     await expect.poll(() => tmux('capture-pane', '-p', '-t', 'test').stdout, { timeout: 10000 }).toContain('OpenAI Codex');
+    // The 0.154+ bootstrap error draws the banner first and fails afterwards.
+    // Waiting for either a ready prompt or the explicit error prevents the
+    // old assertion below from passing on a crashed TUI.
+    await expect.poll(() => {
+      const frame = tmux('capture-pane', '-p', '-t', 'test').stdout;
+      if (frame.includes('Permission overrides are not supported')) return 'error';
+      if (frame.includes('Ask Codex to do anything') || /gpt-[\w.-]+.*·/u.test(frame)) return 'ready';
+      return 'pending';
+    }, { timeout: 20000 }).not.toBe('pending');
+    expect(tmux('capture-pane', '-p', '-t', 'test').stdout)
+      .not.toContain('Permission overrides are not supported');
     // Exit through the native UI; the original shell must remain alive.
     tmux('send-keys', '-t', 'test', 'C-c');
     await new Promise(resolve => setTimeout(resolve, 200));

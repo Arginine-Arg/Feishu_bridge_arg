@@ -4,7 +4,7 @@ A lightweight bot that bridges Feishu / Lark messenger with your local Claude Co
 
 [中文 README](./README.zh.md)
 
-Version 1.5.10 is the clean structured/tmux release. It makes pane discovery robust when `/proc/<pid>/cmdline` is restricted by associating Codex processes with their `TMUX` server socket, `TMUX_PANE`, and pane cwd. It retains `/tmux release`, which removes Bridge management while preserving the session, pane and agent process. Shared Codex panes fall back to `ps`, including shell-wrapped commands, and prefer a unique remote endpoint over stale legacy text. `arg-bridge native <thread-id> --profile codex` resumes a shared conversation in your current shell, preserving its proxy environment and returning to that shell on exit. Binding does not create another pane or writer. See [configuration, validated capabilities, and limitations](./docs/structured-backend.md).
+Version 1.6.0 adapts the Codex CLI 0.154+ remote-resume contract and hardens agent supervision. A TUI attaching to an existing App Server task no longer receives permission overrides, so `--dangerously-bypass-approvals-and-sandbox` / `--sandbox` cannot break bootstrap; the task keeps the permissions frozen when it was created. Per-profile `network.mode` (`direct` / `proxy` / `inherit`) controls the environment of agent children, strips a provably dead loopback proxy, and verifies an explicit proxy before starting. App Server start failures back off at 3s / 6s / 12s / ... up to 60s, and the service definitions add a restart throttle and failure limit instead of respawning in a tight loop. Structured pane discovery and `/tmux release` remain unchanged. See [configuration, validated capabilities, and limitations](./docs/structured-backend.md).
 
 For a product walkthrough, see the [Feishu document](https://larkcommunity.feishu.cn/docx/OaRIdFIRFoLM3xxTmKwcetHqn5e).
 
@@ -46,7 +46,7 @@ Install a pinned release or use a writable custom npm prefix when required:
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.5.10
+sh /tmp/install-arg-bridge.sh --version 1.6.0
 # Example for a machine without permission to write npm's configured global prefix:
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -90,10 +90,10 @@ Release tarballs are preferred. If a Git install is required, keep both compatib
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.5.10"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.0"
 ```
 
-`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.5.10`.
+`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.0`.
 
 ### 4. Node or npm global-prefix errors
 
@@ -345,6 +345,36 @@ When an agent produces a file during a task, it uses the bridge capability rathe
 The package contains the `arg-bridge-sendfile` Codex skill, but npm installation itself does not rely on a lifecycle hook to write into a user's Codex home. On the first Codex run prepared by arg-bridge, it automatically synchronizes `SKILL.md` to `CODEX_HOME/skills/arg-bridge-sendfile/` (or Codex's normal default home when `CODEX_HOME` is not set). Later runs refresh it when the bundled skill changes, so users do not need to install or copy it manually after upgrading the bridge.
 
 The skill tells Codex to use the scoped command above only when the user needs the actual artifact in Feishu/Lark. The file authorization remains enforced by the bridge; if skill synchronization cannot write to the selected Codex home, the run continues and `arg-bridge sendfile` remains available inside an active bridge task.
+
+## Network and proxy policy
+
+Each profile can pin which network path Bridge-launched agent children use through `network`. **Omitting the field preserves current behavior.** It only affects Codex/Claude child processes that Bridge starts and the tmux panes Bridge creates; it never modifies your login shell, system environment, existing tmux sessions, or proxy values that you configured in the tmux server yourself.
+
+| mode | Behavior |
+| --- | --- |
+| `direct` | Remove every inherited `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` variable and connect directly |
+| `proxy` | Remove inherited proxies, use only `proxyUrl`, and verify it with a TCP preflight before starting; unreachable means fail fast instead of retrying |
+| `inherit` | Default. Keep host proxies; only drop a loopback proxy whose TCP connection actually fails, so a stopped clash/systemd proxy cannot poison the child. Remote proxy addresses are neither probed nor changed |
+
+```json
+{
+  "network": {
+    "mode": "proxy",
+    "proxyUrl": "socks5h://127.0.0.1:7890",
+    "noProxy": "localhost,127.0.0.1,::1"
+  }
+}
+```
+
+How to choose:
+
+- If you run `clash on` in the pane and then `arg-bridge native ...`, **keep the default `inherit`**; no config change is needed.
+- If the Bridge daemon itself must always use one fixed proxy regardless of the shell it was started from, use `proxy` and set `proxyUrl` to the real endpoint.
+- If the machine connects directly and stale systemd/shell proxy variables keep appearing, use `direct`.
+
+When Bridge creates a tmux pane, it pins only proxy values it actually owns plus the keys it stripped as dead (pinned empty). Keys Bridge never managed are left untouched, so a proxy you configured in the tmux environment is not overwritten. When a dead proxy is stripped, Bridge logs `network.proxy-stripped`.
+
+Codex CLI 0.154.0 and later reject permission overrides on `codex --remote ... resume <id>`; a remote task keeps the permissions frozen when it was created. Bridge now attaches to that contract, and the old bypass flags are used only for a brand-new local session. App Server start failures back off at 3s / 6s / 12s / ... up to 60s and pause instead of retrying immediately, and the systemd/launchd service definitions set a minimum restart interval and failure limit so a crash loop cannot create a burst of new provider sessions.
 
 ## Permission modes
 

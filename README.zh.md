@@ -4,7 +4,7 @@
 
 [English README](./README.md)
 
-干净版 `1.5.10` 只包含 Feishubridge structured/tmux 功能。它通过 `TMUX` server socket、`TMUX_PANE` 和 pane 工作目录关联 Codex 进程，修复 Linux 限制 `/proc/<pid>/cmdline` 时的 structured 识别问题，也避免不同 tmux server 中重复的 pane 编号互相污染；并保留 `/tmux release`：解除 Bridge 托管但保留 tmux session、pane 和 agent 进程。共享 Codex pane 会回退使用 `ps`，支持 shell 包装命令，并优先采用唯一的 remote endpoint。`arg-bridge native <thread-id> --profile codex` 可在当前 shell 恢复共享会话，继承代理环境，并在退出后回到原 shell；绑定不会另建 pane 或 writer。详见[配置方式、已验证能力与限制](./docs/structured-backend.md)。
+`1.6.0` 适配 Codex CLI 0.154+ 的 remote resume 权限契约，并加固 agent 进程守护。TUI 附着到已有 App Server 任务时不再携带 `--dangerously-bypass-approvals-and-sandbox` / `--sandbox` 等权限覆盖，避免 bootstrap 直接退出；远程任务沿用创建时固化的权限。新增 profile 级 `network.mode`（`direct` / `proxy` / `inherit`）：可强制直连、指定显式代理并做启动前预检，或在 `inherit` 下自动剥离已经失效的本机代理，避免子进程死锁在旧端口。App Server 启动失败改为 3s / 6s / 12s …（上限 60s）指数退避并暂停，systemd/launchd 同时增加重启节流与失败上限，防止无退避拉起触发供应商风控。structured pane 识别与 `/tmux release` 保持不变。详见[配置方式、已验证能力与限制](./docs/structured-backend.md)。
 
 关于能实现的效果，详情可以阅读[飞书文档](https://larkcommunity.feishu.cn/docx/OaRIdFIRFoLM3xxTmKwcetHqn5e)
 
@@ -46,7 +46,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.5.10
+sh /tmp/install-arg-bridge.sh --version 1.6.0
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -90,10 +90,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.5.10"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.0"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.5.10`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.0`。
 
 ### 4. Node 或 npm 全局目录错误
 
@@ -349,6 +349,36 @@ agent 在任务中产出文件时，应调用 bridge 能力而不是直接上传
 安装包包含 `arg-bridge-sendfile` Codex skill，但 npm 安装阶段不会依赖 lifecycle hook 向用户的 Codex 目录写文件。arg-bridge 首次为 Codex 准备运行时，会自动把 `SKILL.md` 同步到 `CODEX_HOME/skills/arg-bridge-sendfile/`；未设置 `CODEX_HOME` 时则使用 Codex 的默认 home。之后每次运行都会检查内置版本，发生变化时自动刷新，因此用户升级 bridge 后不需要手动安装或复制该 skill。
 
 该 skill 只是在用户确实需要在飞书/Lark 收到实际产物时，引导 Codex 调用上面的 scoped 命令。文件授权始终由 bridge 校验；若选定 Codex home 不可写导致同步失败，当前任务仍可继续，活动 bridge 任务内的 `arg-bridge sendfile` 命令仍然可用。
+
+## 网络与代理策略
+
+每个 profile 可以用 `network` 固定 Bridge 拉起的 agent 子进程使用哪套网络出口。**不写这个字段就保持现状**：Bridge 只作用于自己启动的 Codex/Claude 子进程和它新建的 tmux pane，不会修改你的登录 shell、系统环境或已有 tmux 会话，也不会清掉你在 tmux server 里自行设置的代理。
+
+| mode | 行为 |
+| --- | --- |
+| `direct` | 删除所有继承的 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 等变量，始终直连 |
+| `proxy` | 删除继承代理，只使用 `proxyUrl`；启动前先做 TCP 可达性检查，不可达时直接报错并暂停拉起 |
+| `inherit` | 默认值，保留宿主代理；只有代理指向本机回环地址且 TCP 明确连接失败时才剥离，避免失效的 clash / 旧 systemd 代理污染子进程。远程代理地址不做探测、不做修改 |
+
+```json
+{
+  "network": {
+    "mode": "proxy",
+    "proxyUrl": "socks5h://127.0.0.1:7890",
+    "noProxy": "localhost,127.0.0.1,::1"
+  }
+}
+```
+
+怎么选：
+
+- 日常先在 pane 里 `clash on`，再运行 `arg-bridge native ...`：**保持默认 `inherit` 即可**，不需要改配置；
+- 希望 Bridge 守护进程无论从哪个 shell 启动都固定走某个代理：用 `proxy`，把 `proxyUrl` 写成你的实际端口；
+- 机器直连、且旧 systemd / shell 里经常残留死代理变量：用 `direct`。
+
+新建 tmux pane 时，Bridge 只会固定自己实际持有的代理值，以及被判定失效而剥离的 key（固定为空）；Bridge 从未管理过的 key 不会被主动清空，因此不会覆盖你 tmux 环境里本来就配置好的代理。需要排查时，Bridge 会在剥离失效代理时记录 `network.proxy-stripped` 日志。
+
+Codex CLI 0.154.0 起，`codex --remote ... resume <id>` 不再接受 `--sandbox`、`--ask-for-approval`、`--dangerously-bypass-approvals-and-sandbox` 等权限覆盖；远程任务必须继承创建时固化的权限。Bridge 现在按这个规则附加 TUI，旧的绕过参数只用于新建本地会话。App Server 启动连续失败时使用 3s / 6s / 12s …（上限 60s）退避并暂停，systemd/launchd 也配置了最小重启间隔和失败上限，避免短时间内重复建立会话触发供应商风控。
 
 ## 权限模式
 

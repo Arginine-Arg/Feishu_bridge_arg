@@ -52,6 +52,10 @@ export function buildPlist(inputs: PlistInputs): string {
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <!-- Minimum 10s between respawns; prevents a fast crash loop from
+         opening a new provider session on every failure. -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
     <key>StandardOutPath</key>
     <string>${escape(daemonStdoutPath(inputs.profile))}</string>
     <key>StandardErrorPath</key>

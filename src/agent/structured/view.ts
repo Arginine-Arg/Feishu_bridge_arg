@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { spawnProcessSync } from '../../platform/spawn';
 import type { AgentEvent } from '../types';
 import type { TmuxBindingStatus } from '../tmux-control';
-import { codexRemotePermissionArgs, proxyEnvironment } from './permissions';
+import { codexRemoteResumeArgs, proxyEnvironment } from './permissions';
 import type { CodexSandboxMode } from '../../config/permissions';
 
 const quote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
@@ -41,7 +41,7 @@ export class StructuredView {
     if (sessionExists.status !== 0) {
       const inheritedProxy = proxyEnvironment(native?.env ?? process.env);
       const command = native
-        ? [native.binary, '-c', 'check_for_update_on_startup=false', ...codexRemotePermissionArgs(native.sandbox), '--remote', native.endpoint, 'resume', native.threadId, '--no-alt-screen'].map(quote).join(' ') + '; bridge_status=$?; trap - INT; printf "\\n[Codex exited (%s); shell remains]\\n" "$bridge_status"; exec "${SHELL:-/bin/bash}" -i'
+        ? [native.binary, ...codexRemoteResumeArgs(native.endpoint, native.threadId)].map(quote).join(' ') + '; bridge_status=$?; trap - INT; printf "\\n[Codex exited (%s); shell remains]\\n" "$bridge_status"; exec "${SHELL:-/bin/bash}" -i'
         : `tail -n 200 -F ${quote(this.logPath)}`;
       const environmentArgs = Object.entries(inheritedProxy).flatMap(([key, value]) => ['-e', `${key}=${value}`]);
       const created = spawnProcessSync('tmux', ['-S', socket, '-f', '/dev/null', 'new-session', '-d', '-s', name, '-x', '120', '-y', '40', '-c', cwd ?? this.directory, ...environmentArgs, 'bash', '--noprofile', '--norc', '-ic', command], { encoding: 'utf8', env: native?.env ?? process.env });

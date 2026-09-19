@@ -438,13 +438,16 @@ export function createRuntimeAgent(
       codexHome: profileConfig.codex?.codexHome ?? (profileConfig.codex?.inheritCodexHome === true ? undefined : `${appPaths.profileDir}/codex-home`),
       nativeView: profileConfig.preferences.structuredNativeView !== false,
       sandbox: profileConfig.sandbox.defaultMode,
+      network: profileConfig.network,
       larkChannel,
     });
     const live = profileConfig.agentKind === 'codex'
       ? new CodexAdapter({ binary: profileConfig.codex?.binaryPath ?? 'codex', profileStateDir: appPaths.profileDir,
         codexHome: profileConfig.codex?.codexHome, inheritCodexHome: profileConfig.codex?.inheritCodexHome,
-        sandbox: profileConfig.sandbox.defaultMode, sessionMode: 'live', liveTerminalBackend: 'tmux', allowManagedBinding: true, larkChannel })
-      : new ClaudeAdapter({ profileStateDir: appPaths.profileDir, sessionMode: 'live', liveTerminalBackend: 'tmux', allowManagedBinding: true, larkChannel });
+        sandbox: profileConfig.sandbox.defaultMode, sessionMode: 'live', liveTerminalBackend: 'tmux', allowManagedBinding: true, larkChannel,
+        network: profileConfig.network })
+      : new ClaudeAdapter({ profileStateDir: appPaths.profileDir, sessionMode: 'live', liveTerminalBackend: 'tmux', allowManagedBinding: true, larkChannel,
+        network: profileConfig.network });
     return new PreferredStructuredAdapter(structured, live, appPaths.profileDir);
   }
   if (profileConfig.agentKind === 'codex') {
@@ -460,6 +463,7 @@ export function createRuntimeAgent(
       ignoreUserConfig: codex.ignoreUserConfig === true,
       ignoreRules: codex.ignoreRules !== false,
       sandbox: profileConfig.sandbox.defaultMode,
+      network: profileConfig.network,
       larkChannel,
       sessionMode: profileConfig.preferences?.agentSessionMode === 'turn' ? 'turn' : 'live',
       liveTerminalBackend: 'tmux',
@@ -467,6 +471,7 @@ export function createRuntimeAgent(
   }
   return new ClaudeAdapter({
     profileStateDir: appPaths.profileDir,
+    network: profileConfig.network,
     larkChannel,
     sessionMode: profileConfig.preferences?.agentSessionMode === 'turn' ? 'turn' : 'live',
     liveTerminalBackend: 'tmux',

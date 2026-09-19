@@ -38,6 +38,13 @@ describe('profile-scoped daemon paths and arguments', () => {
     expect(buildUnit(inputs)).toContain('run --profile "codex-dev"');
     expect(buildUnit(inputs)).toContain('Environment="LARK_CHANNEL_HOME=/tmp/lark-channel-home"');
     expect(buildUnit(inputs)).toContain('KillMode=process');
+    expect(buildUnit(inputs)).toContain('StartLimitIntervalSec=120');
+    expect(buildUnit(inputs)).toContain('StartLimitBurst=5');
+    expect(buildUnit(inputs)).toContain('RestartSec=3');
+    expect(buildUnit(inputs)).toContain('RestartSteps=6');
+    expect(buildUnit(inputs)).toContain('RestartMaxDelaySec=60');
+    expect(buildUnit({ ...inputs, restartBackoff: false })).not.toContain('RestartSteps');
+    expect(buildPlist(inputs)).toContain('<key>ThrottleInterval</key>\n    <integer>10</integer>');
     expect(buildLauncherCmd(inputs)).toContain('run --profile "codex-dev"');
     expect(buildLauncherCmd(inputs)).toContain('set "LARK_CHANNEL_HOME=/tmp/lark-channel-home"');
   });

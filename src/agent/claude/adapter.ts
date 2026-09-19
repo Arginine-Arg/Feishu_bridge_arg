@@ -29,6 +29,8 @@ import {
   type AgentRunOptions,
 } from '../types';
 import { translateEvent } from './stream-json';
+import type { NetworkConfig } from '../../config/profile-schema';
+import { sanitizeAgentEnv } from '../../platform/network-env';
 
 export interface ClaudeAdapterOptions {
   binary?: string;
@@ -39,6 +41,7 @@ export interface ClaudeAdapterOptions {
   liveTerminalBackend?: LiveTerminalBackend;
   liveIdleMs?: number;
   allowManagedBinding?: boolean;
+  network?: NetworkConfig;
 }
 
 type ClaudeChild = SpawnedProcessByStdio<Writable, Readable, Readable>;
@@ -54,6 +57,9 @@ export class ClaudeAdapter implements AgentAdapter {
   private readonly liveUsePty: boolean | undefined;
   private readonly liveTerminalBackend: LiveTerminalBackend | undefined;
   private readonly liveIdleMs: number | undefined;
+  private readonly network: NetworkConfig | undefined;
+  private baseEnv: NodeJS.ProcessEnv | undefined;
+  private strippedProxyKeys: string[] = [];
   private readonly liveSessions = new LiveSessionPool();
   private readonly tmuxBindings: TmuxBindingController;
 
@@ -64,6 +70,7 @@ export class ClaudeAdapter implements AgentAdapter {
     this.liveUsePty = opts.liveUsePty;
     this.liveTerminalBackend = opts.liveTerminalBackend;
     this.liveIdleMs = opts.liveIdleMs;
+    this.network = opts.network;
     const profileStateDir = opts.profileStateDir ?? join(tmpdir(), `arg-bridge-${process.pid}-claude`);
     this.tmuxBindings = new TmuxBindingController(
       profileStateDir,
@@ -153,6 +160,15 @@ export class ClaudeAdapter implements AgentAdapter {
     });
   }
 
+  async prepareRun(): Promise<void> {
+    const availability = await this.checkAvailability();
+    if (!availability.ok) throw availability.error;
+    this.strippedProxyKeys = [];
+    this.baseEnv = await sanitizeAgentEnv(process.env, this.network, {
+      onDiagnostic: (item) => { if (item.type === 'stripped' && item.keys) this.strippedProxyKeys = item.keys; },
+    });
+  }
+
   run(opts: AgentRunOptions): AgentRun {
     if (!opts.cwd) {
       throw new Error('cwd is required for ClaudeAdapter.run');
@@ -184,7 +200,7 @@ export class ClaudeAdapter implements AgentAdapter {
     const child = spawnProcess(this.binary, args, {
       cwd: opts.cwd,
       env: mergeProcessEnv(
-        process.env,
+        this.baseEnv ?? process.env,
         withArtifactDeliveryEnv(buildLarkChannelEnv(this.larkChannel), opts.artifactDelivery),
       ),
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -318,6 +334,8 @@ export class ClaudeAdapter implements AgentAdapter {
       args,
       cwd: opts.cwd,
       env: withArtifactDeliveryEnv(buildLarkChannelEnv(this.larkChannel), opts.artifactDelivery),
+      baseEnv: this.baseEnv,
+      networkEnv: { mode: this.network?.mode ?? 'inherit', strippedProxyKeys: this.strippedProxyKeys },
       signature: liveSignature,
       usePty: this.liveUsePty,
       backend: this.liveTerminalBackend ?? 'tmux',

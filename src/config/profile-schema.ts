@@ -57,6 +57,20 @@ export interface OutboundConfig {
   allowedFileDirs: string[];
 }
 
+export type NetworkMode = 'direct' | 'proxy' | 'inherit';
+
+/**
+ * Per-profile network policy for agent child processes. `direct` strips every
+ * inherited proxy variable; `proxy` applies one explicit proxy and verifies it
+ * before an agent is allowed to start; `inherit` keeps the host environment
+ * (still dropping a loopback proxy that is provably dead).
+ */
+export interface NetworkConfig {
+  mode: NetworkMode;
+  proxyUrl?: string;
+  noProxy?: string;
+}
+
 export type CommentConfig = Record<string, never>;
 
 export type LarkCliIdentityPreset = 'bot-only' | 'user-default';
@@ -93,6 +107,7 @@ export interface ProfileConfig {
   sandbox: SandboxConfig;
   permissions: PermissionConfig;
   permissionSource?: PermissionSource;
+  network?: NetworkConfig;
   codex?: CodexConfig;
   attachments: AttachmentConfig;
   outbound: OutboundConfig;
@@ -154,6 +169,7 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     };
     sandbox?: Partial<SandboxConfig>;
     permissions?: Partial<PermissionConfig>;
+    network?: Partial<NetworkConfig>;
     codex?: CodexConfig & { flags?: unknown };
     attachments?: Partial<AttachmentConfig>;
     outbound?: {
@@ -199,6 +215,7 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     sandbox,
     permissions,
     permissionSource,
+    network: normalizeNetwork(raw.network),
     ...(raw.codex ? { codex: normalizeCodex(raw.codex) } : {}),
     attachments: {
       maxCount: numberOr(raw.attachments?.maxCount, 10),
@@ -294,6 +311,33 @@ function normalizeCodex(input: CodexConfig & { flags?: unknown }): CodexConfig {
     ignoreRules: input.ignoreRules !== false,
   };
   return codex;
+}
+
+function normalizeNetwork(input: Partial<NetworkConfig> | undefined): NetworkConfig {
+  const mode: NetworkMode =
+    input?.mode === 'direct' || input?.mode === 'proxy' ? input.mode : 'inherit';
+  const proxyUrl = typeof input?.proxyUrl === 'string' && input.proxyUrl.trim()
+    ? input.proxyUrl.trim()
+    : undefined;
+  if (mode === 'proxy') {
+    if (!proxyUrl) throw new Error('network.proxyUrl is required when network.mode is "proxy"');
+    let parsed: URL;
+    try {
+      parsed = new URL(proxyUrl);
+    } catch {
+      throw new Error('network.proxyUrl must be a valid URL');
+    }
+    if (!['http:', 'https:', 'socks:', 'socks5:', 'socks5h:'].includes(parsed.protocol)) {
+      throw new Error('network.proxyUrl must use http, https, socks, socks5, or socks5h');
+    }
+  }
+  return {
+    mode,
+    ...(proxyUrl ? { proxyUrl } : {}),
+    ...(typeof input?.noProxy === 'string' && input.noProxy.trim()
+      ? { noProxy: input.noProxy.trim() }
+      : {}),
+  };
 }
 
 function normalizeComments(_input: unknown): CommentConfig {

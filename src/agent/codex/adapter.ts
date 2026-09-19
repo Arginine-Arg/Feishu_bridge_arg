@@ -1,7 +1,7 @@
 import { createInterface } from 'node:readline';
 import type { Readable, Writable } from 'node:stream';
 import { join } from 'node:path';
-import type { SandboxMode } from '../../config/profile-schema';
+import type { NetworkConfig, SandboxMode } from '../../config/profile-schema';
 import { log } from '../../core/logger';
 import { AsyncEventQueue } from '../event-queue';
 import { mergeProcessEnv, spawnProcess, type SpawnedProcessByStdio } from '../../platform/spawn';
@@ -31,6 +31,7 @@ import type {
 } from '../types';
 import { buildCodexArgs } from './argv';
 import { CodexJsonlTranslator, type CodexFinishReason } from './jsonl';
+import { sanitizeAgentEnv } from '../../platform/network-env';
 
 export interface CodexAdapterOptions {
   binary: string;
@@ -47,6 +48,7 @@ export interface CodexAdapterOptions {
   liveTerminalBackend?: LiveTerminalBackend;
   liveIdleMs?: number;
   allowManagedBinding?: boolean;
+  network?: NetworkConfig;
 }
 
 type CodexChild = SpawnedProcessByStdio<Writable, Readable, Readable>;
@@ -69,6 +71,9 @@ export class CodexAdapter implements AgentAdapter {
   private readonly liveUsePty: boolean | undefined;
   private readonly liveTerminalBackend: LiveTerminalBackend | undefined;
   private readonly liveIdleMs: number | undefined;
+  private readonly network: NetworkConfig | undefined;
+  private baseEnv: NodeJS.ProcessEnv | undefined;
+  private strippedProxyKeys: string[] = [];
   private readonly liveSessions = new LiveSessionPool();
   private readonly tmuxBindings: TmuxBindingController;
 
@@ -86,6 +91,7 @@ export class CodexAdapter implements AgentAdapter {
     this.liveUsePty = opts.liveUsePty;
     this.liveTerminalBackend = opts.liveTerminalBackend;
     this.liveIdleMs = opts.liveIdleMs;
+    this.network = opts.network;
     this.tmuxBindings = new TmuxBindingController(
       opts.profileStateDir,
       opts.larkChannel?.profile ?? 'codex',
@@ -185,6 +191,10 @@ export class CodexAdapter implements AgentAdapter {
       );
     }
     await ensureBundledCodexSkill(this.effectiveCodexHome());
+    this.strippedProxyKeys = [];
+    this.baseEnv = await sanitizeAgentEnv(process.env, this.network, {
+      onDiagnostic: (item) => { if (item.type === 'stripped' && item.keys) this.strippedProxyKeys = item.keys; },
+    });
   }
 
   private effectiveCodexHome(): string | undefined {
@@ -220,7 +230,7 @@ export class CodexAdapter implements AgentAdapter {
     if (codexHome) envOverrides.CODEX_HOME = codexHome;
     const child = spawnProcess(this.binary, args, {
       cwd: opts.cwd,
-      env: mergeProcessEnv(process.env, envOverrides),
+      env: mergeProcessEnv(this.baseEnv ?? process.env, envOverrides),
       stdio: ['pipe', 'pipe', 'pipe'],
     }) as CodexChild;
 
@@ -365,6 +375,8 @@ export class CodexAdapter implements AgentAdapter {
       args,
       cwd: opts.cwd,
       env: envOverrides,
+      baseEnv: this.baseEnv,
+      networkEnv: { mode: this.network?.mode ?? 'inherit', strippedProxyKeys: this.strippedProxyKeys },
       signature: liveSignature,
       usePty: this.liveUsePty,
       backend: this.liveTerminalBackend ?? 'tmux',

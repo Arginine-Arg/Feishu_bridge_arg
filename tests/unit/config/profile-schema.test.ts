@@ -550,4 +550,27 @@ describe('profile schema', () => {
       maxAccess: 'workspace',
     });
   });
+
+  it('normalizes the per-profile agent network policy', () => {
+    const base = {
+      schemaVersion: 2,
+      agentKind: 'codex' as const,
+      accounts: { app },
+      codex: { binaryPath: '/usr/local/bin/codex' },
+    };
+    expect(normalizeProfileConfig(base).network).toEqual({ mode: 'inherit' });
+    expect(normalizeProfileConfig({ ...base, network: { mode: 'direct' } }).network).toEqual({
+      mode: 'direct',
+    });
+    expect(normalizeProfileConfig({
+      ...base,
+      network: { mode: 'proxy', proxyUrl: 'socks5h://127.0.0.1:7890' },
+    }).network).toEqual({ mode: 'proxy', proxyUrl: 'socks5h://127.0.0.1:7890' });
+    expect(() => normalizeProfileConfig({ ...base, network: { mode: 'proxy' } }))
+      .toThrow(/proxyUrl/u);
+    expect(() => normalizeProfileConfig({
+      ...base,
+      network: { mode: 'proxy', proxyUrl: 'ftp://127.0.0.1:21' },
+    })).toThrow(/proxyUrl/u);
+  });
 });
