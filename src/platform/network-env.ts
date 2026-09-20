@@ -10,6 +10,9 @@ export const PROXY_ENV_KEYS = [
 
 export const DEFAULT_NO_PROXY = 'localhost,127.0.0.1,::1';
 
+export const NETWORK_MODES = ['direct', 'proxy', 'inherit'] as const;
+export type NetworkMode = (typeof NETWORK_MODES)[number];
+
 export type ProxyProbeResult = 'open' | 'refused' | 'unreachable';
 export type ProxyProbe = (host: string, port: number, timeoutMs: number) => Promise<ProxyProbeResult>;
 
@@ -33,6 +36,13 @@ export interface SanitizeNetworkEnvOptions {
   probe?: ProxyProbe;
   /** Per-probe timeout. Kept short because this runs on the spawn path. */
   timeoutMs?: number;
+  /**
+   * True when the agent child talks to a third-party Codex provider. In
+   * `inherit` mode a local (loopback) proxy is then removed even when it is
+   * alive, because it would divert provider traffic through a relay that has
+   * no route to a domestic endpoint.
+   */
+  thirdPartyProvider?: boolean;
   onDiagnostic?: (diagnostic: NetworkEnvDiagnostic) => void;
 }
 
@@ -47,6 +57,10 @@ export interface SanitizeNetworkEnvOptions {
  *   provably dead (connection refused/unreachable). This is the common stale
  *   `clash`/systemd case that otherwise poisons every child process after the
  *   local proxy exits.
+ *   When the caller reports a third-party Codex provider, `inherit` also drops
+ *   *live* loopback proxies: a local clash/relay port must not divert traffic
+ *   bound for a domestic provider. Remote proxy hosts and explicitly
+ *   configured `proxy` mode are never touched.
  */
 export async function sanitizeAgentEnv(
   base: NodeJS.ProcessEnv,
@@ -101,7 +115,13 @@ export async function sanitizeAgentEnv(
   const proxy = firstProxyUrl(base);
   if (!proxy) return env;
   const target = parseProxyUrl(proxy);
-  if (!target || !isLoopbackHost(target.host)) return env;
+  if (!target) return env;
+  if (options.thirdPartyProvider === true && isLoopbackHost(target.host)) {
+    const keys = PROXY_ENV_KEYS.filter((key) => base[key] !== undefined);
+    diagnostic({ type: 'stripped', mode: 'inherit', proxy, reason: 'third-party-provider', keys });
+    return stripProxyEnv(base);
+  }
+  if (!isLoopbackHost(target.host)) return env;
   const result = await (options.probe ?? probeProxy)(target.host, target.port, options.timeoutMs ?? 400);
   if (result === 'open') return env;
   const keys = PROXY_ENV_KEYS.filter((key) => base[key] !== undefined);

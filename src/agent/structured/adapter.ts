@@ -11,7 +11,13 @@ import { ensureBundledCodexSkill } from '../bundled-skill';
 import { captureTmuxPaneTail, discoverTmuxSockets, listTmuxAgentPanes, type AgentTmuxControl, type TmuxPaneTarget } from '../tmux-control';
 import { buildLarkChannelEnv, withArtifactDeliveryEnv, type LarkChannelEnvContext } from '../lark-channel-env';
 import { writeFileAtomic } from '../../platform/atomic-write';
-import { connectCodexHost } from './host';
+import { connectCodexHost, shutdownProfileHosts } from './host';
+import {
+  fileStamp,
+  fingerprintCredentialEnv,
+  type CodexHostEnvironmentFingerprint,
+} from './host-registry';
+import { resolveCodexProvider } from '../codex/provider';
 import { CodexStructuredSession } from './codex';
 import { ClaudeStructuredSession } from './claude';
 import type { StructuredSession } from './contracts';
@@ -67,6 +73,7 @@ export class StructuredAdapter implements AgentAdapter {
   private readonly candidatesFile: string;
   private candidates = new Map<string, StructuredCandidate>();
   private credentialResolution: CodexCredentialResolution = { env: {}, injected: false, missingToken: false };
+  private providerIsThirdParty = false;
   constructor(private readonly options: StructuredAdapterOptions) {
     this.id = options.kind;
     this.displayName = options.kind === 'codex' ? 'Codex App Server' : 'Claude Agent SDK';
@@ -182,6 +189,9 @@ export class StructuredAdapter implements AgentAdapter {
     if (!available.ok) throw available.error;
     if (this.id === 'codex') await ensureBundledCodexSkill(this.options.codexHome ?? process.env.CODEX_HOME);
     if (this.id === 'codex') {
+      this.providerIsThirdParty = !(
+        await resolveCodexProvider(this.options.codexHome ?? defaultCodexHome())
+      ).official;
       this.credentialResolution = await resolveCodexCredentialEnv(
         this.options.codexHome ?? defaultCodexHome(),
         { baseEnv: process.env },
@@ -245,13 +255,21 @@ export class StructuredAdapter implements AgentAdapter {
     const inheritedProxy = proxyEnvironment(processEnvironmentForPidTree(target.panePid));
     let strippedProxyKeys: string[] = [];
     const env = await sanitizeAgentEnv({ ...process.env, ...inheritedProxy }, this.options.network, {
+      thirdPartyProvider: this.providerIsThirdParty,
       onDiagnostic: (item) => { if (item.type === 'stripped' && item.keys) strippedProxyKeys = item.keys; },
     });
     const codexHome = target.structured.codexHome ?? this.options.codexHome;
     if (codexHome) env.CODEX_HOME = codexHome;
     else if (this.options.codexHome) env.CODEX_HOME = this.options.codexHome;
     applyCodexCredentialEnv(this.credentialResolution, env);
-    let { rpc, endpoint } = await connectCodexHost({ binary: this.options.binary, profileDir: this.options.profileDir, scope, cwd: target.paneCurrentPath, env });
+    let { rpc, endpoint } = await connectCodexHost({
+      binary: this.options.binary,
+      profileDir: this.options.profileDir,
+      scope,
+      cwd: target.paneCurrentPath,
+      env,
+      fingerprint: this.codexHostFingerprint(env),
+    });
     let createdPaneId: string | undefined;
     try {
       // Loading the legacy rollout is the precondition for migration. Do it
@@ -553,13 +571,17 @@ export class StructuredAdapter implements AgentAdapter {
     try { saved = JSON.parse(await readFile(stateFile, 'utf8')); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     if (!saved && !bound && options.liveInputMode === 'control') throw new Error('没有可恢复的结构化会话；选择操作未启动新任务');
     const env = withArtifactDeliveryEnv({
-      ...(await sanitizeAgentEnv(process.env, this.options.network)),
+      ...(await sanitizeAgentEnv(process.env, this.options.network, {
+        thirdPartyProvider: this.providerIsThirdParty,
+      })),
       ...buildLarkChannelEnv(this.options.larkChannel),
     }, options.artifactDelivery);
     let main: StructuredSession;
     const view = this.makeView(`${scope}\0${cwd}`);
     if (this.id === 'codex') {
       if (this.options.codexHome) env.CODEX_HOME = this.options.codexHome;
+      else if (process.env.CODEX_HOME) env.CODEX_HOME = process.env.CODEX_HOME;
+      applyCodexCredentialEnv(this.credentialResolution, env);
       if (!bound && !this.autoDiscoveryDisabled.has(scope) && saved?.view?.terminal) {
         const pane = activeStructuredTmuxPane(saved.view.terminal.socketPath, saved.view.terminal.target);
         if (pane?.structured?.endpoint) {
@@ -598,7 +620,14 @@ export class StructuredAdapter implements AgentAdapter {
           const loaded = await rpc.request('thread/loaded/list', {});
           if (!loaded.data?.includes(saved.id)) throw new Error('原会话未运行；控制操作不会自动恢复任务');
         } catch (error) { rpc.close(); throw error; }
-      } else ({ rpc, endpoint } = await connectCodexHost({ binary: this.options.binary, profileDir: this.options.profileDir, scope, cwd, env }));
+      } else ({ rpc, endpoint } = await connectCodexHost({
+        binary: this.options.binary,
+        profileDir: this.options.profileDir,
+        scope,
+        cwd,
+        env,
+        fingerprint: this.codexHostFingerprint(env),
+      }));
       const restored = saved ? new CodexStructuredSession(saved.id, endpoint, rpc) : undefined;
       try {
         const common = {
@@ -647,5 +676,23 @@ export class StructuredAdapter implements AgentAdapter {
       if (current.main instanceof CodexStructuredSession) current.main.disconnect();
     }
     this.sessions.clear();
+    if (this.id === 'codex') await shutdownProfileHosts(this.options.profileDir);
+  }
+
+  /**
+   * Identity of the environment an App Server would run with. Used to replace
+   * a detached server whose provider, credential, or config file changed while
+   * it was idle (the `cc-switch` case).
+   */
+  private codexHostFingerprint(env: NodeJS.ProcessEnv): CodexHostEnvironmentFingerprint {
+    const home = env.CODEX_HOME ?? this.options.codexHome ?? process.env.CODEX_HOME;
+    return {
+      credentials: fingerprintCredentialEnv(this.credentialResolution.env),
+      networkMode: this.providerIsThirdParty
+        ? 'inherit:third-party-direct'
+        : this.options.network?.mode ?? 'inherit',
+      configStamp: home ? fileStamp(join(home, 'config.toml')) : undefined,
+      authStamp: home ? fileStamp(join(home, 'auth.json')) : undefined,
+    };
   }
 }

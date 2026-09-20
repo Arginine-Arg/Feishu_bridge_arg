@@ -6,6 +6,7 @@ import { ClaudeAdapter } from '../../agent/claude/adapter';
 import { CodexAdapter } from '../../agent/codex/adapter';
 import { StructuredAdapter } from '../../agent/structured/adapter';
 import { PreferredStructuredAdapter } from '../../agent/structured/preferred';
+import { terminateProfileHosts } from '../../agent/structured/host-registry';
 import {
   AgentPreflightError,
   formatAgentPreflightDiagnostic,
@@ -131,6 +132,14 @@ export async function runStart(opts: StartOptions): Promise<void> {
     tenant: cfg.accounts.app.tenant,
     hostname: os.hostname(),
   });
+
+  // Reclaim Codex App Servers left behind by a previous bridge run. Their
+  // provider, credentials, and proxy were resolved at spawn time, so reusing
+  // them after a `cc-switch` provider change would serve the wrong endpoint.
+  const reclaimedHosts = await terminateProfileHosts(appPaths.profileDir).catch(() => 0);
+  if (reclaimedHosts > 0) {
+    log.info('agent', 'app-server-reclaimed', { count: reclaimedHosts, profile: appPaths.profile });
+  }
 
   let agent = createRuntimeAgent(profileConfig, { ...appPaths, configPath });
   const availability = await checkRuntimeAgentAvailability(agent);

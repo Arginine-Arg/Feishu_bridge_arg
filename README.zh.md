@@ -4,7 +4,7 @@
 
 [English README](./README.md)
 
-`1.6.1` 修复第三方 API 配置下的 Codex 启动失败：当 `cc-switch` 等工具把 `OPENAI_API_KEY` 留成空值时，Bridge 会按 `experimental_bearer_token` / `auth.json` 自动补齐 provider 声明的 `env_key`，官方 API key 与 ChatGPT OAuth 登录完全不受影响。同时补齐 `/tmux list`、`/tmux bind`、`/tmux unbind`、`/tmux release` 的完整文档。
+`1.6.2` 让 `cc-switch` 的 provider 切换实现自愈：第三方 Codex provider 在启动文件把 `OPENAI_API_KEY` 留成空值时，会按 `experimental_bearer_token` / `auth.json` 自动补齐声明的 `env_key`；该 provider 不再继承本机回环代理；`arg-bridge restart` 会回收仍持有旧 provider 的 Codex App Server。官方 API key 与 ChatGPT OAuth 登录完全不受影响。`1.6.1` 补齐了 `/tmux list`、`/tmux bind`、`/tmux unbind`、`/tmux release` 的完整文档。
 
 `1.6.0` 适配 Codex CLI 0.154+ 的 remote resume 权限契约，并加固 agent 进程守护。TUI 附着到已有 App Server 任务时不再携带 `--dangerously-bypass-approvals-and-sandbox` / `--sandbox` 等权限覆盖，避免 bootstrap 直接退出；远程任务沿用创建时固化的权限。新增 profile 级 `network.mode`（`direct` / `proxy` / `inherit`）：可强制直连、指定显式代理并做启动前预检，或在 `inherit` 下自动剥离已经失效的本机代理，避免子进程死锁在旧端口。App Server 启动失败改为 3s / 6s / 12s …（上限 60s）指数退避并暂停，systemd/launchd 同时增加重启节流与失败上限，防止无退避拉起触发供应商风控。详见[配置方式、已验证能力与限制](./docs/structured-backend.md)。
 
@@ -48,7 +48,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.6.1
+sh /tmp/install-arg-bridge.sh --version 1.6.2
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -92,10 +92,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.1"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.2"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.1`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.2`。
 
 ### 4. Node 或 npm 全局目录错误
 
@@ -419,6 +419,35 @@ arg-bridge 会在每次 Codex 运行前处理这个问题：
 - 如果确认是第三方 provider 但找不到任何 token，bridge 只记录 `codex-credential-missing` 并继续启动，把报错留给 Codex，而不是直接让 preflight 失败。
 
 shell 包装函数对**你自己开的终端**（自己 shell 里的 `arg-bridge native`、直接运行 `codex`）仍然有用，但 bridge 不再依赖它。不要把 `OPENAI_API_KEY` 写进 systemd unit 或服务环境；如果那里需要固定 token，建议写在 Codex 配置的 `experimental_bearer_token` 里，bridge 会直接读取。
+
+#### 第三方 provider 不继承本机代理
+
+`inherit` 模式平时会保留宿主代理，因为「在 pane 里先 `clash on`」对官方端点是合法用法。但**当前 provider 是第三方时，本机回环代理会被主动剥离**，即使该端口还活着：本机 clash/中继端口无法访问国内或内网端点，而它的「死端口」变体正是 `cc-switch` 故障的另一半。规则刻意收得很窄：
+
+| 情况 | 结果 |
+|---|---|
+| provider 是第三方，继承的代理是 `127.0.0.1` / `localhost` / `::1` | 删除代理变量，直连 |
+| provider 是第三方，继承的代理是远端主机 | 保留代理：它可能是访问该端点的唯一通路 |
+| provider 是官方（`openai` id 或官方 `base_url`） | 保留代理，`clash on` 照常可用 |
+| `network.mode` 显式为 `proxy` | 以 `proxyUrl` 为准，第三方规则不生效 |
+
+判定在每次运行时从 `config.toml` 读取，所以切换 provider 不需要改配置。被剥离的代理会记录 `network.proxy-stripped`，并带上 `reason=third-party-provider`。
+
+#### App Server 生命周期与 `arg-bridge restart`
+
+Codex App Server 是 detached 进程：它把启动时的 provider、凭据、代理和模型目录固化在进程里。这让暂停的 native TUI 能重新接上，但也意味着**仍在运行的 server 感知不到 provider 变化**，bridge 重启也可能把它留下来当孤儿。
+
+bridge 现在按 profile 在 `<profile>/structured/app-server-registry.json` 里记录它们：环境指纹（凭据变量摘要、生效的网络模式、`config.toml` 与 `auth.json` 的文件时间戳）以及持有该运行目录的进程。
+
+| 事件 | 行为 |
+|---|---|
+| 下一次运行，provider 与凭据未变 | 复用正在运行的 server，不做任何重启 |
+| 下一次运行，`cc-switch` 已改写 `config.toml` 或 token 变化 | 在该轮开始前终止并替换旧 server |
+| `arg-bridge restart --profile <名称>` | 回收该 profile 记录的 App Server，下一轮用当前环境重新拉起；命令会打印回收数量 |
+| `arg-bridge native` 退出且没有其它 owner | 停掉它启动的 server，而不是留着旧环境当孤儿 |
+| 仍有其它 bridge 或暂停的 native TUI 持有该 profile | server 保持可用，等待重连 |
+
+这就是 `cc-switch` 的完整验收路径：切换 provider 后直接发消息（或先跑一次 `arg-bridge restart`），下一轮就会用新的 provider、凭据和代理策略执行。注册表只保存凭据的**摘要**（不保存 token 明文）且权限为 `0600`；需要重置记录时删除 `<profile>/structured/app-server-registry.json` 即可。
 
 Codex CLI 0.154.0 起，`codex --remote ... resume <id>` 不再接受 `--sandbox`、`--ask-for-approval`、`--dangerously-bypass-approvals-and-sandbox` 等权限覆盖；远程任务必须继承创建时固化的权限。Bridge 现在按这个规则附加 TUI，旧的绕过参数只用于新建本地会话。App Server 启动连续失败时使用 3s / 6s / 12s …（上限 60s）退避并暂停，systemd/launchd 也配置了最小重启间隔和失败上限，避免短时间内重复建立会话触发供应商风控。
 

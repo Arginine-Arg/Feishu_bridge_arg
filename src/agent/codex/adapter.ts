@@ -37,6 +37,11 @@ import {
   resolveCodexCredentialEnvSync,
   type CodexCredentialResolution,
 } from './credentials';
+import {
+  resolveCodexProvider,
+  resolveCodexProviderSync,
+  type CodexProviderSummary,
+} from './provider';
 import { CodexJsonlTranslator, type CodexFinishReason } from './jsonl';
 import { sanitizeAgentEnv } from '../../platform/network-env';
 
@@ -86,6 +91,7 @@ export class CodexAdapter implements AgentAdapter {
     missingToken: false,
   };
   private credentialResolved = false;
+  private providerSummary: CodexProviderSummary = { official: true };
   private strippedProxyKeys: string[] = [];
   private readonly liveSessions = new LiveSessionPool();
   private readonly tmuxBindings: TmuxBindingController;
@@ -205,7 +211,12 @@ export class CodexAdapter implements AgentAdapter {
     }
     await ensureBundledCodexSkill(this.effectiveCodexHome());
     this.strippedProxyKeys = [];
+    // Resolve the provider first: a third-party endpoint must not inherit a
+    // live loopback clash/relay proxy (the common `Missing environment
+    // variable` / dead-port combination after `cc-switch`).
+    this.providerSummary = await resolveCodexProvider(this.codexHomeForResolution());
     this.baseEnv = await sanitizeAgentEnv(process.env, this.network, {
+      thirdPartyProvider: this.providerSummary.official === false,
       onDiagnostic: (item) => { if (item.type === 'stripped' && item.keys) this.strippedProxyKeys = item.keys; },
     });
     await this.loadCredentialEnv();
@@ -220,7 +231,7 @@ export class CodexAdapter implements AgentAdapter {
    * untouched.
    */
   private async loadCredentialEnv(): Promise<CodexCredentialResolution> {
-    const resolution = await resolveCodexCredentialEnv(this.codexHome ?? defaultCodexHome(), {
+    const resolution = await resolveCodexCredentialEnv(this.codexHomeForResolution(), {
       baseEnv: process.env,
     });
     this.credentialResolution = resolution;
@@ -235,9 +246,9 @@ export class CodexAdapter implements AgentAdapter {
    */
   private credentialEnv(): CodexCredentialResolution {
     if (!this.credentialResolved) {
-      this.credentialResolution = resolveCodexCredentialEnvSync(
-        this.codexHome ?? defaultCodexHome(),
-      );
+      const home = this.codexHomeForResolution();
+      this.providerSummary = resolveCodexProviderSync(home);
+      this.credentialResolution = resolveCodexCredentialEnvSync(home);
       this.credentialResolved = true;
       this.logCredentialInjection(this.credentialResolution);
     }
@@ -257,6 +268,17 @@ export class CodexAdapter implements AgentAdapter {
     if (this.codexHome) return this.codexHome;
     if (!this.inheritCodexHome) return join(this.profileStateDir, 'codex-home');
     return process.env.CODEX_HOME;
+  }
+
+  /**
+   * Home used for config resolution. Unlike {@link effectiveCodexHome}, this
+   * always yields a concrete directory so an inherited `CODEX_HOME` that is
+   * never passed to the child cannot hide the user's real Codex config.
+   */
+  private codexHomeForResolution(): string | undefined {
+    if (this.codexHome) return this.codexHome;
+    if (!this.inheritCodexHome) return join(this.profileStateDir, 'codex-home');
+    return defaultCodexHome();
   }
 
   private applyCredentialOverride(env: NodeJS.ProcessEnv): void {

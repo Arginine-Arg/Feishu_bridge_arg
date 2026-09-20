@@ -13,7 +13,15 @@ import { spawnProcess } from '../../platform/spawn';
 import { listStructuredTmuxPanes } from '../../agent/structured/tmux-discovery';
 import { RpcClient } from '../../agent/structured/rpc';
 import { sanitizeAgentEnv } from '../../platform/network-env';
-import { applyCodexCredentialEnv, resolveCodexCredentialEnv } from '../../agent/codex/credentials';
+import {
+  applyCodexCredentialEnv,
+  defaultCodexHome,
+  resolveCodexCredentialEnv,
+  type CodexCredentialResolution,
+} from '../../agent/codex/credentials';
+import { fileStamp, fingerprintCredentialEnv } from '../../agent/structured/host-registry';
+import { shutdownProfileHosts } from '../../agent/structured/host';
+import { resolveCodexProvider } from '../../agent/codex/provider';
 
 /** Run as an ordinary foreground shell command. The caller's shell (and its
  * Clash/Conda environment) survives both normal exit and Ctrl-C. */
@@ -24,24 +32,32 @@ export async function runNative(thread: string | undefined, opts: { profile?: st
   const paths = resolveAppPaths({ profile: profileName });
   if (!root.profiles?.[profileName]) throw new Error(`Unknown profile: ${profileName}`);
   const config = normalizeProfileConfig(root.profiles[profileName]);
-  const env = await sanitizeAgentEnv({ ...process.env }, config.network);
   const cwd = process.cwd();
   const sandbox = config.sandbox.defaultMode;
   if (config.agentKind === 'claude') {
-    const child = spawnProcess('claude', [...(thread ? ['--resume', thread] : []), ...(config.preferences.model ? ['--model', config.preferences.model] : []), ...(sandbox === 'danger-full-access' ? ['--dangerously-skip-permissions'] : [])], { cwd, env, stdio: 'inherit' });
+    const claudeEnv = await sanitizeAgentEnv({ ...process.env }, config.network);
+    const child = spawnProcess('claude', [...(thread ? ['--resume', thread] : []), ...(config.preferences.model ? ['--model', config.preferences.model] : []), ...(sandbox === 'danger-full-access' ? ['--dangerously-skip-permissions'] : [])], { cwd, env: claudeEnv, stdio: 'inherit' });
     await waitChild(child);
     return;
   }
   const binary = config.codex?.binaryPath ?? 'codex';
-  if (config.codex?.codexHome) env.CODEX_HOME = config.codex.codexHome;
-  if (!env.CODEX_HOME && config.codex?.inheritCodexHome === false) env.CODEX_HOME = `${paths.profileDir}/codex-home`;
+  const codexHome = config.codex?.codexHome
+    ?? (config.codex?.inheritCodexHome === false ? `${paths.profileDir}/codex-home` : undefined);
+  // A third-party provider must not be diverted through a local clash port, so
+  // the provider decides the network policy before the environment is prepared.
+  const provider = await resolveCodexProvider(codexHome ?? defaultCodexHome());
+  const thirdParty = !provider.official;
+  const env = await sanitizeAgentEnv({ ...process.env }, config.network, {
+    thirdPartyProvider: thirdParty,
+  });
+  if (codexHome) env.CODEX_HOME = codexHome;
   // `arg-bridge native` starts the Codex App Server and TUI without a login
   // shell, so a `cc-switch`-style empty OPENAI_API_KEY would reach the CLI
   // even when config.toml declares a third-party provider token.
-  applyCodexCredentialEnv(
-    await resolveCodexCredentialEnv(env.CODEX_HOME, { baseEnv: env }),
-    env,
-  );
+  const credential: CodexCredentialResolution = await resolveCodexCredentialEnv(env.CODEX_HOME, {
+    baseEnv: env,
+  });
+  applyCodexCredentialEnv(credential, env);
   if (!thread) {
     // Older servers cannot resume a newly allocated thread before its first
     // turn is materialized. Let native TUI own this blank conversation; it
@@ -78,7 +94,19 @@ export async function runNative(thread: string | undefined, opts: { profile?: st
   if (endpoints.length > 1) throw new Error('Multiple endpoints own this thread; no new writer was started.');
   const host = endpoints[0]
     ? { endpoint: endpoints[0], rpc: await RpcClient.connect(`ws+unix://${endpoints[0].slice('unix://'.length)}:/`) }
-    : await connectCodexHost({ binary, profileDir: paths.profileDir, scope: `native:${thread ?? process.env.TMUX_PANE ?? 'new'}`, cwd, env });
+    : await connectCodexHost({
+        binary,
+        profileDir: paths.profileDir,
+        scope: `native:${thread ?? process.env.TMUX_PANE ?? 'new'}`,
+        cwd,
+        env,
+        fingerprint: {
+          credentials: fingerprintCredentialEnv(credential.env),
+          networkMode: thirdParty ? 'inherit:third-party-direct' : config.network?.mode ?? 'inherit',
+          configStamp: env.CODEX_HOME ? fileStamp(join(env.CODEX_HOME, 'config.toml')) : undefined,
+          authStamp: env.CODEX_HOME ? fileStamp(join(env.CODEX_HOME, 'auth.json')) : undefined,
+        },
+      });
   try {
     if (endpoints[0]) await host.rpc.initialize();
     const result = await resumeCodexThread(
@@ -92,7 +120,10 @@ export async function runNative(thread: string | undefined, opts: { profile?: st
     console.log(`Shared Codex thread: ${id}`);
     const child = spawnProcess(binary, codexRemoteResumeArgs(host.endpoint, id), { cwd, env, stdio: 'inherit' });
     await waitChild(child);
-  } finally { host.rpc.close(); }
+  } finally {
+    host.rpc.close();
+    if (!endpoints[0]) await shutdownProfileHosts(paths.profileDir);
+  }
 }
 
 async function waitChild(child: ReturnType<typeof spawnProcess>): Promise<void> {

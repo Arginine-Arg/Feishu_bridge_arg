@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.6.1",
+  version: "1.6.2",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -1285,7 +1285,7 @@ function generateShortId() {
   return randomBytes2(2).toString("hex");
 }
 async function register(args) {
-  const registryFile = args.registryFile ?? paths.processesFile;
+  const registryFile2 = args.registryFile ?? paths.processesFile;
   const entry = {
     id: generateShortId(),
     pid: process.pid,
@@ -1297,15 +1297,15 @@ async function register(args) {
     startedAt: (/* @__PURE__ */ new Date()).toISOString(),
     version: args.version
   };
-  await withRegistryFileLock(registryFile, async () => {
-    const { entries: live } = await readForWriteState(registryFile);
-    await writeAtomic([...live, entry], registryFile);
+  await withRegistryFileLock(registryFile2, async () => {
+    const { entries: live } = await readForWriteState(registryFile2);
+    await writeAtomic([...live, entry], registryFile2);
   });
   return entry;
 }
-async function updateEntry(id, patch, registryFile = paths.processesFile) {
-  await withRegistryFileLock(registryFile, async () => {
-    const { entries: live, pruned } = await readForWriteState(registryFile);
+async function updateEntry(id, patch, registryFile2 = paths.processesFile) {
+  await withRegistryFileLock(registryFile2, async () => {
+    const { entries: live, pruned } = await readForWriteState(registryFile2);
     let changed = false;
     const next = live.map((e) => {
       if (e.id !== id) return e;
@@ -1313,35 +1313,35 @@ async function updateEntry(id, patch, registryFile = paths.processesFile) {
       return { ...e, ...patch };
     });
     if (!changed && !pruned) return;
-    await writeAtomic(next, registryFile);
+    await writeAtomic(next, registryFile2);
   });
 }
-function unregisterSync(id, registryFile = paths.processesFile) {
+function unregisterSync(id, registryFile2 = paths.processesFile) {
   try {
-    withRegistryFileLockSync(registryFile, () => {
-      const live = readRaw(registryFile).entries;
+    withRegistryFileLockSync(registryFile2, () => {
+      const live = readRaw(registryFile2).entries;
       const next = live.filter((e) => e.id !== id);
       if (next.length === live.length) return;
-      writeAtomicSync(next, registryFile);
+      writeAtomicSync(next, registryFile2);
     });
   } catch {
   }
 }
-function cleanupTmpFiles(registryFile = paths.processesFile) {
+function cleanupTmpFiles(registryFile2 = paths.processesFile) {
   try {
-    unlinkSync(`${registryFile}.tmp-${process.pid}`);
+    unlinkSync(`${registryFile2}.tmp-${process.pid}`);
   } catch {
   }
 }
-function sameAppOthers(appId, excludePid = process.pid, registryFile = paths.processesFile) {
-  return readAndPrune(registryFile).filter((e) => e.appId === appId && e.pid !== excludePid);
+function sameAppOthers(appId, excludePid = process.pid, registryFile2 = paths.processesFile) {
+  return readAndPrune(registryFile2).filter((e) => e.appId === appId && e.pid !== excludePid);
 }
-async function sameAppLiveOthers(appId, excludePid = process.pid, registryFile = paths.processesFile) {
-  const candidates = sameAppOthers(appId, excludePid, registryFile);
+async function sameAppLiveOthers(appId, excludePid = process.pid, registryFile2 = paths.processesFile) {
+  const candidates = sameAppOthers(appId, excludePid, registryFile2);
   const checks = await Promise.all(
     candidates.map(async (entry) => ({
       entry,
-      stale: await isEntryStale(entry, registryFile)
+      stale: await isEntryStale(entry, registryFile2)
     }))
   );
   return checks.filter(({ stale }) => !stale).map(({ entry }) => entry);
@@ -1356,9 +1356,9 @@ function resolveTarget(target) {
   }
   return void 0;
 }
-async function withRegistryFileLock(registryFile, fn) {
-  await ensureRegistryFile(registryFile);
-  const release = await lockfile2.lock(registryFile, {
+async function withRegistryFileLock(registryFile2, fn) {
+  await ensureRegistryFile(registryFile2);
+  const release = await lockfile2.lock(registryFile2, {
     realpath: false,
     stale: 3e4,
     update: 1e4
@@ -1369,9 +1369,9 @@ async function withRegistryFileLock(registryFile, fn) {
     await release();
   }
 }
-function withRegistryFileLockSync(registryFile, fn) {
-  ensureRegistryFileSync(registryFile);
-  const release = lockfile2.lockSync(registryFile, {
+function withRegistryFileLockSync(registryFile2, fn) {
+  ensureRegistryFileSync(registryFile2);
+  const release = lockfile2.lockSync(registryFile2, {
     realpath: false,
     stale: 3e4,
     update: 1e4
@@ -1382,12 +1382,12 @@ function withRegistryFileLockSync(registryFile, fn) {
     release();
   }
 }
-async function ensureRegistryFile(registryFile) {
-  await mkdir4(dirname4(registryFile), { recursive: true });
-  const legacy = legacyRegistryFile(registryFile);
+async function ensureRegistryFile(registryFile2) {
+  await mkdir4(dirname4(registryFile2), { recursive: true });
+  const legacy = legacyRegistryFile(registryFile2);
   const initial = legacy ? readRegistryFile(legacy) ?? EMPTY : EMPTY;
   try {
-    await writeFile2(registryFile, `${JSON.stringify(initial, null, 2)}
+    await writeFile2(registryFile2, `${JSON.stringify(initial, null, 2)}
 `, {
       flag: "wx",
       mode: 384
@@ -1396,12 +1396,12 @@ async function ensureRegistryFile(registryFile) {
     if (err.code !== "EEXIST") throw err;
   }
 }
-function ensureRegistryFileSync(registryFile) {
-  mkdirSync(dirname4(registryFile), { recursive: true });
-  const legacy = legacyRegistryFile(registryFile);
+function ensureRegistryFileSync(registryFile2) {
+  mkdirSync(dirname4(registryFile2), { recursive: true });
+  const legacy = legacyRegistryFile(registryFile2);
   const initial = legacy ? readRegistryFile(legacy) ?? EMPTY : EMPTY;
   try {
-    writeFileSync(registryFile, `${JSON.stringify(initial, null, 2)}
+    writeFileSync(registryFile2, `${JSON.stringify(initial, null, 2)}
 `, {
       flag: "wx",
       mode: 384
@@ -1410,19 +1410,19 @@ function ensureRegistryFileSync(registryFile) {
     if (err.code !== "EEXIST") throw err;
   }
 }
-async function readForWriteState(registryFile) {
-  const raw = readRaw(registryFile);
+async function readForWriteState(registryFile2) {
+  const raw = readRaw(registryFile2);
   const checks = await Promise.all(
     raw.entries.map(async (entry) => ({
       entry,
-      stale: await isEntryStale(entry, registryFile)
+      stale: await isEntryStale(entry, registryFile2)
     }))
   );
   const entries = checks.filter(({ stale }) => !stale).map(({ entry }) => entry);
   return { entries, pruned: entries.length !== raw.entries.length };
 }
-async function isEntryStale(entry, registryFile) {
-  const rootDir = rootDirFromRegistryFile(registryFile);
+async function isEntryStale(entry, registryFile2) {
+  const rootDir = rootDirFromRegistryFile(registryFile2);
   const appPaths2 = resolveAppPaths({ rootDir, profile: entry.profileName });
   const [profileLock, appLock] = await Promise.all([
     checkRuntimeLock(appPaths2.profileLockFile),
@@ -1444,8 +1444,8 @@ function lockMatchesEntry(lock4, entry, kind) {
   if (kind === "app" && lock4.meta.appId !== entry.appId) return false;
   return true;
 }
-function rootDirFromRegistryFile(registryFile) {
-  const parent = dirname4(registryFile);
+function rootDirFromRegistryFile(registryFile2) {
+  const parent = dirname4(registryFile2);
   return basename3(parent) === "registry" ? dirname4(parent) : parent;
 }
 function readRaw(path) {
@@ -4144,8 +4144,8 @@ async function runProfileList(opts = {}) {
     console.log("\u6682\u65E0 profile\u3002");
     return;
   }
-  const registryFile = resolveAppPaths({ rootDir }).userRegistryFile;
-  const running = readAndPrune(registryFile);
+  const registryFile2 = resolveAppPaths({ rootDir }).userRegistryFile;
+  const running = readAndPrune(registryFile2);
   const rows = profiles.map((profile2) => {
     const holders = running.filter((entry) => entry.profileName === profile2.name).map((entry) => `pid=${entry.pid} agent=${entry.agentKind}`);
     return {
@@ -5493,6 +5493,162 @@ async function runCapture(cmd, args, timeoutMs, env) {
   return { success: !timedOut && exitCode === 0, output: captured };
 }
 
+// src/agent/structured/host-registry.ts
+import { createHash } from "crypto";
+import { statSync } from "fs";
+import { mkdir as mkdir13, readFile as readFile11, readdir as readdir4, rm as rm11, writeFile as writeFile8 } from "fs/promises";
+import { tmpdir as tmpdir2 } from "os";
+import { join as join16 } from "path";
+function registryFile(profileDir) {
+  return join16(profileDir, "structured", "app-server-registry.json");
+}
+function codexHostRuntimeDirectory(profileDir, scope, cwd, uid = process.getuid?.()) {
+  const hash = createHash("sha256").update(profileDir).update("\0").update(scope).update("\0").update(cwd).digest("hex").slice(0, 20);
+  return join16(tmpdir2(), `argbridge-rpc-${uid ?? "user"}-${hash}`);
+}
+function ownerDirectory(profileDir) {
+  return join16(profileDir, "structured", "app-server-owners");
+}
+function fingerprintCredentialEnv(env) {
+  const entries = [];
+  for (const [key, value] of Object.entries(env)) {
+    if (value === void 0) continue;
+    entries.push([key, `sha256:${createHash("sha256").update(value).digest("hex").slice(0, 32)}`]);
+  }
+  entries.sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
+  return Object.fromEntries(entries);
+}
+function fileStamp(path) {
+  try {
+    const stat8 = statSync(path);
+    return `${stat8.mtimeMs}:${stat8.size}`;
+  } catch {
+    return void 0;
+  }
+}
+function sameFingerprint(a, b) {
+  if (!a) return false;
+  return a.networkMode === b.networkMode && a.configStamp === b.configStamp && a.authStamp === b.authStamp && sameCredentials(a.credentials, b.credentials);
+}
+function sameCredentials(a, b) {
+  const keys = /* @__PURE__ */ new Set([...Object.keys(a), ...Object.keys(b)]);
+  for (const key of keys) {
+    if (a[key] !== b[key]) return false;
+  }
+  return true;
+}
+function processAlive(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+async function readHostRegistry(profileDir) {
+  try {
+    const parsed = JSON.parse(await readFile11(registryFile(profileDir), "utf8"));
+    if (!parsed || typeof parsed !== "object") return [];
+    const file = parsed;
+    if (file.version !== 1 || !Array.isArray(file.hosts)) return [];
+    return file.hosts.filter(isRegistration);
+  } catch {
+    return [];
+  }
+}
+async function writeHostRegistry(profileDir, hosts) {
+  const file = { version: 1, hosts };
+  await mkdir13(join16(profileDir, "structured"), { recursive: true, mode: 448 });
+  await writeFileAtomic(registryFile(profileDir), `${JSON.stringify(file, null, 2)}
+`, {
+    mode: 384
+  });
+}
+async function recordHost(profileDir, registration) {
+  const hosts = (await readHostRegistry(profileDir)).filter(
+    (host) => host.directory !== registration.directory
+  );
+  hosts.push(registration);
+  await writeHostRegistry(profileDir, hosts);
+}
+async function forgetHost(profileDir, directory) {
+  const hosts = (await readHostRegistry(profileDir)).filter((host) => host.directory !== directory);
+  await writeHostRegistry(profileDir, hosts);
+}
+async function recordOwner(profileDir, pid = process.pid) {
+  try {
+    await mkdir13(ownerDirectory(profileDir), { recursive: true, mode: 448 });
+    await writeFile8(join16(ownerDirectory(profileDir), String(pid)), `${Date.now()}
+`, {
+      mode: 384
+    });
+  } catch {
+  }
+}
+async function liveOwners(profileDir, excludePid) {
+  let names;
+  try {
+    names = await readdir4(ownerDirectory(profileDir));
+  } catch {
+    return [];
+  }
+  const owners = [];
+  for (const name of names) {
+    if (!/^\d+$/u.test(name)) continue;
+    const pid = Number.parseInt(name, 10);
+    if (pid === excludePid) continue;
+    if (processAlive(pid)) owners.push(pid);
+    else await pruneOwner(profileDir, pid);
+  }
+  return owners;
+}
+async function dropOwner(profileDir, pid = process.pid) {
+  const remaining = await liveOwners(profileDir, pid);
+  await pruneOwner(profileDir, pid);
+  return remaining.length === 0;
+}
+async function pruneOwner(profileDir, pid) {
+  try {
+    await rm11(join16(ownerDirectory(profileDir), String(pid)), { force: true });
+  } catch {
+  }
+}
+function terminateHost(pid, signal = "SIGTERM") {
+  if (!processAlive(pid)) return;
+  try {
+    process.kill(pid, signal);
+  } catch {
+  }
+}
+async function waitForExit(pid, timeoutMs = 2e3) {
+  if (!processAlive(pid)) return true;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((resolve6) => setTimeout(resolve6, 100));
+    if (!processAlive(pid)) return true;
+  }
+  terminateHost(pid, "SIGKILL");
+  return !processAlive(pid);
+}
+async function terminateProfileHosts(profileDir) {
+  const hosts = await readHostRegistry(profileDir);
+  let terminated = 0;
+  for (const host of hosts) {
+    if (!processAlive(host.pid)) continue;
+    terminateHost(host.pid);
+    await waitForExit(host.pid);
+    terminated += 1;
+  }
+  await writeHostRegistry(profileDir, hosts.filter((host) => processAlive(host.pid)));
+  return terminated;
+}
+function isRegistration(value) {
+  if (!value || typeof value !== "object") return false;
+  const record = value;
+  return typeof record.directory === "string" && typeof record.pid === "number" && typeof record.binary === "string" && !!record.fingerprint && typeof record.fingerprint === "object";
+}
+
 // src/cli/commands/service.ts
 function requireAdapter(cmdName, profile2) {
   const adapter = getServiceAdapter(profile2);
@@ -5708,6 +5864,10 @@ async function runServiceRestart(opts = {}) {
     console.error("bot \u8FD8\u6CA1\u5728\u540E\u53F0\u8FD0\u884C\u8FC7\u3002\u8BF7\u5148\u8FD0\u884C `start` \u542F\u52A8\u3002");
     process.exit(1);
   }
+  const released = await terminateProfileHosts(resolveAppPaths({ profile: profile2 }).profileDir).catch(() => 0);
+  if (released > 0) {
+    console.log(`\u2713 \u5DF2\u56DE\u6536 ${released} \u4E2A\u65E7 Codex App Server\uFF08\u4E0B\u6B21\u8FD0\u884C\u4F1A\u6309\u5F53\u524D\u914D\u7F6E\u91CD\u65B0\u62C9\u8D77\uFF09`);
+  }
   if (adapter.isRunning()) {
     await reportConnectAfter("restarted", profile2, adapter.restart);
     return;
@@ -5793,8 +5953,8 @@ import os from "os";
 import { createInterface as createInterface7 } from "readline";
 
 // src/agent/claude/adapter.ts
-import { tmpdir as tmpdir2 } from "os";
-import { join as join19 } from "path";
+import { tmpdir as tmpdir3 } from "os";
+import { join as join20 } from "path";
 import { createInterface as createInterface3 } from "readline";
 
 // src/agent/event-queue.ts
@@ -5832,15 +5992,15 @@ var AsyncEventQueue = class {
 
 // src/agent/live-session.ts
 import { EventEmitter } from "events";
-import { createHash as createHash2 } from "crypto";
+import { createHash as createHash3 } from "crypto";
 import { chmodSync, lstatSync as lstatSync2, mkdirSync as mkdirSync3 } from "fs";
-import { dirname as dirname15, join as join18, resolve as resolve3 } from "path";
+import { dirname as dirname15, join as join19, resolve as resolve3 } from "path";
 
 // src/agent/codex/credentials.ts
 import { readFileSync as readFileSync2 } from "fs";
-import { readFile as readFile11 } from "fs/promises";
+import { readFile as readFile12 } from "fs/promises";
 import { homedir as homedir5 } from "os";
-import { isAbsolute as isAbsolute2, join as join16 } from "path";
+import { isAbsolute as isAbsolute2, join as join17 } from "path";
 var OFFICIAL_PROVIDER_IDS = /* @__PURE__ */ new Set(["openai", "codex"]);
 var DEFAULT_THIRD_PARTY_ENV_KEY = "OPENAI_API_KEY";
 var OFFICIAL_HOSTS = /* @__PURE__ */ new Set([
@@ -5857,8 +6017,8 @@ var INTERESTING_PROVIDER_KEYS = /* @__PURE__ */ new Set([
 async function resolveCodexCredentialEnv(codexHome, defaults) {
   const home = codexHome ?? defaultCodexHome();
   if (!home) return emptyResolution();
-  const config = parseCodexConfigSummary(await readText(join16(home, "config.toml")) ?? "");
-  const auth = defaults?.auth ?? parseJsonObject2(await readText(join16(home, "auth.json")));
+  const config = parseCodexConfigSummary(await readText(join17(home, "config.toml")) ?? "");
+  const auth = defaults?.auth ?? parseJsonObject2(await readText(join17(home, "auth.json")));
   return resolveFromConfig(home, config, {
     baseEnv: defaults?.baseEnv ?? process.env,
     ...auth !== void 0 ? { auth } : {}
@@ -5867,8 +6027,8 @@ async function resolveCodexCredentialEnv(codexHome, defaults) {
 function resolveCodexCredentialEnvSync(codexHome, baseEnv = process.env) {
   const home = codexHome ?? defaultCodexHome();
   if (!home) return emptyResolution();
-  const config = parseCodexConfigSummary(readTextSync(join16(home, "config.toml")) ?? "");
-  const auth = parseJsonObject2(readTextSync(join16(home, "auth.json")));
+  const config = parseCodexConfigSummary(readTextSync(join17(home, "config.toml")) ?? "");
+  const auth = parseJsonObject2(readTextSync(join17(home, "auth.json")));
   return resolveFromConfig(home, config, {
     baseEnv,
     ...auth !== void 0 ? { auth } : {}
@@ -5960,8 +6120,15 @@ function isOfficialBaseUrl(baseUrl) {
 }
 function defaultCodexHome(env = process.env, home = homedir5()) {
   const configured = nonEmpty2(env.CODEX_HOME);
-  if (configured) return isAbsolute2(configured) ? configured : join16(home, configured);
-  return home ? join16(home, ".codex") : void 0;
+  if (configured) return isAbsolute2(configured) ? configured : join17(home, configured);
+  return home ? join17(home, ".codex") : void 0;
+}
+async function readCodexConfigSummary(configPath) {
+  try {
+    return parseCodexConfigSummary(await readFile12(configPath, "utf8"));
+  } catch {
+    return { providers: /* @__PURE__ */ new Map() };
+  }
 }
 function parseCodexConfigSummary(raw) {
   const topLevel = /* @__PURE__ */ new Map();
@@ -6027,7 +6194,7 @@ function readTextSync(path) {
 }
 async function readText(path) {
   try {
-    return await readFile11(path, "utf8");
+    return await readFile12(path, "utf8");
   } catch {
     return void 0;
   }
@@ -6863,14 +7030,14 @@ function isCodexResumeControlLine(line) {
 }
 
 // src/agent/tmux-control.ts
-import { createHash } from "crypto";
+import { createHash as createHash2 } from "crypto";
 import {
   lstatSync,
   readFileSync as readFileSync3,
   readdirSync,
   unlinkSync as unlinkSync2
 } from "fs";
-import { basename as basename4, dirname as dirname14, isAbsolute as isAbsolute3, join as join17, resolve as resolve2 } from "path";
+import { basename as basename4, dirname as dirname14, isAbsolute as isAbsolute3, join as join18, resolve as resolve2 } from "path";
 var BINDINGS_FILE = "tmux-bindings.json";
 var MANAGED_TERMINALS_FILE = "tmux-managed-terminals.json";
 var MAX_TMUX_TAIL_CHARS = 12e3;
@@ -6891,9 +7058,9 @@ var TmuxBindingController = class {
     this.profile = profile2;
     this.agentKind = agentKind;
     this.allowManagedBinding = allowManagedBinding;
-    this.file = join17(profileStateDir, BINDINGS_FILE);
+    this.file = join18(profileStateDir, BINDINGS_FILE);
     this.bindings = loadBindings(this.file);
-    this.managedFile = join17(profileStateDir, MANAGED_TERMINALS_FILE);
+    this.managedFile = join18(profileStateDir, MANAGED_TERMINALS_FILE);
     this.managedTerminals = loadManagedTerminals(this.managedFile, agentKind);
   }
   profileStateDir;
@@ -7168,7 +7335,7 @@ function defaultTmuxSocketPath(env = process.env) {
   const current = env.TMUX?.split(",")[0];
   if (current && isAbsolute3(current)) return current;
   const uid = typeof process.getuid === "function" ? process.getuid() : 0;
-  return join17(env.TMUX_TMPDIR || "/tmp", `tmux-${uid}`, "default");
+  return join18(env.TMUX_TMPDIR || "/tmp", `tmux-${uid}`, "default");
 }
 function tmuxAttachCommand(target) {
   const pane = `${target.sessionName}:${target.windowIndex}.${target.paneIndex}`;
@@ -7205,7 +7372,7 @@ function discoverTmuxSockets() {
   }
   const standardDir = dirname14(defaultTmuxSocketPath({ ...process.env, TMUX: void 0 }));
   try {
-    for (const name of readdirSync(standardDir)) found.add(join17(standardDir, name));
+    for (const name of readdirSync(standardDir)) found.add(join18(standardDir, name));
   } catch {
   }
   for (const path of [...found]) {
@@ -7325,7 +7492,7 @@ function resolveSocketSelector(selector) {
   const trimmed = selector.trim();
   if (isAbsolute3(trimmed)) return trimmed;
   if (/^[A-Za-z0-9_.-]+$/.test(trimmed)) {
-    return join17(dirname14(defaultTmuxSocketPath({ ...process.env, TMUX: void 0 })), trimmed);
+    return join18(dirname14(defaultTmuxSocketPath({ ...process.env, TMUX: void 0 })), trimmed);
   }
   return trimmed;
 }
@@ -7500,7 +7667,7 @@ function recoverManagedTerminal(cwd, scopeId, profile2, agentKind) {
   }
   const sockets = [
     defaultTmuxSocketPath({ ...process.env, TMUX: void 0 }),
-    ...names.sort().filter((name) => /^\.ab-live-[a-f0-9]{12}\.sock$/u.test(name)).map((name) => join17(cwd, name))
+    ...names.sort().filter((name) => /^\.ab-live-[a-f0-9]{12}\.sock$/u.test(name)).map((name) => join18(cwd, name))
   ];
   for (const socketPath of [...new Set(sockets)]) {
     if (!isSafeTmuxSocket(socketPath)) continue;
@@ -7543,7 +7710,7 @@ function managedTerminalServerAlive(terminal) {
 }
 function managedSessionNameFor(profile2, agentKind, scopeId) {
   const safeProfile = safeTmuxName(profile2).slice(0, 24) || agentKind;
-  const scopeHash = createHash("sha256").update(scopeId).digest("hex").slice(0, 12);
+  const scopeHash = createHash2("sha256").update(scopeId).digest("hex").slice(0, 12);
   return `argbridge-${agentKind}-${safeProfile}-${scopeHash}`.slice(0, 96);
 }
 function loadBindings(file) {
@@ -7583,9 +7750,9 @@ function findCrossProfileBinding(profileStateDir, target, scopeId) {
   const profilesDir = dirname14(profileStateDir);
   try {
     for (const profile2 of readdirSync(profilesDir)) {
-      const dir = join17(profilesDir, profile2);
+      const dir = join18(profilesDir, profile2);
       if (resolve2(dir) === resolve2(profileStateDir)) continue;
-      const bindings = loadBindings(join17(dir, BINDINGS_FILE));
+      const bindings = loadBindings(join18(dir, BINDINGS_FILE));
       if (Object.entries(bindings).some(([scope, item]) => scope !== scopeId && samePane(item, target))) {
         return profile2;
       }
@@ -9045,9 +9212,9 @@ function isDefaultTmuxSocket(socketPath) {
   return resolve3(socketPath) === resolve3(defaultTmuxSocketPath({ ...process.env, TMUX: void 0 }));
 }
 function liveTmuxIdentity(cwd, sessionKey, signature, preferredSessionName) {
-  const hash = createHash2("sha256").update(cwd).update("\0").update(sessionKey).update("\0").update(signature).digest("hex").slice(0, 20);
+  const hash = createHash3("sha256").update(cwd).update("\0").update(sessionKey).update("\0").update(signature).digest("hex").slice(0, 20);
   return {
-    socketPath: join18(cwd, `.ab-live-${hash.slice(0, 12)}.sock`),
+    socketPath: join19(cwd, `.ab-live-${hash.slice(0, 12)}.sock`),
     sessionName: preferredSessionName ?? `argbridge-live-${hash}`
   };
 }
@@ -10006,7 +10173,7 @@ function parseLiveHistorySnapshot(payload) {
   return { paneId: "", startLine: 0, endLine: lineCount, text: payload };
 }
 function liveHistoryFingerprint(history) {
-  return createHash2("sha256").update(history.paneId).update("\0").update(String(history.startLine)).update("\0").update(String(history.endLine)).update("\0").update(history.text).digest("hex");
+  return createHash3("sha256").update(history.paneId).update("\0").update(String(history.startLine)).update("\0").update(String(history.endLine)).update("\0").update(history.text).digest("hex");
 }
 function matchingPrefixSuffixLength(input, prefix) {
   const max = Math.min(input.length, prefix.length - 1);
@@ -11159,7 +11326,13 @@ async function sanitizeAgentEnv(base, config, options = {}) {
   const proxy = firstProxyUrl(base);
   if (!proxy) return env;
   const target = parseProxyUrl(proxy);
-  if (!target || !isLoopbackHost(target.host)) return env;
+  if (!target) return env;
+  if (options.thirdPartyProvider === true && isLoopbackHost(target.host)) {
+    const keys2 = PROXY_ENV_KEYS.filter((key) => base[key] !== void 0);
+    diagnostic({ type: "stripped", mode: "inherit", proxy, reason: "third-party-provider", keys: keys2 });
+    return stripProxyEnv(base);
+  }
+  if (!isLoopbackHost(target.host)) return env;
   const result = await (options.probe ?? probeProxy)(target.host, target.port, options.timeoutMs ?? 400);
   if (result === "open") return env;
   const keys = PROXY_ENV_KEYS.filter((key) => base[key] !== void 0);
@@ -11257,7 +11430,7 @@ var ClaudeAdapter = class {
     this.liveTerminalBackend = opts.liveTerminalBackend;
     this.liveIdleMs = opts.liveIdleMs;
     this.network = opts.network;
-    const profileStateDir = opts.profileStateDir ?? join19(tmpdir2(), `arg-bridge-${process.pid}-claude`);
+    const profileStateDir = opts.profileStateDir ?? join20(tmpdir3(), `arg-bridge-${process.pid}-claude`);
     this.tmuxBindings = new TmuxBindingController(
       profileStateDir,
       opts.larkChannel?.profile ?? "claude",
@@ -11607,7 +11780,7 @@ function isWindowsCommandNotFoundLine(line) {
 
 // src/agent/codex/adapter.ts
 import { createInterface as createInterface4 } from "readline";
-import { join as join21 } from "path";
+import { join as join23 } from "path";
 
 // src/runtime/errors.ts
 var RunRejected = class extends Error {
@@ -11632,21 +11805,21 @@ var SpawnFailed = class extends Error {
 };
 
 // src/agent/bundled-skill.ts
-import { copyFile as copyFile2, mkdir as mkdir13, readFile as readFile12 } from "fs/promises";
+import { copyFile as copyFile2, mkdir as mkdir14, readFile as readFile13 } from "fs/promises";
 import { homedir as homedir6 } from "os";
-import { dirname as dirname16, join as join20 } from "path";
+import { dirname as dirname16, join as join21 } from "path";
 import { fileURLToPath } from "url";
 var SKILL_NAME = "arg-bridge-sendfile";
 async function ensureBundledCodexSkill(codexHome) {
   const source = await bundledSkillSource();
   if (!source) return;
-  const root = codexHome ?? process.env.CODEX_HOME ?? join20(homedir6(), ".codex");
-  const target = join20(root, "skills", SKILL_NAME, "SKILL.md");
+  const root = codexHome ?? process.env.CODEX_HOME ?? join21(homedir6(), ".codex");
+  const target = join21(root, "skills", SKILL_NAME, "SKILL.md");
   try {
-    const sourceContent = await readFile12(source, "utf8");
-    const current = await readFile12(target, "utf8").catch(() => void 0);
+    const sourceContent = await readFile13(source, "utf8");
+    const current = await readFile13(target, "utf8").catch(() => void 0);
     if (current === sourceContent) return;
-    await mkdir13(dirname16(target), { recursive: true, mode: 448 });
+    await mkdir14(dirname16(target), { recursive: true, mode: 448 });
     await copyFile2(source, target);
     log.info("agent-skill", "installed", { name: SKILL_NAME, target });
   } catch (err) {
@@ -11659,12 +11832,12 @@ async function ensureBundledCodexSkill(codexHome) {
 async function bundledSkillSource() {
   const moduleDir = dirname16(fileURLToPath(import.meta.url));
   const candidates = [
-    join20(moduleDir, "..", "..", "skills", SKILL_NAME, "SKILL.md"),
-    join20(moduleDir, "..", "skills", SKILL_NAME, "SKILL.md")
+    join21(moduleDir, "..", "..", "skills", SKILL_NAME, "SKILL.md"),
+    join21(moduleDir, "..", "skills", SKILL_NAME, "SKILL.md")
   ];
   for (const candidate of candidates) {
     try {
-      await readFile12(candidate, "utf8");
+      await readFile13(candidate, "utf8");
       return candidate;
     } catch {
     }
@@ -11712,6 +11885,36 @@ function buildCodexArgs(input) {
     ...imageFlags.length > 0 ? ["--"] : [],
     "-"
   ];
+}
+
+// src/agent/codex/provider.ts
+import { join as join22 } from "path";
+import { readFileSync as readFileSync4 } from "fs";
+function providerSummaryFromConfig(config) {
+  const providerId = (config.modelProvider ?? "").trim() || void 0;
+  const provider = providerId ? config.providers.get(providerId) : void 0;
+  const summary = {
+    official: !isThirdPartyProvider(providerId, provider),
+    ...config.preferredAuthMethod ? { preferredAuthMethod: config.preferredAuthMethod } : {}
+  };
+  if (providerId) summary.providerId = providerId;
+  return summary;
+}
+async function resolveCodexProvider(codexHome) {
+  const home = codexHome ?? defaultCodexHome();
+  if (!home) return { official: true };
+  return providerSummaryFromConfig(await readCodexConfigSummary(join22(home, "config.toml")));
+}
+function resolveCodexProviderSync(codexHome) {
+  const home = codexHome ?? defaultCodexHome();
+  if (!home) return { official: true };
+  try {
+    return providerSummaryFromConfig(
+      parseCodexConfigSummary(readFileSync4(join22(home, "config.toml"), "utf8"))
+    );
+  } catch {
+    return { official: true };
+  }
 }
 
 // src/agent/codex/jsonl.ts
@@ -11917,6 +12120,7 @@ var CodexAdapter = class {
     missingToken: false
   };
   credentialResolved = false;
+  providerSummary = { official: true };
   strippedProxyKeys = [];
   liveSessions = new LiveSessionPool();
   tmuxBindings;
@@ -12025,7 +12229,9 @@ var CodexAdapter = class {
     }
     await ensureBundledCodexSkill(this.effectiveCodexHome());
     this.strippedProxyKeys = [];
+    this.providerSummary = await resolveCodexProvider(this.codexHomeForResolution());
     this.baseEnv = await sanitizeAgentEnv(process.env, this.network, {
+      thirdPartyProvider: this.providerSummary.official === false,
       onDiagnostic: (item) => {
         if (item.type === "stripped" && item.keys) this.strippedProxyKeys = item.keys;
       }
@@ -12041,7 +12247,7 @@ var CodexAdapter = class {
    * untouched.
    */
   async loadCredentialEnv() {
-    const resolution = await resolveCodexCredentialEnv(this.codexHome ?? defaultCodexHome(), {
+    const resolution = await resolveCodexCredentialEnv(this.codexHomeForResolution(), {
       baseEnv: process.env
     });
     this.credentialResolution = resolution;
@@ -12055,9 +12261,9 @@ var CodexAdapter = class {
    */
   credentialEnv() {
     if (!this.credentialResolved) {
-      this.credentialResolution = resolveCodexCredentialEnvSync(
-        this.codexHome ?? defaultCodexHome()
-      );
+      const home = this.codexHomeForResolution();
+      this.providerSummary = resolveCodexProviderSync(home);
+      this.credentialResolution = resolveCodexCredentialEnvSync(home);
       this.credentialResolved = true;
       this.logCredentialInjection(this.credentialResolution);
     }
@@ -12073,8 +12279,18 @@ var CodexAdapter = class {
   }
   effectiveCodexHome() {
     if (this.codexHome) return this.codexHome;
-    if (!this.inheritCodexHome) return join21(this.profileStateDir, "codex-home");
+    if (!this.inheritCodexHome) return join23(this.profileStateDir, "codex-home");
     return process.env.CODEX_HOME;
+  }
+  /**
+   * Home used for config resolution. Unlike {@link effectiveCodexHome}, this
+   * always yields a concrete directory so an inherited `CODEX_HOME` that is
+   * never passed to the child cannot hide the user's real Codex config.
+   */
+  codexHomeForResolution() {
+    if (this.codexHome) return this.codexHome;
+    if (!this.inheritCodexHome) return join23(this.profileStateDir, "codex-home");
+    return defaultCodexHome();
   }
   applyCredentialOverride(env) {
     applyCodexCredentialEnv(this.credentialEnv(), env);
@@ -12373,16 +12589,14 @@ function isWindowsCommandNotFoundLine2(line) {
 
 // src/agent/structured/adapter.ts
 import { createHash as createHash5, randomUUID as randomUUID3 } from "crypto";
-import { readFile as readFile14, mkdir as mkdir16, lstat as lstat3 } from "fs/promises";
-import { readFileSync as readFileSync5 } from "fs";
+import { readFile as readFile15, mkdir as mkdir17, lstat as lstat3 } from "fs/promises";
+import { readFileSync as readFileSync6 } from "fs";
 import { tmpdir as tmpdir4 } from "os";
-import { join as join24, resolve as resolve4 } from "path";
+import { join as join26, resolve as resolve4 } from "path";
 
 // src/agent/structured/host.ts
-import { createHash as createHash3 } from "crypto";
-import { mkdir as mkdir14, lstat, chmod as chmod5, open as open3 } from "fs/promises";
-import { tmpdir as tmpdir3 } from "os";
-import { join as join22 } from "path";
+import { mkdir as mkdir15, lstat, chmod as chmod5, open as open3, rm as rm12 } from "fs/promises";
+import { join as join24 } from "path";
 
 // src/agent/structured/rpc.ts
 import { EventEmitter as EventEmitter2 } from "events";
@@ -12509,15 +12723,31 @@ function clearHostFailure(directory) {
 }
 async function connectCodexHost(options) {
   if (process.platform === "win32") throw new Error("Codex structured shared-terminal backend currently requires Unix sockets; keep terminal transport on Windows");
-  const hash = createHash3("sha256").update(options.profileDir).update("\0").update(options.scope).update("\0").update(options.cwd).digest("hex").slice(0, 20);
-  const directory = join22(tmpdir3(), `argbridge-rpc-${process.getuid?.() ?? "user"}-${hash}`);
-  await mkdir14(directory, { recursive: true, mode: 448 });
+  const directory = codexHostRuntimeDirectory(options.profileDir, options.scope, options.cwd);
+  await mkdir15(directory, { recursive: true, mode: 448 });
   const stat8 = await lstat(directory);
   if (stat8.isSymbolicLink() || !stat8.isDirectory() || process.getuid && stat8.uid !== process.getuid()) throw new Error("Unsafe structured runtime directory");
   await chmod5(directory, 448);
-  const path = join22(directory, "server.sock");
+  const path = join24(directory, "server.sock");
   const endpoint = `unix://${path}`;
   const url = `ws+unix://${path}:/`;
+  let stale;
+  if (options.fingerprint) {
+    stale = await findStaleHost(
+      options.profileDir,
+      directory,
+      options.binary,
+      options.fingerprint
+    );
+    if (stale) {
+      await forgetHost(options.profileDir, stale.directory);
+      terminateHost(stale.pid);
+      await waitForExit(stale.pid);
+      await rm12(stale.directory, { recursive: true, force: true }).catch(() => {
+      });
+      log.info("agent", "app-server-replaced", { directory, reason: stale.reason });
+    }
+  }
   let rpc;
   try {
     rpc = await RpcClient.connect(url);
@@ -12530,7 +12760,12 @@ async function connectCodexHost(options) {
         `Codex App Server \u8FDE\u7EED\u542F\u52A8\u5931\u8D25 ${paused.failures} \u6B21\uFF1B\u5DF2\u6682\u505C ${Math.ceil(pausedForMs / 1e3)}s\uFF0C\u907F\u514D\u7EE7\u7EED\u5EFA\u7ACB\u65B0\u4F1A\u8BDD\u89E6\u53D1\u4F9B\u5E94\u5546\u98CE\u63A7\u3002\u8BF7\u68C0\u67E5 profile \u7684\u7F51\u7EDC/\u4EE3\u7406\u914D\u7F6E\uFF0C\u6216\u4FEE\u590D\u540E\u8FD0\u884C \`arg-bridge restart\`\u3002`
       );
     }
-    const logFile = await open3(join22(directory, "server.log"), "a", 384);
+    if (stale) {
+      await rm12(path, { force: true }).catch(() => {
+      });
+      await mkdir15(directory, { recursive: true, mode: 448 });
+    }
+    const logFile = await open3(join24(directory, "server.log"), "a", 384);
     const child = spawnProcess(options.binary, ["app-server", "--listen", endpoint], {
       cwd: options.cwd,
       env: options.env,
@@ -12558,12 +12793,22 @@ async function connectCodexHost(options) {
       const breaker = recordHostFailure(directory);
       const retryInMs = Math.max(0, breaker.nextAttemptAt - Date.now());
       throw failure ?? new Error(
-        `Codex App Server did not become ready (failure ${breaker.failures}); next attempt in ${Math.ceil(retryInMs / 1e3)}s; inspect ${join22(directory, "server.log")}`
+        `Codex App Server did not become ready (failure ${breaker.failures}); next attempt in ${Math.ceil(retryInMs / 1e3)}s; inspect ${join24(directory, "server.log")}`
       );
     }
     clearHostFailure(directory);
     rpc = connected;
+    if (options.fingerprint) {
+      await recordHost(options.profileDir, {
+        directory,
+        pid: child.pid ?? 0,
+        startedAt: Date.now(),
+        binary: options.binary,
+        fingerprint: options.fingerprint
+      });
+    }
   }
+  await recordOwner(options.profileDir);
   try {
     await rpc.initialize();
   } catch (error) {
@@ -12571,6 +12816,32 @@ async function connectCodexHost(options) {
     throw error;
   }
   return { rpc, endpoint };
+}
+async function shutdownProfileHosts(profileDir) {
+  const lastOwner = await dropOwner(profileDir);
+  if (!lastOwner) return;
+  for (const host of await readHostRegistry(profileDir)) {
+    if (processAlive(host.pid)) {
+      terminateHost(host.pid);
+      await waitForExit(host.pid);
+    }
+    await rm12(host.directory, { recursive: true, force: true }).catch(() => {
+    });
+  }
+  await writeHostRegistry(profileDir, []);
+}
+async function findStaleHost(profileDir, directory, binary, fingerprint) {
+  const host = (await readHostRegistry(profileDir)).find((item) => item.directory === directory);
+  if (!host) return void 0;
+  const result = { directory: host.directory, pid: host.pid };
+  if (host.pid <= 0 || !processAlive(host.pid)) return { ...result, reason: "process-gone" };
+  if (!sameFingerprint(host.fingerprint, fingerprint)) {
+    return { ...result, reason: "environment-changed" };
+  }
+  const owners = await liveOwners(profileDir);
+  if (owners.length === 0) return { ...result, reason: "owner-dead" };
+  if (host.binary !== binary) return { ...result, reason: "binary-changed" };
+  return void 0;
 }
 
 // src/agent/structured/codex.ts
@@ -13056,7 +13327,7 @@ ${options.prompt}` : options.prompt }];
 
 // src/agent/structured/claude.ts
 import { randomUUID as randomUUID2 } from "crypto";
-import { readFile as readFile13 } from "fs/promises";
+import { readFile as readFile14 } from "fs/promises";
 import { extname as extname2 } from "path";
 var ClaudeStructuredSession = class _ClaudeStructuredSession {
   constructor(id, options, query) {
@@ -13207,7 +13478,7 @@ ${JSON.stringify(input, null, 2)}`,
       for (const path of options.images ?? []) {
         const mime = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif" }[extname2(path).toLowerCase()];
         if (!mime) throw new Error("Unsupported image format");
-        content.push({ type: "image", source: { type: "base64", media_type: mime, data: await readFile13(path, "base64") } });
+        content.push({ type: "image", source: { type: "base64", media_type: mime, data: await readFile14(path, "base64") } });
       }
       if (signal.aborted) return;
       this.phase = "busy";
@@ -13331,8 +13602,8 @@ ${JSON.stringify(input, null, 2)}`,
 
 // src/agent/structured/view.ts
 import { createHash as createHash4 } from "crypto";
-import { mkdir as mkdir15, appendFile, lstat as lstat2, chmod as chmod6 } from "fs/promises";
-import { join as join23 } from "path";
+import { mkdir as mkdir16, appendFile, lstat as lstat2, chmod as chmod6 } from "fs/promises";
+import { join as join25 } from "path";
 var quote = (value) => `'${value.replace(/'/g, `'\\''`)}'`;
 var StructuredView = class {
   constructor(directory, key) {
@@ -13349,15 +13620,15 @@ var StructuredView = class {
   async start(native, cwd) {
     if (native) this.nativeSpec = native;
     if (cwd) this.nativeCwd = cwd;
-    await mkdir15(this.directory, { recursive: true, mode: 448 });
+    await mkdir16(this.directory, { recursive: true, mode: 448 });
     const info = await lstat2(this.directory);
     if (info.isSymbolicLink() || !info.isDirectory() || process.getuid && info.uid !== process.getuid()) throw new Error("Unsafe terminal view directory");
     await chmod6(this.directory, 448);
     const name = `argbridge-api-${createHash4("sha256").update(this.key).digest("hex").slice(0, 16)}`;
-    this.logPath = join23(this.directory, `${name}.log`);
+    this.logPath = join25(this.directory, `${name}.log`);
     await appendFile(this.logPath, "", { mode: 384 });
     if (process.platform === "win32" || spawnProcessSync("tmux", ["-V"], { stdio: "ignore" }).status !== 0) return;
-    const socket = join23(this.directory, "view.sock");
+    const socket = join25(this.directory, "view.sock");
     if (Buffer.byteLength(socket) > 100) return;
     const exists2 = spawnProcessSync("tmux", ["-S", socket, "has-session", "-t", name], { stdio: "ignore" });
     if (exists2.status === 0 && native) {
@@ -13425,7 +13696,7 @@ ${event.output}
 
 // src/agent/structured/tmux-discovery.ts
 import { basename as basename5, resolve as resolvePath } from "path";
-import { readFileSync as readFileSync4, readlinkSync } from "fs";
+import { readFileSync as readFileSync5, readlinkSync } from "fs";
 function listStructuredTmuxPanes(socket) {
   return listTmuxAgentPanes(socket).flatMap((pane) => {
     const processArgs = [
@@ -13497,13 +13768,13 @@ function processEnvironmentForPidTree(rootPid) {
   let fallback = {};
   for (const pid of ids) {
     try {
-      const raw = readFileSync4(`/proc/${pid}/environ`, "utf8");
+      const raw = readFileSync5(`/proc/${pid}/environ`, "utf8");
       const env = Object.fromEntries(raw.split("\0").flatMap((item) => {
         const index = item.indexOf("=");
         return index > 0 ? [[item.slice(0, index), item.slice(index + 1)]] : [];
       }));
       if (!Object.keys(fallback).length) fallback = env;
-      const argv = readFileSync4(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
+      const argv = readFileSync5(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
       if (argv.slice(0, 2).some((arg) => basename5(arg) === "codex")) return env;
     } catch {
     }
@@ -13534,7 +13805,7 @@ function processArgvTree(rootPid) {
   return [...ids].flatMap((pid) => {
     if (process.platform === "linux") {
       try {
-        const argv = readFileSync4(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
+        const argv = readFileSync5(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
         if (argv.length) return [argv];
       } catch {
       }
@@ -13559,7 +13830,7 @@ function processArgvForPane(pane) {
     let tmuxMatch = false;
     let cwdMatch = false;
     try {
-      const env = readFileSync4(`/proc/${pid}/environ`, "utf8");
+      const env = readFileSync5(`/proc/${pid}/environ`, "utf8");
       const values = /* @__PURE__ */ new Map();
       for (const item of env.split("\0")) {
         const equals = item.indexOf("=");
@@ -13594,8 +13865,8 @@ var StructuredAdapter = class {
     this.options = options;
     this.id = options.kind;
     this.displayName = options.kind === "codex" ? "Codex App Server" : "Claude Agent SDK";
-    this.bindingsFile = join24(options.profileDir, "structured", "tmux-bindings.json");
-    this.candidatesFile = join24(options.profileDir, "structured", "tmux-candidates.json");
+    this.bindingsFile = join26(options.profileDir, "structured", "tmux-bindings.json");
+    this.candidatesFile = join26(options.profileDir, "structured", "tmux-candidates.json");
     this.loadBindings();
     this.loadCandidates();
     this.tmux = {
@@ -13674,6 +13945,7 @@ var StructuredAdapter = class {
   candidatesFile;
   candidates = /* @__PURE__ */ new Map();
   credentialResolution = { env: {}, injected: false, missingToken: false };
+  providerIsThirdParty = false;
   async listStructuredPanes(socket) {
     if (this.id !== "codex") return listTmuxAgentPanes(socket);
     const sockets = socket ? [socket] : [.../* @__PURE__ */ new Set([
@@ -13736,6 +14008,7 @@ var StructuredAdapter = class {
     if (!available.ok) throw available.error;
     if (this.id === "codex") await ensureBundledCodexSkill(this.options.codexHome ?? process.env.CODEX_HOME);
     if (this.id === "codex") {
+      this.providerIsThirdParty = !(await resolveCodexProvider(this.options.codexHome ?? defaultCodexHome())).official;
       this.credentialResolution = await resolveCodexCredentialEnv(
         this.options.codexHome ?? defaultCodexHome(),
         { baseEnv: process.env }
@@ -13744,7 +14017,7 @@ var StructuredAdapter = class {
   }
   loadBindings() {
     try {
-      const parsed = JSON.parse(readFileSync5(this.bindingsFile, "utf8"));
+      const parsed = JSON.parse(readFileSync6(this.bindingsFile, "utf8"));
       if (parsed.version !== 1) return;
       for (const scope of parsed.disabled ?? []) if (typeof scope === "string") this.autoDiscoveryDisabled.add(scope);
       for (const [scope, binding] of Object.entries(parsed.bindings ?? {})) {
@@ -13755,7 +14028,7 @@ var StructuredAdapter = class {
   }
   loadCandidates() {
     try {
-      const parsed = JSON.parse(readFileSync5(this.candidatesFile, "utf8"));
+      const parsed = JSON.parse(readFileSync6(this.candidatesFile, "utf8"));
       if (parsed.version !== 1) return;
       for (const [key, candidate] of Object.entries(parsed.candidates ?? {})) {
         if (candidate?.threadId && candidate.cwd && candidate.target?.socketPath && candidate.target?.sessionName) this.candidates.set(key, candidate);
@@ -13764,11 +14037,11 @@ var StructuredAdapter = class {
     }
   }
   async saveCandidates() {
-    await mkdir16(join24(this.options.profileDir, "structured"), { recursive: true, mode: 448 });
+    await mkdir17(join26(this.options.profileDir, "structured"), { recursive: true, mode: 448 });
     await writeFileAtomic(this.candidatesFile, JSON.stringify({ version: 1, candidates: Object.fromEntries(this.candidates) }, null, 2) + "\n", { mode: 384 });
   }
   async saveBindings() {
-    await mkdir16(join24(this.options.profileDir, "structured"), { recursive: true, mode: 448 });
+    await mkdir17(join26(this.options.profileDir, "structured"), { recursive: true, mode: 448 });
     await writeFileAtomic(this.bindingsFile, JSON.stringify({ version: 1, bindings: Object.fromEntries(this.bindings), disabled: [...this.autoDiscoveryDisabled] }, null, 2) + "\n", { mode: 384 });
   }
   async bindTmuxPane(scope, selector) {
@@ -13795,6 +14068,7 @@ var StructuredAdapter = class {
     const inheritedProxy = proxyEnvironment(processEnvironmentForPidTree(target.panePid));
     let strippedProxyKeys = [];
     const env = await sanitizeAgentEnv({ ...process.env, ...inheritedProxy }, this.options.network, {
+      thirdPartyProvider: this.providerIsThirdParty,
       onDiagnostic: (item) => {
         if (item.type === "stripped" && item.keys) strippedProxyKeys = item.keys;
       }
@@ -13803,7 +14077,14 @@ var StructuredAdapter = class {
     if (codexHome) env.CODEX_HOME = codexHome;
     else if (this.options.codexHome) env.CODEX_HOME = this.options.codexHome;
     applyCodexCredentialEnv(this.credentialResolution, env);
-    let { rpc, endpoint } = await connectCodexHost({ binary: this.options.binary, profileDir: this.options.profileDir, scope, cwd: target.paneCurrentPath, env });
+    let { rpc, endpoint } = await connectCodexHost({
+      binary: this.options.binary,
+      profileDir: this.options.profileDir,
+      scope,
+      cwd: target.paneCurrentPath,
+      env,
+      fingerprint: this.codexHostFingerprint(env)
+    });
     let createdPaneId;
     try {
       const reconciled = await this.resumeLegacyThread(rpc, endpoint, target.structured.threadId, target.paneCurrentPath);
@@ -14069,15 +14350,15 @@ ${prompt}
   }
   makeView(scope) {
     const key = `${this.options.profileDir}\0${scope}`;
-    const directory = join24(tmpdir4(), `ab-view-${process.getuid?.() ?? "user"}-${createHash5("sha256").update(key).digest("hex").slice(0, 12)}`);
+    const directory = join26(tmpdir4(), `ab-view-${process.getuid?.() ?? "user"}-${createHash5("sha256").update(key).digest("hex").slice(0, 12)}`);
     return new StructuredView(directory, key);
   }
   stateFile(scope, cwd) {
-    return join24(this.options.profileDir, "structured", `${createHash5("sha256").update(scope).update("\0").update(cwd).digest("hex")}.json`);
+    return join26(this.options.profileDir, "structured", `${createHash5("sha256").update(scope).update("\0").update(cwd).digest("hex")}.json`);
   }
   async saved(scope, cwd) {
     try {
-      const value = JSON.parse(await readFile14(this.stateFile(scope, cwd), "utf8"));
+      const value = JSON.parse(await readFile15(this.stateFile(scope, cwd), "utf8"));
       return value.scope === scope && value.cwd === cwd && value.kind === this.id && typeof value.id === "string" ? value : void 0;
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
@@ -14141,23 +14422,27 @@ ${prompt}
   }
   async createSession(scope, options, bound2) {
     const cwd = options.cwd;
-    const directory = join24(this.options.profileDir, "structured");
+    const directory = join26(this.options.profileDir, "structured");
     const stateFile = this.stateFile(scope, cwd);
     let saved;
     try {
-      saved = JSON.parse(await readFile14(stateFile, "utf8"));
+      saved = JSON.parse(await readFile15(stateFile, "utf8"));
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
     }
     if (!saved && !bound2 && options.liveInputMode === "control") throw new Error("\u6CA1\u6709\u53EF\u6062\u590D\u7684\u7ED3\u6784\u5316\u4F1A\u8BDD\uFF1B\u9009\u62E9\u64CD\u4F5C\u672A\u542F\u52A8\u65B0\u4EFB\u52A1");
     const env = withArtifactDeliveryEnv({
-      ...await sanitizeAgentEnv(process.env, this.options.network),
+      ...await sanitizeAgentEnv(process.env, this.options.network, {
+        thirdPartyProvider: this.providerIsThirdParty
+      }),
       ...buildLarkChannelEnv(this.options.larkChannel)
     }, options.artifactDelivery);
     let main;
     const view = this.makeView(`${scope}\0${cwd}`);
     if (this.id === "codex") {
       if (this.options.codexHome) env.CODEX_HOME = this.options.codexHome;
+      else if (process.env.CODEX_HOME) env.CODEX_HOME = process.env.CODEX_HOME;
+      applyCodexCredentialEnv(this.credentialResolution, env);
       if (!bound2 && !this.autoDiscoveryDisabled.has(scope) && saved?.view?.terminal) {
         const pane = activeStructuredTmuxPane(saved.view.terminal.socketPath, saved.view.terminal.target);
         if (pane?.structured?.endpoint) {
@@ -14202,7 +14487,14 @@ ${prompt}
           rpc.close();
           throw error;
         }
-      } else ({ rpc, endpoint } = await connectCodexHost({ binary: this.options.binary, profileDir: this.options.profileDir, scope, cwd, env }));
+      } else ({ rpc, endpoint } = await connectCodexHost({
+        binary: this.options.binary,
+        profileDir: this.options.profileDir,
+        scope,
+        cwd,
+        env,
+        fingerprint: this.codexHostFingerprint(env)
+      }));
       const restored = saved ? new CodexStructuredSession(saved.id, endpoint, rpc) : void 0;
       try {
         const common = {
@@ -14258,13 +14550,28 @@ ${prompt}
       if (current.main instanceof CodexStructuredSession) current.main.disconnect();
     }
     this.sessions.clear();
+    if (this.id === "codex") await shutdownProfileHosts(this.options.profileDir);
+  }
+  /**
+   * Identity of the environment an App Server would run with. Used to replace
+   * a detached server whose provider, credential, or config file changed while
+   * it was idle (the `cc-switch` case).
+   */
+  codexHostFingerprint(env) {
+    const home = env.CODEX_HOME ?? this.options.codexHome ?? process.env.CODEX_HOME;
+    return {
+      credentials: fingerprintCredentialEnv(this.credentialResolution.env),
+      networkMode: this.providerIsThirdParty ? "inherit:third-party-direct" : this.options.network?.mode ?? "inherit",
+      configStamp: home ? fileStamp(join26(home, "config.toml")) : void 0,
+      authStamp: home ? fileStamp(join26(home, "auth.json")) : void 0
+    };
   }
 };
 
 // src/agent/structured/preferred.ts
-import { readFileSync as readFileSync6 } from "fs";
-import { join as join25 } from "path";
-import { mkdir as mkdir17 } from "fs/promises";
+import { readFileSync as readFileSync7 } from "fs";
+import { join as join27 } from "path";
+import { mkdir as mkdir18 } from "fs/promises";
 var PreferredStructuredAdapter = class {
   constructor(structured, live, directory) {
     this.structured = structured;
@@ -14272,13 +14579,13 @@ var PreferredStructuredAdapter = class {
     this.directory = directory;
     this.id = structured.id;
     this.displayName = `${structured.displayName} (live fallback)`;
-    this.file = join25(directory, "preferred-panes.json");
+    this.file = join27(directory, "preferred-panes.json");
     try {
-      const data = JSON.parse(readFileSync6(this.file, "utf8"));
+      const data = JSON.parse(readFileSync7(this.file, "utf8"));
       if (data.version === 1) for (const [scope, target] of Object.entries(data.targets ?? {})) this.targets.set(scope, target);
     } catch {
       try {
-        const old = JSON.parse(readFileSync6(join25(directory, "structured", "tmux-bindings.json"), "utf8"));
+        const old = JSON.parse(readFileSync7(join27(directory, "structured", "tmux-bindings.json"), "utf8"));
         if (old.version === 1) for (const [scope, binding] of Object.entries(old.bindings ?? {})) {
           const target = binding.target;
           if (target?.paneId) this.targets.set(scope, target);
@@ -14339,7 +14646,7 @@ var PreferredStructuredAdapter = class {
   targets = /* @__PURE__ */ new Map();
   file;
   async save() {
-    await mkdir17(this.directory, { recursive: true, mode: 448 });
+    await mkdir18(this.directory, { recursive: true, mode: 448 });
     await writeFileAtomic(this.file, JSON.stringify({ version: 1, targets: Object.fromEntries(this.targets) }), { mode: 384 });
   }
   current(scope) {
@@ -14449,7 +14756,7 @@ var PreferredStructuredAdapter = class {
 import { createLarkChannel } from "@larksuite/channel";
 import { createHash as createHash11 } from "crypto";
 import { homedir as homedir9 } from "os";
-import { dirname as dirname20, join as join29 } from "path";
+import { dirname as dirname20, join as join31 } from "path";
 
 // src/agent/bridge-system-prompt.ts
 var BRIDGE_SYSTEM_PROMPT = `# arg-bridge \u8FD0\u884C\u7EA6\u5B9A
@@ -14845,7 +15152,7 @@ function safeJsonStringify(value) {
 
 // src/commands/index.ts
 import { randomUUID as randomUUID4 } from "crypto";
-import { lstat as lstat4, readFile as readFile15, realpath as realpath4 } from "fs/promises";
+import { lstat as lstat4, readFile as readFile16, realpath as realpath4 } from "fs/promises";
 import { homedir as homedir8 } from "os";
 import { basename as basename6, dirname as dirname17, isAbsolute as isAbsolute4, relative, sep } from "path";
 
@@ -16830,9 +17137,9 @@ function finalizeIfRunning(state) {
 
 // src/session/history.ts
 import { createReadStream } from "fs";
-import { readdir as readdir4, stat as stat6 } from "fs/promises";
+import { readdir as readdir5, stat as stat6 } from "fs/promises";
 import { homedir as homedir7 } from "os";
-import { join as join26 } from "path";
+import { join as join28 } from "path";
 import { createInterface as createInterface5 } from "readline";
 
 // src/session/preview.ts
@@ -16871,13 +17178,13 @@ function encodeCwd(cwd) {
   return cwd.replace(/[^A-Za-z0-9]/g, "-");
 }
 function claudeProjectDir(cwd) {
-  return join26(homedir7(), ".claude", "projects", encodeCwd(cwd));
+  return join28(homedir7(), ".claude", "projects", encodeCwd(cwd));
 }
 async function listRecentSessions(cwd, limit = 5) {
   const dir = claudeProjectDir(cwd);
   let files;
   try {
-    files = await readdir4(dir);
+    files = await readdir5(dir);
   } catch (err) {
     if (err.code === "ENOENT") return [];
     throw err;
@@ -16885,7 +17192,7 @@ async function listRecentSessions(cwd, limit = 5) {
   const jsonls = files.filter((f) => f.endsWith(".jsonl"));
   const withStats = await Promise.all(
     jsonls.map(async (f) => {
-      const path = join26(dir, f);
+      const path = join28(dir, f);
       try {
         const st = await stat6(path);
         return { file: f, path, mtime: st.mtimeMs };
@@ -16956,7 +17263,7 @@ function formatRelTime(mtime) {
 
 // src/session/codex-history.ts
 import { createInterface as createInterface6 } from "readline";
-import { join as join27 } from "path";
+import { join as join29 } from "path";
 var CodexHistoryError = class extends Error {
   code;
   constructor(code, message, options) {
@@ -17071,7 +17378,7 @@ function spawnCodexAppServer(options) {
   if (options.codexHome) {
     envOverrides.CODEX_HOME = options.codexHome;
   } else if (options.inheritCodexHome === false) {
-    envOverrides.CODEX_HOME = join27(options.profileStateDir, "codex-home");
+    envOverrides.CODEX_HOME = join29(options.profileStateDir, "codex-home");
   }
   return spawnProcess(options.binary, ["app-server", "--listen", "stdio://"], {
     env: mergeProcessEnv(process.env, envOverrides),
@@ -17881,7 +18188,7 @@ function runtimeAccessStatus(profileConfig) {
 async function larkCliStatus(ctx) {
   const appPaths2 = commandProfilePaths(ctx);
   try {
-    const raw = JSON.parse(await readFile15(appPaths2.larkCliTargetConfigFile, "utf8"));
+    const raw = JSON.parse(await readFile16(appPaths2.larkCliTargetConfigFile, "utf8"));
     const app = raw.apps?.find(
       (candidate) => candidate.appId === ctx.controls.profileConfig.accounts.app.id && candidate.brand === ctx.controls.profileConfig.accounts.app.tenant
     );
@@ -20361,7 +20668,7 @@ function signatureMatches(actual, expected) {
 }
 
 // src/card/callback-store.ts
-import { readFile as readFile16 } from "fs/promises";
+import { readFile as readFile17 } from "fs/promises";
 var CallbackNonceStore = class {
   path;
   nonces = /* @__PURE__ */ new Map();
@@ -20371,7 +20678,7 @@ var CallbackNonceStore = class {
   }
   async load() {
     try {
-      const raw = JSON.parse(await readFile16(this.path, "utf8"));
+      const raw = JSON.parse(await readFile17(this.path, "utf8"));
       if (!raw || typeof raw !== "object") return;
       this.nonces.clear();
       for (const [nonce, state] of Object.entries(raw)) {
@@ -20921,8 +21228,8 @@ function footerLine(status) {
 // src/media/cache.ts
 import { createHash as createHash8 } from "crypto";
 import { createReadStream as createReadStream2 } from "fs";
-import { mkdir as mkdir18, readdir as readdir5, rename as rename4, rm as rm11, stat as stat7 } from "fs/promises";
-import { join as join28 } from "path";
+import { mkdir as mkdir19, readdir as readdir6, rename as rename4, rm as rm13, stat as stat7 } from "fs/promises";
+import { join as join30 } from "path";
 
 // src/media/attachment.ts
 var DEFAULT_POLICY = {
@@ -21028,7 +21335,7 @@ var MediaCache = class {
   }
   async resolve(items, options = {}) {
     if (items.length === 0) return [];
-    await mkdir18(this.rootDir, { recursive: true });
+    await mkdir19(this.rootDir, { recursive: true });
     const candidates = [];
     for (const item of items) {
       try {
@@ -21058,7 +21365,7 @@ var MediaCache = class {
       return null;
     }
     const kind = r.type;
-    const tmpPath = join28(
+    const tmpPath = join30(
       this.rootDir,
       `.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`
     );
@@ -21072,10 +21379,10 @@ var MediaCache = class {
     const hash = await hashFile(tmpPath);
     const mime = contentType ?? defaultMime(kind);
     const ext = safeExtensionForMime(mime);
-    const absPath = join28(this.rootDir, `${hash}.${ext}`);
+    const absPath = join30(this.rootDir, `${hash}.${ext}`);
     try {
       await stat7(absPath);
-      await rm11(tmpPath, { force: true });
+      await rm13(tmpPath, { force: true });
       log.info("media", "cache-hit", { path: absPath });
     } catch {
       await rename4(tmpPath, absPath);
@@ -21111,7 +21418,7 @@ async function gcMediaCache(maxAgeMs, root = paths.mediaDir) {
     try {
       const st = await stat7(p3);
       if (st.isFile() && st.mtimeMs < cutoff) {
-        await rm11(p3);
+        await rm13(p3);
         removed++;
       }
     } catch {
@@ -21133,9 +21440,9 @@ function defaultMime(kind) {
 }
 async function listFiles(root) {
   const out = [];
-  const entries = await readdir5(root, { withFileTypes: true }).catch(() => []);
+  const entries = await readdir6(root, { withFileTypes: true }).catch(() => []);
   for (const entry of entries) {
-    const full = join28(root, entry.name);
+    const full = join30(root, entry.name);
     if (entry.isDirectory()) {
       out.push(...await listFiles(full));
     } else if (entry.isFile()) {
@@ -21162,13 +21469,13 @@ async function enforceCacheMaxBytes(root, maxBytes, protectedPaths) {
   let total = files.reduce((sum, file) => sum + file.size, 0);
   for (const file of files.filter((item) => !protectedPaths.has(item.path)).sort((a, b) => a.mtimeMs - b.mtimeMs)) {
     if (total <= maxBytes) break;
-    await rm11(file.path, { force: true });
+    await rm13(file.path, { force: true });
     total -= file.size;
   }
 }
 async function removeRejectedResolvedFiles(attachments) {
   await Promise.all(
-    attachments.filter((attachment) => attachment.decision !== "accepted").map((attachment) => rm11(attachment.absPath, { force: true }))
+    attachments.filter((attachment) => attachment.decision !== "accepted").map((attachment) => rm13(attachment.absPath, { force: true }))
   );
 }
 
@@ -21743,14 +22050,14 @@ var RunExecutor = class {
       }
     }
     let cleaned = false;
-    const cleanup = async (waitForExit) => {
+    const cleanup = async (waitForExit2) => {
       if (cleaned) return;
       cleaned = true;
       if (concurrentSide) this.activeRuns.unregisterSide(input.scopeId, run);
       else this.activeRuns.unregister(input.scopeId, run);
       release();
       if (handle.detached) return;
-      if (waitForExit) {
+      if (waitForExit2) {
         const exited = await run.waitForExit(this.postDoneExitGraceMs);
         if (!exited) {
           log.warn("run", "post-done-exit-timeout", {
@@ -22008,7 +22315,7 @@ var ChatModeCache = class {
 
 // src/bot/comments.ts
 import { randomUUID as randomUUID6 } from "crypto";
-import { mkdir as mkdir19 } from "fs/promises";
+import { mkdir as mkdir20 } from "fs/promises";
 import { dirname as dirname18 } from "path";
 
 // src/bot/run-flow.ts
@@ -22589,7 +22896,7 @@ async function resolveCommentWorkingDirectory(configuredCwd, defaultCwd, managed
 }
 async function resolveManagedCommentWorkingDirectory(managedFallbackCwd, fallbackFrom, fallbackReason, failures) {
   try {
-    await mkdir19(managedFallbackCwd, { recursive: true, mode: 448 });
+    await mkdir20(managedFallbackCwd, { recursive: true, mode: 448 });
   } catch (err) {
     return {
       ok: false,
@@ -23178,7 +23485,7 @@ async function removeReaction(channel, messageId, reactionId) {
 
 // src/bot/artifact-broker.ts
 import { createHash as createHash10, randomBytes as randomBytes5 } from "crypto";
-import { lstat as lstat5, mkdir as mkdir20, readFile as readFile17, realpath as realpath5, rm as rm12 } from "fs/promises";
+import { lstat as lstat5, mkdir as mkdir21, readFile as readFile18, realpath as realpath5, rm as rm14 } from "fs/promises";
 import { createServer } from "net";
 import { basename as basename7, dirname as dirname19, isAbsolute as isAbsolute5, relative as relative2, resolve as resolve5, sep as sep2 } from "path";
 var ArtifactBroker = class {
@@ -23199,8 +23506,8 @@ var ArtifactBroker = class {
   async start() {
     await this.loadPersistentGrants();
     if (process.platform !== "win32") {
-      await mkdir20(dirname19(this.socketPath), { recursive: true });
-      await rm12(this.socketPath, { force: true }).catch(() => {
+      await mkdir21(dirname19(this.socketPath), { recursive: true });
+      await rm14(this.socketPath, { force: true }).catch(() => {
       });
     }
     this.server = createServer((socket) => {
@@ -23269,7 +23576,7 @@ var ArtifactBroker = class {
     if (server) {
       await new Promise((resolve6) => server.close(() => resolve6()));
     }
-    if (process.platform !== "win32") await rm12(this.socketPath, { force: true }).catch(() => {
+    if (process.platform !== "win32") await rm14(this.socketPath, { force: true }).catch(() => {
     });
   }
   async flush() {
@@ -23349,7 +23656,7 @@ var ArtifactBroker = class {
   async loadPersistentGrants() {
     if (!this.persistentStatePath) return;
     try {
-      const raw = JSON.parse(await readFile17(this.persistentStatePath, "utf8"));
+      const raw = JSON.parse(await readFile18(this.persistentStatePath, "utf8"));
       if (raw.version !== 1 || !Array.isArray(raw.grants)) return;
       for (const item of raw.grants) {
         if (!isPersistentGrant(item)) continue;
@@ -23414,7 +23721,7 @@ function normalizeCaption(value) {
 }
 
 // src/bot/inbound-message-ledger.ts
-import { readFile as readFile18 } from "fs/promises";
+import { readFile as readFile19 } from "fs/promises";
 var FILE_VERSION2 = 1;
 var DEFAULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1e3;
 var DEFAULT_MAX_ENTRIES = 5e4;
@@ -23430,7 +23737,7 @@ var InboundMessageLedger = class {
   async load() {
     if (!this.path) return;
     try {
-      const raw = JSON.parse(await readFile18(this.path, "utf8"));
+      const raw = JSON.parse(await readFile19(this.path, "utf8"));
       if (raw.version !== FILE_VERSION2 || !raw.entries || typeof raw.entries !== "object") return;
       for (const [messageId, acceptedAt] of Object.entries(raw.entries)) {
         if (typeof acceptedAt === "number" && Number.isFinite(acceptedAt) && messageId) {
@@ -23975,7 +24282,7 @@ function stringifyArgs(args) {
 }
 function expandHomeDirectory(path) {
   if (path === "~") return homedir9();
-  return path.startsWith("~/") ? join29(homedir9(), path.slice(2)) : path;
+  return path.startsWith("~/") ? join31(homedir9(), path.slice(2)) : path;
 }
 async function startChannel(deps) {
   const { cfg, agent, sessions, sessionCatalog, workspaces, controls } = deps;
@@ -23985,10 +24292,10 @@ async function startChannel(deps) {
   const pool = new ProcessPool(() => getMaxConcurrentRuns(controls.cfg));
   const executor = new RunExecutor({ agent, pool, activeRuns });
   const appSecret = await resolveAppSecret(cfg, deps.appPaths);
-  const callbackNonceStore = deps.appPaths?.mediaDir ? new CallbackNonceStore(join29(dirname20(deps.appPaths.mediaDir), "callback-nonces.json")) : void 0;
+  const callbackNonceStore = deps.appPaths?.mediaDir ? new CallbackNonceStore(join31(dirname20(deps.appPaths.mediaDir), "callback-nonces.json")) : void 0;
   await callbackNonceStore?.load();
   const inboundMessages = new InboundMessageLedger(
-    deps.appPaths?.mediaDir ? join29(dirname20(deps.appPaths.mediaDir), "inbound-message-ledger.json") : void 0
+    deps.appPaths?.mediaDir ? join31(dirname20(deps.appPaths.mediaDir), "inbound-message-ledger.json") : void 0
   );
   await inboundMessages.load();
   const callbackAuth = callbackNonceStore ? new CallbackAuth({
@@ -24079,10 +24386,10 @@ async function startChannel(deps) {
   const media = new MediaCache(channel, deps.appPaths?.mediaDir);
   const artifactStateDir = deps.appPaths?.mediaDir ? dirname20(deps.appPaths.mediaDir) : void 0;
   const artifactBroker = new ArtifactBroker(
-    join29(artifactStateDir ?? join29(process.cwd(), ".arg-bridge-media"), "artifact-broker.sock"),
+    join31(artifactStateDir ?? join31(process.cwd(), ".arg-bridge-media"), "artifact-broker.sock"),
     channel,
     allowLocalFileRoot,
-    artifactStateDir ? join29(artifactStateDir, "artifact-grants.json") : void 0
+    artifactStateDir ? join31(artifactStateDir, "artifact-grants.json") : void 0
   );
   await artifactBroker.start();
   if (agent.tmux?.restoreArtifactDelivery) {
@@ -27354,7 +27661,7 @@ function isDefined(value) {
 }
 
 // src/session/store.ts
-import { readFile as readFile19 } from "fs/promises";
+import { readFile as readFile20 } from "fs/promises";
 var SessionStore = class {
   data = {};
   saving = Promise.resolve();
@@ -27364,7 +27671,7 @@ var SessionStore = class {
   }
   async load() {
     try {
-      const text = await readFile19(this.path, "utf8");
+      const text = await readFile20(this.path, "utf8");
       const raw = JSON.parse(text);
       this.data = {};
       for (const [chatId, entry] of Object.entries(raw)) {
@@ -27529,7 +27836,7 @@ function isPersistedLiveInteraction(value) {
 
 // src/session/catalog.ts
 import { randomUUID as randomUUID7 } from "crypto";
-import { open as open4, readFile as readFile20, rename as rename5, mkdir as mkdir21 } from "fs/promises";
+import { open as open4, readFile as readFile21, rename as rename5, mkdir as mkdir22 } from "fs/promises";
 import { dirname as dirname21 } from "path";
 var DEFAULT_MAX_ARCHIVED_AGE_MS = 90 * 24 * 60 * 60 * 1e3;
 var DEFAULT_MAX_ENTRIES_PER_SCOPE = 20;
@@ -27552,7 +27859,7 @@ var SessionCatalog = class {
   }
   async load() {
     try {
-      const raw = JSON.parse(await readFile20(this.path, "utf8"));
+      const raw = JSON.parse(await readFile21(this.path, "utf8"));
       if (!Array.isArray(raw)) {
         this.data.clear();
         return;
@@ -27652,7 +27959,7 @@ var SessionCatalog = class {
     });
   }
   async persist() {
-    await mkdir21(dirname21(this.path), { recursive: true });
+    await mkdir22(dirname21(this.path), { recursive: true });
     const tmp = `${this.path}.${process.pid}.${Date.now()}.${randomUUID7()}.tmp`;
     const payload = `${JSON.stringify(this.entries(), null, 2)}
 `;
@@ -27714,7 +28021,7 @@ function assertAgentIdentity(input) {
 }
 
 // src/workspace/store.ts
-import { readFile as readFile21 } from "fs/promises";
+import { readFile as readFile22 } from "fs/promises";
 var WorkspaceStore = class {
   data = { chats: {}, named: {} };
   saving = Promise.resolve();
@@ -27724,7 +28031,7 @@ var WorkspaceStore = class {
   }
   async load() {
     try {
-      const text = await readFile21(this.path, "utf8");
+      const text = await readFile22(this.path, "utf8");
       const parsed = JSON.parse(text);
       this.data = {
         chats: parsed.chats ?? {},
@@ -27844,6 +28151,10 @@ async function runStart(opts) {
     tenant: cfg.accounts.app.tenant,
     hostname: os.hostname()
   });
+  const reclaimedHosts = await terminateProfileHosts(appPaths2.profileDir).catch(() => 0);
+  if (reclaimedHosts > 0) {
+    log.info("agent", "app-server-reclaimed", { count: reclaimedHosts, profile: appPaths2.profile });
+  }
   let agent = createRuntimeAgent(profileConfig, { ...appPaths2, configPath });
   const availability = await checkRuntimeAgentAvailability(agent);
   if (!availability.ok) {
@@ -28304,30 +28615,35 @@ function readTmuxSessionEnvironment(name, env) {
 }
 
 // src/cli/commands/native.ts
-import { readFile as readFile22, lstat as lstat6 } from "fs/promises";
-import { join as join30 } from "path";
+import { readFile as readFile23, lstat as lstat6 } from "fs/promises";
+import { join as join32 } from "path";
 async function runNative(thread, opts) {
   const rootPaths = resolveAppPaths();
-  const root = JSON.parse(await readFile22(rootPaths.configFile, "utf8"));
+  const root = JSON.parse(await readFile23(rootPaths.configFile, "utf8"));
   const profileName = opts.profile ?? root.activeProfile;
   const paths2 = resolveAppPaths({ profile: profileName });
   if (!root.profiles?.[profileName]) throw new Error(`Unknown profile: ${profileName}`);
   const config = normalizeProfileConfig(root.profiles[profileName]);
-  const env = await sanitizeAgentEnv({ ...process.env }, config.network);
   const cwd = process.cwd();
   const sandbox = config.sandbox.defaultMode;
   if (config.agentKind === "claude") {
-    const child = spawnProcess("claude", [...thread ? ["--resume", thread] : [], ...config.preferences.model ? ["--model", config.preferences.model] : [], ...sandbox === "danger-full-access" ? ["--dangerously-skip-permissions"] : []], { cwd, env, stdio: "inherit" });
+    const claudeEnv = await sanitizeAgentEnv({ ...process.env }, config.network);
+    const child = spawnProcess("claude", [...thread ? ["--resume", thread] : [], ...config.preferences.model ? ["--model", config.preferences.model] : [], ...sandbox === "danger-full-access" ? ["--dangerously-skip-permissions"] : []], { cwd, env: claudeEnv, stdio: "inherit" });
     await waitChild(child);
     return;
   }
   const binary = config.codex?.binaryPath ?? "codex";
-  if (config.codex?.codexHome) env.CODEX_HOME = config.codex.codexHome;
-  if (!env.CODEX_HOME && config.codex?.inheritCodexHome === false) env.CODEX_HOME = `${paths2.profileDir}/codex-home`;
-  applyCodexCredentialEnv(
-    await resolveCodexCredentialEnv(env.CODEX_HOME, { baseEnv: env }),
-    env
-  );
+  const codexHome = config.codex?.codexHome ?? (config.codex?.inheritCodexHome === false ? `${paths2.profileDir}/codex-home` : void 0);
+  const provider = await resolveCodexProvider(codexHome ?? defaultCodexHome());
+  const thirdParty = !provider.official;
+  const env = await sanitizeAgentEnv({ ...process.env }, config.network, {
+    thirdPartyProvider: thirdParty
+  });
+  if (codexHome) env.CODEX_HOME = codexHome;
+  const credential = await resolveCodexCredentialEnv(env.CODEX_HOME, {
+    baseEnv: env
+  });
+  applyCodexCredentialEnv(credential, env);
   if (!thread) {
     console.log("New native conversation (live fallback); use native <thread-id> to share a saved conversation.");
     await waitChild(spawnProcess(binary, [...codexRemotePermissionArgs(sandbox)], { cwd, env, stdio: "inherit" }));
@@ -28335,9 +28651,9 @@ async function runNative(thread, opts) {
   }
   const existing = thread ? listStructuredTmuxPanes().filter((pane) => pane.structured.threadId === thread && pane.structured.endpoint) : [];
   const candidates = new Set(existing.map((pane) => pane.structured.endpoint));
-  for (const file of [join30(paths2.profileDir, "structured", "tmux-bindings.json"), join30(paths2.profileDir, "preferred-panes.json")]) {
+  for (const file of [join32(paths2.profileDir, "structured", "tmux-bindings.json"), join32(paths2.profileDir, "preferred-panes.json")]) {
     try {
-      const stored = JSON.parse(await readFile22(file, "utf8"));
+      const stored = JSON.parse(await readFile23(file, "utf8"));
       for (const entry of Object.values(stored.bindings ?? stored.targets ?? {})) {
         const identity = entry.structured ?? entry;
         if (identity.threadId === thread && identity.endpoint) candidates.add(identity.endpoint);
@@ -28362,7 +28678,19 @@ async function runNative(thread, opts) {
     }
   }
   if (endpoints.length > 1) throw new Error("Multiple endpoints own this thread; no new writer was started.");
-  const host = endpoints[0] ? { endpoint: endpoints[0], rpc: await RpcClient.connect(`ws+unix://${endpoints[0].slice("unix://".length)}:/`) } : await connectCodexHost({ binary, profileDir: paths2.profileDir, scope: `native:${thread ?? process.env.TMUX_PANE ?? "new"}`, cwd, env });
+  const host = endpoints[0] ? { endpoint: endpoints[0], rpc: await RpcClient.connect(`ws+unix://${endpoints[0].slice("unix://".length)}:/`) } : await connectCodexHost({
+    binary,
+    profileDir: paths2.profileDir,
+    scope: `native:${thread ?? process.env.TMUX_PANE ?? "new"}`,
+    cwd,
+    env,
+    fingerprint: {
+      credentials: fingerprintCredentialEnv(credential.env),
+      networkMode: thirdParty ? "inherit:third-party-direct" : config.network?.mode ?? "inherit",
+      configStamp: env.CODEX_HOME ? fileStamp(join32(env.CODEX_HOME, "config.toml")) : void 0,
+      authStamp: env.CODEX_HOME ? fileStamp(join32(env.CODEX_HOME, "auth.json")) : void 0
+    }
+  });
   try {
     if (endpoints[0]) await host.rpc.initialize();
     const result = await resumeCodexThread(
@@ -28378,6 +28706,7 @@ async function runNative(thread, opts) {
     await waitChild(child);
   } finally {
     host.rpc.close();
+    if (!endpoints[0]) await shutdownProfileHosts(paths2.profileDir);
   }
 }
 async function waitChild(child) {

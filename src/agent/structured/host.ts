@@ -1,10 +1,24 @@
-import { createHash } from 'node:crypto';
-import { mkdir, lstat, chmod, open } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { mkdir, lstat, chmod, open, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { spawnProcess } from '../../platform/spawn';
 import { RpcClient } from './rpc';
 import { log } from '../../core/logger';
+import {
+  codexHostRuntimeDirectory,
+  dropOwner,
+  fingerprintCredentialEnv,
+  forgetHost,
+  liveOwners,
+  processAlive,
+  readHostRegistry,
+  recordHost,
+  recordOwner,
+  sameFingerprint,
+  terminateHost,
+  waitForExit,
+  writeHostRegistry,
+  type CodexHostEnvironmentFingerprint,
+} from './host-registry';
 
 const HOST_FAILURE_BASE_MS = 3_000;
 const HOST_FAILURE_MAX_MS = 60_000;
@@ -62,10 +76,15 @@ function clearHostFailure(directory: string): void {
 
 export async function connectCodexHost(options: {
   binary: string; profileDir: string; scope: string; cwd: string; env: NodeJS.ProcessEnv;
+  /**
+   * Environment identity of the App Server. When it changes (provider switch,
+   * credential rotation, network policy) a still-running server is replaced
+   * instead of silently serving the previous configuration.
+   */
+  fingerprint?: CodexHostEnvironmentFingerprint;
 }): Promise<{ rpc: RpcClient; endpoint: string }> {
   if (process.platform === 'win32') throw new Error('Codex structured shared-terminal backend currently requires Unix sockets; keep terminal transport on Windows');
-  const hash = createHash('sha256').update(options.profileDir).update('\0').update(options.scope).update('\0').update(options.cwd).digest('hex').slice(0, 20);
-  const directory = join(tmpdir(), `argbridge-rpc-${process.getuid?.() ?? 'user'}-${hash}`);
+  const directory = codexHostRuntimeDirectory(options.profileDir, options.scope, options.cwd);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const stat = await lstat(directory);
   if (stat.isSymbolicLink() || !stat.isDirectory() || (process.getuid && stat.uid !== process.getuid())) throw new Error('Unsafe structured runtime directory');
@@ -73,6 +92,25 @@ export async function connectCodexHost(options: {
   const path = join(directory, 'server.sock');
   const endpoint = `unix://${path}`;
   const url = `ws+unix://${path}:/`;
+  let stale: { directory: string; pid: number; reason: string } | undefined;
+  if (options.fingerprint) {
+    stale = await findStaleHost(
+      options.profileDir,
+      directory,
+      options.binary,
+      options.fingerprint,
+    );
+    if (stale) {
+      // Claim the replacement by removing the registration first: concurrent
+      // owners then see no record and reuse whichever server lands first
+      // instead of racing over the same socket.
+      await forgetHost(options.profileDir, stale.directory);
+      terminateHost(stale.pid);
+      await waitForExit(stale.pid);
+      await rm(stale.directory, { recursive: true, force: true }).catch(() => {});
+      log.info('agent', 'app-server-replaced', { directory, reason: stale.reason });
+    }
+  }
   let rpc: RpcClient;
   try { rpc = await RpcClient.connect(url); clearHostFailure(directory); }
   catch {
@@ -83,6 +121,13 @@ export async function connectCodexHost(options: {
         `Codex App Server 连续启动失败 ${paused!.failures} 次；已暂停 ${Math.ceil(pausedForMs / 1000)}s，` +
         '避免继续建立新会话触发供应商风控。请检查 profile 的网络/代理配置，或修复后运行 `arg-bridge restart`。',
       );
+    }
+    // A replaced App Server leaves its socket file behind, and its old process
+    // may still be draining. Clear both before spawning the successor so it
+    // cannot bind to a dead socket or race the shutdown.
+    if (stale) {
+      await rm(path, { force: true }).catch(() => {});
+      await mkdir(directory, { recursive: true, mode: 0o700 });
     }
     const logFile = await open(join(directory, 'server.log'), 'a', 0o600);
     const child = spawnProcess(options.binary, ['app-server', '--listen', endpoint], {
@@ -108,7 +153,61 @@ export async function connectCodexHost(options: {
     }
     clearHostFailure(directory);
     rpc = connected;
+    if (options.fingerprint) {
+      await recordHost(options.profileDir, {
+        directory,
+        pid: child.pid ?? 0,
+        startedAt: Date.now(),
+        binary: options.binary,
+        fingerprint: options.fingerprint,
+      });
+    }
   }
+  await recordOwner(options.profileDir);
   try { await rpc.initialize(); } catch (error) { rpc.close(); throw error; }
   return { rpc, endpoint };
+}
+
+/**
+ * Drop this process as an owner and, when nobody else is using a directory,
+ * stop the detached App Server instead of leaving an orphan that holds the
+ * environment it was started with.
+ */
+export async function shutdownProfileHosts(profileDir: string): Promise<void> {
+  // Drop this process first: when a paused native TUI or another bridge still
+  // owns the profile, the detached servers stay available for reconnection.
+  const lastOwner = await dropOwner(profileDir);
+  if (!lastOwner) return;
+  for (const host of await readHostRegistry(profileDir)) {
+    if (processAlive(host.pid)) {
+      terminateHost(host.pid);
+      await waitForExit(host.pid);
+    }
+    await rm(host.directory, { recursive: true, force: true }).catch(() => {});
+  }
+  await writeHostRegistry(profileDir, []);
+}
+
+/**
+ * Compare the recorded environment with the one the current configuration
+ * resolves to. A server is replaced when the fingerprint changed or when every
+ * process that asked for it is gone.
+ */
+export async function findStaleHost(
+  profileDir: string,
+  directory: string,
+  binary: string,
+  fingerprint: CodexHostEnvironmentFingerprint,
+): Promise<{ directory: string; pid: number; reason: string } | undefined> {
+  const host = (await readHostRegistry(profileDir)).find((item) => item.directory === directory);
+  if (!host) return undefined;
+  const result = { directory: host.directory, pid: host.pid };
+  if (host.pid <= 0 || !processAlive(host.pid)) return { ...result, reason: 'process-gone' };
+  if (!sameFingerprint(host.fingerprint, fingerprint)) {
+    return { ...result, reason: 'environment-changed' };
+  }
+  const owners = await liveOwners(profileDir);
+  if (owners.length === 0) return { ...result, reason: 'owner-dead' };
+  if (host.binary !== binary) return { ...result, reason: 'binary-changed' };
+  return undefined;
 }

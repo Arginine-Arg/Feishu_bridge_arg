@@ -4,7 +4,7 @@ A lightweight bot that bridges Feishu / Lark messenger with your local Claude Co
 
 [中文 README](./README.zh.md)
 
-Version 1.6.1 fixes third-party Codex providers that failed to start when a `cc-switch`-style startup file left `OPENAI_API_KEY` empty: the bridge now restores the provider's declared `env_key` from `experimental_bearer_token` or `auth.json`, while official API keys and ChatGPT OAuth logins are never modified. It also documents `/tmux list`, `/tmux bind`, `/tmux unbind`, and `/tmux release` below.
+Version 1.6.2 makes `cc-switch` provider changes self-healing. A third-party Codex provider gets its declared `env_key` restored from `experimental_bearer_token` or `auth.json` when a startup file leaves `OPENAI_API_KEY` empty, inherited local proxies are dropped for that provider, and `arg-bridge restart` reclaims the Codex App Servers that still hold the previous provider. Official API keys and ChatGPT OAuth logins are never modified. Version 1.6.1 documented the `/tmux list`, `/tmux bind`, `/tmux unbind`, and `/tmux release` workflow below.
 
 Version 1.6.0 adapts the Codex CLI 0.154+ remote-resume contract and hardens agent supervision. A TUI attaching to an existing App Server task no longer receives permission overrides, so `--dangerously-bypass-approvals-and-sandbox` / `--sandbox` cannot break bootstrap; the task keeps the permissions frozen when it was created. Per-profile `network.mode` (`direct` / `proxy` / `inherit`) controls the environment of agent children, strips a provably dead loopback proxy, and verifies an explicit proxy before starting. App Server start failures back off at 3s / 6s / 12s / ... up to 60s, and the service definitions add a restart throttle and failure limit instead of respawning in a tight loop. See [configuration, validated capabilities, and limitations](./docs/structured-backend.md).
 
@@ -48,7 +48,7 @@ Install a pinned release or use a writable custom npm prefix when required:
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.6.1
+sh /tmp/install-arg-bridge.sh --version 1.6.2
 # Example for a machine without permission to write npm's configured global prefix:
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -92,10 +92,10 @@ Release tarballs are preferred. If a Git install is required, keep both compatib
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.1"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.2"
 ```
 
-`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.1`.
+`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.2`.
 
 ### 4. Node or npm global-prefix errors
 
@@ -415,6 +415,35 @@ arg-bridge resolves this before every Codex run:
 - If a third-party provider is selected and no token can be found, the bridge logs `codex-credential-missing` and continues; the provider error is left for Codex to report rather than failing the bridge preflight.
 
 A shell wrapper is still useful for terminals you start yourself (`arg-bridge native` in your own shell, plain `codex`), but it is not required by the bridge. Keep `OPENAI_API_KEY` out of systemd units and service environments: if you need a fixed token there, prefer `experimental_bearer_token` in the Codex config, which the bridge reads directly.
+
+#### Third-party providers never inherit a local proxy
+
+In `inherit` mode the bridge normally keeps host proxies, because `clash on` in the pane is a valid workflow for official endpoints. A **local (loopback) proxy is dropped when the active provider is third-party**, even when the port is alive: a local clash/relay port cannot reach a domestic or intranet endpoint, and its dead-port variant was the second half of the `cc-switch` failure. The rule is narrow on purpose:
+
+| Situation | Result |
+|---|---|
+| Provider is third-party, inherited proxy is `127.0.0.1`/`localhost`/`::1` | Proxy variables removed; traffic goes direct |
+| Provider is third-party, inherited proxy is a remote host | Proxy kept: it may be the only route to that endpoint |
+| Provider is official (`openai` id or official `base_url`) | Proxy kept; `clash on` keeps working |
+| `network.mode` is `proxy` | The explicit `proxyUrl` always wins; the third-party rule does not apply |
+
+The decision is made per run from `config.toml`, so switching providers does not need a config edit. A stripped proxy is logged as `network.proxy-stripped` with `reason=third-party-provider`.
+
+#### App Server lifecycle and `arg-bridge restart`
+
+A Codex App Server is a detached process: it keeps the provider, credentials, proxy, and model catalog resolved when it started. That is what lets a paused native TUI reconnect, but it also means a provider change is invisible to a server that is still running, and a bridge restart could leave such a server behind.
+
+The bridge now tracks them per profile in `<profile>/structured/app-server-registry.json` with an environment fingerprint (credential variables, effective network mode, `config.toml` and `auth.json` file stamps) plus the processes that own the runtime directory.
+
+| Event | Behavior |
+|---|---|
+| Next turn, same provider and credentials | The running server is reused; nothing is restarted |
+| Next turn after `cc-switch` rewrote `config.toml` or the token changed | The stale server is terminated and replaced before the turn starts |
+| `arg-bridge restart --profile <name>` | Recorded App Servers for that profile are reclaimed, so the next turn spawns a server with the current environment; the command prints how many were released |
+| `arg-bridge native` exits and no other owner is left | The server it started is stopped instead of lingering with a stale environment |
+| Another bridge or a paused native TUI still owns the profile | The server stays available for reconnection |
+
+This is the `cc-switch` acceptance path end to end: switch provider, send a message (or run `arg-bridge restart` first), and the next turn runs with the new provider, credentials, and proxy policy. The registry stores credential **digests**, never token values, and is written `0600`; delete `<profile>/structured/app-server-registry.json` to reset the bookkeeping.
 
 Codex CLI 0.154.0 and later reject permission overrides on `codex --remote ... resume <id>`; a remote task keeps the permissions frozen when it was created. Bridge now attaches to that contract, and the old bypass flags are used only for a brand-new local session. App Server start failures back off at 3s / 6s / 12s / ... up to 60s and pause instead of retrying immediately, and the systemd/launchd service definitions set a minimum restart interval and failure limit so a crash loop cannot create a burst of new provider sessions.
 

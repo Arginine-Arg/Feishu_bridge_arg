@@ -17,6 +17,8 @@ import { checkRuntimeLock, type RuntimeLockMeta } from '../../runtime/locks';
 import { preFlightChecks } from '../preflight';
 import { promptAndStopActiveBridgeMigrationConflict } from './migrate';
 import { stopProcessEntry, type StopProcessEntryResult } from './ps';
+import { resolveAppPaths } from '../../config/app-paths';
+import { terminateProfileHosts } from '../../agent/structured/host-registry';
 
 export interface ServiceStartOptions {
   profile?: string;
@@ -372,6 +374,13 @@ export async function runServiceRestart(opts: ServiceProfileOptions = {}): Promi
   if (!adapter.fileExists()) {
     console.error('bot 还没在后台运行过。请先运行 `start` 启动。');
     process.exit(1);
+  }
+  // A restarted bridge must not inherit Codex App Servers that still hold the
+  // provider, credentials, or proxy resolved by the previous run. This is the
+  // `cc-switch` acceptance path: switch provider, restart, keep working.
+  const released = await terminateProfileHosts(resolveAppPaths({ profile }).profileDir).catch(() => 0);
+  if (released > 0) {
+    console.log(`✓ 已回收 ${released} 个旧 Codex App Server（下次运行会按当前配置重新拉起）`);
   }
   if (adapter.isRunning()) {
     await reportConnectAfter('restarted', profile, adapter.restart);

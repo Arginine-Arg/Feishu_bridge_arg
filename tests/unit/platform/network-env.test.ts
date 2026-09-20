@@ -66,6 +66,39 @@ describe('agent network environment', () => {
     expect(probe).not.toHaveBeenCalled();
   });
 
+  it('inherit mode drops a live loopback proxy for a third-party provider', async () => {
+    const probe = vi.fn(async () => 'open' as const);
+    const env = await sanitizeAgentEnv(deadProxyEnv, { mode: 'inherit' }, {
+      probe,
+      thirdPartyProvider: true,
+    });
+
+    // The generic inherit path keeps a reachable loopback proxy for `clash on`
+    // workflows, but it cannot route traffic to a domestic provider endpoint.
+    expect(probe).not.toHaveBeenCalled();
+    expect(env).toEqual({ KEEP_ME: 'unchanged' });
+  });
+
+  it('inherit mode keeps a remote proxy even for a third-party provider', async () => {
+    const env = await sanitizeAgentEnv(
+      { HTTPS_PROXY: 'http://10.0.0.5:3128', KEEP_ME: 'x' },
+      { mode: 'inherit' },
+      { thirdPartyProvider: true },
+    );
+
+    expect(env.HTTPS_PROXY).toBe('http://10.0.0.5:3128');
+  });
+
+  it('third-party detection never overrides an explicit proxy mode', async () => {
+    const probe = vi.fn(async () => 'open' as const);
+    const env = await sanitizeAgentEnv({ KEEP_ME: 'x' }, {
+      mode: 'proxy',
+      proxyUrl: 'socks5h://127.0.0.1:7890',
+    }, { probe, thirdPartyProvider: true });
+
+    expect(env.ALL_PROXY).toBe('socks5h://127.0.0.1:7890');
+  });
+
   it('parses proxy URLs and recognizes loopback hosts', () => {
     expect(parseProxyUrl('http://127.0.0.1:7890')).toEqual({ host: '127.0.0.1', port: 7890 });
     expect(parseProxyUrl('socks5h://localhost')).toEqual({ host: 'localhost', port: 1080 });
