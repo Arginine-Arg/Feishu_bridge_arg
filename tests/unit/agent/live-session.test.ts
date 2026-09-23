@@ -3004,6 +3004,68 @@ setInterval(() => {}, 1000);
     }
   }, 20_000);
 
+  tmuxIt('keeps the scoped artifact capability in the tmux session environment', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-artifact-env-test-'));
+    const bin = join(dir, 'fake-tmux-artifact-env-agent.mjs');
+    const observed = join(dir, 'observed.txt');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+import { writeFileSync } from 'node:fs';
+writeFileSync(${JSON.stringify(observed)}, [
+  process.env.ARG_BRIDGE_ARTIFACT_SOCKET || '',
+  process.env.ARG_BRIDGE_ARTIFACT_TOKEN || '',
+].join('\\t'));
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', () => process.stdout.write('ready\\n\\u203a\\n'));
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    try {
+      const session = pool.getOrCreate('artifact-env-scope', {
+        command: process.execPath,
+        args: [bin],
+        cwd: dir,
+        artifactEnv: {
+          ARG_BRIDGE_ARTIFACT_SOCKET: join(dir, 'artifacts.sock'),
+          ARG_BRIDGE_ARTIFACT_TOKEN: 'scope-token-123',
+        },
+        signature: 'artifact-env-signature',
+        tmuxScopeId: 'artifact-env-scope',
+        tmuxAgentKind: 'codex',
+        usePty: true,
+        backend: 'tmux',
+        idleMs: 200,
+        outputFlushMs: 30,
+        startupTimeoutMs: 2_000,
+      });
+      await collect(session.run('artifact-env-run', 'hello', dir).events);
+      await waitForFileText(observed, 'scope-token-123', 5_000);
+
+      const terminal = pool.terminalInfo('artifact-env-scope');
+      expect(terminal?.sessionName).toBeTruthy();
+      const environment = spawnSync(
+        'tmux',
+        ['-S', terminal!.socketPath!, 'show-environment', '-t', terminal!.sessionName!],
+        { encoding: 'utf8' },
+      ).stdout;
+      // A respawned pane inherits these, so `arg-bridge sendfile` still works
+      // after the user restarts Codex inside the managed session.
+      expect(environment).toContain('ARG_BRIDGE_ARTIFACT_TOKEN=scope-token-123');
+      expect(environment).toContain(`ARG_BRIDGE_ARTIFACT_SOCKET=${join(dir, 'artifacts.sock')}`);
+    } finally {
+      const terminal = pool.terminalInfo('artifact-env-scope');
+      await pool.closeAll();
+      if (terminal?.socketPath) {
+        spawnSync('tmux', ['-S', terminal.socketPath, 'kill-server'], { stdio: 'ignore' });
+      }
+    }
+  }, 20_000);
+
   tmuxIt('injects provider credentials into the tmux agent pane', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-credentials-test-'));
     const bin = join(dir, 'fake-tmux-credentials-agent.mjs');

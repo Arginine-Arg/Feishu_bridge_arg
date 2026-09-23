@@ -53,7 +53,18 @@ export class StructuredView {
       attachCommand: `tmux -S ${quote(socket)} attach -t ${quote(name)}`,
     }, message: native ? 'Shared Codex App Server terminal' : 'Read-only structured event view; input is controlled from Feishu' };
   }
-  async ensureNative(): Promise<void> {
+  /** Refresh the scoped artifact capability this session hands to its panes. */
+  async ensureNative(artifactEnv?: NodeJS.ProcessEnv): Promise<void> {
+    if (artifactEnv && Object.keys(artifactEnv).length > 0) {
+      const socket = this.statusValue.terminal?.socketPath;
+      const name = `argbridge-api-${createHash('sha256').update(this.key).digest('hex').slice(0, 16)}`;
+      if (socket) {
+        for (const [key, value] of Object.entries(artifactEnv)) {
+          if (value === undefined) continue;
+          spawnProcessSync('tmux', ['-S', socket, 'set-environment', '-t', name, key, value], { stdio: 'ignore' });
+        }
+      }
+    }
     if (this.nativeSpec) await this.start(this.nativeSpec, this.nativeCwd);
   }
   event(event: AgentEvent): void {

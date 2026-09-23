@@ -4,6 +4,8 @@ A lightweight bot that bridges Feishu / Lark messenger with your local Claude Co
 
 [中文 README](./README.zh.md)
 
+Version 1.6.4 keeps the scoped file-delivery capability in the tmux session environment of bridge-managed sessions, so `arg-bridge sendfile` still works after a pane is respawned or Codex is restarted inside that session.
+
 Version 1.6.3 fixes `/tmux bind` for Codex panes whose App Server socket is exposed through the `codex app-server daemon` symlink: the path is resolved and validated (owner-only parents, real Unix socket owned by the user) instead of being rejected as unsafe.
 
 Version 1.6.2 makes `cc-switch` provider changes self-healing. A third-party Codex provider gets its declared `env_key` restored from `experimental_bearer_token` or `auth.json` when a startup file leaves `OPENAI_API_KEY` empty, inherited local proxies are dropped for that provider, and `arg-bridge restart` reclaims the Codex App Servers that still hold the previous provider. Official API keys and ChatGPT OAuth logins are never modified. Version 1.6.1 documented the `/tmux list`, `/tmux bind`, `/tmux unbind`, and `/tmux release` workflow below.
@@ -50,7 +52,7 @@ Install a pinned release or use a writable custom npm prefix when required:
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.6.3
+sh /tmp/install-arg-bridge.sh --version 1.6.4
 # Example for a machine without permission to write npm's configured global prefix:
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -94,10 +96,10 @@ Release tarballs are preferred. If a Git install is required, keep both compatib
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.3"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.4"
 ```
 
-`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.3`.
+`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.4`.
 
 ### 4. Node or npm global-prefix errors
 

@@ -545,7 +545,14 @@ export class StructuredAdapter implements AgentAdapter {
         }
         if (!options.liveInputMode || side) (side ? current.sideView : current.view)?.event(textEvent(`\n[user]\n${prompt}\n`));
         await target.submit({ ...options, prompt, ...(side ? { liveInputMode: undefined } : {}) }, emit, abort.signal);
-        if (!side && target === current.main && this.id === 'codex' && this.options.nativeView !== false) await current.view.ensureNative();
+        if (!side && target === current.main && this.id === 'codex' && this.options.nativeView !== false) {
+          await current.view.ensureNative(options.artifactDelivery
+            ? {
+                ARG_BRIDGE_ARTIFACT_SOCKET: options.artifactDelivery.socketPath,
+                ARG_BRIDGE_ARTIFACT_TOKEN: options.artifactDelivery.token,
+              }
+            : undefined);
+        }
       } catch (error) { emit({ type: 'error', message: error instanceof Error ? error.message : String(error), terminationReason: 'failed' }); }
       finally { if (!terminal && !detached) emit({ type: 'done', terminationReason: abort.signal.aborted ? 'interrupted' : 'normal' }); events.close(); }
     })();

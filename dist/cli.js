@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.6.3",
+  version: "1.6.4",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -9157,6 +9157,7 @@ function spawnTmuxLiveProcess(opts, env, commandLine, rows, columns) {
   const defaultSocketPath = defaultTmuxSocketPath({ ...process.env, TMUX: void 0 });
   if (!external && socketPath === defaultSocketPath) ensureDefaultTmuxSocketDirectory(socketPath);
   const target = external?.paneId ?? sessionName;
+  const artifactArg = Object.entries(opts.artifactEnv ?? {}).filter(([, value]) => value !== void 0).map(([key, value]) => `${key}=${value}`).join(";");
   const child = spawnProcess(
     process.execPath,
     [
@@ -9173,7 +9174,8 @@ function spawnTmuxLiveProcess(opts, env, commandLine, rows, columns) {
       opts.tmuxProfile ?? "",
       opts.tmuxScopeId ?? "",
       opts.tmuxAgentKind ?? "",
-      String(process.pid)
+      String(process.pid),
+      artifactArg
     ],
     {
       cwd: opts.cwd,
@@ -9245,6 +9247,16 @@ const { createHash } = require('node:crypto');
 const { existsSync } = require('node:fs');
 
 const [mode, socketPath, session, requestedTarget, commandBase64, cwd, rows, columns, profile, scope, agentKind, ownerPid] = process.argv.slice(1);
+const artifactEnv = (() => {
+  const raw = process.argv[13];
+  if (!raw) return {};
+  const parsed = {};
+  for (const pair of String(raw).split(';')) {
+    const index = pair.indexOf('=');
+    if (index > 0) parsed[pair.slice(0, index)] = pair.slice(index + 1);
+  }
+  return parsed;
+})();
 const managed = mode !== 'external';
 const privateServer = mode === 'managed-private';
 let target = managed ? session + ':0.0' : requestedTarget;
@@ -9345,8 +9357,8 @@ function setManagedMetadata() {
 
 function setManagedArtifactDeliveryEnvironment() {
   if (!managed) return;
-  const socket = process.env.ARG_BRIDGE_ARTIFACT_SOCKET;
-  const token = process.env.ARG_BRIDGE_ARTIFACT_TOKEN;
+  const socket = artifactEnv.ARG_BRIDGE_ARTIFACT_SOCKET || process.env.ARG_BRIDGE_ARTIFACT_SOCKET;
+  const token = artifactEnv.ARG_BRIDGE_ARTIFACT_TOKEN || process.env.ARG_BRIDGE_ARTIFACT_TOKEN;
   if (!socket || !token) return;
 
   // A managed session belongs to exactly one bridge scope. Keep this scoped
@@ -9390,6 +9402,12 @@ function createAgentWindow(initial) {
     }
     return [];
   });
+  // tmux only applies -e to new-session; a brand-new managed session gets
+  // the scoped artifact capability here, and setManagedArtifactDeliveryEnvironment
+  // keeps it in the session environment for later panes and respawns.
+  const artifactArgs = Object.entries(artifactEnv).flatMap(([key, value]) =>
+    value === undefined ? [] : ['-e', key + '=' + value],
+  );
   const args = initial
     ? [
         'new-session',
@@ -9404,6 +9422,7 @@ function createAgentWindow(initial) {
         'agent',
         '-c',
         cwd,
+        ...artifactArgs,
         ...networkArgs,
         commandLine,
         // Keep the first detached session alive even when the user's tmux
@@ -12456,6 +12475,7 @@ var CodexAdapter = class {
       env: envOverrides,
       baseEnv: this.baseEnv,
       ...Object.keys(this.credentialEnv().env).length > 0 ? { credentialEnv: this.credentialEnv().env } : {},
+      ...artifactDeliveryEnv(opts.artifactDelivery),
       networkEnv: { mode: this.network?.mode ?? "inherit", strippedProxyKeys: this.strippedProxyKeys },
       signature: liveSignature,
       usePty: this.liveUsePty,
@@ -12585,6 +12605,15 @@ function terminalError(message) {
 }
 function isWindowsCommandNotFoundLine2(line) {
   return process.platform === "win32" && /is not recognized as an internal or external command|operable program or batch file/i.test(line);
+}
+function artifactDeliveryEnv(artifact) {
+  if (!artifact) return {};
+  return {
+    artifactEnv: {
+      ARG_BRIDGE_ARTIFACT_SOCKET: artifact.socketPath,
+      ARG_BRIDGE_ARTIFACT_TOKEN: artifact.token
+    }
+  };
 }
 
 // src/agent/structured/adapter.ts
@@ -13653,7 +13682,18 @@ var StructuredView = class {
       attachCommand: `tmux -S ${quote(socket)} attach -t ${quote(name)}`
     }, message: native ? "Shared Codex App Server terminal" : "Read-only structured event view; input is controlled from Feishu" };
   }
-  async ensureNative() {
+  /** Refresh the scoped artifact capability this session hands to its panes. */
+  async ensureNative(artifactEnv) {
+    if (artifactEnv && Object.keys(artifactEnv).length > 0) {
+      const socket = this.statusValue.terminal?.socketPath;
+      const name = `argbridge-api-${createHash4("sha256").update(this.key).digest("hex").slice(0, 16)}`;
+      if (socket) {
+        for (const [key, value] of Object.entries(artifactEnv)) {
+          if (value === void 0) continue;
+          spawnProcessSync("tmux", ["-S", socket, "set-environment", "-t", name, key, value], { stdio: "ignore" });
+        }
+      }
+    }
     if (this.nativeSpec) await this.start(this.nativeSpec, this.nativeCwd);
   }
   event(event) {
@@ -14360,7 +14400,12 @@ var StructuredAdapter = class {
 ${prompt}
 `));
         await target.submit({ ...options, prompt, ...side ? { liveInputMode: void 0 } : {} }, emit2, abort.signal);
-        if (!side && target === current.main && this.id === "codex" && this.options.nativeView !== false) await current.view.ensureNative();
+        if (!side && target === current.main && this.id === "codex" && this.options.nativeView !== false) {
+          await current.view.ensureNative(options.artifactDelivery ? {
+            ARG_BRIDGE_ARTIFACT_SOCKET: options.artifactDelivery.socketPath,
+            ARG_BRIDGE_ARTIFACT_TOKEN: options.artifactDelivery.token
+          } : void 0);
+        }
       } catch (error) {
         emit2({ type: "error", message: error instanceof Error ? error.message : String(error), terminationReason: "failed" });
       } finally {

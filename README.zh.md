@@ -4,6 +4,8 @@
 
 [English README](./README.md)
 
+`1.6.4` 修复 bridge 托管 session 丢失文件发送能力的问题：scoped 凭据现在会写入 tmux session 环境，pane 被重建或在 pane 内重启 Codex 之后，`arg-bridge sendfile` 依然可用。
+
 `1.6.3` 修复 `/tmux bind` 绑定 Codex 自带 daemon 管理的 pane 时失败（报 `App Server socket 不安全`）的问题：现在会安全解析该符号链接（父目录不可被他人替换、目标是属主为自己的真 Unix socket），这类 pane 可以直接绑定。
 
 `1.6.2` 让 `cc-switch` 的 provider 切换实现自愈：第三方 Codex provider 在启动文件把 `OPENAI_API_KEY` 留成空值时，会按 `experimental_bearer_token` / `auth.json` 自动补齐声明的 `env_key`；该 provider 不再继承本机回环代理；`arg-bridge restart` 会回收仍持有旧 provider 的 Codex App Server。官方 API key 与 ChatGPT OAuth 登录完全不受影响。`1.6.1` 补齐了 `/tmux list`、`/tmux bind`、`/tmux unbind`、`/tmux release` 的完整文档。
@@ -50,7 +52,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.6.3
+sh /tmp/install-arg-bridge.sh --version 1.6.4
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -94,10 +96,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.3"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.4"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.3`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.4`。
 
 ### 4. Node 或 npm 全局目录错误
 

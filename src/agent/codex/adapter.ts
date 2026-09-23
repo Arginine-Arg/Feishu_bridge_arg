@@ -463,6 +463,7 @@ export class CodexAdapter implements AgentAdapter {
       ...(Object.keys(this.credentialEnv().env).length > 0
         ? { credentialEnv: this.credentialEnv().env }
         : {}),
+      ...artifactDeliveryEnv(opts.artifactDelivery),
       networkEnv: { mode: this.network?.mode ?? 'inherit', strippedProxyKeys: this.strippedProxyKeys },
       signature: liveSignature,
       usePty: this.liveUsePty,
@@ -615,4 +616,21 @@ function isWindowsCommandNotFoundLine(line: string): boolean {
     process.platform === 'win32' &&
     /is not recognized as an internal or external command|operable program or batch file/i.test(line)
   );
+}
+
+/**
+ * Bridge-managed tmux sessions keep the scoped artifact capability in the
+ * session environment, so replacing the pane (user Ctrl-C, manual restart, or
+ * a respawned Codex) does not silently drop `arg-bridge sendfile` support.
+ */
+function artifactDeliveryEnv(
+  artifact: AgentRunOptions['artifactDelivery'],
+): { artifactEnv?: NodeJS.ProcessEnv } {
+  if (!artifact) return {};
+  return {
+    artifactEnv: {
+      ARG_BRIDGE_ARTIFACT_SOCKET: artifact.socketPath,
+      ARG_BRIDGE_ARTIFACT_TOKEN: artifact.token,
+    },
+  };
 }

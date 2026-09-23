@@ -90,6 +90,12 @@ export interface LiveSessionCommand {
    */
   credentialEnv?: NodeJS.ProcessEnv;
   /**
+   * Scoped file-delivery capability for bridge-managed sessions. Written into
+   * the tmux session environment so a pane that is respawned by the user (or
+   * by the bridge after Ctrl-C) still lets `arg-bridge sendfile` find it.
+   */
+  artifactEnv?: NodeJS.ProcessEnv;
+  /**
    * Network policy metadata for tmux pane creation. `direct`/`proxy` own the
    * pane environment; `inherit` clears only keys that sanitization removed.
    */
@@ -1922,6 +1928,13 @@ function spawnTmuxLiveProcess(
   // Managed panes can be replaced after a native Ctrl-C. Expose the stable
   // session target instead of an initial pane address that can become stale.
   const target = external?.paneId ?? sessionName;
+  // Encoded as `KEY=VALUE;…`: tmux `set-environment` values must be single
+  // arguments, and the helper applies them to the session so every respawned
+  // pane keeps the scoped artifact capability.
+  const artifactArg = Object.entries(opts.artifactEnv ?? {})
+    .filter(([, value]) => value !== undefined)
+    .map(([key, value]) => `${key}=${value}`)
+    .join(';');
   const child = spawnProcess(
     process.execPath,
     [
@@ -1943,6 +1956,7 @@ function spawnTmuxLiveProcess(
       opts.tmuxScopeId ?? '',
       opts.tmuxAgentKind ?? '',
       String(process.pid),
+      artifactArg,
     ],
     {
       cwd: opts.cwd,
@@ -2050,6 +2064,16 @@ const { createHash } = require('node:crypto');
 const { existsSync } = require('node:fs');
 
 const [mode, socketPath, session, requestedTarget, commandBase64, cwd, rows, columns, profile, scope, agentKind, ownerPid] = process.argv.slice(1);
+const artifactEnv = (() => {
+  const raw = process.argv[13];
+  if (!raw) return {};
+  const parsed = {};
+  for (const pair of String(raw).split(';')) {
+    const index = pair.indexOf('=');
+    if (index > 0) parsed[pair.slice(0, index)] = pair.slice(index + 1);
+  }
+  return parsed;
+})();
 const managed = mode !== 'external';
 const privateServer = mode === 'managed-private';
 let target = managed ? session + ':0.0' : requestedTarget;
@@ -2150,8 +2174,8 @@ function setManagedMetadata() {
 
 function setManagedArtifactDeliveryEnvironment() {
   if (!managed) return;
-  const socket = process.env.ARG_BRIDGE_ARTIFACT_SOCKET;
-  const token = process.env.ARG_BRIDGE_ARTIFACT_TOKEN;
+  const socket = artifactEnv.ARG_BRIDGE_ARTIFACT_SOCKET || process.env.ARG_BRIDGE_ARTIFACT_SOCKET;
+  const token = artifactEnv.ARG_BRIDGE_ARTIFACT_TOKEN || process.env.ARG_BRIDGE_ARTIFACT_TOKEN;
   if (!socket || !token) return;
 
   // A managed session belongs to exactly one bridge scope. Keep this scoped
@@ -2195,6 +2219,12 @@ function createAgentWindow(initial) {
     }
     return [];
   });
+  // tmux only applies -e to new-session; a brand-new managed session gets
+  // the scoped artifact capability here, and setManagedArtifactDeliveryEnvironment
+  // keeps it in the session environment for later panes and respawns.
+  const artifactArgs = Object.entries(artifactEnv).flatMap(([key, value]) =>
+    value === undefined ? [] : ['-e', key + '=' + value],
+  );
   const args = initial
     ? [
         'new-session',
@@ -2209,6 +2239,7 @@ function createAgentWindow(initial) {
         'agent',
         '-c',
         cwd,
+        ...artifactArgs,
         ...networkArgs,
         commandLine,
         // Keep the first detached session alive even when the user's tmux
