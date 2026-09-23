@@ -4,6 +4,8 @@
 
 [English README](./README.md)
 
+`1.6.3` 修复 `/tmux bind` 绑定 Codex 自带 daemon 管理的 pane 时失败（报 `App Server socket 不安全`）的问题：现在会安全解析该符号链接（父目录不可被他人替换、目标是属主为自己的真 Unix socket），这类 pane 可以直接绑定。
+
 `1.6.2` 让 `cc-switch` 的 provider 切换实现自愈：第三方 Codex provider 在启动文件把 `OPENAI_API_KEY` 留成空值时，会按 `experimental_bearer_token` / `auth.json` 自动补齐声明的 `env_key`；该 provider 不再继承本机回环代理；`arg-bridge restart` 会回收仍持有旧 provider 的 Codex App Server。官方 API key 与 ChatGPT OAuth 登录完全不受影响。`1.6.1` 补齐了 `/tmux list`、`/tmux bind`、`/tmux unbind`、`/tmux release` 的完整文档。
 
 `1.6.0` 适配 Codex CLI 0.154+ 的 remote resume 权限契约，并加固 agent 进程守护。TUI 附着到已有 App Server 任务时不再携带 `--dangerously-bypass-approvals-and-sandbox` / `--sandbox` 等权限覆盖，避免 bootstrap 直接退出；远程任务沿用创建时固化的权限。新增 profile 级 `network.mode`（`direct` / `proxy` / `inherit`）：可强制直连、指定显式代理并做启动前预检，或在 `inherit` 下自动剥离已经失效的本机代理，避免子进程死锁在旧端口。App Server 启动失败改为 3s / 6s / 12s …（上限 60s）指数退避并暂停，systemd/launchd 同时增加重启节流与失败上限，防止无退避拉起触发供应商风控。详见[配置方式、已验证能力与限制](./docs/structured-backend.md)。
@@ -48,7 +50,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.6.2
+sh /tmp/install-arg-bridge.sh --version 1.6.3
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -92,10 +94,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.2"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.3"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.2`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.3`。
 
 ### 4. Node 或 npm 全局目录错误
 

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { readFile, mkdir, lstat } from 'node:fs/promises';
+import { readFile, mkdir, lstat, realpath, stat } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -49,6 +49,70 @@ const shellQuote = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'
 const LEGACY_RESUME_TIMEOUT_MS = 180_000;
 const LEGACY_RESUME_PROBE_TIMEOUT_MS = 5_000;
 const LEGACY_RESUME_RECONCILE_MS = 180_000;
+
+/** Directories already verified as owner-only; sockets do not move between runs. */
+const trustedSocketParents = new Set<string>();
+const MAX_SOCKET_PARENT_LEVELS = 20;
+
+/**
+ * Resolve an App Server endpoint to a socket path that is safe to connect to.
+ *
+ * The socket itself must be a Unix socket owned by the current user. Codex's
+ * own app-server daemon exposes its control socket as a *symlink* to the real
+ * socket under `codex-daemon-<uid>/`, so following one link is legitimate —
+ * but only when the link target and every parent directory is owner-private
+ * (no group/other write), which removes the symlink-swap risk.
+ */
+export async function resolveAppServerSocketPath(candidate: string): Promise<string> {
+  if (!candidate.startsWith('/') || candidate.includes('\0')) {
+    throw new Error('App Server endpoint 不安全');
+  }
+  const requested = resolve(candidate);
+  await assertOwnedParents(requested);
+  const resolvedPath = await realpath(requested);
+  await assertOwnedParents(resolvedPath);
+  const info = await stat(resolvedPath);
+  if (!info.isSocket()) throw new Error('App Server socket 不安全');
+  if (process.getuid && info.uid !== process.getuid()) {
+    throw new Error('App Server socket 不安全');
+  }
+  return resolvedPath;
+}
+
+async function assertOwnedParents(target: string): Promise<void> {
+  let current = join(target, '..');
+  for (let level = 0; level < MAX_SOCKET_PARENT_LEVELS; level += 1) {
+    const directory = resolve(current);
+    if (directory === '/') return;
+    if (trustedSocketParents.has(directory)) return;
+    const info = await lstat(directory);
+    if (!isSafeSocketParent(info)) throw new Error('App Server socket 不安全');
+    trustedSocketParents.add(directory);
+    current = join(directory, '..');
+  }
+  throw new Error('App Server socket 不安全');
+}
+
+/**
+ * A parent directory is safe when other users cannot replace entries inside it:
+ * either the current user owns it without group/other write access, or it is a
+ * sticky directory such as `/tmp` (mode 1777) where only the owner may unlink.
+ */
+function isSafeSocketParent(info: {
+  isDirectory(): boolean;
+  isSymbolicLink(): boolean;
+  uid: number;
+  mode: number;
+}): boolean {
+  if (!info.isDirectory() || info.isSymbolicLink()) return false;
+  if (process.getuid === undefined) return true;
+  // Not writable by group/other: only its owner (e.g. root for `/run/user`)
+  // can replace entries, so a symlink swap is impossible.
+  if ((info.mode & 0o022) === 0) return true;
+  // World-writable is acceptable only with the sticky bit (`/tmp`), where a
+  // process may only remove entries it owns.
+  return (info.mode & 0o1000) !== 0;
+}
 
 const candidateKey = (socketPath: string, sessionName: string, threadId: string): string => `${socketPath}\0${sessionName}\0${threadId}`;
 
@@ -391,10 +455,7 @@ export class StructuredAdapter implements AgentAdapter {
   }
   private async connectExisting(endpoint: string): Promise<RpcClient> {
     if (process.platform === 'win32' || !endpoint.startsWith('unix://')) throw new Error('结构化 pane 必须使用本机 Unix App Server socket');
-    const path = endpoint.slice('unix://'.length);
-    if (!path.startsWith('/') || path.includes('\0')) throw new Error('App Server endpoint 不安全');
-    const stat = await lstat(path);
-    if (!stat.isSocket() || stat.isSymbolicLink() || (process.getuid && stat.uid !== process.getuid())) throw new Error('App Server socket 不安全');
+    const path = await resolveAppServerSocketPath(endpoint.slice('unix://'.length));
     return RpcClient.connect(`ws+unix://${path}:/`);
   }
   structuredControl = async (scope: string, input: string): Promise<AgentEvent[]> => {

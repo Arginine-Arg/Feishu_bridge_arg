@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.6.2",
+  version: "1.6.3",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -5520,8 +5520,8 @@ function fingerprintCredentialEnv(env) {
 }
 function fileStamp(path) {
   try {
-    const stat8 = statSync(path);
-    return `${stat8.mtimeMs}:${stat8.size}`;
+    const stat9 = statSync(path);
+    return `${stat9.mtimeMs}:${stat9.size}`;
   } catch {
     return void 0;
   }
@@ -12589,7 +12589,7 @@ function isWindowsCommandNotFoundLine2(line) {
 
 // src/agent/structured/adapter.ts
 import { createHash as createHash5, randomUUID as randomUUID3 } from "crypto";
-import { readFile as readFile15, mkdir as mkdir17, lstat as lstat3 } from "fs/promises";
+import { readFile as readFile15, mkdir as mkdir17, lstat as lstat3, realpath as realpath4, stat as stat6 } from "fs/promises";
 import { readFileSync as readFileSync6 } from "fs";
 import { tmpdir as tmpdir4 } from "os";
 import { join as join26, resolve as resolve4 } from "path";
@@ -12725,8 +12725,8 @@ async function connectCodexHost(options) {
   if (process.platform === "win32") throw new Error("Codex structured shared-terminal backend currently requires Unix sockets; keep terminal transport on Windows");
   const directory = codexHostRuntimeDirectory(options.profileDir, options.scope, options.cwd);
   await mkdir15(directory, { recursive: true, mode: 448 });
-  const stat8 = await lstat(directory);
-  if (stat8.isSymbolicLink() || !stat8.isDirectory() || process.getuid && stat8.uid !== process.getuid()) throw new Error("Unsafe structured runtime directory");
+  const stat9 = await lstat(directory);
+  if (stat9.isSymbolicLink() || !stat9.isDirectory() || process.getuid && stat9.uid !== process.getuid()) throw new Error("Unsafe structured runtime directory");
   await chmod5(directory, 448);
   const path = join24(directory, "server.sock");
   const endpoint = `unix://${path}`;
@@ -13859,6 +13859,42 @@ var shellQuote3 = (value) => `'${value.replace(/'/g, `'\\''`)}'`;
 var LEGACY_RESUME_TIMEOUT_MS = 18e4;
 var LEGACY_RESUME_PROBE_TIMEOUT_MS = 5e3;
 var LEGACY_RESUME_RECONCILE_MS = 18e4;
+var trustedSocketParents = /* @__PURE__ */ new Set();
+var MAX_SOCKET_PARENT_LEVELS = 20;
+async function resolveAppServerSocketPath(candidate) {
+  if (!candidate.startsWith("/") || candidate.includes("\0")) {
+    throw new Error("App Server endpoint \u4E0D\u5B89\u5168");
+  }
+  const requested = resolve4(candidate);
+  await assertOwnedParents(requested);
+  const resolvedPath = await realpath4(requested);
+  await assertOwnedParents(resolvedPath);
+  const info = await stat6(resolvedPath);
+  if (!info.isSocket()) throw new Error("App Server socket \u4E0D\u5B89\u5168");
+  if (process.getuid && info.uid !== process.getuid()) {
+    throw new Error("App Server socket \u4E0D\u5B89\u5168");
+  }
+  return resolvedPath;
+}
+async function assertOwnedParents(target) {
+  let current = join26(target, "..");
+  for (let level = 0; level < MAX_SOCKET_PARENT_LEVELS; level += 1) {
+    const directory = resolve4(current);
+    if (directory === "/") return;
+    if (trustedSocketParents.has(directory)) return;
+    const info = await lstat3(directory);
+    if (!isSafeSocketParent(info)) throw new Error("App Server socket \u4E0D\u5B89\u5168");
+    trustedSocketParents.add(directory);
+    current = join26(directory, "..");
+  }
+  throw new Error("App Server socket \u4E0D\u5B89\u5168");
+}
+function isSafeSocketParent(info) {
+  if (!info.isDirectory() || info.isSymbolicLink()) return false;
+  if (process.getuid === void 0) return true;
+  if ((info.mode & 18) === 0) return true;
+  return (info.mode & 512) !== 0;
+}
 var candidateKey = (socketPath, sessionName, threadId) => `${socketPath}\0${sessionName}\0${threadId}`;
 var StructuredAdapter = class {
   constructor(options) {
@@ -14207,10 +14243,7 @@ var StructuredAdapter = class {
   }
   async connectExisting(endpoint) {
     if (process.platform === "win32" || !endpoint.startsWith("unix://")) throw new Error("\u7ED3\u6784\u5316 pane \u5FC5\u987B\u4F7F\u7528\u672C\u673A Unix App Server socket");
-    const path = endpoint.slice("unix://".length);
-    if (!path.startsWith("/") || path.includes("\0")) throw new Error("App Server endpoint \u4E0D\u5B89\u5168");
-    const stat8 = await lstat3(path);
-    if (!stat8.isSocket() || stat8.isSymbolicLink() || process.getuid && stat8.uid !== process.getuid()) throw new Error("App Server socket \u4E0D\u5B89\u5168");
+    const path = await resolveAppServerSocketPath(endpoint.slice("unix://".length));
     return RpcClient.connect(`ws+unix://${path}:/`);
   }
   structuredControl = async (scope, input) => {
@@ -15152,7 +15185,7 @@ function safeJsonStringify(value) {
 
 // src/commands/index.ts
 import { randomUUID as randomUUID4 } from "crypto";
-import { lstat as lstat4, readFile as readFile16, realpath as realpath4 } from "fs/promises";
+import { lstat as lstat4, readFile as readFile16, realpath as realpath5 } from "fs/promises";
 import { homedir as homedir8 } from "os";
 import { basename as basename6, dirname as dirname17, isAbsolute as isAbsolute4, relative, sep } from "path";
 
@@ -17137,7 +17170,7 @@ function finalizeIfRunning(state) {
 
 // src/session/history.ts
 import { createReadStream } from "fs";
-import { readdir as readdir5, stat as stat6 } from "fs/promises";
+import { readdir as readdir5, stat as stat7 } from "fs/promises";
 import { homedir as homedir7 } from "os";
 import { join as join28 } from "path";
 import { createInterface as createInterface5 } from "readline";
@@ -17194,7 +17227,7 @@ async function listRecentSessions(cwd, limit = 5) {
     jsonls.map(async (f) => {
       const path = join28(dir, f);
       try {
-        const st = await stat6(path);
+        const st = await stat7(path);
         return { file: f, path, mtime: st.mtimeMs };
       } catch {
         return null;
@@ -17733,7 +17766,7 @@ async function handleSendFile(args, ctx) {
     await reply(ctx, "\u53EA\u80FD\u53D1\u9001\u666E\u901A\u6587\u4EF6\u3002");
     return;
   }
-  const resolvedPath = await realpath4(requestedPath).catch(() => void 0);
+  const resolvedPath = await realpath5(requestedPath).catch(() => void 0);
   if (!resolvedPath) {
     await reply(ctx, "\u6587\u4EF6\u4E0D\u5B58\u5728\u6216\u4E0D\u53EF\u8BBF\u95EE\u3002");
     return;
@@ -17776,7 +17809,7 @@ async function resolveSendFileRoots(ctx) {
     commandProfilePaths(ctx).mediaDir,
     ...ctx.controls.profileConfig.outbound.allowedFileDirs.map(expandTilde)
   ].filter((path) => Boolean(path));
-  const roots = await Promise.all(candidates.map((path) => realpath4(path).catch(() => void 0)));
+  const roots = await Promise.all(candidates.map((path) => realpath5(path).catch(() => void 0)));
   return [...new Set(roots.filter((path) => Boolean(path)))];
 }
 function sendFileFailureMessage(err) {
@@ -21228,7 +21261,7 @@ function footerLine(status) {
 // src/media/cache.ts
 import { createHash as createHash8 } from "crypto";
 import { createReadStream as createReadStream2 } from "fs";
-import { mkdir as mkdir19, readdir as readdir6, rename as rename4, rm as rm13, stat as stat7 } from "fs/promises";
+import { mkdir as mkdir19, readdir as readdir6, rename as rename4, rm as rm13, stat as stat8 } from "fs/promises";
 import { join as join30 } from "path";
 
 // src/media/attachment.ts
@@ -21375,13 +21408,13 @@ var MediaCache = class {
       r.type === "image" ? "image" : "file",
       tmpPath
     );
-    const tmpStat = await stat7(tmpPath);
+    const tmpStat = await stat8(tmpPath);
     const hash = await hashFile(tmpPath);
     const mime = contentType ?? defaultMime(kind);
     const ext = safeExtensionForMime(mime);
     const absPath = join30(this.rootDir, `${hash}.${ext}`);
     try {
-      await stat7(absPath);
+      await stat8(absPath);
       await rm13(tmpPath, { force: true });
       log.info("media", "cache-hit", { path: absPath });
     } catch {
@@ -21407,7 +21440,7 @@ var MediaCache = class {
 };
 async function gcMediaCache(maxAgeMs, root = paths.mediaDir) {
   try {
-    await stat7(root);
+    await stat8(root);
   } catch {
     return;
   }
@@ -21416,7 +21449,7 @@ async function gcMediaCache(maxAgeMs, root = paths.mediaDir) {
   const files = await listFiles(root);
   for (const p3 of files) {
     try {
-      const st = await stat7(p3);
+      const st = await stat8(p3);
       if (st.isFile() && st.mtimeMs < cutoff) {
         await rm13(p3);
         removed++;
@@ -21462,7 +21495,7 @@ async function enforceCacheMaxBytes(root, maxBytes, protectedPaths) {
   if (!Number.isFinite(maxBytes) || maxBytes <= 0) return;
   const files = await Promise.all(
     (await listFiles(root)).map(async (path) => {
-      const fileStat = await stat7(path);
+      const fileStat = await stat8(path);
       return { path, size: fileStat.size, mtimeMs: fileStat.mtimeMs };
     })
   );
@@ -23485,7 +23518,7 @@ async function removeReaction(channel, messageId, reactionId) {
 
 // src/bot/artifact-broker.ts
 import { createHash as createHash10, randomBytes as randomBytes5 } from "crypto";
-import { lstat as lstat5, mkdir as mkdir21, readFile as readFile18, realpath as realpath5, rm as rm14 } from "fs/promises";
+import { lstat as lstat5, mkdir as mkdir21, readFile as readFile18, realpath as realpath6, rm as rm14 } from "fs/promises";
 import { createServer } from "net";
 import { basename as basename7, dirname as dirname19, isAbsolute as isAbsolute5, relative as relative2, resolve as resolve5, sep as sep2 } from "path";
 var ArtifactBroker = class {
@@ -23629,7 +23662,7 @@ var ArtifactBroker = class {
     if (entry.isSymbolicLink()) throw new Error("\u4E0D\u5141\u8BB8\u53D1\u9001\u7B26\u53F7\u94FE\u63A5");
     if (!entry.isFile()) throw new Error("\u53EA\u80FD\u53D1\u9001\u666E\u901A\u6587\u4EF6");
     if (entry.size > grant.maxFileBytes) throw new Error(`\u6587\u4EF6\u8D85\u8FC7\u53D1\u9001\u4E0A\u9650\uFF08${grant.maxFileBytes} B\uFF09`);
-    const resolved = await realpath5(requested);
+    const resolved = await realpath6(requested);
     const root = await findCanonicalAllowedRoot(resolved, grant.allowedRoots);
     if (!root) throw new Error("\u6587\u4EF6\u4E0D\u5728\u5F53\u524D\u4EFB\u52A1\u5141\u8BB8\u7684\u76EE\u5F55\u5185");
     if (!await this.allowLocalFileRoot(root)) throw new Error("bridge \u672A\u5141\u8BB8\u8BE5\u6587\u4EF6\u76EE\u5F55");
@@ -23701,7 +23734,7 @@ function artifactBrokerSocketPath(socketPath) {
 }
 async function findCanonicalAllowedRoot(path, roots) {
   for (const root of roots) {
-    const canonicalRoot = await realpath5(root).catch(() => void 0);
+    const canonicalRoot = await realpath6(root).catch(() => void 0);
     if (canonicalRoot && isPathWithinRoot2(path, canonicalRoot)) return root;
   }
   return void 0;
@@ -28666,8 +28699,8 @@ async function runNative(thread, opts) {
     if (!endpoint.startsWith("unix:///")) continue;
     let observer;
     try {
-      const stat8 = await lstat6(endpoint.slice("unix://".length));
-      if (!stat8.isSocket() || process.getuid && stat8.uid !== process.getuid()) continue;
+      const stat9 = await lstat6(endpoint.slice("unix://".length));
+      if (!stat9.isSocket() || process.getuid && stat9.uid !== process.getuid()) continue;
       observer = await RpcClient.connect(`ws+unix://${endpoint.slice("unix://".length)}:/`);
       await observer.initialize();
       const loaded = await observer.request("thread/loaded/list", {});
