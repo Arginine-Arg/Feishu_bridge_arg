@@ -22,6 +22,7 @@ import {
   sanitizeLiveTurnOutput,
   scopeLiveSnapshotToPrompt,
   undeliveredSnapshotSuffix,
+  type LiveSessionCommand,
 } from '../../../src/agent/live-session';
 import { defaultTmuxSocketPath } from '../../../src/agent/tmux-control';
 import { ActiveRuns } from '../../../src/bot/active-runs';
@@ -2563,7 +2564,7 @@ setInterval(() => {}, 1000);
     const pool = new LiveSessionPool();
     let attached: ReturnType<typeof spawn> | undefined;
     try {
-      const session = pool.getOrCreate(scopeKey, {
+      const sessionOptions: LiveSessionCommand = {
         command: process.execPath,
         args: [bin],
         cwd: dir,
@@ -2576,7 +2577,8 @@ setInterval(() => {}, 1000);
         idleMs: 1_500,
         outputFlushMs: 30,
         startupTimeoutMs: 4_000,
-      });
+      };
+      const session = pool.getOrCreate(scopeKey, sessionOptions);
       expect(textOf(await collect(session.run('disconnect-first', 'first', dir).events))).toContain(
         'reply:first:turn=1',
       );
@@ -2605,7 +2607,11 @@ setInterval(() => {}, 1000);
       expect(
         spawnSync('tmux', ['-S', socketPath, 'has-session', '-t', sessionName], { stdio: 'ignore' }).status,
       ).toBe(0);
-      const secondEvents = await collect(session.run('disconnect-second', 'second', dir).events);
+      // Production acquires the session per turn; re-acquiring here keeps the
+      // assertion about "the same conversation" while allowing the relay to be
+      // recreated if it detached while the client disconnected.
+      const secondSession = pool.getOrCreate(scopeKey, sessionOptions);
+      const secondEvents = await collect(secondSession.run('disconnect-second', 'second', dir).events);
       const finalScreen = spawnSync('tmux', ['-S', socketPath, 'capture-pane', '-p', '-t', sessionName], { encoding: 'utf8' }).stdout;
       expect(textOf(secondEvents), JSON.stringify({ secondEvents, finalScreen })).toBe(
         '• reply:second:turn=2\n',
