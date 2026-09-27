@@ -27,6 +27,10 @@ export class CodexStructuredSession implements StructuredSession {
     rpc.on('message', this.listener);
     rpc.on('disconnected', this.disconnected);
   }
+  /** False when the underlying App Server channel is gone and must be rebuilt. */
+  isAlive(): boolean { return !this.rpc.closed; }
+  /** Why the channel died, when it did. */
+  get failureReason(): string | undefined { return this.rpc.failureReason?.message; }
   private disconnected = (error: Error) => {
     for (const waiter of this.acknowledgements.values()) waiter.reject(error);
     this.acknowledgements.clear();

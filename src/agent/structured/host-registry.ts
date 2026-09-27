@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { statSync } from 'node:fs';
+import { readFileSync, readdirSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -225,6 +225,89 @@ export function terminateHost(pid: number, signal: NodeJS.Signals = 'SIGTERM'): 
   } catch {
     // Already gone between the check and the signal.
   }
+  // The spawned entry is a Node wrapper; the real codex binary is its child
+  // and would otherwise survive as an orphan holding the socket. `detached`
+  // spawns make the wrapper a process-group leader, so signal the group.
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    // No group (or already gone): the direct signal above still applies.
+  }
+}
+
+/**
+ * True when some process still holds a connection to this App Server socket.
+ * A native TUI attached with `--remote` keeps one ESTABLISHED entry, and
+ * killing the server under it produces "Connection lost" / "app-server
+ * session could not be restored" on the user's side.
+ */
+export function hostHasActiveClients(directory: string): boolean {
+  const socketPath = resolveSocketPath(directory);
+  if (!socketPath) return false;
+  let table: string;
+  try {
+    table = readFileSync('/proc/net/unix', 'utf8');
+  } catch {
+    // Without /proc we cannot prove idleness; assume it is in use.
+    return true;
+  }
+  for (const line of table.split('\n').slice(1)) {
+    if (!line.includes(socketPath)) continue;
+    // Columns: Num RefCount Protocol Flags Type St Inode Path
+    const state = line.trim().split(/\s+/)[5];
+    // 03 = connected (a client is attached); 01 = listening socket only.
+    if (state === '03') return true;
+  }
+  return false;
+}
+
+function resolveSocketPath(directory: string): string | undefined {
+  const candidate = join(directory, 'server.sock');
+  try {
+    return realpathSync(candidate);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Processes that currently hold this App Server's socket open, including an
+ * orphaned child of a dead wrapper (the "parent gone, child draining" state
+ * that otherwise rejects every later request with `Server is draining`).
+ */
+export function findSocketHolders(directory: string): number[] {
+  const resolved = resolveSocketPath(directory);
+  if (!resolved) return [];
+  const inodes = new Set<string>();
+  try {
+    for (const line of readFileSync('/proc/net/unix', 'utf8').split('\n').slice(1)) {
+      if (!line.includes(resolved)) continue;
+      const fields = line.trim().split(/\s+/);
+      if (fields.length >= 7) inodes.add(fields[6]!);
+    }
+  } catch {
+    return [];
+  }
+  if (inodes.size === 0) return [];
+  const uid = process.getuid?.();
+  const pids: number[] = [];
+  for (const name of readdirSync('/proc')) {
+    if (!/^\d+$/u.test(name)) continue;
+    const pid = Number.parseInt(name, 10);
+    if (uid !== undefined) {
+      try { if (statSync(`/proc/${pid}`).uid !== uid) continue; } catch { continue; }
+    }
+    try {
+      for (const fd of readdirSync(`/proc/${pid}/fd`)) {
+        const link = readlinkSync(`/proc/${pid}/fd/${fd}`);
+        const match = /^socket:\[(\d+)\]$/u.exec(link);
+        if (match && inodes.has(match[1]!)) { pids.push(pid); break; }
+      }
+    } catch {
+      // Process exited or is not ours.
+    }
+  }
+  return pids;
 }
 
 export async function waitForExit(pid: number, timeoutMs = 2_000): Promise<boolean> {
@@ -243,17 +326,35 @@ export async function waitForExit(pid: number, timeoutMs = 2_000): Promise<boole
  * restart` so a provider switch cannot be served by a process that still holds
  * the previous provider and credentials.
  */
-export async function terminateProfileHosts(profileDir: string): Promise<number> {
+export interface HostReclaimResult {
+  /** App Servers that were stopped. */
+  terminated: number;
+  /** App Servers kept alive because a client is still attached. */
+  inUse: number;
+}
+
+export async function terminateProfileHosts(
+  profileDir: string,
+  options: { force?: boolean } = {},
+): Promise<HostReclaimResult> {
   const hosts = await readHostRegistry(profileDir);
   let terminated = 0;
+  let inUse = 0;
   for (const host of hosts) {
     if (!processAlive(host.pid)) continue;
+    // A native TUI (`--remote`) keeps an established connection. Killing the
+    // server under it breaks that pane ("Connection lost ... could not be
+    // restored"), so an in-use server is only reclaimed when forced.
+    if (!options.force && hostHasActiveClients(host.directory)) {
+      inUse += 1;
+      continue;
+    }
     terminateHost(host.pid);
     await waitForExit(host.pid);
     terminated += 1;
   }
   await writeHostRegistry(profileDir, hosts.filter((host) => processAlive(host.pid)));
-  return terminated;
+  return { terminated, inUse };
 }
 
 function isRegistration(value: unknown): value is CodexHostRegistration {

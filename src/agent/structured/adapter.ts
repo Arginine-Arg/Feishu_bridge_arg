@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
 import { AsyncEventQueue } from '../event-queue';
+import { log } from '../../core/logger';
 import type { AgentAdapter, AgentEvent, AgentRun, AgentRunOptions } from '../types';
 import { checkAgentAvailability } from '../preflight';
 import { ensureBundledCodexSkill } from '../bundled-skill';
@@ -49,6 +50,87 @@ const shellQuote = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'
 const LEGACY_RESUME_TIMEOUT_MS = 180_000;
 const LEGACY_RESUME_PROBE_TIMEOUT_MS = 5_000;
 const LEGACY_RESUME_RECONCILE_MS = 180_000;
+
+/**
+ * A saved/bound endpoint whose socket no longer exists or cannot be reached.
+ * Recovery is to spawn a fresh App Server and resume the thread from disk
+ * instead of surfacing `realpath ENOENT` to the user.
+ */
+export class StaleStructuredEndpointError extends Error {
+  constructor(readonly endpoint: string, cause?: unknown) {
+    super(`结构化 App Server 已不在：${endpoint}`);
+    this.name = 'StaleStructuredEndpointError';
+    if (cause !== undefined) this.cause = cause;
+  }
+}
+
+/** Artifact capability passed to the native view so its panes can send files. */
+function artifactEnvFrom(options: AgentRunOptions): NodeJS.ProcessEnv | undefined {
+  return options.artifactDelivery
+    ? {
+        ARG_BRIDGE_ARTIFACT_SOCKET: options.artifactDelivery.socketPath,
+        ARG_BRIDGE_ARTIFACT_TOKEN: options.artifactDelivery.token,
+      }
+    : undefined;
+}
+
+/**
+ * True when the App Server channel rejected a request without executing it
+ * (draining server, closed socket, EPIPE). Rejections are safe to retry on a
+ * freshly connected server; timeouts are not, because their outcome is unknown.
+ */
+export function isTransportUnavailable(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /Server is draining|connection closed|RPC connection is not open|ECONNRESET|EPIPE|ENOENT.*server\.sock/i
+    .test(message);
+}
+
+/**
+ * Open a `/btw` side conversation, rebuilding the structured session once when
+ * the App Server channel turns out to be unusable. `thread/fork` that was
+ * explicitly rejected never created a thread, so the retry cannot duplicate a
+ * turn.
+ */
+async function openSideWithRetry(
+  adapter: StructuredAdapter,
+  current: ScopeSession,
+  options: AgentRunOptions,
+  emit: (event: AgentEvent) => void,
+): Promise<CodexStructuredSession> {
+  const attach = async (session: CodexStructuredSession): Promise<CodexStructuredSession> => {
+    current.side = session;
+    current.sideView = (adapter as unknown as {
+      makeView(scope: string): StructuredView;
+    }).makeView(`${options.scopeId}:side:${session.id}`);
+    // A separate native TUI would retain a subscription after /btw out.
+    // The side view observes the same events read-only; main stays native.
+    await current.sideView.start(undefined, current.cwd);
+    return session;
+  };
+
+  const main = current.main as CodexStructuredSession;
+  try {
+    return await attach(await main.forkSide(current.cwd));
+  } catch (error) {
+    if (!isTransportUnavailable(error)) throw error;
+    const scope = options.scopeId ?? options.cwd!;
+    log.warn('agent', 'structured-side-reconnect', { scope, thread: main.id, reason: (error as Error).message });
+    emit({
+      type: 'error',
+      message: '共享 App Server 已重建，正在重新打开 side 会话…',
+      terminationReason: 'failed',
+    });
+    main.disconnect();
+    await main.close().catch(() => {});
+    (adapter as unknown as { sessions: Map<string, ScopeSession> }).sessions.delete(scope);
+    const rebuilt = await (adapter as unknown as {
+      session(options: AgentRunOptions): Promise<ScopeSession>;
+    }).session(options);
+    if (!(rebuilt.main instanceof CodexStructuredSession)) throw error;
+    current.main = rebuilt.main;
+    return attach(await rebuilt.main.forkSide(current.cwd));
+  }
+}
 
 /** Directories already verified as owner-only; sockets do not move between runs. */
 const trustedSocketParents = new Set<string>();
@@ -455,8 +537,24 @@ export class StructuredAdapter implements AgentAdapter {
   }
   private async connectExisting(endpoint: string): Promise<RpcClient> {
     if (process.platform === 'win32' || !endpoint.startsWith('unix://')) throw new Error('结构化 pane 必须使用本机 Unix App Server socket');
-    const path = await resolveAppServerSocketPath(endpoint.slice('unix://'.length));
-    return RpcClient.connect(`ws+unix://${path}:/`);
+    let path: string;
+    try {
+      path = await resolveAppServerSocketPath(endpoint.slice('unix://'.length));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new StaleStructuredEndpointError(endpoint, error);
+      }
+      throw error;
+    }
+    try {
+      return await RpcClient.connect(`ws+unix://${path}:/`);
+    } catch (error) {
+      // The socket can disappear between validation and connect.
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new StaleStructuredEndpointError(endpoint, error);
+      }
+      throw error;
+    }
   }
   structuredControl = async (scope: string, input: string): Promise<AgentEvent[]> => {
     const current = this.sessions.get(scope) ?? await this.starting.get(scope);
@@ -522,14 +620,7 @@ export class StructuredAdapter implements AgentAdapter {
             emit({ type: 'system', sideConversation: 'exited' }); emit(textEvent('已退出 side，主任务继续运行。')); return;
           }
           if (!current.side) {
-            current.sideOpening ??= current.main.forkSide(current.cwd).then(async session => {
-              current.side = session;
-              current.sideView = this.makeView(`${options.scopeId}:side:${session.id}`);
-              // A separate native TUI would retain a subscription after /btw out.
-              // The side view observes the same events read-only; main stays native.
-              await current.sideView.start(undefined, current.cwd);
-              return session;
-            });
+            current.sideOpening ??= openSideWithRetry(this, current, options, emit);
             try { await current.sideOpening; } finally { current.sideOpening = undefined; }
           }
           if (current.sideClosing) return;
@@ -544,7 +635,30 @@ export class StructuredAdapter implements AgentAdapter {
           if (!prompt) { emit(textEvent('已进入 side，请发送正文。')); return; }
         }
         if (!options.liveInputMode || side) (side ? current.sideView : current.view)?.event(textEvent(`\n[user]\n${prompt}\n`));
-        await target.submit({ ...options, prompt, ...(side ? { liveInputMode: undefined } : {}) }, emit, abort.signal);
+        const payload = { ...options, prompt, ...(side ? { liveInputMode: undefined } : {}) };
+        try {
+          await target.submit(payload, emit, abort.signal);
+        } catch (error) {
+          // Only a rejected (never-started) turn is retried: the App Server
+          // said "draining"/"closed" instead of accepting `turn/start`, and no
+          // turn is recorded for this session. Timeouts stay fatal so input is
+          // never replayed.
+          if (side || !isTransportUnavailable(error) || !(target instanceof CodexStructuredSession)) throw error;
+          if (target.diagnostics().inputState !== 'empty') throw error;
+          const scope = options.scopeId ?? options.cwd!;
+          log.warn('agent', 'structured-turn-reconnect', {
+            scope,
+            thread: target.id,
+            reason: (error as Error).message,
+          });
+          target.disconnect();
+          await target.close().catch(() => {});
+          this.sessions.delete(scope);
+          const rebuilt = await this.session(options);
+          if (!(rebuilt.main instanceof CodexStructuredSession)) throw error;
+          target = rebuilt.main;
+          await target.submit(payload, emit, abort.signal);
+        }
         if (!side && target === current.main && this.id === 'codex' && this.options.nativeView !== false) {
           await current.view.ensureNative(options.artifactDelivery
             ? {
@@ -584,11 +698,22 @@ export class StructuredAdapter implements AgentAdapter {
       const pane = listStructuredTmuxPanes(binding.target.socketPath).find(item =>
         item.paneId === binding!.target.paneId && item.sessionName === binding!.target.sessionName);
       if (!pane?.structured?.endpoint) {
-        throw new Error('绑定 pane 当前没有可连接的 structured Codex。可能已退出到 shell，或启动了普通 Codex；消息未提交到旧 thread。请在该 pane 恢复共享连接后重试。');
+        // The bound pane lost its shared App Server (exit, restart cleanup, or
+        // it was replaced). Drop the binding and continue with a managed
+        // session so the conversation keeps working instead of failing.
+        log.warn('agent', 'structured-binding-lost', {
+          scope,
+          thread: binding.threadId,
+          pane: binding.target.paneId,
+        });
+        this.bindings.delete(scope);
+        await this.saveBindings();
+        binding = undefined;
+      } else {
+        binding = { target: pane, endpoint: pane.structured.endpoint, threadId: pane.structured.threadId, cwd: pane.paneCurrentPath, updatedAt: Date.now() };
+        this.bindings.set(scope, binding);
+        await this.saveBindings();
       }
-      binding = { target: pane, endpoint: pane.structured.endpoint, threadId: pane.structured.threadId, cwd: pane.paneCurrentPath, updatedAt: Date.now() };
-      this.bindings.set(scope, binding);
-      await this.saveBindings();
     }
     if (!binding && found && !this.autoDiscoveryDisabled.has(scope) && this.id === 'codex' && found.main.diagnostics().inputState === 'empty' && !found.side) {
       const terminal = found.bound?.target
@@ -606,6 +731,21 @@ export class StructuredAdapter implements AgentAdapter {
       }
     }
     if (binding && resolve(binding.cwd) !== resolve(options.cwd)) throw new Error(`tmux pane workspace (${binding.cwd}) 与当前 workspace (${options.cwd}) 不一致`);
+    // The App Server can exit or be replaced between turns (daemon lifecycle,
+    // bridge restart cleanup, provider switch). A cached session whose RPC is
+    // closed rejects every later request, so drop it and let `createSession`
+    // reconnect and resume the same thread instead of failing the turn.
+    if (found && found.main instanceof CodexStructuredSession && !found.main.isAlive()) {
+      log.warn('agent', 'structured-session-dead', {
+        scope,
+        thread: found.main.id,
+        reason: found.main.failureReason ?? null,
+      });
+      found.main.disconnect();
+      await found.main.close().catch(() => {});
+      this.sessions.delete(scope);
+      found = undefined;
+    }
     if (found) {
       if (this.autoDiscoveryDisabled.has(scope) && found.bound) {
         await found.main.close();
@@ -659,9 +799,38 @@ export class StructuredAdapter implements AgentAdapter {
         }
       }
       if (bound) {
-        const rpc = await this.connectExisting(bound.endpoint);
+        let rpc: RpcClient;
+        let endpoint = bound.endpoint;
+        let spawnedFresh = false;
         try {
-          await rpc.initialize();
+          rpc = await this.connectExisting(endpoint);
+        } catch (error) {
+          if (!(error instanceof StaleStructuredEndpointError)) throw error;
+          // The shared App Server behind this pane is gone (daemon exit,
+          // restart cleanup, or a replaced runtime directory). Spawn a fresh
+          // one for this scope and resume the same thread from disk.
+          log.warn('agent', 'structured-endpoint-stale', {
+            scope,
+            endpoint,
+            thread: bound.threadId,
+          });
+          const spawned = await connectCodexHost({
+            binary: this.options.binary,
+            profileDir: this.options.profileDir,
+            scope,
+            cwd,
+            env,
+            fingerprint: this.codexHostFingerprint(env),
+          });
+          rpc = spawned.rpc;
+          endpoint = spawned.endpoint;
+          spawnedFresh = true;
+          this.bindings.delete(scope);
+          await this.saveBindings();
+        }
+        try {
+          // `connectCodexHost` already initialized the fresh channel.
+          if (!spawnedFresh) await rpc.initialize();
           const loaded = await rpc.request('thread/loaded/list', {});
           if (!Array.isArray(loaded.data) || !loaded.data.includes(bound.threadId)) throw new Error('tmux 当前 resume 的 thread 不在对应 App Server 中');
           const resumed = await resumeCodexThread(
@@ -670,10 +839,24 @@ export class StructuredAdapter implements AgentAdapter {
             options.liveInputMode ? {} : codexThreadPermissionOverrides(options.sandbox ?? this.options.sandbox),
           );
           if (resumed.thread?.id !== bound.threadId) throw new Error('App Server 返回了不同的 thread');
-          const attached = new CodexStructuredSession(bound.threadId, bound.endpoint, rpc);
+          const attached = new CodexStructuredSession(bound.threadId, endpoint, rpc);
           await attached.syncState();
-          await writeFileAtomic(stateFile, JSON.stringify({ id: bound.threadId, cwd, scope, kind: this.id, endpoint: bound.endpoint, bound: true }, null, 2));
-          return { main: attached, view, bound, cwd };
+          await writeFileAtomic(stateFile, JSON.stringify({ id: bound.threadId, cwd, scope, kind: this.id, endpoint, bound: true }, null, 2));
+          if (spawnedFresh) {
+            // Point the pane's native TUI at the replacement server; the old
+            // `--remote` connection is dead and cannot restore itself.
+            await view.ensureNative(artifactEnvFrom(options), {
+              force: true,
+              native: {
+                binary: this.options.binary,
+                endpoint,
+                threadId: bound.threadId,
+                env,
+                sandbox: options.sandbox ?? this.options.sandbox,
+              },
+            }).catch(() => {});
+          }
+          return { main: attached, view, bound: { ...bound, endpoint }, cwd };
         } catch (error) { rpc.close(); throw error; }
       }
       const readOnlyReconnect = saved && options.liveInputMode && !/^\/goal\s+(?!pause\b|clear\b|edit\b|status\b)/.test(options.prompt);
@@ -682,7 +865,14 @@ export class StructuredAdapter implements AgentAdapter {
       if (readOnlyReconnect) {
         if (!saved?.endpoint?.startsWith('unix://')) throw new Error('旧连接信息不足，控制操作未启动任何新服务');
         endpoint = saved.endpoint;
-        rpc = await RpcClient.connect(`ws+unix://${endpoint.slice('unix://'.length)}:/`);
+        try {
+          rpc = await this.connectExisting(endpoint);
+        } catch (error) {
+          if (error instanceof StaleStructuredEndpointError) {
+            throw new Error('原结构化会话已不在运行；控制操作不会自动恢复任务。请重新发起该操作。');
+          }
+          throw error;
+        }
         try {
           await rpc.initialize();
           const loaded = await rpc.request('thread/loaded/list', {});

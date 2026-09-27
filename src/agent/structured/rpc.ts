@@ -18,8 +18,14 @@ export class RpcClient extends EventEmitter {
         const request = this.pending.get(message.id);
         if (!request) return;
         this.pending.delete(message.id); clearTimeout(request.timer);
-        if (message.error) request.reject(new Error(String(message.error.message ?? 'RPC error')));
-        else request.resolve(message.result ?? {});
+        if (message.error) {
+          const text = String(message.error.message ?? 'RPC error');
+          request.reject(new Error(text));
+          // An explicit rejection is safe to retry on a fresh channel, but the
+          // channel itself is unusable: a draining App Server keeps rejecting
+          // everything, so callers must rebuild instead of reusing it.
+          if (/draining|connection closed/i.test(text)) this.fail(new Error(text));
+        } else request.resolve(message.result ?? {});
       } else this.emit('message', message);
     });
     socket.on('error', error => this.fail(error));
@@ -33,6 +39,16 @@ export class RpcClient extends EventEmitter {
     });
     return client;
   }
+  /**
+   * True once this channel failed or closed. Callers that cache a client must
+   * check this before reusing it: the App Server can exit or be replaced
+   * between turns, and a reused dead client rejects every request with
+   * "connection closed; input will not be replayed".
+   */
+  get closed(): boolean { return Boolean(this.failure); }
+
+  /** Last failure, for diagnostics. */
+  get failureReason(): Error | undefined { return this.failure; }
   async initialize(): Promise<void> {
     await this.request('initialize', { clientInfo: { name: 'arg_bridge', version: 'structured-preview' }, capabilities: { experimentalApi: true } });
     this.notify('initialized', {});

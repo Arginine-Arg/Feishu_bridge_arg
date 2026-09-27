@@ -7,7 +7,9 @@ import {
   codexHostRuntimeDirectory,
   dropOwner,
   fingerprintCredentialEnv,
+  findSocketHolders,
   forgetHost,
+  hostHasActiveClients,
   liveOwners,
   processAlive,
   readHostRegistry,
@@ -83,6 +85,22 @@ export async function connectCodexHost(options: {
    */
   fingerprint?: CodexHostEnvironmentFingerprint;
 }): Promise<{ rpc: RpcClient; endpoint: string }> {
+  return connectCodexHostInternal(options, 0);
+}
+
+interface CodexHostOptions {
+  binary: string;
+  profileDir: string;
+  scope: string;
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  fingerprint?: CodexHostEnvironmentFingerprint;
+}
+
+async function connectCodexHostInternal(
+  options: CodexHostOptions,
+  attempt: number,
+): Promise<{ rpc: RpcClient; endpoint: string }> {
   if (process.platform === 'win32') throw new Error('Codex structured shared-terminal backend currently requires Unix sockets; keep terminal transport on Windows');
   const directory = codexHostRuntimeDirectory(options.profileDir, options.scope, options.cwd);
   await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -164,8 +182,35 @@ export async function connectCodexHost(options: {
     }
   }
   await recordOwner(options.profileDir);
-  try { await rpc.initialize(); } catch (error) { rpc.close(); throw error; }
+  try {
+    await rpc.initialize();
+  } catch (error) {
+    rpc.close();
+    // The socket exists but the server rejects every request: a draining
+    // orphan whose wrapper process already died. Reclaim the socket holders
+    // and spawn a successor instead of failing every later turn with
+    // "Server is draining; retry after reconnecting".
+    if (attempt === 0 && isUnusableServerError(error)) {
+      log.warn('agent', 'app-server-unusable-reclaimed', {
+        directory,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+      for (const holder of findSocketHolders(directory)) {
+        terminateHost(holder);
+        await waitForExit(holder);
+      }
+      await forgetHost(options.profileDir, directory).catch(() => {});
+      await rm(directory, { recursive: true, force: true }).catch(() => {});
+      return connectCodexHostInternal(options, attempt + 1);
+    }
+    throw error;
+  }
   return { rpc, endpoint };
+}
+
+function isUnusableServerError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /Server is draining|connection closed|RPC connection is not open/i.test(message);
 }
 
 /**
@@ -179,13 +224,20 @@ export async function shutdownProfileHosts(profileDir: string): Promise<void> {
   const lastOwner = await dropOwner(profileDir);
   if (!lastOwner) return;
   for (const host of await readHostRegistry(profileDir)) {
+    // A native TUI can still be attached even though no owner marker is left
+    // (it is a client, not an owner). Killing the server under it would break
+    // that pane, so leave in-use servers for the next start to reclaim.
+    if (hostHasActiveClients(host.directory)) {
+      log.info('agent', 'app-server-kept-in-use', { directory: host.directory });
+      continue;
+    }
     if (processAlive(host.pid)) {
       terminateHost(host.pid);
       await waitForExit(host.pid);
     }
     await rm(host.directory, { recursive: true, force: true }).catch(() => {});
   }
-  await writeHostRegistry(profileDir, []);
+  await writeHostRegistry(profileDir, (await readHostRegistry(profileDir)).filter((host) => processAlive(host.pid)));
 }
 
 /**

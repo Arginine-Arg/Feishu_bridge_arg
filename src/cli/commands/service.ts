@@ -378,9 +378,13 @@ export async function runServiceRestart(opts: ServiceProfileOptions = {}): Promi
   // A restarted bridge must not inherit Codex App Servers that still hold the
   // provider, credentials, or proxy resolved by the previous run. This is the
   // `cc-switch` acceptance path: switch provider, restart, keep working.
-  const released = await terminateProfileHosts(resolveAppPaths({ profile }).profileDir).catch(() => 0);
-  if (released > 0) {
-    console.log(`✓ 已回收 ${released} 个旧 Codex App Server（下次运行会按当前配置重新拉起）`);
+  const released = await terminateProfileHosts(resolveAppPaths({ profile }).profileDir)
+    .catch(() => ({ terminated: 0, inUse: 0 }));
+  if (released.terminated > 0) {
+    console.log(`✓ 已回收 ${released.terminated} 个旧 Codex App Server（下次运行会按当前配置重新拉起）`);
+  }
+  if (released.inUse > 0) {
+    console.log(`ℹ️ 有 ${released.inUse} 个 App Server 仍被终端连接使用，已跳过回收（避免打断正在运行的会话）`);
   }
   if (adapter.isRunning()) {
     await reportConnectAfter('restarted', profile, adapter.restart);

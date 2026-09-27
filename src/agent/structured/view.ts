@@ -54,7 +54,14 @@ export class StructuredView {
     }, message: native ? 'Shared Codex App Server terminal' : 'Read-only structured event view; input is controlled from Feishu' };
   }
   /** Refresh the scoped artifact capability this session hands to its panes. */
-  async ensureNative(artifactEnv?: NodeJS.ProcessEnv): Promise<void> {
+  async ensureNative(
+    artifactEnv?: NodeJS.ProcessEnv,
+    options: {
+      force?: boolean;
+      native?: { binary: string; endpoint: string; threadId: string; env?: NodeJS.ProcessEnv; sandbox?: CodexSandboxMode };
+    } = {},
+  ): Promise<void> {
+    if (options.native) this.nativeSpec = options.native;
     if (artifactEnv && Object.keys(artifactEnv).length > 0) {
       const socket = this.statusValue.terminal?.socketPath;
       const name = `argbridge-api-${createHash('sha256').update(this.key).digest('hex').slice(0, 16)}`;
@@ -65,7 +72,32 @@ export class StructuredView {
         }
       }
     }
+    if (options.force) {
+      await this.restartNative();
+      return;
+    }
     if (this.nativeSpec) await this.start(this.nativeSpec, this.nativeCwd);
+  }
+
+  /**
+   * Replace the pane process so a TUI stuck on "Connection lost / app-server
+   * session could not be restored" attaches to the current endpoint again.
+   * `respawn-pane -k` keeps the session, socket and scrollback target intact.
+   */
+  private async restartNative(): Promise<void> {
+    const native = this.nativeSpec;
+    const socket = this.statusValue.terminal?.socketPath;
+    const target = this.statusValue.terminal?.target;
+    if (!native || !socket || !target) return;
+    const command = [native.binary, ...codexRemoteResumeArgs(native.endpoint, native.threadId)].map(quote).join(' ')
+      + '; bridge_status=$?; trap - INT; printf "\\n[Codex exited (%s); shell remains]\\n" "$bridge_status"; exec "${SHELL:-/bin/bash}" -i';
+    const inheritedProxy = proxyEnvironment(native.env ?? process.env);
+    const environmentArgs = Object.entries(inheritedProxy).flatMap(([key, value]) => ['-e', `${key}=${value}`]);
+    spawnProcessSync(
+      'tmux',
+      ['-S', socket, 'respawn-pane', '-k', '-t', target, '-c', this.nativeCwd ?? this.directory, ...environmentArgs, 'bash', '--noprofile', '--norc', '-ic', command],
+      { encoding: 'utf8', env: native.env ?? process.env, stdio: 'ignore' },
+    );
   }
   event(event: AgentEvent): void {
     if (!this.logPath) return;

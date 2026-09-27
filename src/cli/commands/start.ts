@@ -136,9 +136,14 @@ export async function runStart(opts: StartOptions): Promise<void> {
   // Reclaim Codex App Servers left behind by a previous bridge run. Their
   // provider, credentials, and proxy were resolved at spawn time, so reusing
   // them after a `cc-switch` provider change would serve the wrong endpoint.
-  const reclaimedHosts = await terminateProfileHosts(appPaths.profileDir).catch(() => 0);
-  if (reclaimedHosts > 0) {
-    log.info('agent', 'app-server-reclaimed', { count: reclaimedHosts, profile: appPaths.profile });
+  const reclaimed = await terminateProfileHosts(appPaths.profileDir)
+    .catch(() => ({ terminated: 0, inUse: 0 }));
+  if (reclaimed.terminated > 0 || reclaimed.inUse > 0) {
+    log.info('agent', 'app-server-reclaimed', {
+      count: reclaimed.terminated,
+      inUse: reclaimed.inUse,
+      profile: appPaths.profile,
+    });
   }
 
   let agent = createRuntimeAgent(profileConfig, { ...appPaths, configPath });

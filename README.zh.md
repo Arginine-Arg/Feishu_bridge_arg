@@ -4,6 +4,8 @@
 
 [English README](./README.md)
 
+`1.6.5` 让结构化传输实现自愈：缓存的会话在 App Server 通道关闭后会被重建并按原 thread 恢复，而不是之后每条消息都失败；draining 孤儿会被回收替换；失效 endpoint 不再抛出 `realpath ENOENT`；只有"被明确拒绝、从未开始"的回合才会重试一次；重启 bridge 时不再回收仍被客户端连接的 App Server。同时支持 Node.js 26，并让安装器优先复用兼容的专用运行时、必要时部署隔离 LTS、升级失败自动回滚。
+
 `1.6.4` 修复 bridge 托管 session 丢失文件发送能力的问题：scoped 凭据现在会写入 tmux session 环境，pane 被重建或在 pane 内重启 Codex 之后，`arg-bridge sendfile` 依然可用。
 
 `1.6.3` 修复 `/tmux bind` 绑定 Codex 自带 daemon 管理的 pane 时失败（报 `App Server socket 不安全`）的问题：现在会安全解析该符号链接（父目录不可被他人替换、目标是属主为自己的真 Unix socket），这类 pane 可以直接绑定。
@@ -33,7 +35,7 @@
 
 ## 前置条件
 
-- Node.js **>= 20.12.0 且 < 25**。部署推荐 Node 22 LTS；生产机器不建议使用 Node 25 这类过新的非 LTS 版本。
+- Node.js **>= 20.12.0 且 < 27**（推荐 Node 22 LTS）。安装器会优先复用兼容的专用运行时（`--node`、`ARG_BRIDGE_NODE`、`~/.arg-bridge/node/bin`、`~/.lark-channel/node/bin`、`~/software/node-v2x`），而不是 PATH 上第一个 `node`；都找不到时会自动把隔离的 Node LTS 安装到 `~/.arg-bridge/`。升级失败会自动回滚到旧版本。
 - 本机至少安装并登录一个 agent：
   - Claude Code：`claude`，安装说明：https://docs.anthropic.com/en/docs/claude-code/quickstart
   - Codex CLI：`codex`，安装说明：https://developers.openai.com/codex/cli
@@ -52,13 +54,13 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.6.4
+sh /tmp/install-arg-bridge.sh --version 1.6.5
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-主命令是 `arg-bridge`，迁移期仍保留 `lark-channel-bridge` 兼容别名。Release 已包含预构建的 `dist/`，不再需要 clone、`git pull`、本地构建或手工猜 tarball 文件名。要求 Node.js >= 20.12 且 < 25，部署推荐 Node 22 LTS。
+主命令是 `arg-bridge`，迁移期仍保留 `lark-channel-bridge` 兼容别名。Release 已包含预构建的 `dist/`，不再需要 clone、`git pull`、本地构建或手工猜 tarball 文件名。要求 Node.js >= 20.12 且 < 27（推荐 Node 22 LTS）；安装器会自动选择或部署兼容运行时。
 
 也可以手工下载稳定资产并校验后安装：
 
@@ -96,10 +98,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.4"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.5"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.4`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.5`。
 
 ### 4. Node 或 npm 全局目录错误
 

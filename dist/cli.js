@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.6.4",
+  version: "1.6.5",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -76,7 +76,7 @@ var package_default = {
     vitest: "^2.1.8"
   },
   engines: {
-    node: ">=20.12.0 <25"
+    node: ">=20.12.0 <27"
   },
   pnpm: {
     onlyBuiltDependencies: [
@@ -5495,7 +5495,7 @@ async function runCapture(cmd, args, timeoutMs, env) {
 
 // src/agent/structured/host-registry.ts
 import { createHash } from "crypto";
-import { statSync } from "fs";
+import { readFileSync as readFileSync2, readdirSync, readlinkSync, realpathSync, statSync } from "fs";
 import { mkdir as mkdir13, readFile as readFile11, readdir as readdir4, rm as rm11, writeFile as writeFile8 } from "fs/promises";
 import { tmpdir as tmpdir2 } from "os";
 import { join as join16 } from "path";
@@ -5620,6 +5620,74 @@ function terminateHost(pid, signal = "SIGTERM") {
     process.kill(pid, signal);
   } catch {
   }
+  try {
+    process.kill(-pid, signal);
+  } catch {
+  }
+}
+function hostHasActiveClients(directory) {
+  const socketPath = resolveSocketPath(directory);
+  if (!socketPath) return false;
+  let table;
+  try {
+    table = readFileSync2("/proc/net/unix", "utf8");
+  } catch {
+    return true;
+  }
+  for (const line of table.split("\n").slice(1)) {
+    if (!line.includes(socketPath)) continue;
+    const state = line.trim().split(/\s+/)[5];
+    if (state === "03") return true;
+  }
+  return false;
+}
+function resolveSocketPath(directory) {
+  const candidate = join16(directory, "server.sock");
+  try {
+    return realpathSync(candidate);
+  } catch {
+    return void 0;
+  }
+}
+function findSocketHolders(directory) {
+  const resolved = resolveSocketPath(directory);
+  if (!resolved) return [];
+  const inodes = /* @__PURE__ */ new Set();
+  try {
+    for (const line of readFileSync2("/proc/net/unix", "utf8").split("\n").slice(1)) {
+      if (!line.includes(resolved)) continue;
+      const fields = line.trim().split(/\s+/);
+      if (fields.length >= 7) inodes.add(fields[6]);
+    }
+  } catch {
+    return [];
+  }
+  if (inodes.size === 0) return [];
+  const uid = process.getuid?.();
+  const pids = [];
+  for (const name of readdirSync("/proc")) {
+    if (!/^\d+$/u.test(name)) continue;
+    const pid = Number.parseInt(name, 10);
+    if (uid !== void 0) {
+      try {
+        if (statSync(`/proc/${pid}`).uid !== uid) continue;
+      } catch {
+        continue;
+      }
+    }
+    try {
+      for (const fd of readdirSync(`/proc/${pid}/fd`)) {
+        const link = readlinkSync(`/proc/${pid}/fd/${fd}`);
+        const match = /^socket:\[(\d+)\]$/u.exec(link);
+        if (match && inodes.has(match[1])) {
+          pids.push(pid);
+          break;
+        }
+      }
+    } catch {
+    }
+  }
+  return pids;
 }
 async function waitForExit(pid, timeoutMs = 2e3) {
   if (!processAlive(pid)) return true;
@@ -5631,17 +5699,22 @@ async function waitForExit(pid, timeoutMs = 2e3) {
   terminateHost(pid, "SIGKILL");
   return !processAlive(pid);
 }
-async function terminateProfileHosts(profileDir) {
+async function terminateProfileHosts(profileDir, options = {}) {
   const hosts = await readHostRegistry(profileDir);
   let terminated = 0;
+  let inUse = 0;
   for (const host of hosts) {
     if (!processAlive(host.pid)) continue;
+    if (!options.force && hostHasActiveClients(host.directory)) {
+      inUse += 1;
+      continue;
+    }
     terminateHost(host.pid);
     await waitForExit(host.pid);
     terminated += 1;
   }
   await writeHostRegistry(profileDir, hosts.filter((host) => processAlive(host.pid)));
-  return terminated;
+  return { terminated, inUse };
 }
 function isRegistration(value) {
   if (!value || typeof value !== "object") return false;
@@ -5864,9 +5937,12 @@ async function runServiceRestart(opts = {}) {
     console.error("bot \u8FD8\u6CA1\u5728\u540E\u53F0\u8FD0\u884C\u8FC7\u3002\u8BF7\u5148\u8FD0\u884C `start` \u542F\u52A8\u3002");
     process.exit(1);
   }
-  const released = await terminateProfileHosts(resolveAppPaths({ profile: profile2 }).profileDir).catch(() => 0);
-  if (released > 0) {
-    console.log(`\u2713 \u5DF2\u56DE\u6536 ${released} \u4E2A\u65E7 Codex App Server\uFF08\u4E0B\u6B21\u8FD0\u884C\u4F1A\u6309\u5F53\u524D\u914D\u7F6E\u91CD\u65B0\u62C9\u8D77\uFF09`);
+  const released = await terminateProfileHosts(resolveAppPaths({ profile: profile2 }).profileDir).catch(() => ({ terminated: 0, inUse: 0 }));
+  if (released.terminated > 0) {
+    console.log(`\u2713 \u5DF2\u56DE\u6536 ${released.terminated} \u4E2A\u65E7 Codex App Server\uFF08\u4E0B\u6B21\u8FD0\u884C\u4F1A\u6309\u5F53\u524D\u914D\u7F6E\u91CD\u65B0\u62C9\u8D77\uFF09`);
+  }
+  if (released.inUse > 0) {
+    console.log(`\u2139\uFE0F \u6709 ${released.inUse} \u4E2A App Server \u4ECD\u88AB\u7EC8\u7AEF\u8FDE\u63A5\u4F7F\u7528\uFF0C\u5DF2\u8DF3\u8FC7\u56DE\u6536\uFF08\u907F\u514D\u6253\u65AD\u6B63\u5728\u8FD0\u884C\u7684\u4F1A\u8BDD\uFF09`);
   }
   if (adapter.isRunning()) {
     await reportConnectAfter("restarted", profile2, adapter.restart);
@@ -5997,7 +6073,7 @@ import { chmodSync, lstatSync as lstatSync2, mkdirSync as mkdirSync3 } from "fs"
 import { dirname as dirname15, join as join19, resolve as resolve3 } from "path";
 
 // src/agent/codex/credentials.ts
-import { readFileSync as readFileSync2 } from "fs";
+import { readFileSync as readFileSync3 } from "fs";
 import { readFile as readFile12 } from "fs/promises";
 import { homedir as homedir5 } from "os";
 import { isAbsolute as isAbsolute2, join as join17 } from "path";
@@ -6187,7 +6263,7 @@ function parseCodexConfigSummary(raw) {
 }
 function readTextSync(path) {
   try {
-    return readFileSync2(path, "utf8");
+    return readFileSync3(path, "utf8");
   } catch {
     return void 0;
   }
@@ -7033,8 +7109,8 @@ function isCodexResumeControlLine(line) {
 import { createHash as createHash2 } from "crypto";
 import {
   lstatSync,
-  readFileSync as readFileSync3,
-  readdirSync,
+  readFileSync as readFileSync4,
+  readdirSync as readdirSync2,
   unlinkSync as unlinkSync2
 } from "fs";
 import { basename as basename4, dirname as dirname14, isAbsolute as isAbsolute3, join as join18, resolve as resolve2 } from "path";
@@ -7362,7 +7438,7 @@ function discoverTmuxSockets() {
   if (process.platform === "linux") {
     try {
       const standardDir2 = dirname14(defaultTmuxSocketPath({ ...process.env, TMUX: void 0 }));
-      const lines = readFileSync3("/proc/net/unix", "utf8").split("\n");
+      const lines = readFileSync4("/proc/net/unix", "utf8").split("\n");
       for (const line of lines) {
         const path = line.trim().split(/\s+/).at(-1);
         if (path?.startsWith(`${standardDir2}/`)) found.add(path);
@@ -7372,7 +7448,7 @@ function discoverTmuxSockets() {
   }
   const standardDir = dirname14(defaultTmuxSocketPath({ ...process.env, TMUX: void 0 }));
   try {
-    for (const name of readdirSync(standardDir)) found.add(join18(standardDir, name));
+    for (const name of readdirSync2(standardDir)) found.add(join18(standardDir, name));
   } catch {
   }
   for (const path of [...found]) {
@@ -7661,7 +7737,7 @@ function recoverManagedTerminal(cwd, scopeId, profile2, agentKind) {
   const expectedSessionName = managedSessionNameFor(profile2, agentKind, scopeId);
   let names;
   try {
-    names = readdirSync(cwd);
+    names = readdirSync2(cwd);
   } catch {
     return void 0;
   }
@@ -7715,7 +7791,7 @@ function managedSessionNameFor(profile2, agentKind, scopeId) {
 }
 function loadBindings(file) {
   try {
-    const parsed = JSON.parse(readFileSync3(file, "utf8"));
+    const parsed = JSON.parse(readFileSync4(file, "utf8"));
     if (parsed.version !== 1 || !parsed.bindings || typeof parsed.bindings !== "object") return {};
     return parsed.bindings;
   } catch {
@@ -7724,7 +7800,7 @@ function loadBindings(file) {
 }
 function loadManagedTerminals(file, expectedAgent) {
   try {
-    const parsed = JSON.parse(readFileSync3(file, "utf8"));
+    const parsed = JSON.parse(readFileSync4(file, "utf8"));
     if (parsed.version !== 1 || !parsed.terminals || typeof parsed.terminals !== "object") return {};
     const out = {};
     for (const [scopeId, raw] of Object.entries(parsed.terminals)) {
@@ -7749,7 +7825,7 @@ function loadManagedTerminals(file, expectedAgent) {
 function findCrossProfileBinding(profileStateDir, target, scopeId) {
   const profilesDir = dirname14(profileStateDir);
   try {
-    for (const profile2 of readdirSync(profilesDir)) {
+    for (const profile2 of readdirSync2(profilesDir)) {
       const dir = join18(profilesDir, profile2);
       if (resolve2(dir) === resolve2(profileStateDir)) continue;
       const bindings = loadBindings(join18(dir, BINDINGS_FILE));
@@ -11908,7 +11984,7 @@ function buildCodexArgs(input) {
 
 // src/agent/codex/provider.ts
 import { join as join22 } from "path";
-import { readFileSync as readFileSync4 } from "fs";
+import { readFileSync as readFileSync5 } from "fs";
 function providerSummaryFromConfig(config) {
   const providerId = (config.modelProvider ?? "").trim() || void 0;
   const provider = providerId ? config.providers.get(providerId) : void 0;
@@ -11929,7 +12005,7 @@ function resolveCodexProviderSync(codexHome) {
   if (!home) return { official: true };
   try {
     return providerSummaryFromConfig(
-      parseCodexConfigSummary(readFileSync4(join22(home, "config.toml"), "utf8"))
+      parseCodexConfigSummary(readFileSync5(join22(home, "config.toml"), "utf8"))
     );
   } catch {
     return { official: true };
@@ -12619,7 +12695,7 @@ function artifactDeliveryEnv(artifact) {
 // src/agent/structured/adapter.ts
 import { createHash as createHash5, randomUUID as randomUUID3 } from "crypto";
 import { readFile as readFile15, mkdir as mkdir17, lstat as lstat3, realpath as realpath4, stat as stat6 } from "fs/promises";
-import { readFileSync as readFileSync6 } from "fs";
+import { readFileSync as readFileSync7 } from "fs";
 import { tmpdir as tmpdir4 } from "os";
 import { join as join26, resolve as resolve4 } from "path";
 
@@ -12651,8 +12727,11 @@ var RpcClient = class _RpcClient extends EventEmitter2 {
         if (!request) return;
         this.pending.delete(message.id);
         clearTimeout(request.timer);
-        if (message.error) request.reject(new Error(String(message.error.message ?? "RPC error")));
-        else request.resolve(message.result ?? {});
+        if (message.error) {
+          const text = String(message.error.message ?? "RPC error");
+          request.reject(new Error(text));
+          if (/draining|connection closed/i.test(text)) this.fail(new Error(text));
+        } else request.resolve(message.result ?? {});
       } else this.emit("message", message);
     });
     socket.on("error", (error) => this.fail(error));
@@ -12670,6 +12749,19 @@ var RpcClient = class _RpcClient extends EventEmitter2 {
       socket.once("error", reject4);
     });
     return client;
+  }
+  /**
+   * True once this channel failed or closed. Callers that cache a client must
+   * check this before reusing it: the App Server can exit or be replaced
+   * between turns, and a reused dead client rejects every request with
+   * "connection closed; input will not be replayed".
+   */
+  get closed() {
+    return Boolean(this.failure);
+  }
+  /** Last failure, for diagnostics. */
+  get failureReason() {
+    return this.failure;
   }
   async initialize() {
     await this.request("initialize", { clientInfo: { name: "arg_bridge", version: "structured-preview" }, capabilities: { experimentalApi: true } });
@@ -12751,6 +12843,9 @@ function clearHostFailure(directory) {
   hostBreakers.delete(directory);
 }
 async function connectCodexHost(options) {
+  return connectCodexHostInternal(options, 0);
+}
+async function connectCodexHostInternal(options, attempt) {
   if (process.platform === "win32") throw new Error("Codex structured shared-terminal backend currently requires Unix sockets; keep terminal transport on Windows");
   const directory = codexHostRuntimeDirectory(options.profileDir, options.scope, options.cwd);
   await mkdir15(directory, { recursive: true, mode: 448 });
@@ -12842,14 +12937,37 @@ async function connectCodexHost(options) {
     await rpc.initialize();
   } catch (error) {
     rpc.close();
+    if (attempt === 0 && isUnusableServerError(error)) {
+      log.warn("agent", "app-server-unusable-reclaimed", {
+        directory,
+        reason: error instanceof Error ? error.message : String(error)
+      });
+      for (const holder of findSocketHolders(directory)) {
+        terminateHost(holder);
+        await waitForExit(holder);
+      }
+      await forgetHost(options.profileDir, directory).catch(() => {
+      });
+      await rm12(directory, { recursive: true, force: true }).catch(() => {
+      });
+      return connectCodexHostInternal(options, attempt + 1);
+    }
     throw error;
   }
   return { rpc, endpoint };
+}
+function isUnusableServerError(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /Server is draining|connection closed|RPC connection is not open/i.test(message);
 }
 async function shutdownProfileHosts(profileDir) {
   const lastOwner = await dropOwner(profileDir);
   if (!lastOwner) return;
   for (const host of await readHostRegistry(profileDir)) {
+    if (hostHasActiveClients(host.directory)) {
+      log.info("agent", "app-server-kept-in-use", { directory: host.directory });
+      continue;
+    }
     if (processAlive(host.pid)) {
       terminateHost(host.pid);
       await waitForExit(host.pid);
@@ -12857,7 +12975,7 @@ async function shutdownProfileHosts(profileDir) {
     await rm12(host.directory, { recursive: true, force: true }).catch(() => {
     });
   }
-  await writeHostRegistry(profileDir, []);
+  await writeHostRegistry(profileDir, (await readHostRegistry(profileDir)).filter((host) => processAlive(host.pid)));
 }
 async function findStaleHost(profileDir, directory, binary, fingerprint) {
   const host = (await readHostRegistry(profileDir)).find((item) => item.directory === directory);
@@ -12991,6 +13109,14 @@ var CodexStructuredSession = class _CodexStructuredSession {
   deferredInteractions = [];
   usageTotal;
   listener;
+  /** False when the underlying App Server channel is gone and must be rebuilt. */
+  isAlive() {
+    return !this.rpc.closed;
+  }
+  /** Why the channel died, when it did. */
+  get failureReason() {
+    return this.rpc.failureReason?.message;
+  }
   disconnected = (error) => {
     for (const waiter of this.acknowledgements.values()) waiter.reject(error);
     this.acknowledgements.clear();
@@ -13683,7 +13809,8 @@ var StructuredView = class {
     }, message: native ? "Shared Codex App Server terminal" : "Read-only structured event view; input is controlled from Feishu" };
   }
   /** Refresh the scoped artifact capability this session hands to its panes. */
-  async ensureNative(artifactEnv) {
+  async ensureNative(artifactEnv, options = {}) {
+    if (options.native) this.nativeSpec = options.native;
     if (artifactEnv && Object.keys(artifactEnv).length > 0) {
       const socket = this.statusValue.terminal?.socketPath;
       const name = `argbridge-api-${createHash4("sha256").update(this.key).digest("hex").slice(0, 16)}`;
@@ -13694,7 +13821,30 @@ var StructuredView = class {
         }
       }
     }
+    if (options.force) {
+      await this.restartNative();
+      return;
+    }
     if (this.nativeSpec) await this.start(this.nativeSpec, this.nativeCwd);
+  }
+  /**
+   * Replace the pane process so a TUI stuck on "Connection lost / app-server
+   * session could not be restored" attaches to the current endpoint again.
+   * `respawn-pane -k` keeps the session, socket and scrollback target intact.
+   */
+  async restartNative() {
+    const native = this.nativeSpec;
+    const socket = this.statusValue.terminal?.socketPath;
+    const target = this.statusValue.terminal?.target;
+    if (!native || !socket || !target) return;
+    const command = [native.binary, ...codexRemoteResumeArgs(native.endpoint, native.threadId)].map(quote).join(" ") + '; bridge_status=$?; trap - INT; printf "\\n[Codex exited (%s); shell remains]\\n" "$bridge_status"; exec "${SHELL:-/bin/bash}" -i';
+    const inheritedProxy = proxyEnvironment(native.env ?? process.env);
+    const environmentArgs = Object.entries(inheritedProxy).flatMap(([key, value]) => ["-e", `${key}=${value}`]);
+    spawnProcessSync(
+      "tmux",
+      ["-S", socket, "respawn-pane", "-k", "-t", target, "-c", this.nativeCwd ?? this.directory, ...environmentArgs, "bash", "--noprofile", "--norc", "-ic", command],
+      { encoding: "utf8", env: native.env ?? process.env, stdio: "ignore" }
+    );
   }
   event(event) {
     if (!this.logPath) return;
@@ -13736,7 +13886,7 @@ ${event.output}
 
 // src/agent/structured/tmux-discovery.ts
 import { basename as basename5, resolve as resolvePath } from "path";
-import { readFileSync as readFileSync5, readlinkSync } from "fs";
+import { readFileSync as readFileSync6, readlinkSync as readlinkSync2 } from "fs";
 function listStructuredTmuxPanes(socket) {
   return listTmuxAgentPanes(socket).flatMap((pane) => {
     const processArgs = [
@@ -13808,13 +13958,13 @@ function processEnvironmentForPidTree(rootPid) {
   let fallback = {};
   for (const pid of ids) {
     try {
-      const raw = readFileSync5(`/proc/${pid}/environ`, "utf8");
+      const raw = readFileSync6(`/proc/${pid}/environ`, "utf8");
       const env = Object.fromEntries(raw.split("\0").flatMap((item) => {
         const index = item.indexOf("=");
         return index > 0 ? [[item.slice(0, index), item.slice(index + 1)]] : [];
       }));
       if (!Object.keys(fallback).length) fallback = env;
-      const argv = readFileSync5(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
+      const argv = readFileSync6(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
       if (argv.slice(0, 2).some((arg) => basename5(arg) === "codex")) return env;
     } catch {
     }
@@ -13845,7 +13995,7 @@ function processArgvTree(rootPid) {
   return [...ids].flatMap((pid) => {
     if (process.platform === "linux") {
       try {
-        const argv = readFileSync5(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
+        const argv = readFileSync6(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
         if (argv.length) return [argv];
       } catch {
       }
@@ -13870,7 +14020,7 @@ function processArgvForPane(pane) {
     let tmuxMatch = false;
     let cwdMatch = false;
     try {
-      const env = readFileSync5(`/proc/${pid}/environ`, "utf8");
+      const env = readFileSync6(`/proc/${pid}/environ`, "utf8");
       const values = /* @__PURE__ */ new Map();
       for (const item of env.split("\0")) {
         const equals = item.indexOf("=");
@@ -13882,7 +14032,7 @@ function processArgvForPane(pane) {
     } catch {
     }
     try {
-      cwdMatch = readlinkSync(`/proc/${pid}/cwd`) === pane.paneCurrentPath;
+      cwdMatch = readlinkSync2(`/proc/${pid}/cwd`) === pane.paneCurrentPath;
     } catch {
     }
     if (paneMatch || cwdMatch) candidates.push({ pid, args, paneMatch, tmuxMatch, cwdMatch });
@@ -13899,6 +14049,54 @@ var shellQuote3 = (value) => `'${value.replace(/'/g, `'\\''`)}'`;
 var LEGACY_RESUME_TIMEOUT_MS = 18e4;
 var LEGACY_RESUME_PROBE_TIMEOUT_MS = 5e3;
 var LEGACY_RESUME_RECONCILE_MS = 18e4;
+var StaleStructuredEndpointError = class extends Error {
+  constructor(endpoint, cause) {
+    super(`\u7ED3\u6784\u5316 App Server \u5DF2\u4E0D\u5728\uFF1A${endpoint}`);
+    this.endpoint = endpoint;
+    this.name = "StaleStructuredEndpointError";
+    if (cause !== void 0) this.cause = cause;
+  }
+  endpoint;
+};
+function artifactEnvFrom(options) {
+  return options.artifactDelivery ? {
+    ARG_BRIDGE_ARTIFACT_SOCKET: options.artifactDelivery.socketPath,
+    ARG_BRIDGE_ARTIFACT_TOKEN: options.artifactDelivery.token
+  } : void 0;
+}
+function isTransportUnavailable(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /Server is draining|connection closed|RPC connection is not open|ECONNRESET|EPIPE|ENOENT.*server\.sock/i.test(message);
+}
+async function openSideWithRetry(adapter, current, options, emit2) {
+  const attach = async (session) => {
+    current.side = session;
+    current.sideView = adapter.makeView(`${options.scopeId}:side:${session.id}`);
+    await current.sideView.start(void 0, current.cwd);
+    return session;
+  };
+  const main = current.main;
+  try {
+    return await attach(await main.forkSide(current.cwd));
+  } catch (error) {
+    if (!isTransportUnavailable(error)) throw error;
+    const scope = options.scopeId ?? options.cwd;
+    log.warn("agent", "structured-side-reconnect", { scope, thread: main.id, reason: error.message });
+    emit2({
+      type: "error",
+      message: "\u5171\u4EAB App Server \u5DF2\u91CD\u5EFA\uFF0C\u6B63\u5728\u91CD\u65B0\u6253\u5F00 side \u4F1A\u8BDD\u2026",
+      terminationReason: "failed"
+    });
+    main.disconnect();
+    await main.close().catch(() => {
+    });
+    adapter.sessions.delete(scope);
+    const rebuilt = await adapter.session(options);
+    if (!(rebuilt.main instanceof CodexStructuredSession)) throw error;
+    current.main = rebuilt.main;
+    return attach(await rebuilt.main.forkSide(current.cwd));
+  }
+}
 var trustedSocketParents = /* @__PURE__ */ new Set();
 var MAX_SOCKET_PARENT_LEVELS = 20;
 async function resolveAppServerSocketPath(candidate) {
@@ -14093,7 +14291,7 @@ var StructuredAdapter = class {
   }
   loadBindings() {
     try {
-      const parsed = JSON.parse(readFileSync6(this.bindingsFile, "utf8"));
+      const parsed = JSON.parse(readFileSync7(this.bindingsFile, "utf8"));
       if (parsed.version !== 1) return;
       for (const scope of parsed.disabled ?? []) if (typeof scope === "string") this.autoDiscoveryDisabled.add(scope);
       for (const [scope, binding] of Object.entries(parsed.bindings ?? {})) {
@@ -14104,7 +14302,7 @@ var StructuredAdapter = class {
   }
   loadCandidates() {
     try {
-      const parsed = JSON.parse(readFileSync6(this.candidatesFile, "utf8"));
+      const parsed = JSON.parse(readFileSync7(this.candidatesFile, "utf8"));
       if (parsed.version !== 1) return;
       for (const [key, candidate] of Object.entries(parsed.candidates ?? {})) {
         if (candidate?.threadId && candidate.cwd && candidate.target?.socketPath && candidate.target?.sessionName) this.candidates.set(key, candidate);
@@ -14283,8 +14481,23 @@ var StructuredAdapter = class {
   }
   async connectExisting(endpoint) {
     if (process.platform === "win32" || !endpoint.startsWith("unix://")) throw new Error("\u7ED3\u6784\u5316 pane \u5FC5\u987B\u4F7F\u7528\u672C\u673A Unix App Server socket");
-    const path = await resolveAppServerSocketPath(endpoint.slice("unix://".length));
-    return RpcClient.connect(`ws+unix://${path}:/`);
+    let path;
+    try {
+      path = await resolveAppServerSocketPath(endpoint.slice("unix://".length));
+    } catch (error) {
+      if (error.code === "ENOENT") {
+        throw new StaleStructuredEndpointError(endpoint, error);
+      }
+      throw error;
+    }
+    try {
+      return await RpcClient.connect(`ws+unix://${path}:/`);
+    } catch (error) {
+      if (error.code === "ENOENT") {
+        throw new StaleStructuredEndpointError(endpoint, error);
+      }
+      throw error;
+    }
   }
   structuredControl = async (scope, input) => {
     const current = this.sessions.get(scope) ?? await this.starting.get(scope);
@@ -14364,12 +14577,7 @@ var StructuredAdapter = class {
             return;
           }
           if (!current.side) {
-            current.sideOpening ??= current.main.forkSide(current.cwd).then(async (session) => {
-              current.side = session;
-              current.sideView = this.makeView(`${options.scopeId}:side:${session.id}`);
-              await current.sideView.start(void 0, current.cwd);
-              return session;
-            });
+            current.sideOpening ??= openSideWithRetry(this, current, options, emit2);
             try {
               await current.sideOpening;
             } finally {
@@ -14399,7 +14607,27 @@ var StructuredAdapter = class {
 [user]
 ${prompt}
 `));
-        await target.submit({ ...options, prompt, ...side ? { liveInputMode: void 0 } : {} }, emit2, abort.signal);
+        const payload = { ...options, prompt, ...side ? { liveInputMode: void 0 } : {} };
+        try {
+          await target.submit(payload, emit2, abort.signal);
+        } catch (error) {
+          if (side || !isTransportUnavailable(error) || !(target instanceof CodexStructuredSession)) throw error;
+          if (target.diagnostics().inputState !== "empty") throw error;
+          const scope = options.scopeId ?? options.cwd;
+          log.warn("agent", "structured-turn-reconnect", {
+            scope,
+            thread: target.id,
+            reason: error.message
+          });
+          target.disconnect();
+          await target.close().catch(() => {
+          });
+          this.sessions.delete(scope);
+          const rebuilt = await this.session(options);
+          if (!(rebuilt.main instanceof CodexStructuredSession)) throw error;
+          target = rebuilt.main;
+          await target.submit(payload, emit2, abort.signal);
+        }
         if (!side && target === current.main && this.id === "codex" && this.options.nativeView !== false) {
           await current.view.ensureNative(options.artifactDelivery ? {
             ARG_BRIDGE_ARTIFACT_SOCKET: options.artifactDelivery.socketPath,
@@ -14451,11 +14679,19 @@ ${prompt}
     if (binding && this.id === "codex") {
       const pane = listStructuredTmuxPanes(binding.target.socketPath).find((item) => item.paneId === binding.target.paneId && item.sessionName === binding.target.sessionName);
       if (!pane?.structured?.endpoint) {
-        throw new Error("\u7ED1\u5B9A pane \u5F53\u524D\u6CA1\u6709\u53EF\u8FDE\u63A5\u7684 structured Codex\u3002\u53EF\u80FD\u5DF2\u9000\u51FA\u5230 shell\uFF0C\u6216\u542F\u52A8\u4E86\u666E\u901A Codex\uFF1B\u6D88\u606F\u672A\u63D0\u4EA4\u5230\u65E7 thread\u3002\u8BF7\u5728\u8BE5 pane \u6062\u590D\u5171\u4EAB\u8FDE\u63A5\u540E\u91CD\u8BD5\u3002");
+        log.warn("agent", "structured-binding-lost", {
+          scope,
+          thread: binding.threadId,
+          pane: binding.target.paneId
+        });
+        this.bindings.delete(scope);
+        await this.saveBindings();
+        binding = void 0;
+      } else {
+        binding = { target: pane, endpoint: pane.structured.endpoint, threadId: pane.structured.threadId, cwd: pane.paneCurrentPath, updatedAt: Date.now() };
+        this.bindings.set(scope, binding);
+        await this.saveBindings();
       }
-      binding = { target: pane, endpoint: pane.structured.endpoint, threadId: pane.structured.threadId, cwd: pane.paneCurrentPath, updatedAt: Date.now() };
-      this.bindings.set(scope, binding);
-      await this.saveBindings();
     }
     if (!binding && found && !this.autoDiscoveryDisabled.has(scope) && this.id === "codex" && found.main.diagnostics().inputState === "empty" && !found.side) {
       const terminal = found.bound?.target ? { socketPath: found.bound.target.socketPath, target: found.bound.target.sessionName } : found.view.status().terminal;
@@ -14468,6 +14704,18 @@ ${prompt}
       }
     }
     if (binding && resolve4(binding.cwd) !== resolve4(options.cwd)) throw new Error(`tmux pane workspace (${binding.cwd}) \u4E0E\u5F53\u524D workspace (${options.cwd}) \u4E0D\u4E00\u81F4`);
+    if (found && found.main instanceof CodexStructuredSession && !found.main.isAlive()) {
+      log.warn("agent", "structured-session-dead", {
+        scope,
+        thread: found.main.id,
+        reason: found.main.failureReason ?? null
+      });
+      found.main.disconnect();
+      await found.main.close().catch(() => {
+      });
+      this.sessions.delete(scope);
+      found = void 0;
+    }
     if (found) {
       if (this.autoDiscoveryDisabled.has(scope) && found.bound) {
         await found.main.close();
@@ -14530,9 +14778,34 @@ ${prompt}
         }
       }
       if (bound2) {
-        const rpc2 = await this.connectExisting(bound2.endpoint);
+        let rpc2;
+        let endpoint2 = bound2.endpoint;
+        let spawnedFresh = false;
         try {
-          await rpc2.initialize();
+          rpc2 = await this.connectExisting(endpoint2);
+        } catch (error) {
+          if (!(error instanceof StaleStructuredEndpointError)) throw error;
+          log.warn("agent", "structured-endpoint-stale", {
+            scope,
+            endpoint: endpoint2,
+            thread: bound2.threadId
+          });
+          const spawned = await connectCodexHost({
+            binary: this.options.binary,
+            profileDir: this.options.profileDir,
+            scope,
+            cwd,
+            env,
+            fingerprint: this.codexHostFingerprint(env)
+          });
+          rpc2 = spawned.rpc;
+          endpoint2 = spawned.endpoint;
+          spawnedFresh = true;
+          this.bindings.delete(scope);
+          await this.saveBindings();
+        }
+        try {
+          if (!spawnedFresh) await rpc2.initialize();
           const loaded = await rpc2.request("thread/loaded/list", {});
           if (!Array.isArray(loaded.data) || !loaded.data.includes(bound2.threadId)) throw new Error("tmux \u5F53\u524D resume \u7684 thread \u4E0D\u5728\u5BF9\u5E94 App Server \u4E2D");
           const resumed = await resumeCodexThread(
@@ -14541,10 +14814,23 @@ ${prompt}
             options.liveInputMode ? {} : codexThreadPermissionOverrides(options.sandbox ?? this.options.sandbox)
           );
           if (resumed.thread?.id !== bound2.threadId) throw new Error("App Server \u8FD4\u56DE\u4E86\u4E0D\u540C\u7684 thread");
-          const attached = new CodexStructuredSession(bound2.threadId, bound2.endpoint, rpc2);
+          const attached = new CodexStructuredSession(bound2.threadId, endpoint2, rpc2);
           await attached.syncState();
-          await writeFileAtomic(stateFile, JSON.stringify({ id: bound2.threadId, cwd, scope, kind: this.id, endpoint: bound2.endpoint, bound: true }, null, 2));
-          return { main: attached, view, bound: bound2, cwd };
+          await writeFileAtomic(stateFile, JSON.stringify({ id: bound2.threadId, cwd, scope, kind: this.id, endpoint: endpoint2, bound: true }, null, 2));
+          if (spawnedFresh) {
+            await view.ensureNative(artifactEnvFrom(options), {
+              force: true,
+              native: {
+                binary: this.options.binary,
+                endpoint: endpoint2,
+                threadId: bound2.threadId,
+                env,
+                sandbox: options.sandbox ?? this.options.sandbox
+              }
+            }).catch(() => {
+            });
+          }
+          return { main: attached, view, bound: { ...bound2, endpoint: endpoint2 }, cwd };
         } catch (error) {
           rpc2.close();
           throw error;
@@ -14556,7 +14842,14 @@ ${prompt}
       if (readOnlyReconnect) {
         if (!saved?.endpoint?.startsWith("unix://")) throw new Error("\u65E7\u8FDE\u63A5\u4FE1\u606F\u4E0D\u8DB3\uFF0C\u63A7\u5236\u64CD\u4F5C\u672A\u542F\u52A8\u4EFB\u4F55\u65B0\u670D\u52A1");
         endpoint = saved.endpoint;
-        rpc = await RpcClient.connect(`ws+unix://${endpoint.slice("unix://".length)}:/`);
+        try {
+          rpc = await this.connectExisting(endpoint);
+        } catch (error) {
+          if (error instanceof StaleStructuredEndpointError) {
+            throw new Error("\u539F\u7ED3\u6784\u5316\u4F1A\u8BDD\u5DF2\u4E0D\u5728\u8FD0\u884C\uFF1B\u63A7\u5236\u64CD\u4F5C\u4E0D\u4F1A\u81EA\u52A8\u6062\u590D\u4EFB\u52A1\u3002\u8BF7\u91CD\u65B0\u53D1\u8D77\u8BE5\u64CD\u4F5C\u3002");
+          }
+          throw error;
+        }
         try {
           await rpc.initialize();
           const loaded = await rpc.request("thread/loaded/list", {});
@@ -14647,7 +14940,7 @@ ${prompt}
 };
 
 // src/agent/structured/preferred.ts
-import { readFileSync as readFileSync7 } from "fs";
+import { readFileSync as readFileSync8 } from "fs";
 import { join as join27 } from "path";
 import { mkdir as mkdir18 } from "fs/promises";
 var PreferredStructuredAdapter = class {
@@ -14659,11 +14952,11 @@ var PreferredStructuredAdapter = class {
     this.displayName = `${structured.displayName} (live fallback)`;
     this.file = join27(directory, "preferred-panes.json");
     try {
-      const data = JSON.parse(readFileSync7(this.file, "utf8"));
+      const data = JSON.parse(readFileSync8(this.file, "utf8"));
       if (data.version === 1) for (const [scope, target] of Object.entries(data.targets ?? {})) this.targets.set(scope, target);
     } catch {
       try {
-        const old = JSON.parse(readFileSync7(join27(directory, "structured", "tmux-bindings.json"), "utf8"));
+        const old = JSON.parse(readFileSync8(join27(directory, "structured", "tmux-bindings.json"), "utf8"));
         if (old.version === 1) for (const [scope, binding] of Object.entries(old.bindings ?? {})) {
           const target = binding.target;
           if (target?.paneId) this.targets.set(scope, target);
@@ -28229,9 +28522,13 @@ async function runStart(opts) {
     tenant: cfg.accounts.app.tenant,
     hostname: os.hostname()
   });
-  const reclaimedHosts = await terminateProfileHosts(appPaths2.profileDir).catch(() => 0);
-  if (reclaimedHosts > 0) {
-    log.info("agent", "app-server-reclaimed", { count: reclaimedHosts, profile: appPaths2.profile });
+  const reclaimed = await terminateProfileHosts(appPaths2.profileDir).catch(() => ({ terminated: 0, inUse: 0 }));
+  if (reclaimed.terminated > 0 || reclaimed.inUse > 0) {
+    log.info("agent", "app-server-reclaimed", {
+      count: reclaimed.terminated,
+      inUse: reclaimed.inUse,
+      profile: appPaths2.profile
+    });
   }
   let agent = createRuntimeAgent(profileConfig, { ...appPaths2, configPath });
   const availability = await checkRuntimeAgentAvailability(agent);

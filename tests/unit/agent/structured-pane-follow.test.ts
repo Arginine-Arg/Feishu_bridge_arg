@@ -36,23 +36,37 @@ async function harness() {
 }
 
 describe('structured binding follows the selected pane', () => {
-  it('does not submit to the cached thread after the user exits into a shell', async () => {
+  it('drops a binding whose pane lost its shared server and keeps the conversation alive', async () => {
     const h = await harness();
     state.panes = [];
-    await expect(h.session()).rejects.toThrow('消息未提交到旧 thread');
-    expect(h.create).not.toHaveBeenCalled();
+    // The pane's App Server is gone, so the cached channel is closed: this is
+    // exactly the state that used to fail every later turn.
+    Object.assign(h.rpc, { closed: true, failureReason: new Error('Codex App Server connection closed; input will not be replayed') });
+    // The turn must not silently go to the cached thread, but it must also not
+    // fail: the binding is dropped and a managed session takes over.
+    await expect(h.session()).resolves.toBeDefined();
+    expect(Reflect.get(h.adapter, 'bindings').has('scope')).toBe(false);
+    expect(h.create).toHaveBeenCalled();
     expect(h.rpc.request).not.toHaveBeenCalled();
     await h.adapter.shutdown();
   });
 
-  it('does not follow another pane or mistake a legacy process for a shared server', async () => {
-    const h = await harness();
-    state.panes = [{ ...h.pane, paneId: '%2' }];
-    await expect(h.session()).rejects.toThrow('消息未提交到旧 thread');
-    state.panes = [{ ...h.pane, structured: { threadId: 'other', legacy: true } }];
-    await expect(h.session()).rejects.toThrow('消息未提交到旧 thread');
-    expect(h.create).not.toHaveBeenCalled();
-    await h.adapter.shutdown();
+  it('drops a binding when the pane is gone or downgraded to a legacy process', async () => {
+    const gone = await harness();
+    state.panes = [{ ...gone.pane, paneId: '%2' }];
+    Object.assign(gone.rpc, { closed: true, failureReason: new Error('connection closed') });
+    await expect(gone.session()).resolves.toBeDefined();
+    expect(Reflect.get(gone.adapter, 'bindings').has('scope')).toBe(false);
+    expect(gone.create).toHaveBeenCalled();
+    await gone.adapter.shutdown();
+
+    const legacy = await harness();
+    state.panes = [{ ...legacy.pane, structured: { threadId: 'other', legacy: true } }];
+    Object.assign(legacy.rpc, { closed: true, failureReason: new Error('connection closed') });
+    await expect(legacy.session()).resolves.toBeDefined();
+    expect(Reflect.get(legacy.adapter, 'bindings').has('scope')).toBe(false);
+    expect(legacy.create).toHaveBeenCalled();
+    await legacy.adapter.shutdown();
   });
 
   it('reconnects when the same pane resumes another thread', async () => {

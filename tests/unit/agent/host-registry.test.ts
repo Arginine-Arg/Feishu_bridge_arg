@@ -1,10 +1,13 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { createServer, connect as connectSocket, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   fileStamp,
   fingerprintCredentialEnv,
+  hostHasActiveClients,
   liveOwners,
   ownerDirectory,
   readHostRegistry,
@@ -216,9 +219,9 @@ describe('profile host termination', () => {
       fingerprint: fingerprint(),
     });
 
-    const terminated = await terminateProfileHosts(profileDir);
+    const result = await terminateProfileHosts(profileDir);
 
-    expect(terminated).toBe(0);
+    expect(result).toEqual({ terminated: 0, inUse: 0 });
     expect(await readHostRegistry(profileDir)).toEqual([]);
   });
 });
