@@ -46,6 +46,14 @@ jobs:
         if: always()
         run: node scripts/report-vitest-failures.mjs .ci/vitest.json
 
+      - name: Upload test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vitest-report
+          path: .ci/vitest.json
+          if-no-files-found: ignore
+
       - name: Verify types
         run: pnpm typecheck
 

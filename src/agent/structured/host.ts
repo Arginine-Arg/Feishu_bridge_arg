@@ -18,6 +18,7 @@ import {
   sameFingerprint,
   terminateHost,
   waitForExit,
+  waitForIdleSocket,
   writeHostRegistry,
   type CodexHostEnvironmentFingerprint,
 } from './host-registry';
@@ -227,7 +228,7 @@ export async function shutdownProfileHosts(profileDir: string): Promise<void> {
     // A native TUI can still be attached even though no owner marker is left
     // (it is a client, not an owner). Killing the server under it would break
     // that pane, so leave in-use servers for the next start to reclaim.
-    if (hostHasActiveClients(host.directory)) {
+    if (!(await waitForIdleSocket(host.directory))) {
       log.info('agent', 'app-server-kept-in-use', { directory: host.directory });
       continue;
     }

@@ -261,6 +261,24 @@ export function hostHasActiveClients(directory: string): boolean {
   return false;
 }
 
+/**
+ * Wait briefly for a just-closed client to disappear from the socket table.
+ * Connection teardown is asynchronous, so an immediate check can still see a
+ * client that has already gone away; without this settle window a legitimate
+ * reclaim would be skipped and the stale server would keep running.
+ */
+export async function waitForIdleSocket(
+  directory: string,
+  timeoutMs = 1_500,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!hostHasActiveClients(directory)) return true;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return !hostHasActiveClients(directory);
+}
+
 function resolveSocketPath(directory: string): string | undefined {
   const candidate = join(directory, 'server.sock');
   try {
@@ -345,7 +363,7 @@ export async function terminateProfileHosts(
     // A native TUI (`--remote`) keeps an established connection. Killing the
     // server under it breaks that pane ("Connection lost ... could not be
     // restored"), so an in-use server is only reclaimed when forced.
-    if (!options.force && hostHasActiveClients(host.directory)) {
+    if (!options.force && !(await waitForIdleSocket(host.directory, 750))) {
       inUse += 1;
       continue;
     }

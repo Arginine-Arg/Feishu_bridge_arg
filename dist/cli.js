@@ -5641,6 +5641,14 @@ function hostHasActiveClients(directory) {
   }
   return false;
 }
+async function waitForIdleSocket(directory, timeoutMs = 1500) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!hostHasActiveClients(directory)) return true;
+    await new Promise((resolve6) => setTimeout(resolve6, 100));
+  }
+  return !hostHasActiveClients(directory);
+}
 function resolveSocketPath(directory) {
   const candidate = join16(directory, "server.sock");
   try {
@@ -5705,7 +5713,7 @@ async function terminateProfileHosts(profileDir, options = {}) {
   let inUse = 0;
   for (const host of hosts) {
     if (!processAlive(host.pid)) continue;
-    if (!options.force && hostHasActiveClients(host.directory)) {
+    if (!options.force && !await waitForIdleSocket(host.directory, 750)) {
       inUse += 1;
       continue;
     }
@@ -12964,7 +12972,7 @@ async function shutdownProfileHosts(profileDir) {
   const lastOwner = await dropOwner(profileDir);
   if (!lastOwner) return;
   for (const host of await readHostRegistry(profileDir)) {
-    if (hostHasActiveClients(host.directory)) {
+    if (!await waitForIdleSocket(host.directory)) {
       log.info("agent", "app-server-kept-in-use", { directory: host.directory });
       continue;
     }
