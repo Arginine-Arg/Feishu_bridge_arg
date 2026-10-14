@@ -61,8 +61,10 @@ describe.skipIf(!live)('tmux control', () => {
     const socket = join(root, 'tmux.sock');
     const codex = join(root, 'codex');
     const claude = join(root, 'claude');
-    await symlink('/bin/sleep', codex);
-    await symlink('/bin/sleep', claude);
+    // A tiny executable whose argv carries the agent name: unlike a renamed
+    // `sleep`, this works on hosts where coreutils is a multicall binary.
+    await writeFile(codex, '#!/usr/bin/env node\nsetInterval(() => {}, 1000);\n', { mode: 0o755 });
+    await writeFile(claude, '#!/usr/bin/env node\nsetInterval(() => {}, 1000);\n', { mode: 0o755 });
     cleanup.push(async () => {
       spawnSync('tmux', ['-S', socket, 'kill-server'], { stdio: 'ignore' });
       await rm(root, { recursive: true, force: true });
@@ -132,7 +134,7 @@ describe.skipIf(!live)('tmux control', () => {
     const socket = join(root, 'tmux.sock');
     const codex = join(root, 'codex');
     const profile = join(root, 'profile');
-    await symlink('/bin/sleep', codex);
+    await writeFile(codex, '#!/usr/bin/env node\nsetInterval(() => {}, 1000);\n', { mode: 0o755 });
     cleanup.push(async () => {
       spawnSync('tmux', ['-S', socket, 'kill-server'], { stdio: 'ignore' });
       await rm(root, { recursive: true, force: true });

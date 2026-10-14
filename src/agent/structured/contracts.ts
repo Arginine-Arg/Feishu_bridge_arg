@@ -10,7 +10,12 @@ export interface StructuredSession {
   answer(id: string, value: string): Promise<void>;
   hasRequest(id: string): boolean;
   freeTextRequest(): string | undefined;
-  interrupt(): Promise<void>;
+  /**
+   * Stop the running work. Returns `false` when the session proved there was
+   * nothing to stop, so `/stop` can report honestly instead of claiming
+   * success; `void` is accepted for sessions that cannot tell.
+   */
+  interrupt(): Promise<boolean | void>;
   diagnostics(): LiveSessionDiagnostics;
   close(): Promise<void>;
 }

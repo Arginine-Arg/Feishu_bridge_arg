@@ -1080,6 +1080,17 @@ async function handleStop(args: string, ctx: CommandContext): Promise<void> {
         stoppedMain = ctx.activeRuns.interruptMain(mainScope);
         effectiveScope = mainScope;
       }
+    } else {
+      // A plain `/stop` means "stop this conversation", not "stop the side and
+      // leave the main goal running". A side handle can outlive `/btw out`
+      // (pending close, reconnect), so the main run is interrupted as well.
+      const mainScope = selectCandidate((candidate) => Boolean(ctx.activeRuns.get(candidate)));
+      if (mainScope && mainScope !== effectiveScope) {
+        ctx.activeRuns.advanceStopGeneration(mainScope, 'main');
+        generationAdvanced = true;
+        stoppedMain = ctx.activeRuns.interruptMain(mainScope);
+        effectiveScope = mainScope;
+      }
     }
   }
   // A generation is still advanced for the requested exact scope when no
@@ -1108,21 +1119,29 @@ async function handleStop(args: string, ctx: CommandContext): Promise<void> {
         ctx.agent.tmux.diagnostics(fallbackScope, fallbackCwd),
       );
     }
-    const durableTarget =
-      sideOnly || ctx.lifecycleTarget === 'side' || durableSideDetected
-        ? 'side' as const
-        : 'main' as const;
-    if (!ctx.activeRuns.beginDurableInterrupt(fallbackScope, durableTarget)) {
-      // The first fallback is still running or already sent its one guarded
-      // Ctrl-C. A repeated `/stop` is an idempotent acknowledgement and must
-      // never issue a second durable interrupt.
-      durableStopAlreadyRequested = true;
-    } else {
+    // A plain `/stop` targets whatever is running: the side first (it is the
+    // visible conversation) and then the main thread's goal. An explicit
+    // side-only stop never falls through to main.
+    const explicitSide = sideOnly || ctx.lifecycleTarget === 'side';
+    const durableTargets: Array<'side' | 'main'> = explicitSide
+      ? ['side']
+      : durableSideDetected
+        ? ['side', 'main']
+        : ['main'];
+    for (const durableTarget of durableTargets) {
+      if (!ctx.activeRuns.beginDurableInterrupt(fallbackScope, durableTarget)) {
+        // The first fallback is still running or already sent its one guarded
+        // Ctrl-C. A repeated `/stop` is an idempotent acknowledgement and must
+        // never issue a second durable interrupt.
+        durableStopAlreadyRequested = true;
+        continue;
+      }
       try {
-        stoppedDurableTerminal = await ctx.agent.tmux.interrupt(fallbackScope, fallbackCwd, {
+        const stopped = await ctx.agent.tmux.interrupt(fallbackScope, fallbackCwd, {
           sideOnly: durableTarget === 'side',
         });
-        if (stoppedDurableTerminal) {
+        if (stopped) {
+          stoppedDurableTerminal = true;
           effectiveScope = fallbackScope;
           if (durableTarget === 'side') stoppedSide = true;
           else stoppedMain = true;

@@ -85,6 +85,9 @@ export function isTransportUnavailable(error: unknown): boolean {
     .test(message);
 }
 
+export { isMainScopedNativeCommand } from '../native-commands';
+import { isMainScopedNativeCommand } from '../native-commands';
+
 /**
  * Open a `/btw` side conversation, rebuilding the structured session once when
  * the App Server channel turns out to be unusable. `thread/fork` that was
@@ -262,8 +265,16 @@ export class StructuredAdapter implements AgentAdapter {
       },
       interrupt: async (scope, cwd, options) => {
         const current = this.sessions.get(scope);
-        if (options?.sideOnly && !current?.side) return false;
-        if (current) { await (current.side ?? current.main).interrupt(); return true; }
+        if (current) {
+          const sideOnly = options?.sideOnly === true;
+          // `/stop` must reach the main thread's goal; only an explicit
+          // side-only stop (or a side-scoped picker) targets the side.
+          const target = sideOnly ? current.side : current.main;
+          if (!target) return false;
+          const acted = await target.interrupt();
+          return acted !== false;
+        }
+        if (options?.sideOnly) return false;
         const binding = this.bindings.get(scope);
         if (binding) return this.interruptBinding(binding);
         if (this.id !== 'codex' || !cwd) return false;
@@ -532,7 +543,7 @@ export class StructuredAdapter implements AgentAdapter {
       const loaded = await rpc.request('thread/loaded/list', {});
       if (!Array.isArray(loaded.data) || !loaded.data.includes(binding.threadId)) return false;
       const session = new CodexStructuredSession(binding.threadId, binding.endpoint, rpc);
-      try { await session.syncState(); await session.interrupt(); return true; } finally { await session.close(); }
+      try { return await session.interrupt(); } finally { await session.close(); }
     } finally { rpc.close(); }
   }
   private async connectExisting(endpoint: string): Promise<RpcClient> {
@@ -572,7 +583,9 @@ export class StructuredAdapter implements AgentAdapter {
   structuredReady = (scope: string): boolean => this.sessions.has(scope);
   structuredQuestion = (scope: string): string | undefined => {
     const current = this.sessions.get(scope);
-    return (current?.side ?? current?.main)?.freeTextRequest();
+    // Ask both sessions: a `/model` picker lives on main even while a side is
+    // open, so consulting only the side would misroute the answer.
+    return current?.side?.freeTextRequest() ?? current?.main.freeTextRequest();
   };
   run(options: AgentRunOptions): AgentRun { return this.createRun(options, false); }
   runSide(options: AgentRunOptions): AgentRun { return this.createRun(options, true); }
@@ -601,7 +614,12 @@ export class StructuredAdapter implements AgentAdapter {
           const requestId = /^\/answer\s+(\S+)/.exec(options.prompt)?.[1];
           const controlTarget = requestId
             ? [current.main, current.side].find(session => session?.hasRequest(requestId))
-            : current.side ?? current.main;
+            : isMainScopedNativeCommand(options.prompt)
+              // A side conversation is ephemeral and cannot carry goals or the
+              // main thread's model; state-changing commands always target the
+              // main session even while a side is open.
+              ? current.main
+              : current.side ?? current.main;
           if (!controlTarget) throw new Error('选择请求已失效，请使用最新卡片');
           target = controlTarget;
         }

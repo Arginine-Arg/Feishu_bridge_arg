@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.6.5",
+  version: "1.6.6",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -6356,6 +6356,11 @@ function nonEmpty2(value) {
   return trimmed === "" ? void 0 : trimmed;
 }
 
+// src/agent/native-commands.ts
+function isMainScopedNativeCommand(prompt) {
+  return /^\/(?:goal|model|stop|compact)(?:\s|$)/iu.test(prompt.trim());
+}
+
 // src/agent/terminal-text.ts
 function novelTerminalTextSuffix(delivered, candidate) {
   if (!candidate || !delivered) return candidate;
@@ -8898,6 +8903,15 @@ var LiveTerminalSession = class {
           }
           acceptingOutput = true;
           setPhase("submitted");
+          if (commandMode && !sideMode && !sideExitMode && this.sideConversationConfirmed && isMainScopedNativeCommand(prompt)) {
+            const exited = await this.exitSideConversation(
+              writeTurn,
+              () => !done && !interruption.requested && !interruption.detached,
+              sideOwnershipConfirmed
+            );
+            if (done || interruption.requested || interruption.detached) break submitTurn;
+            if (exited) push({ type: "system", cwd, sideConversation: "exited" });
+          }
           if (sideExitMode) {
             const exitedSideConversation = await this.exitSideConversation(
               writeTurn,
@@ -13425,13 +13439,48 @@ ${options.prompt}` : options.prompt }];
       this.acknowledgements.delete(key);
     }
   }
+  /**
+   * Stop whatever this thread is doing and report whether anything was
+   * actually stopped. The local goal/turn bookkeeping can be stale (a side
+   * conversation, a reconnect, or a goal started by the native TUI), so the
+   * server is consulted before deciding that a `/stop` had nothing to do.
+   */
   async interrupt() {
+    let acted = false;
+    try {
+      await this.syncState();
+    } catch {
+    }
     if (this.goalActive) {
       await this.rpc.request("thread/goal/set", { threadId: this.id, status: "paused" });
       this.goalActive = false;
+      acted = true;
+    } else {
+      try {
+        const goal = await this.rpc.request("thread/goal/get", { threadId: this.id });
+        if (goal.goal?.status === "active") {
+          await this.rpc.request("thread/goal/set", { threadId: this.id, status: "paused" });
+          acted = true;
+        }
+      } catch {
+      }
     }
-    if (this.turnId) await this.rpc.request("turn/interrupt", { threadId: this.id, turnId: this.turnId });
-    else this.finish();
+    if (this.turnId) {
+      await this.rpc.request("turn/interrupt", { threadId: this.id, turnId: this.turnId });
+      acted = true;
+    } else {
+      try {
+        const turns = await this.rpc.request("thread/turns/list", { threadId: this.id, limit: 1, sortDirection: "desc" });
+        const active2 = turns.data?.find((turn) => turn.status === "inProgress");
+        if (active2) {
+          await this.rpc.request("turn/interrupt", { threadId: this.id, turnId: active2.id });
+          acted = true;
+        }
+      } catch {
+      }
+    }
+    if (!acted) this.finish();
+    return acted;
   }
   diagnostics() {
     return { phase: this.goalActive && this.phase === "idle" ? "busy" : this.phase, inputState: this.turnId || this.goalActive ? "submitted" : "empty", retryCount: 0 };
@@ -13439,7 +13488,9 @@ ${options.prompt}` : options.prompt }];
   async syncState() {
     try {
       const result = await this.rpc.request("thread/goal/get", { threadId: this.id });
-      this.goalActive = result.goal?.status === "active";
+      const status = result.goal?.status;
+      if (!result.goal) this.goalActive = false;
+      else if (typeof status === "string") this.goalActive = status === "active";
     } catch {
     }
     try {
@@ -13656,6 +13707,13 @@ ${JSON.stringify(input, null, 2)}`,
   }
   async command(input) {
     if (input === "/status") return [textEvent(JSON.stringify({ sessionId: this.id, phase: this.phase, model: this.model }, null, 2))];
+    if (/^\/stop(?:\s|$)/iu.test(input.trim())) {
+      await this.interrupt();
+      return [];
+    }
+    if (/^\/goal(?:\s|$)/iu.test(input.trim())) {
+      return [textEvent("Claude \u540E\u7AEF\u6CA1\u6709 goal \u6A21\u5F0F\uFF1B\u8BE5\u547D\u4EE4\u672A\u53D1\u9001\u7ED9\u6A21\u578B\u3002\u53EF\u7528 /btw \u5F00\u542F\u4FA7\u5BF9\u8BDD\u6216\u76F4\u63A5\u628A\u76EE\u6807\u5199\u6210\u4E00\u6761\u4EFB\u52A1\u3002")];
+    }
     if (input === "/model") {
       const models = await this.query.supportedModels();
       return [this.menu("\u9009\u62E9 Claude \u6A21\u578B", models.map((model) => ({ label: model.displayName, action: async () => {
@@ -13714,8 +13772,15 @@ ${JSON.stringify(input, null, 2)}`,
     this.commandEvents.push(...await request.answer(value));
     this.phase = this.pending.size ? "picker" : this.complete ? "busy" : "idle";
   }
+  /**
+   * Interrupt the running work. The SDK exposes no "was anything running"
+   * signal, so a busy session reports `true` and an idle one reports `false`
+   * to keep `/stop` honest without inventing a result.
+   */
   async interrupt() {
+    const wasBusy = this.phase === "busy";
     await this.query.interrupt();
+    return wasBusy;
   }
   askQuestions(id, input, signal) {
     const questions = input.questions;
@@ -14186,11 +14251,14 @@ var StructuredAdapter = class {
       },
       interrupt: async (scope, cwd, options2) => {
         const current = this.sessions.get(scope);
-        if (options2?.sideOnly && !current?.side) return false;
         if (current) {
-          await (current.side ?? current.main).interrupt();
-          return true;
+          const sideOnly = options2?.sideOnly === true;
+          const target = sideOnly ? current.side : current.main;
+          if (!target) return false;
+          const acted = await target.interrupt();
+          return acted !== false;
         }
+        if (options2?.sideOnly) return false;
         const binding = this.bindings.get(scope);
         if (binding) return this.interruptBinding(binding);
         if (this.id !== "codex" || !cwd) return false;
@@ -14477,9 +14545,7 @@ var StructuredAdapter = class {
       if (!Array.isArray(loaded.data) || !loaded.data.includes(binding.threadId)) return false;
       const session = new CodexStructuredSession(binding.threadId, binding.endpoint, rpc);
       try {
-        await session.syncState();
-        await session.interrupt();
-        return true;
+        return await session.interrupt();
       } finally {
         await session.close();
       }
@@ -14521,7 +14587,7 @@ var StructuredAdapter = class {
   structuredReady = (scope) => this.sessions.has(scope);
   structuredQuestion = (scope) => {
     const current = this.sessions.get(scope);
-    return (current?.side ?? current?.main)?.freeTextRequest();
+    return current?.side?.freeTextRequest() ?? current?.main.freeTextRequest();
   };
   run(options) {
     return this.createRun(options, false);
@@ -14553,7 +14619,7 @@ var StructuredAdapter = class {
         let target = current.main;
         if (!side && options.liveInputMode) {
           const requestId = /^\/answer\s+(\S+)/.exec(options.prompt)?.[1];
-          const controlTarget = requestId ? [current.main, current.side].find((session) => session?.hasRequest(requestId)) : current.side ?? current.main;
+          const controlTarget = requestId ? [current.main, current.side].find((session) => session?.hasRequest(requestId)) : isMainScopedNativeCommand(options.prompt) ? current.main : current.side ?? current.main;
           if (!controlTarget) throw new Error("\u9009\u62E9\u8BF7\u6C42\u5DF2\u5931\u6548\uFF0C\u8BF7\u4F7F\u7528\u6700\u65B0\u5361\u7247");
           target = controlTarget;
         }
@@ -18692,6 +18758,14 @@ async function handleStop(args, ctx) {
         stoppedMain = ctx.activeRuns.interruptMain(mainScope);
         effectiveScope = mainScope;
       }
+    } else {
+      const mainScope = selectCandidate((candidate) => Boolean(ctx.activeRuns.get(candidate)));
+      if (mainScope && mainScope !== effectiveScope) {
+        ctx.activeRuns.advanceStopGeneration(mainScope, "main");
+        generationAdvanced = true;
+        stoppedMain = ctx.activeRuns.interruptMain(mainScope);
+        effectiveScope = mainScope;
+      }
     }
   }
   if (!generationAdvanced && !stoppedSide && !stoppedMain && candidateScopes.length > 0) {
@@ -18706,15 +18780,19 @@ async function handleStop(args, ctx) {
         ctx.agent.tmux.diagnostics(fallbackScope, fallbackCwd)
       );
     }
-    const durableTarget = sideOnly || ctx.lifecycleTarget === "side" || durableSideDetected ? "side" : "main";
-    if (!ctx.activeRuns.beginDurableInterrupt(fallbackScope, durableTarget)) {
-      durableStopAlreadyRequested = true;
-    } else {
+    const explicitSide = sideOnly || ctx.lifecycleTarget === "side";
+    const durableTargets = explicitSide ? ["side"] : durableSideDetected ? ["side", "main"] : ["main"];
+    for (const durableTarget of durableTargets) {
+      if (!ctx.activeRuns.beginDurableInterrupt(fallbackScope, durableTarget)) {
+        durableStopAlreadyRequested = true;
+        continue;
+      }
       try {
-        stoppedDurableTerminal = await ctx.agent.tmux.interrupt(fallbackScope, fallbackCwd, {
+        const stopped = await ctx.agent.tmux.interrupt(fallbackScope, fallbackCwd, {
           sideOnly: durableTarget === "side"
         });
-        if (stoppedDurableTerminal) {
+        if (stopped) {
+          stoppedDurableTerminal = true;
           effectiveScope = fallbackScope;
           if (durableTarget === "side") stoppedSide = true;
           else stoppedMain = true;
@@ -20220,6 +20298,11 @@ function liveInputModeForMessage(msg) {
   if (!msg.raw || typeof msg.raw !== "object" || Array.isArray(msg.raw)) return void 0;
   const mode = msg.raw[LIVE_INPUT_MODE_RAW_KEY];
   return mode === "command" || mode === "control" || mode === "side" || mode === "side-exit" ? mode : void 0;
+}
+function contentWithoutLeadingMention(content, mentionedBot) {
+  if (!mentionedBot) return content;
+  const match = /^\s*@[^\s/]+\s+(\/[\s\S]*)$/u.exec(content);
+  return match ? match[1].trimStart() : content;
 }
 
 // src/bot/session-catalog-identity.ts
@@ -25072,7 +25155,7 @@ async function intakeMessage(deps) {
     workspaces,
     activeRuns,
     pending,
-    msg,
+    msg: rawMsg,
     controls,
     chatModeCache,
     logThreadModeOverride,
@@ -25083,6 +25166,8 @@ async function intakeMessage(deps) {
     allowLocalFileRoot,
     inboundMessages
   } = deps;
+  const normalizedContent = contentWithoutLeadingMention(rawMsg.content, rawMsg.mentionedBot);
+  const msg = normalizedContent === rawMsg.content ? rawMsg : { ...rawMsg, content: normalizedContent };
   const earlyRoute = rewriteAgentCommandMessage(msg, controls.profileConfig.agentKind);
   const isImmediateStop = /^\/stop(?:\s|$)/iu.test(earlyRoute.msg.content.trim());
   if (!await inboundMessages.claim(msg.messageId, { waitForPersist: !isImmediateStop })) {

@@ -5,6 +5,7 @@ import { dirname, join, resolve } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
 import { log } from '../core/logger';
 import { codexCredentialCommandPrefix } from './codex/credentials';
+import { isMainScopedNativeCommand } from './native-commands';
 import {
   mergeProcessEnv,
   spawnProcess,
@@ -1455,6 +1456,25 @@ export class LiveTerminalSession {
         }
         acceptingOutput = true;
         setPhase('submitted');
+        if (
+          commandMode &&
+          !sideMode &&
+          !sideExitMode &&
+          this.sideConversationConfirmed &&
+          isMainScopedNativeCommand(prompt)
+        ) {
+          // A goal/model/stop command belongs to the main thread. Sending it
+          // into an open side conversation would make the native TUI apply it
+          // to the ephemeral side (where goals are rejected), so leave the side
+          // first — the same expectation the structured backend implements.
+          const exited = await this.exitSideConversation(
+            writeTurn,
+            () => !done && !interruption.requested && !interruption.detached,
+            sideOwnershipConfirmed,
+          );
+          if (done || interruption.requested || interruption.detached) break submitTurn;
+          if (exited) push({ type: 'system', cwd, sideConversation: 'exited' });
+        }
         if (sideExitMode) {
           const exitedSideConversation = await this.exitSideConversation(
             writeTurn,

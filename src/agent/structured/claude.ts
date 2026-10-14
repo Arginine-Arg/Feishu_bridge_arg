@@ -137,6 +137,12 @@ export class ClaudeStructuredSession implements StructuredSession {
   }
   async command(input: string): Promise<AgentEvent[]> {
     if (input === '/status') return [textEvent(JSON.stringify({ sessionId: this.id, phase: this.phase, model: this.model }, null, 2))];
+    if (/^\/stop(?:\s|$)/iu.test(input.trim())) { await this.interrupt(); return []; }
+    if (/^\/goal(?:\s|$)/iu.test(input.trim())) {
+      // Claude has no goal mode; answer explicitly instead of typing the text
+      // into the conversation or failing the whole turn.
+      return [textEvent('Claude 后端没有 goal 模式；该命令未发送给模型。可用 /btw 开启侧对话或直接把目标写成一条任务。')];
+    }
     if (input === '/model') {
       const models = await this.query.supportedModels();
       return [this.menu('选择 Claude 模型', models.map(model => ({ label: model.displayName, action: async () => { await this.query.setModel(model.value); this.model = model.value; return [textEvent(`模型已设置为 ${model.value}`)]; } })))];
@@ -175,7 +181,16 @@ export class ClaudeStructuredSession implements StructuredSession {
     this.pending.delete(id); this.menus.delete(id); this.commandEvents.push(...await request.answer(value));
     this.phase = this.pending.size ? 'picker' : this.complete ? 'busy' : 'idle';
   }
-  async interrupt(): Promise<void> { await this.query.interrupt(); }
+  /**
+   * Interrupt the running work. The SDK exposes no "was anything running"
+   * signal, so a busy session reports `true` and an idle one reports `false`
+   * to keep `/stop` honest without inventing a result.
+   */
+  async interrupt(): Promise<boolean> {
+    const wasBusy = this.phase === 'busy';
+    await this.query.interrupt();
+    return wasBusy;
+  }
   private askQuestions(id: string, input: Record<string, unknown>, signal: AbortSignal): Promise<PermissionResult> {
     const questions = input.questions as Wire[];
     if (!questions.length) return Promise.resolve({ behavior: 'deny', message: '没有可回答的问题' });

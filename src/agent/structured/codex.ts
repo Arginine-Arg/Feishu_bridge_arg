@@ -262,14 +262,54 @@ export class CodexStructuredSession implements StructuredSession {
       });
     } finally { if (timer) clearTimeout(timer); this.acknowledgements.delete(key); }
   }
-  async interrupt(): Promise<void> {
-    if (this.goalActive) { await this.rpc.request('thread/goal/set', { threadId: this.id, status: 'paused' }); this.goalActive = false; }
-    if (this.turnId) await this.rpc.request('turn/interrupt', { threadId: this.id, turnId: this.turnId });
-    else this.finish();
+  /**
+   * Stop whatever this thread is doing and report whether anything was
+   * actually stopped. The local goal/turn bookkeeping can be stale (a side
+   * conversation, a reconnect, or a goal started by the native TUI), so the
+   * server is consulted before deciding that a `/stop` had nothing to do.
+   */
+  async interrupt(): Promise<boolean> {
+    let acted = false;
+    try { await this.syncState(); } catch { /* keep local state */ }
+    if (this.goalActive) {
+      await this.rpc.request('thread/goal/set', { threadId: this.id, status: 'paused' });
+      this.goalActive = false;
+      acted = true;
+    } else {
+      try {
+        const goal = await this.rpc.request('thread/goal/get', { threadId: this.id });
+        if (goal.goal?.status === 'active') {
+          await this.rpc.request('thread/goal/set', { threadId: this.id, status: 'paused' });
+          acted = true;
+        }
+      } catch { /* older servers may not expose goals */ }
+    }
+    if (this.turnId) {
+      await this.rpc.request('turn/interrupt', { threadId: this.id, turnId: this.turnId });
+      acted = true;
+    } else {
+      try {
+        const turns = await this.rpc.request('thread/turns/list', { threadId: this.id, limit: 1, sortDirection: 'desc' });
+        const active = turns.data?.find((turn: Wire) => turn.status === 'inProgress');
+        if (active) {
+          await this.rpc.request('turn/interrupt', { threadId: this.id, turnId: active.id });
+          acted = true;
+        }
+      } catch { /* an unmaterialized thread has no turns to list */ }
+    }
+    if (!acted) this.finish();
+    return acted;
   }
   diagnostics(): LiveSessionDiagnostics { return { phase: this.goalActive && this.phase === 'idle' ? 'busy' : this.phase, inputState: this.turnId || this.goalActive ? 'submitted' : 'empty', retryCount: 0 }; }
   async syncState(): Promise<void> {
-    try { const result = await this.rpc.request('thread/goal/get', { threadId: this.id }); this.goalActive = result.goal?.status === 'active'; }
+    try {
+      const result = await this.rpc.request('thread/goal/get', { threadId: this.id });
+      const status = result.goal?.status;
+      // A response without a status must not clear a goal that is active in
+      // this session; only an explicit absent goal or a concrete status does.
+      if (!result.goal) this.goalActive = false;
+      else if (typeof status === 'string') this.goalActive = status === 'active';
+    }
     catch { /* Older servers may lack goals; ordinary turns remain available. */ }
     try {
       const result = await this.rpc.request('thread/turns/list', { threadId: this.id, limit: 1, sortDirection: 'desc' });

@@ -102,6 +102,7 @@ import { ArtifactBroker } from './artifact-broker';
 import { InboundMessageLedger } from './inbound-message-ledger';
 import { RunEventGate, SerializedDelivery } from './run-delivery';
 import {
+  contentWithoutLeadingMention,
   isForceLiveAgentCommandMessage,
   isNativeAgentCommandMessage,
   liveInputModeForMessage,
@@ -762,7 +763,7 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     workspaces,
     activeRuns,
     pending,
-    msg,
+    msg: rawMsg,
     controls,
     chatModeCache,
     logThreadModeOverride,
@@ -773,6 +774,10 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     allowLocalFileRoot,
     inboundMessages,
   } = deps;
+  // A leading `@bot` token (unmatched mention or plain-text mention) must not
+  // hide a slash command; every downstream classifier sees the cleaned text.
+  const normalizedContent = contentWithoutLeadingMention(rawMsg.content, rawMsg.mentionedBot);
+  const msg = normalizedContent === rawMsg.content ? rawMsg : { ...rawMsg, content: normalizedContent };
   // `/stop` is an emergency control path. Install its duplicate claim in
   // memory immediately, but do not wait for a potentially slow network-file
   // persistence flush before handling the command.
