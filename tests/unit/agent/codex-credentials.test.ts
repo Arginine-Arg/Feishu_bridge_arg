@@ -36,6 +36,7 @@ describe('codex config summary parsing', () => {
   it('reads the active provider, base url, env key, and bearer token', () => {
     const summary = parseCodexConfigSummary(thirdPartyConfig);
 
+    expect(summary.model).toBeUndefined();
     expect(summary.modelProvider).toBe('deepseek');
     expect(summary.preferredAuthMethod).toBe('apikey');
     expect(summary.providers.get('deepseek')).toEqual({
@@ -48,15 +49,18 @@ describe('codex config summary parsing', () => {
   it('ignores comments and honors the selected profile override', () => {
     const summary = parseCodexConfigSummary(`
 model_provider = "openai" # default stays official
+model = "gpt-main"
 profile = "work"
 
 [profiles.work]
+model = "vendor-main"
 model_provider = "deepseek"
 
 [model_providers.deepseek]
 base_url = "https://third-party.example.com/v1" # inline comment
 `);
 
+    expect(summary.model).toBe('vendor-main');
     expect(summary.modelProvider).toBe('deepseek');
     expect(summary.providers.get('deepseek')?.baseUrl).toBe('https://third-party.example.com/v1');
   });

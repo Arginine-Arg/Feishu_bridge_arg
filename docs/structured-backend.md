@@ -108,6 +108,13 @@ Use the intended proxy environment before first starting its server. Shared
 thread context does not imply that idle terminal-originated output is always
 pushed unsolicited to Feishu; the Bridge relay forwards its active requests.
 
+Before every `thread/resume`, the structured adapter reads the active
+`$CODEX_HOME/config.toml` and supplies its current `modelProvider` and `model`
+unless the request already carries explicit overrides. This rebinds a saved
+thread to the active provider without changing its message history. It also
+handles threads created under an older `cc-switch` provider id after the live
+configuration has moved to the stable `custom` id.
+
 Claude uses the official Agent SDK streaming-input mode with one persistent
 Claude process per scope. The default `claude_code` preset and normal user/project
 configuration are retained. No Bridge system/developer prompt, summarizer,

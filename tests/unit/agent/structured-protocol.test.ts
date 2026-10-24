@@ -11,6 +11,27 @@ import { join } from 'node:path';
 import { sendStructuredCard } from '../../../src/card/structured-interaction';
 
 describe('structured transport contracts', () => {
+  it('captures the App Server CODEX_HOME used to resolve resume overrides', async () => {
+    const server = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+    await new Promise<void>(resolve => server.once('listening', resolve));
+    const address = server.address() as { port: number };
+    server.on('connection', socket => socket.on('message', data => {
+      const message = JSON.parse(data.toString());
+      if (message.id === 1) {
+        socket.send(JSON.stringify({ id: 1, result: { codexHome: '/tmp/codex-home' } }));
+      }
+    }));
+    const client = await RpcClient.connect(`ws://127.0.0.1:${address.port}`);
+    try {
+      await client.initialize();
+      expect(client.codexHome).toBe('/tmp/codex-home');
+    } finally {
+      client.close();
+      for (const socket of server.clients) socket.terminate();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+  });
+
   it('reconciles a timed-out legacy resume with read-only loaded checks and never retries it', async () => {
     let probes = 0;
     const request = vi.fn(async (method: string) => {

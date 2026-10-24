@@ -20,6 +20,11 @@ export interface CodexProviderSummary {
   preferredAuthMethod?: string;
 }
 
+export interface CodexResumeDefaults {
+  modelProvider: string;
+  model?: string;
+}
+
 export function providerSummaryFromConfig(config: CodexConfigSummary): CodexProviderSummary {
   const providerId = (config.modelProvider ?? '').trim() || undefined;
   const provider = providerId ? config.providers.get(providerId) : undefined;
@@ -49,5 +54,31 @@ export function resolveCodexProviderSync(codexHome: string | undefined): CodexPr
     );
   } catch {
     return { official: true };
+  }
+}
+
+/**
+ * The provider/model pair a thread should use when it is resumed under the
+ * current Codex configuration.
+ *
+ * Codex persists the provider id in each thread. App Server tries to resolve
+ * that historical id before it can apply the current config, so a thread that
+ * was created under `deepseek` fails to resume after `cc-switch` switches to
+ * the stable third-party id `custom`. `thread/resume` accepts `modelProvider`
+ * and `model` overrides; supplying both keeps the existing history while
+ * rebinding subsequent turns to the active provider.
+ */
+export function resolveCodexResumeDefaults(
+  codexHome: string | undefined,
+): CodexResumeDefaults {
+  const home = codexHome ?? defaultCodexHome();
+  if (!home) return { modelProvider: 'openai' };
+  try {
+    const config = parseCodexConfigSummary(readFileSync(join(home, 'config.toml'), 'utf8'));
+    const modelProvider = (config.modelProvider ?? '').trim() || 'openai';
+    const model = (config.model ?? '').trim() || undefined;
+    return { modelProvider, ...(model ? { model } : {}) };
+  } catch {
+    return { modelProvider: 'openai' };
   }
 }

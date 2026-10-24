@@ -422,6 +422,8 @@ arg-bridge resolves this before every Codex run:
 - Injected values reach all bridge launch paths: turn-mode `codex exec`, live tmux panes (including panes created later and panes replaced after Ctrl-C), migrated structured panes, and `arg-bridge native`.
 - If a third-party provider is selected and no token can be found, the bridge logs `codex-credential-missing` and continues; the provider error is left for Codex to report rather than failing the bridge preflight.
 
+Codex also persists a provider id on every thread. App Server resolves that historical id before it can apply the current configuration, so resuming a thread can fail with ``Model provider `<old-id>` not found`` after switching providers. Structured and native resume now read the active `$CODEX_HOME/config.toml` and pass its current `modelProvider` and `model` to `thread/resume` unless the caller supplied explicit overrides. The conversation history is preserved and subsequent turns use the active provider.
+
 A shell wrapper is still useful for terminals you start yourself (`arg-bridge native` in your own shell, plain `codex`), but it is not required by the bridge. Keep `OPENAI_API_KEY` out of systemd units and service environments: if you need a fixed token there, prefer `experimental_bearer_token` in the Codex config, which the bridge reads directly.
 
 #### Third-party providers never inherit a local proxy

@@ -6264,6 +6264,7 @@ function parseCodexConfigSummary(raw) {
   const selectedProfile = nonEmpty2(topLevel.get("profile"));
   const profile2 = selectedProfile ? profiles.get(selectedProfile) : void 0;
   return {
+    model: profile2?.get("model") ?? topLevel.get("model"),
     modelProvider: profile2?.get("model_provider") ?? topLevel.get("model_provider"),
     preferredAuthMethod: topLevel.get("preferred_auth_method") ?? profile2?.get("preferred_auth_method"),
     providers
@@ -12033,6 +12034,18 @@ function resolveCodexProviderSync(codexHome) {
     return { official: true };
   }
 }
+function resolveCodexResumeDefaults(codexHome) {
+  const home = codexHome ?? defaultCodexHome();
+  if (!home) return { modelProvider: "openai" };
+  try {
+    const config = parseCodexConfigSummary(readFileSync5(join22(home, "config.toml"), "utf8"));
+    const modelProvider = (config.modelProvider ?? "").trim() || "openai";
+    const model = (config.model ?? "").trim() || void 0;
+    return { modelProvider, ...model ? { model } : {} };
+  } catch {
+    return { modelProvider: "openai" };
+  }
+}
 
 // src/agent/codex/jsonl.ts
 var CodexJsonlTranslator = class {
@@ -12763,6 +12776,7 @@ var RpcClient = class _RpcClient extends EventEmitter2 {
   nextId = 1;
   failure;
   pending = /* @__PURE__ */ new Map();
+  codexHome;
   static async connect(url) {
     const socket = new WebSocket(url, { handshakeTimeout: 5e3, maxPayload: 32 * 1024 * 1024, perMessageDeflate: false });
     const client = new _RpcClient(socket);
@@ -12786,7 +12800,8 @@ var RpcClient = class _RpcClient extends EventEmitter2 {
     return this.failure;
   }
   async initialize() {
-    await this.request("initialize", { clientInfo: { name: "arg_bridge", version: "structured-preview" }, capabilities: { experimentalApi: true } });
+    const result = await this.request("initialize", { clientInfo: { name: "arg_bridge", version: "structured-preview" }, capabilities: { experimentalApi: true } });
+    if (typeof result.codexHome === "string") this.codexHome = result.codexHome;
     this.notify("initialized", {});
   }
   request(method, params, timeoutMs = 3e4) {
@@ -13070,14 +13085,18 @@ function isRemotePermissionOverrideError(error) {
   return /permission overrides are not supported/i.test(message);
 }
 async function resumeCodexThread(rpc, params, overrides, timeoutMs = 3e4) {
+  const defaults = resolveCodexResumeDefaults(rpc.codexHome);
+  const resumeParams = { ...defaults, ...params };
+  if (params.modelProvider === void 0) resumeParams.modelProvider = defaults.modelProvider;
+  if (params.model === void 0 && defaults.model !== void 0) resumeParams.model = defaults.model;
   if (Object.keys(overrides).length === 0) {
-    return rpc.request("thread/resume", params, timeoutMs);
+    return rpc.request("thread/resume", resumeParams, timeoutMs);
   }
   try {
-    return await rpc.request("thread/resume", { ...params, ...overrides }, timeoutMs);
+    return await rpc.request("thread/resume", { ...resumeParams, ...overrides }, timeoutMs);
   } catch (error) {
     if (!isRemotePermissionOverrideError(error)) throw error;
-    return rpc.request("thread/resume", params, timeoutMs);
+    return rpc.request("thread/resume", resumeParams, timeoutMs);
   }
 }
 function proxyEnvironment(env) {

@@ -426,6 +426,8 @@ arg-bridge 会在每次 Codex 运行前处理这个问题：
 - 注入对 bridge 的所有启动路径都生效：turn 模式的 `codex exec`、live tmux pane（包括之后新建的 pane 和 Ctrl-C 后重建的 pane）、迁移后的 structured pane，以及 `arg-bridge native`。
 - 如果确认是第三方 provider 但找不到任何 token，bridge 只记录 `codex-credential-missing` 并继续启动，把报错留给 Codex，而不是直接让 preflight 失败。
 
+Codex 还会把 provider id 固化到每个 thread 中。App Server 在加载旧 thread 时会先解析这个历史 id，所以切换 provider 后直接 resume 可能报 ``Model provider `<旧 id>` not found``。现在 structured/native resume 会读取当前 `$CODEX_HOME/config.toml`，在调用方没有显式覆盖时把当前的 `modelProvider` 和 `model` 传给 `thread/resume`。原会话历史保持不变，后续回合使用当前 provider。
+
 shell 包装函数对**你自己开的终端**（自己 shell 里的 `arg-bridge native`、直接运行 `codex`）仍然有用，但 bridge 不再依赖它。不要把 `OPENAI_API_KEY` 写进 systemd unit 或服务环境；如果那里需要固定 token，建议写在 Codex 配置的 `experimental_bearer_token` 里，bridge 会直接读取。
 
 #### 第三方 provider 不继承本机代理

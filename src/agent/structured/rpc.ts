@@ -8,6 +8,7 @@ export class RpcClient extends EventEmitter {
   private nextId = 1;
   private failure?: Error;
   private pending = new Map<number, { resolve(value: Wire): void; reject(error: Error): void; timer: NodeJS.Timeout }>();
+  codexHome?: string;
   private constructor(private readonly socket: WebSocket) {
     super();
     socket.on('message', data => {
@@ -50,7 +51,8 @@ export class RpcClient extends EventEmitter {
   /** Last failure, for diagnostics. */
   get failureReason(): Error | undefined { return this.failure; }
   async initialize(): Promise<void> {
-    await this.request('initialize', { clientInfo: { name: 'arg_bridge', version: 'structured-preview' }, capabilities: { experimentalApi: true } });
+    const result = await this.request('initialize', { clientInfo: { name: 'arg_bridge', version: 'structured-preview' }, capabilities: { experimentalApi: true } });
+    if (typeof result.codexHome === 'string') this.codexHome = result.codexHome;
     this.notify('initialized', {});
   }
   request(method: string, params: Wire, timeoutMs = 30000): Promise<Wire> {

@@ -1,4 +1,5 @@
 import type { CodexSandboxMode } from '../../config/permissions';
+import { resolveCodexResumeDefaults } from '../codex/provider';
 import type { RpcClient, Wire } from './rpc';
 
 /**
@@ -86,14 +87,18 @@ export async function resumeCodexThread(
   overrides: Wire,
   timeoutMs = 30_000,
 ): Promise<Wire> {
+  const defaults = resolveCodexResumeDefaults(rpc.codexHome);
+  const resumeParams: Wire = { ...defaults, ...params };
+  if (params.modelProvider === undefined) resumeParams.modelProvider = defaults.modelProvider;
+  if (params.model === undefined && defaults.model !== undefined) resumeParams.model = defaults.model;
   if (Object.keys(overrides).length === 0) {
-    return rpc.request('thread/resume', params, timeoutMs);
+    return rpc.request('thread/resume', resumeParams, timeoutMs);
   }
   try {
-    return await rpc.request('thread/resume', { ...params, ...overrides }, timeoutMs);
+    return await rpc.request('thread/resume', { ...resumeParams, ...overrides }, timeoutMs);
   } catch (error) {
     if (!isRemotePermissionOverrideError(error)) throw error;
-    return rpc.request('thread/resume', params, timeoutMs);
+    return rpc.request('thread/resume', resumeParams, timeoutMs);
   }
 }
 

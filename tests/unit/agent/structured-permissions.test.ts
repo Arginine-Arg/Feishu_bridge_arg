@@ -1,4 +1,7 @@
-import { describe, expect, it, vi } from 'vitest';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   codexRemotePermissionArgs,
   codexRemoteResumeArgs,
@@ -9,6 +12,12 @@ import {
   resumeCodexThread,
 } from '../../../src/agent/structured/permissions';
 import type { RpcClient } from '../../../src/agent/structured/rpc';
+
+const cleanups: Array<() => Promise<void>> = [];
+
+afterEach(async () => {
+  await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
+});
 
 describe('structured Codex permissions', () => {
   it('maps full access to the App Server YOLO contract', () => {
@@ -59,10 +68,11 @@ describe('structured Codex permissions', () => {
   });
 
   it('retries a rejected remote resume once without permission overrides', async () => {
+    const home = await writeCodexHome();
     const request = vi.fn()
       .mockRejectedValueOnce(new Error('Permission overrides are not supported when resuming a remote task.'))
       .mockResolvedValueOnce({ thread: { id: 'thread-1' } });
-    const rpc = { request } as unknown as RpcClient;
+    const rpc = { request, codexHome: home } as unknown as RpcClient;
     const result = await resumeCodexThread(
       rpc,
       { threadId: 'thread-1', cwd: '/repo' },
@@ -71,16 +81,50 @@ describe('structured Codex permissions', () => {
     );
     expect(result.thread.id).toBe('thread-1');
     expect(request).toHaveBeenNthCalledWith(1, 'thread/resume', {
-      threadId: 'thread-1', cwd: '/repo', sandbox: 'danger-full-access', approvalPolicy: 'never',
+      threadId: 'thread-1', cwd: '/repo', modelProvider: 'custom', model: 'gpt-current',
+      sandbox: 'danger-full-access', approvalPolicy: 'never',
     }, 12_345);
     expect(request).toHaveBeenNthCalledWith(2, 'thread/resume', {
-      threadId: 'thread-1', cwd: '/repo',
+      threadId: 'thread-1', cwd: '/repo', modelProvider: 'custom', model: 'gpt-current',
     }, 12_345);
+  });
+
+  it('uses the active provider and model when a historical thread id is unavailable', async () => {
+    const home = await writeCodexHome();
+    const request = vi.fn().mockResolvedValue({ thread: { id: 'thread-old' } });
+    const rpc = { request, codexHome: home } as unknown as RpcClient;
+
+    await resumeCodexThread(rpc, { threadId: 'thread-old', cwd: '/repo' }, {});
+
+    expect(request).toHaveBeenCalledWith('thread/resume', {
+      threadId: 'thread-old',
+      cwd: '/repo',
+      modelProvider: 'custom',
+      model: 'gpt-current',
+    }, 30_000);
+  });
+
+  it('preserves explicit provider and model overrides', async () => {
+    const home = await writeCodexHome();
+    const request = vi.fn().mockResolvedValue({ thread: { id: 'thread-old' } });
+    const rpc = { request, codexHome: home } as unknown as RpcClient;
+
+    await resumeCodexThread(rpc, {
+      threadId: 'thread-old',
+      modelProvider: 'openai',
+      model: 'gpt-explicit',
+    }, {});
+
+    expect(request).toHaveBeenCalledWith('thread/resume', {
+      threadId: 'thread-old',
+      modelProvider: 'openai',
+      model: 'gpt-explicit',
+    }, 30_000);
   });
 
   it('does not retry an unrelated resume failure', async () => {
     const request = vi.fn().mockRejectedValue(new Error('connection reset'));
-    const rpc = { request } as unknown as RpcClient;
+    const rpc = { request, codexHome: '/nonexistent-codex-home' } as unknown as RpcClient;
     await expect(resumeCodexThread(
       rpc,
       { threadId: 'thread-1' },
@@ -89,3 +133,16 @@ describe('structured Codex permissions', () => {
     expect(request).toHaveBeenCalledTimes(1);
   });
 });
+
+async function writeCodexHome(): Promise<string> {
+  const home = await mkdtemp(join(tmpdir(), 'structured-provider-resume-'));
+  cleanups.push(() => rm(home, { recursive: true, force: true }));
+  await writeFile(join(home, 'config.toml'), `
+model = "gpt-current"
+model_provider = "custom"
+
+[model_providers.custom]
+base_url = "https://vendor.example.com/v1"
+`.trimStart(), 'utf8');
+  return home;
+}
