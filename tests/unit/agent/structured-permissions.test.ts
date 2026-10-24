@@ -1,14 +1,28 @@
-import { describe, expect, it, vi } from 'vitest';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   codexRemotePermissionArgs,
   codexRemoteResumeArgs,
   codexThreadPermissionOverrides,
   codexTurnPermissionOverrides,
+  isModelProviderMissingError,
   isRemotePermissionOverrideError,
   proxyEnvironment,
   resumeCodexThread,
 } from '../../../src/agent/structured/permissions';
 import type { RpcClient } from '../../../src/agent/structured/rpc';
+
+const cleanups: Array<() => Promise<void>> = [];
+
+afterEach(async () => {
+  await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
+  vi.restoreAllMocks();
+});
+
+const permissionError = 'Permission overrides are not supported when resuming a remote task.';
+const providerError = 'failed to load configuration: Model provider `deepseek` not found';
 
 describe('structured Codex permissions', () => {
   it('maps full access to the App Server YOLO contract', () => {
@@ -51,24 +65,80 @@ describe('structured Codex permissions', () => {
     expect(args).not.toContain('--ask-for-approval');
   });
 
-  it('recognizes the deterministic remote permission rejection', () => {
-    expect(isRemotePermissionOverrideError(
-      new Error('Permission overrides are not supported when resuming a remote task.'),
-    )).toBe(true);
+  it('recognizes the deterministic permission and provider failures', () => {
+    expect(isRemotePermissionOverrideError(new Error(permissionError))).toBe(true);
     expect(isRemotePermissionOverrideError(new Error('network timeout'))).toBe(false);
+    expect(isModelProviderMissingError(new Error(providerError))).toBe(true);
+    expect(isModelProviderMissingError(new Error('Model provider `custom` not found'))).toBe(true);
+    expect(isModelProviderMissingError(new Error('network timeout'))).toBe(false);
+  });
+
+  it('resumes normally without touching provider or model', async () => {
+    const request = vi.fn().mockResolvedValue({ thread: { id: 'thread-1' } });
+    const rpc = { request, codexHome: await writeCodexHome() } as unknown as RpcClient;
+
+    await resumeCodexThread(rpc, { threadId: 'thread-1', cwd: '/repo' }, {});
+
+    // The thread's own settings are authoritative on a normal resume,
+    // including a model the user selected through /model.
+    expect(request).toHaveBeenCalledWith('thread/resume', {
+      threadId: 'thread-1',
+      cwd: '/repo',
+    }, 30_000);
+  });
+
+  it('rebinds only after the server reports a missing historical provider', async () => {
+    const request = vi.fn()
+      .mockRejectedValueOnce(new Error(providerError))
+      .mockResolvedValueOnce({ thread: { id: 'thread-old' } });
+    const rpc = { request, codexHome: await writeCodexHome() } as unknown as RpcClient;
+
+    const result = await resumeCodexThread(rpc, { threadId: 'thread-old', cwd: '/repo' }, {});
+
+    expect(result.thread.id).toBe('thread-old');
+    expect(request).toHaveBeenNthCalledWith(1, 'thread/resume', {
+      threadId: 'thread-old', cwd: '/repo',
+    }, 30_000);
+    expect(request).toHaveBeenNthCalledWith(2, 'thread/resume', {
+      threadId: 'thread-old',
+      cwd: '/repo',
+      modelProvider: 'custom',
+      model: 'gpt-current',
+    }, 30_000);
+  });
+
+  it('keeps explicit caller provider/model overrides during the rebind retry', async () => {
+    const request = vi.fn()
+      .mockRejectedValueOnce(new Error(providerError))
+      .mockResolvedValueOnce({ thread: { id: 'thread-old' } });
+    const rpc = { request, codexHome: await writeCodexHome() } as unknown as RpcClient;
+
+    await resumeCodexThread(rpc, {
+      threadId: 'thread-old',
+      modelProvider: 'explicit-provider',
+      model: 'explicit-model',
+    }, {});
+
+    expect(request).toHaveBeenNthCalledWith(2, 'thread/resume', {
+      threadId: 'thread-old',
+      modelProvider: 'explicit-provider',
+      model: 'explicit-model',
+    }, 30_000);
   });
 
   it('retries a rejected remote resume once without permission overrides', async () => {
     const request = vi.fn()
-      .mockRejectedValueOnce(new Error('Permission overrides are not supported when resuming a remote task.'))
+      .mockRejectedValueOnce(new Error(permissionError))
       .mockResolvedValueOnce({ thread: { id: 'thread-1' } });
-    const rpc = { request } as unknown as RpcClient;
+    const rpc = { request, codexHome: await writeCodexHome() } as unknown as RpcClient;
+
     const result = await resumeCodexThread(
       rpc,
       { threadId: 'thread-1', cwd: '/repo' },
       { sandbox: 'danger-full-access', approvalPolicy: 'never' },
       12_345,
     );
+
     expect(result.thread.id).toBe('thread-1');
     expect(request).toHaveBeenNthCalledWith(1, 'thread/resume', {
       threadId: 'thread-1', cwd: '/repo', sandbox: 'danger-full-access', approvalPolicy: 'never',
@@ -78,9 +148,55 @@ describe('structured Codex permissions', () => {
     }, 12_345);
   });
 
+  it('combines permission and provider retries without exceeding three attempts', async () => {
+    const request = vi.fn()
+      .mockRejectedValueOnce(new Error(permissionError))
+      .mockRejectedValueOnce(new Error(providerError))
+      .mockResolvedValueOnce({ thread: { id: 'thread-1' } });
+    const rpc = { request, codexHome: await writeCodexHome() } as unknown as RpcClient;
+
+    await resumeCodexThread(
+      rpc,
+      { threadId: 'thread-1' },
+      { sandbox: 'danger-full-access', approvalPolicy: 'never' },
+    );
+
+    expect(request).toHaveBeenNthCalledWith(1, 'thread/resume', {
+      threadId: 'thread-1', sandbox: 'danger-full-access', approvalPolicy: 'never',
+    }, 30_000);
+    expect(request).toHaveBeenNthCalledWith(2, 'thread/resume', {
+      threadId: 'thread-1',
+    }, 30_000);
+    expect(request).toHaveBeenNthCalledWith(3, 'thread/resume', {
+      threadId: 'thread-1',
+      modelProvider: 'custom',
+      model: 'gpt-current',
+    }, 30_000);
+  });
+
+  it('does not retry a provider failure when the home or config is unavailable', async () => {
+    const missingHome = vi.fn().mockRejectedValue(new Error(providerError));
+    await expect(resumeCodexThread(
+      { request: missingHome } as unknown as RpcClient,
+      { threadId: 'thread-1' },
+      {},
+    )).rejects.toThrow(providerError);
+    expect(missingHome).toHaveBeenCalledTimes(1);
+
+    const home = await mkdtemp(join(tmpdir(), 'structured-provider-unreadable-'));
+    cleanups.push(() => rm(home, { recursive: true, force: true }));
+    const unreadable = vi.fn().mockRejectedValue(new Error(providerError));
+    await expect(resumeCodexThread(
+      { request: unreadable, codexHome: home } as unknown as RpcClient,
+      { threadId: 'thread-1' },
+      {},
+    )).rejects.toThrow(providerError);
+    expect(unreadable).toHaveBeenCalledTimes(1);
+  });
+
   it('does not retry an unrelated resume failure', async () => {
     const request = vi.fn().mockRejectedValue(new Error('connection reset'));
-    const rpc = { request } as unknown as RpcClient;
+    const rpc = { request, codexHome: '/nonexistent-codex-home' } as unknown as RpcClient;
     await expect(resumeCodexThread(
       rpc,
       { threadId: 'thread-1' },
@@ -89,3 +205,16 @@ describe('structured Codex permissions', () => {
     expect(request).toHaveBeenCalledTimes(1);
   });
 });
+
+async function writeCodexHome(): Promise<string> {
+  const home = await mkdtemp(join(tmpdir(), 'structured-provider-resume-'));
+  cleanups.push(() => rm(home, { recursive: true, force: true }));
+  await writeFile(join(home, 'config.toml'), `
+model = "gpt-current"
+model_provider = "custom"
+
+[model_providers.custom]
+base_url = "https://vendor.example.com/v1"
+`.trimStart(), 'utf8');
+  return home;
+}

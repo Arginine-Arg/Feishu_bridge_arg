@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.6.6",
+  version: "1.6.7",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -6264,6 +6264,7 @@ function parseCodexConfigSummary(raw) {
   const selectedProfile = nonEmpty2(topLevel.get("profile"));
   const profile2 = selectedProfile ? profiles.get(selectedProfile) : void 0;
   return {
+    model: profile2?.get("model") ?? topLevel.get("model"),
     modelProvider: profile2?.get("model_provider") ?? topLevel.get("model_provider"),
     preferredAuthMethod: topLevel.get("preferred_auth_method") ?? profile2?.get("preferred_auth_method"),
     providers
@@ -12033,6 +12034,26 @@ function resolveCodexProviderSync(codexHome) {
     return { official: true };
   }
 }
+function resolveCodexResumeDefaults(codexHome) {
+  if (!codexHome) {
+    log.warn("agent", "codex-resume-defaults-unavailable", { reason: "no-home" });
+    return void 0;
+  }
+  let raw;
+  try {
+    raw = readFileSync5(join22(codexHome, "config.toml"), "utf8");
+  } catch {
+    log.warn("agent", "codex-resume-defaults-unavailable", {
+      reason: "unreadable",
+      codexHome
+    });
+    return void 0;
+  }
+  const config = parseCodexConfigSummary(raw);
+  const modelProvider = (config.modelProvider ?? "").trim() || "openai";
+  const model = (config.model ?? "").trim() || void 0;
+  return { modelProvider, ...model ? { model } : {} };
+}
 
 // src/agent/codex/jsonl.ts
 var CodexJsonlTranslator = class {
@@ -12763,9 +12784,17 @@ var RpcClient = class _RpcClient extends EventEmitter2 {
   nextId = 1;
   failure;
   pending = /* @__PURE__ */ new Map();
-  static async connect(url) {
+  /**
+   * The App Server's effective `$CODEX_HOME`. Seeded by the caller when it
+   * knows the spawn environment, then replaced by the authoritative value in
+   * the `initialize` response. Used to resolve resume defaults without
+   * guessing when multiple Codex homes are configured.
+   */
+  codexHome;
+  static async connect(url, options = {}) {
     const socket = new WebSocket(url, { handshakeTimeout: 5e3, maxPayload: 32 * 1024 * 1024, perMessageDeflate: false });
     const client = new _RpcClient(socket);
+    if (options.codexHome) client.codexHome = options.codexHome;
     await new Promise((resolve6, reject4) => {
       socket.once("open", resolve6);
       socket.once("error", reject4);
@@ -12786,7 +12815,8 @@ var RpcClient = class _RpcClient extends EventEmitter2 {
     return this.failure;
   }
   async initialize() {
-    await this.request("initialize", { clientInfo: { name: "arg_bridge", version: "structured-preview" }, capabilities: { experimentalApi: true } });
+    const result = await this.request("initialize", { clientInfo: { name: "arg_bridge", version: "structured-preview" }, capabilities: { experimentalApi: true } });
+    if (typeof result.codexHome === "string" && result.codexHome) this.codexHome = result.codexHome;
     this.notify("initialized", {});
   }
   request(method, params, timeoutMs = 3e4) {
@@ -12896,7 +12926,7 @@ async function connectCodexHostInternal(options, attempt) {
   }
   let rpc;
   try {
-    rpc = await RpcClient.connect(url);
+    rpc = await RpcClient.connect(url, { codexHome: options.env.CODEX_HOME });
     clearHostFailure(directory);
   } catch {
     const paused = hostBreakers.get(directory);
@@ -12928,7 +12958,7 @@ async function connectCodexHostInternal(options, attempt) {
     let connected;
     while (Date.now() < deadline && !failure) {
       try {
-        connected = await RpcClient.connect(url);
+        connected = await RpcClient.connect(url, { codexHome: options.env.CODEX_HOME });
         break;
       } catch {
         await new Promise((resolve6) => setTimeout(resolve6, 150));
@@ -13069,16 +13099,54 @@ function isRemotePermissionOverrideError(error) {
   const message = error instanceof Error ? error.message : String(error ?? "");
   return /permission overrides are not supported/i.test(message);
 }
+function isModelProviderMissingError(error) {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return /model provider\s+.*?\s+not found/i.test(message);
+}
 async function resumeCodexThread(rpc, params, overrides, timeoutMs = 3e4) {
-  if (Object.keys(overrides).length === 0) {
-    return rpc.request("thread/resume", params, timeoutMs);
+  let effectiveParams = { ...params };
+  let includeOverrides = Object.keys(overrides).length > 0;
+  let permissionRetried = false;
+  let providerRetried = false;
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const request = includeOverrides ? { ...effectiveParams, ...overrides } : effectiveParams;
+    try {
+      return await rpc.request("thread/resume", request, timeoutMs);
+    } catch (error) {
+      lastError = error;
+      if (includeOverrides && !permissionRetried && isRemotePermissionOverrideError(error)) {
+        permissionRetried = true;
+        includeOverrides = false;
+        log.info("agent", "codex-resume-permission-retry", {
+          threadId: params.threadId ?? null
+        });
+        continue;
+      }
+      if (!providerRetried && isModelProviderMissingError(error)) {
+        providerRetried = true;
+        const defaults = resolveCodexResumeDefaults(rpc.codexHome);
+        if (!defaults) {
+          log.warn("agent", "codex-provider-rebind-unavailable", {
+            threadId: params.threadId ?? null,
+            codexHome: rpc.codexHome ?? null,
+            reason: rpc.codexHome ? "config-unavailable" : "home-unknown"
+          });
+          throw error;
+        }
+        effectiveParams = { ...defaults, ...params };
+        log.info("agent", "codex-provider-rebind", {
+          threadId: params.threadId ?? null,
+          codexHome: rpc.codexHome ?? null,
+          modelProvider: defaults.modelProvider,
+          model: defaults.model ?? null
+        });
+        continue;
+      }
+      throw error;
+    }
   }
-  try {
-    return await rpc.request("thread/resume", { ...params, ...overrides }, timeoutMs);
-  } catch (error) {
-    if (!isRemotePermissionOverrideError(error)) throw error;
-    return rpc.request("thread/resume", params, timeoutMs);
-  }
+  throw lastError instanceof Error ? lastError : new Error("Codex thread resume retry limit reached");
 }
 function proxyEnvironment(env) {
   const names = [
@@ -14565,7 +14633,9 @@ var StructuredAdapter = class {
       throw error;
     }
     try {
-      return await RpcClient.connect(`ws+unix://${path}:/`);
+      return await RpcClient.connect(`ws+unix://${path}:/`, {
+        codexHome: this.options.codexHome ?? process.env.CODEX_HOME
+      });
     } catch (error) {
       if (error.code === "ENOENT") {
         throw new StaleStructuredEndpointError(endpoint, error);
@@ -29146,7 +29216,12 @@ async function runNative(thread, opts) {
     }
   }
   if (endpoints.length > 1) throw new Error("Multiple endpoints own this thread; no new writer was started.");
-  const host = endpoints[0] ? { endpoint: endpoints[0], rpc: await RpcClient.connect(`ws+unix://${endpoints[0].slice("unix://".length)}:/`) } : await connectCodexHost({
+  const host = endpoints[0] ? {
+    endpoint: endpoints[0],
+    rpc: await RpcClient.connect(`ws+unix://${endpoints[0].slice("unix://".length)}:/`, {
+      codexHome: env.CODEX_HOME
+    })
+  } : await connectCodexHost({
     binary,
     profileDir: paths2.profileDir,
     scope: `native:${thread ?? process.env.TMUX_PANE ?? "new"}`,

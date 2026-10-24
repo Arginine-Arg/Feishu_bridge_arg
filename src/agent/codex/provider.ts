@@ -7,6 +7,7 @@ import {
   type CodexConfigSummary,
 } from './credentials';
 import { readFileSync } from 'node:fs';
+import { log } from '../../core/logger';
 
 /**
  * Which model provider the active Codex configuration targets, and whether it
@@ -18,6 +19,16 @@ export interface CodexProviderSummary {
   /** True for `openai`/`codex` ids and for official base URLs. */
   official: boolean;
   preferredAuthMethod?: string;
+}
+
+/**
+ * Provider/model pair used only to recover a resume that failed because the
+ * thread still references a provider id that no longer exists in the current
+ * `config.toml`.
+ */
+export interface CodexResumeDefaults {
+  modelProvider: string;
+  model?: string;
 }
 
 export function providerSummaryFromConfig(config: CodexConfigSummary): CodexProviderSummary {
@@ -50,4 +61,38 @@ export function resolveCodexProviderSync(codexHome: string | undefined): CodexPr
   } catch {
     return { official: true };
   }
+}
+
+/**
+ * Resolve the provider/model to use when rebinding an old thread.
+ *
+ * This deliberately does **not** fall back to the bridge process's Codex home:
+ * the App Server can run with a different `$CODEX_HOME` (profile-local or
+ * multiple homes), and guessing would silently bind the thread to the wrong
+ * provider. Callers pass the home reported by `initialize`, or a home seeded
+ * from the App Server's spawn environment. `undefined` means "do not rebind".
+ */
+export function resolveCodexResumeDefaults(
+  codexHome: string | undefined,
+): CodexResumeDefaults | undefined {
+  if (!codexHome) {
+    log.warn('agent', 'codex-resume-defaults-unavailable', { reason: 'no-home' });
+    return undefined;
+  }
+  let raw: string;
+  try {
+    raw = readFileSync(join(codexHome, 'config.toml'), 'utf8');
+  } catch {
+    log.warn('agent', 'codex-resume-defaults-unavailable', {
+      reason: 'unreadable',
+      codexHome,
+    });
+    return undefined;
+  }
+  const config = parseCodexConfigSummary(raw);
+  // A readable config without `model_provider` means Codex's built-in
+  // provider, which is the one the server itself will use.
+  const modelProvider = (config.modelProvider ?? '').trim() || 'openai';
+  const model = (config.model ?? '').trim() || undefined;
+  return { modelProvider, ...(model ? { model } : {}) };
 }

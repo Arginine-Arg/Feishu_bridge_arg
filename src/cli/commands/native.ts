@@ -93,7 +93,12 @@ export async function runNative(thread: string | undefined, opts: { profile?: st
   }
   if (endpoints.length > 1) throw new Error('Multiple endpoints own this thread; no new writer was started.');
   const host = endpoints[0]
-    ? { endpoint: endpoints[0], rpc: await RpcClient.connect(`ws+unix://${endpoints[0].slice('unix://'.length)}:/`) }
+    ? {
+        endpoint: endpoints[0],
+        rpc: await RpcClient.connect(`ws+unix://${endpoints[0].slice('unix://'.length)}:/`, {
+          codexHome: env.CODEX_HOME,
+        }),
+      }
     : await connectCodexHost({
         binary,
         profileDir: paths.profileDir,

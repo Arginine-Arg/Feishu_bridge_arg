@@ -558,7 +558,9 @@ export class StructuredAdapter implements AgentAdapter {
       throw error;
     }
     try {
-      return await RpcClient.connect(`ws+unix://${path}:/`);
+      return await RpcClient.connect(`ws+unix://${path}:/`, {
+        codexHome: this.options.codexHome ?? process.env.CODEX_HOME,
+      });
     } catch (error) {
       // The socket can disappear between validation and connect.
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {

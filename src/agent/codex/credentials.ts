@@ -28,6 +28,7 @@ export interface CodexProviderEntry {
 }
 
 export interface CodexConfigSummary {
+  model?: string;
   modelProvider?: string;
   preferredAuthMethod?: string;
   providers: Map<string, CodexProviderEntry>;
@@ -288,6 +289,7 @@ export function parseCodexConfigSummary(raw: string): CodexConfigSummary {
   const selectedProfile = nonEmpty(topLevel.get('profile'));
   const profile = selectedProfile ? profiles.get(selectedProfile) : undefined;
   return {
+    model: profile?.get('model') ?? topLevel.get('model'),
     modelProvider: profile?.get('model_provider') ?? topLevel.get('model_provider'),
     preferredAuthMethod:
       topLevel.get('preferred_auth_method') ?? profile?.get('preferred_auth_method'),

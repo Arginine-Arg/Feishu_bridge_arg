@@ -108,6 +108,18 @@ Use the intended proxy environment before first starting its server. Shared
 thread context does not imply that idle terminal-originated output is always
 pushed unsolicited to Feishu; the Bridge relay forwards its active requests.
 
+Codex persists the provider id in each thread. If `cc-switch` removes that id
+from `config.toml`, `thread/resume` fails before the thread can load with
+`Model provider <old-id> not found`. The bridge therefore retries **only that
+specific failure** once, using the `modelProvider`/`model` from the
+`$CODEX_HOME` reported by the App Server's `initialize` response. A normal
+resume sends no provider or model override, so a model selected with `/model`
+(or persisted in the thread) is preserved. If the App Server home or its
+`config.toml` is unavailable, the bridge does not guess: it logs
+`codex-resume-defaults-unavailable` / `codex-provider-rebind-unavailable` and
+surfaces the original error. The retry never rewrites history; it only changes
+the resume request parameters.
+
 Claude uses the official Agent SDK streaming-input mode with one persistent
 Claude process per scope. The default `claude_code` preset and normal user/project
 configuration are retained. No Bridge system/developer prompt, summarizer,

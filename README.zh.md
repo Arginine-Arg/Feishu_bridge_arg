@@ -4,6 +4,8 @@
 
 [English README](./README.md)
 
+`1.6.7` 修复 `cc-switch` 切换 provider 后旧 Codex thread 无法 resume 的问题。bridge 先按原样 resume（保留用户通过 `/model` 选择的模型）；仅当服务端明确返回 `Model provider <旧 id> not found` 时，才用 App Server 自己 `$CODEX_HOME` 中的 provider/model 重试一次。它不会重写历史；配置不可读时不会猜 `openai`，App Server 未报告 home 时也不会退到 bridge 自己的 Codex home。
+
 `1.6.6` 修正 structured 模式下命令作用域：`/goal`、`/model`、`/stop`、`/compact` 在 `/btw` 侧对话打开时也始终作用于主线程；`/model` 的选择按卡片所属线程回填；普通 `/stop` 会同时停掉 side 与主线程上的 goal（包括 bridge 从未观测到的 goal）；带 `@bot` 前缀的命令会被正确识别，而不再被原样敲进 agent。终端转发路径在发送这些命令前会先退出 side；Claude harness 对 `/goal` 给出明确说明、`/stop` 走中断。
 
 `1.6.5` 让结构化传输实现自愈：缓存的会话在 App Server 通道关闭后会被重建并按原 thread 恢复，而不是之后每条消息都失败；draining 孤儿会被回收替换；失效 endpoint 不再抛出 `realpath ENOENT`；只有"被明确拒绝、从未开始"的回合才会重试一次；重启 bridge 时不再回收仍被客户端连接的 App Server。同时支持 Node.js 26，并让安装器优先复用兼容的专用运行时、必要时部署隔离 LTS、升级失败自动回滚。
@@ -56,7 +58,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.6.6
+sh /tmp/install-arg-bridge.sh --version 1.6.7
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -100,10 +102,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.6"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.7"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.6`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.7`。
 
 ### 4. Node 或 npm 全局目录错误
 

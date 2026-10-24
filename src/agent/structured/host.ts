@@ -131,7 +131,10 @@ async function connectCodexHostInternal(
     }
   }
   let rpc: RpcClient;
-  try { rpc = await RpcClient.connect(url); clearHostFailure(directory); }
+  try {
+    rpc = await RpcClient.connect(url, { codexHome: options.env.CODEX_HOME });
+    clearHostFailure(directory);
+  }
   catch {
     const paused = hostBreakers.get(directory);
     const pausedForMs = paused ? paused.nextAttemptAt - Date.now() : 0;
@@ -159,7 +162,12 @@ async function connectCodexHostInternal(
     const deadline = Date.now() + 20000;
     let connected: RpcClient | undefined;
     while (Date.now() < deadline && !failure) {
-      try { connected = await RpcClient.connect(url); break; } catch { await new Promise(resolve => setTimeout(resolve, 150)); }
+      try {
+        connected = await RpcClient.connect(url, { codexHome: options.env.CODEX_HOME });
+        break;
+      } catch {
+        await new Promise(resolve => setTimeout(resolve, 150));
+      }
     }
     if (!connected) {
       child.kill('SIGTERM');
