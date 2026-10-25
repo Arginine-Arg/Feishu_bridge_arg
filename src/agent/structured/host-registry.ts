@@ -349,6 +349,20 @@ export function findSocketHolders(directory: string): number[] {
 
 function macProcessSocketHolders(socketPath: string): number[] | undefined {
   try {
+    const output = execFileSync('pgrep', ['-f', socketPath], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 2_000,
+    });
+    return output.split('\n')
+      .map(line => Number.parseInt(line.trim(), 10))
+      .filter(pid => Number.isSafeInteger(pid) && pid > 0);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (String(code) === '1') return [];
+    if (code !== 'ENOENT') return undefined;
+  }
+  try {
     const output = execFileSync('ps', ['-A', '-ww', '-o', 'pid=,command='], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],

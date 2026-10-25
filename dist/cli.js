@@ -5793,6 +5793,18 @@ function findSocketHolders(directory) {
 }
 function macProcessSocketHolders(socketPath) {
   try {
+    const output = execFileSync("pgrep", ["-f", socketPath], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 2e3
+    });
+    return output.split("\n").map((line) => Number.parseInt(line.trim(), 10)).filter((pid) => Number.isSafeInteger(pid) && pid > 0);
+  } catch (error) {
+    const code = error.code;
+    if (String(code) === "1") return [];
+    if (code !== "ENOENT") return void 0;
+  }
+  try {
     const output = execFileSync("ps", ["-A", "-ww", "-o", "pid=,command="], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
