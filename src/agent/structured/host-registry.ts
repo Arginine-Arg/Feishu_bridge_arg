@@ -349,7 +349,7 @@ export function findSocketHolders(directory: string): number[] {
 
 function macProcessSocketHolders(socketPath: string): number[] | undefined {
   try {
-    const output = execFileSync('ps', ['-axo', 'pid=,command='], {
+    const output = execFileSync('ps', ['-A', '-ww', '-o', 'pid=,command='], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
       timeout: 2_000,

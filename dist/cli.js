@@ -5793,7 +5793,7 @@ function findSocketHolders(directory) {
 }
 function macProcessSocketHolders(socketPath) {
   try {
-    const output = execFileSync("ps", ["-axo", "pid=,command="], {
+    const output = execFileSync("ps", ["-A", "-ww", "-o", "pid=,command="], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
       timeout: 2e3
