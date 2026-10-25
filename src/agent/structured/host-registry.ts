@@ -349,27 +349,22 @@ export function findSocketHolders(directory: string): number[] {
 
 function lsofUnixSocketHolders(socketPath: string): number[] | undefined {
   try {
-    const output = execFileSync('lsof', ['-nP', '-U'], {
+    const output = execFileSync('lsof', ['-nP', '+U', '-F', 'pn'], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
       timeout: 2_000,
     });
-    const records = output.split('\n').flatMap(line => {
-      const fields = line.trim().split(/\s+/);
-      if (fields.length < 9) return [];
-      const pid = Number.parseInt(fields[1] ?? '', 10);
-      const node = fields[7];
-      const name = fields.slice(8).join(' ');
-      if (!Number.isSafeInteger(pid) || pid <= 0 || !node) return [];
-      return [{ pid, node, name }];
-    });
-    const socketNodes = new Set(records
-      .filter(record => record.name.includes(socketPath))
-      .map(record => record.node));
-    if (socketNodes.size === 0) return [];
-    return [...new Set(records
-      .filter(record => socketNodes.has(record.node))
-      .map(record => record.pid))];
+    const holders = new Set<number>();
+    let pid: number | undefined;
+    for (const line of output.split('\n')) {
+      if (line.startsWith('p')) {
+        const parsed = Number.parseInt(line.slice(1), 10);
+        pid = Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
+      } else if (pid && line.startsWith('n') && line.slice(1).includes(socketPath)) {
+        holders.add(pid);
+      }
+    }
+    return [...holders];
   } catch {
     return undefined;
   }
