@@ -349,29 +349,14 @@ export function findSocketHolders(directory: string): number[] {
 
 function lsofUnixSocketHolders(socketPath: string): number[] | undefined {
   try {
-    const output = execFileSync('lsof', ['-nP', '+U'], {
+    const output = execFileSync('lsof', ['-nP', '+U', '-t', socketPath], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
       timeout: 2_000,
     });
-    const records = output.split('\n').flatMap(line => {
-      const fields = line.trim().split(/\s+/);
-      if (fields.length < 9) return [];
-      const pid = Number.parseInt(fields[1] ?? '', 10);
-      if (!Number.isSafeInteger(pid) || pid <= 0) return [];
-      return [{
-        pid,
-        device: fields[5] ?? '',
-        node: fields[7] ?? '',
-        name: fields.slice(8).join(' '),
-      }];
-    });
-    const serverRecords = records.filter(record => record.name.includes(socketPath));
-    const devices = new Set(serverRecords.map(record => record.device).filter(Boolean));
-    const nodes = new Set(serverRecords.map(record => record.node).filter(Boolean));
-    return [...new Set(records
-      .filter(record => devices.has(record.device) || nodes.has(record.node))
-      .map(record => record.pid))];
+    return output.split('\n')
+      .map(line => Number.parseInt(line.trim(), 10))
+      .filter(pid => Number.isSafeInteger(pid) && pid > 0);
   } catch {
     return undefined;
   }
