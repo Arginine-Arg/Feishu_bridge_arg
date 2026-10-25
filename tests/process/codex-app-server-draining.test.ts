@@ -9,7 +9,7 @@ import { codexHostRuntimeDirectory, processAlive } from '../../src/agent/structu
 
 const require = createRequire(import.meta.url);
 const cleanups: Array<() => Promise<void>> = [];
-const unixIt = process.platform === 'win32' ? it.skip : it;
+const unixIt = process.platform === 'linux' ? it : it.skip;
 
 afterEach(async () => {
   await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));

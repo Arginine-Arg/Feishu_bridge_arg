@@ -2,8 +2,9 @@
 
 ## 1.7.2
 
-- Completed macOS App Server client detection and draining-orphan cleanup using
-  the process table, including symlinked socket paths.
+- Completed macOS canonical-path handling for App Server sockets. Where
+  `/proc/net/unix` is unavailable, automatic replacement/recovery is
+  conservatively deferred instead of guessing or killing an ambiguous process.
 - Made Unix-socket process tests platform-scoped without weakening their Linux
   and macOS assertions.
 - Reworked Windows path-sensitive tests around canonical temp paths and

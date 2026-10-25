@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -258,9 +257,8 @@ export function hostHasActiveClients(directory: string): boolean {
     table = readFileSync('/proc/net/unix', 'utf8');
   } catch {
     if (process.platform === 'darwin') {
-      const holders = macProcessSocketHolders(socketPath);
-      if (holders !== undefined) return holders.length > 1;
-      // Without a working process inspection tool, fail safe.
+      // macOS has no /proc. Without a reliable socket-client query, keep the
+      // server instead of risking termination under a live native TUI.
       return true;
     }
     // Non-Unix structured transport is unsupported; keep the conservative
@@ -321,7 +319,9 @@ export function findSocketHolders(directory: string): number[] {
     }
   } catch {
     if (process.platform === 'darwin') {
-      return macProcessSocketHolders(resolved) ?? [];
+      // macOS lacks /proc/fd matching for this process. Recovery is deferred
+      // rather than guessing which process owns the socket.
+      return [];
     }
     return [];
   }
@@ -345,38 +345,6 @@ export function findSocketHolders(directory: string): number[] {
     }
   }
   return pids;
-}
-
-function macProcessSocketHolders(socketPath: string): number[] | undefined {
-  try {
-    const output = execFileSync('pgrep', ['-f', socketPath], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: 2_000,
-    });
-    return output.split('\n')
-      .map(line => Number.parseInt(line.trim(), 10))
-      .filter(pid => Number.isSafeInteger(pid) && pid > 0);
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (String(code) !== '1' && code !== 'ENOENT') return undefined;
-  }
-  try {
-    const output = execFileSync('ps', ['-A', '-ww', '-o', 'pid=,command='], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: 2_000,
-    });
-    return output.split('\n')
-      .flatMap(line => {
-        if (!line.includes(socketPath)) return [];
-        const match = /^\s*(\d+)\s+/.exec(line);
-        const pid = match ? Number.parseInt(match[1]!, 10) : NaN;
-        return Number.isSafeInteger(pid) && pid > 0 ? [pid] : [];
-      });
-  } catch {
-    return undefined;
-  }
 }
 
 export async function waitForExit(pid: number, timeoutMs = 2_000): Promise<boolean> {

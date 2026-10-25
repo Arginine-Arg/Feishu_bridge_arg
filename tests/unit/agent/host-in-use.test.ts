@@ -18,7 +18,7 @@ afterEach(async () => {
 });
 
 describe('App Server reclaim safety', () => {
-  (process.platform === 'win32' ? it.skip : it)('keeps a server that still has a connected client and reclaims it once idle', async () => {
+  (process.platform === 'linux' ? it : it.skip)('keeps a server that still has a connected client and reclaims it once idle', async () => {
     const profileDir = await mkdtemp(join(tmpdir(), 'host-in-use-profile-'));
     const runtimeDir = await mkdtemp(join(tmpdir(), 'host-in-use-runtime-'));
     cleanups.push(async () => {

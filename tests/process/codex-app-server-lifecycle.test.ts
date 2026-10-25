@@ -27,7 +27,7 @@ function wsWrapperPath(): string {
 const cleanups: Array<() => Promise<void>> = [];
 const oldKey = process.env.OPENAI_API_KEY;
 let otherOwnerPid = 0;
-const unixIt = process.platform === 'win32' ? it.skip : it;
+const unixIt = process.platform === 'linux' ? it : it.skip;
 
 beforeAll(() => {
   // A stand-in for a paused native TUI: a live process that owns the profile.

@@ -5580,7 +5580,6 @@ async function runCapture(cmd, args, timeoutMs, env) {
 
 // src/agent/structured/host-registry.ts
 import { createHash } from "crypto";
-import { execFileSync } from "child_process";
 import { readFileSync as readFileSync2, readdirSync, readlinkSync, realpathSync, statSync } from "fs";
 import { mkdir as mkdir13, readFile as readFile11, readdir as readdir4, rm as rm11, writeFile as writeFile8 } from "fs/promises";
 import { tmpdir as tmpdir2 } from "os";
@@ -5719,8 +5718,6 @@ function hostHasActiveClients(directory) {
     table = readFileSync2("/proc/net/unix", "utf8");
   } catch {
     if (process.platform === "darwin") {
-      const holders = macProcessSocketHolders(socketPath);
-      if (holders !== void 0) return holders.length > 1;
       return true;
     }
     return true;
@@ -5760,7 +5757,7 @@ function findSocketHolders(directory) {
     }
   } catch {
     if (process.platform === "darwin") {
-      return macProcessSocketHolders(resolved) ?? [];
+      return [];
     }
     return [];
   }
@@ -5790,34 +5787,6 @@ function findSocketHolders(directory) {
     }
   }
   return pids;
-}
-function macProcessSocketHolders(socketPath) {
-  try {
-    const output = execFileSync("pgrep", ["-f", socketPath], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 2e3
-    });
-    return output.split("\n").map((line) => Number.parseInt(line.trim(), 10)).filter((pid) => Number.isSafeInteger(pid) && pid > 0);
-  } catch (error) {
-    const code = error.code;
-    if (String(code) !== "1" && code !== "ENOENT") return void 0;
-  }
-  try {
-    const output = execFileSync("ps", ["-A", "-ww", "-o", "pid=,command="], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 2e3
-    });
-    return output.split("\n").flatMap((line) => {
-      if (!line.includes(socketPath)) return [];
-      const match = /^\s*(\d+)\s+/.exec(line);
-      const pid = match ? Number.parseInt(match[1], 10) : NaN;
-      return Number.isSafeInteger(pid) && pid > 0 ? [pid] : [];
-    });
-  } catch {
-    return void 0;
-  }
 }
 async function waitForExit(pid, timeoutMs = 2e3) {
   if (!processAlive(pid)) return true;
