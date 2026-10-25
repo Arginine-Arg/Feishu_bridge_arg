@@ -2,7 +2,6 @@ import { spawn } from 'node:child_process';
 import { lstat, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { connect as connectSocket } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   fingerprintCredentialEnv,
@@ -39,11 +38,15 @@ describe('App Server reclaim safety', () => {
     });
     await waitForFile(socketPath, 5_000);
 
-    const client = connectSocket(socketPath);
-    await new Promise<void>((resolve, reject) => {
-      client.once('connect', () => resolve());
-      client.once('error', reject);
+    const client = spawn(
+      process.execPath,
+      ['-e', `require('node:net').connect(${JSON.stringify(socketPath)}); setInterval(() => {}, 1000);`],
+      { stdio: 'ignore' },
+    );
+    cleanups.push(async () => {
+      try { process.kill(client.pid!, 'SIGKILL'); } catch { /* already gone */ }
     });
+    await waitFor(() => hostHasActiveClients(runtimeDir), 3_000);
 
     await recordHost(profileDir, {
       directory: runtimeDir,
@@ -62,14 +65,23 @@ describe('App Server reclaim safety', () => {
     expect(firstPass).toEqual({ terminated: 0, inUse: 1 });
     expect(processAlive(child.pid!)).toBe(true);
 
-    client.destroy();
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    client.kill('SIGTERM');
+    await waitFor(() => !hostHasActiveClients(runtimeDir), 3_000);
     const secondPass = await terminateProfileHosts(profileDir);
     expect(secondPass.terminated).toBe(1);
     await new Promise((resolve) => setTimeout(resolve, 400));
     expect(processAlive(child.pid!)).toBe(false);
   }, 30_000);
 });
+
+async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  throw new Error('timed out waiting for socket state');
+}
 
 async function waitForFile(path: string, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;

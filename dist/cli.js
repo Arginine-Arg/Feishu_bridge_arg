@@ -5719,7 +5719,7 @@ function hostHasActiveClients(directory) {
     table = readFileSync2("/proc/net/unix", "utf8");
   } catch {
     if (process.platform === "darwin") {
-      const holders = lsofUnixSocketHolders(socketPath);
+      const holders = macProcessSocketHolders(socketPath);
       if (holders !== void 0) return holders.length > 1;
       return true;
     }
@@ -5760,7 +5760,7 @@ function findSocketHolders(directory) {
     }
   } catch {
     if (process.platform === "darwin") {
-      return lsofUnixSocketHolders(resolved) ?? [];
+      return macProcessSocketHolders(resolved) ?? [];
     }
     return [];
   }
@@ -5791,14 +5791,19 @@ function findSocketHolders(directory) {
   }
   return pids;
 }
-function lsofUnixSocketHolders(socketPath) {
+function macProcessSocketHolders(socketPath) {
   try {
-    const output = execFileSync("lsof", ["-nP", "+U", "-t", socketPath], {
+    const output = execFileSync("ps", ["-axo", "pid=,command="], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
       timeout: 2e3
     });
-    return output.split("\n").map((line) => Number.parseInt(line.trim(), 10)).filter((pid) => Number.isSafeInteger(pid) && pid > 0);
+    return output.split("\n").flatMap((line) => {
+      if (!line.includes(socketPath)) return [];
+      const match = /^\s*(\d+)\s+/.exec(line);
+      const pid = match ? Number.parseInt(match[1], 10) : NaN;
+      return Number.isSafeInteger(pid) && pid > 0 ? [pid] : [];
+    });
   } catch {
     return void 0;
   }

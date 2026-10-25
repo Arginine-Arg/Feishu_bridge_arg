@@ -3,7 +3,7 @@
 ## 1.7.2
 
 - Completed macOS App Server client detection and draining-orphan cleanup using
-  `lsof`, including symlinked socket paths.
+  the process table, including symlinked socket paths.
 - Made Unix-socket process tests platform-scoped without weakening their Linux
   and macOS assertions.
 - Reworked Windows path-sensitive tests around canonical temp paths and
