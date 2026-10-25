@@ -99,16 +99,23 @@ export async function resumeCodexThread(
   overrides: Wire,
   timeoutMs = 30_000,
 ): Promise<Wire> {
-  let effectiveParams: Wire = { ...params };
+  const boundaryDefaults = await providerDefaultsAtIdleBoundary(
+    rpc,
+    params,
+  );
+  // Explicit caller params remain authoritative. Configuration defaults are
+  // applied only when the read-only thread snapshot proves the previous turn
+  // is idle, so a running request is never switched to another provider.
+  let effectiveParams: Wire = { ...(boundaryDefaults ?? {}), ...params };
   let includeOverrides = Object.keys(overrides).length > 0;
   let permissionRetried = false;
   let providerRetried = false;
   let lastError: unknown;
 
-  // A normal resume must not touch provider/model: the thread's own settings
-  // are authoritative, including a model the user picked with `/model`.
-  // Provider defaults are applied only after the server proves the historical
-  // provider id is gone.
+  // Apply the current cc-switch provider/model at an idle resume boundary.
+  // If the thread snapshot is unavailable, preserve the legacy deterministic
+  // retry: rebind only after the server proves the historical provider is
+  // gone.
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const request = includeOverrides
       ? { ...effectiveParams, ...overrides }
@@ -150,6 +157,57 @@ export async function resumeCodexThread(
     }
   }
   throw lastError instanceof Error ? lastError : new Error('Codex thread resume retry limit reached');
+}
+
+async function providerDefaultsAtIdleBoundary(
+  rpc: RpcClient,
+  params: Wire,
+): Promise<Wire | undefined> {
+  if (params.modelProvider !== undefined) return undefined;
+  let thread: Wire;
+  try {
+    const result = await rpc.request('thread/read', {
+      threadId: params.threadId,
+      includeTurns: false,
+    });
+    thread = result.thread ?? result;
+  } catch {
+    return undefined;
+  }
+  if (!thread || typeof thread !== 'object') return undefined;
+  const turns: Wire[] = Array.isArray(thread.turns) ? thread.turns : [];
+  const active = thread.status?.type === 'active' ||
+    turns.some(turn => turn.status === 'inProgress');
+  if (active) {
+    log.info('agent', 'codex-provider-switch-deferred', {
+      threadId: params.threadId ?? null,
+      reason: 'active-turn',
+    });
+    return undefined;
+  }
+  const statusType = thread.status?.type;
+  if (statusType === undefined && turns.length === 0) {
+    // Older App Servers may omit status on an empty read. Do not guess an idle
+    // boundary from an incomplete response.
+    return undefined;
+  }
+  const defaults = resolveCodexResumeDefaults(rpc.codexHome);
+  if (!defaults) return undefined;
+  const threadProvider = typeof thread.modelProvider === 'string'
+    ? thread.modelProvider.trim()
+    : undefined;
+  const threadModel = typeof thread.model === 'string' ? thread.model.trim() : undefined;
+  const providerChanged = Boolean(threadProvider && threadProvider !== defaults.modelProvider);
+  const modelChanged = Boolean(defaults.model && threadModel && threadModel !== defaults.model);
+  if (!providerChanged && !modelChanged && threadProvider) return undefined;
+  log.info('agent', 'codex-provider-switch-at-boundary', {
+    threadId: params.threadId ?? null,
+    fromProvider: threadProvider ?? null,
+    toProvider: defaults.modelProvider,
+    fromModel: threadModel ?? null,
+    toModel: defaults.model ?? null,
+  });
+  return defaults;
 }
 
 /**

@@ -50,6 +50,98 @@ describe('profile schema', () => {
     });
   });
 
+  it('adds backward-compatible safe subagent and RSI defaults', () => {
+    const cfg = createDefaultProfileConfig({
+      agentKind: 'claude',
+      accounts: { app },
+    });
+
+    expect(cfg.subagents).toEqual({
+      enabled: true,
+      mode: 'auto',
+      routeMode: 'follow-cc-switch',
+      readRoute: null,
+      writeRoute: null,
+      includeProgressSnapshot: true,
+      reuse: 'scope-cwd',
+      allowForkFallback: true,
+    });
+    expect(cfg.rsi).toEqual({
+      mode: 'auto',
+      projectRoot: null,
+      reviewerRouteMode: 'follow-cc-switch',
+      reviewerRoute: null,
+    });
+  });
+
+  it('normalizes subagent routes without accepting credentials in profile fields', () => {
+    const cfg = normalizeProfileConfig({
+      schemaVersion: 2,
+      agentKind: 'claude',
+      accounts: { app },
+      subagents: {
+        enabled: true,
+        mode: 'broker',
+        routeMode: 'manual',
+        readRoute: 'route-a',
+        writeRoute: 'route-write',
+        includeProgressSnapshot: false,
+        allowForkFallback: false,
+        mixagents: {
+          mcpCommand: 'fake-broker',
+          mcpArgs: ['mcp'],
+          credentialEnvKeys: ['BROKER_TOKEN'],
+          token: 'must-not-survive',
+        },
+      },
+      rsi: {
+        mode: 'auto',
+        projectRoot: '/repo',
+        reviewerRouteMode: 'manual',
+        reviewerRoute: 'route-a',
+        runnerCommand: 'runner',
+        runnerArgs: ['--json'],
+        validatorCommand: 'validator',
+        validatorArgs: ['--strict'],
+      },
+    });
+
+    expect(cfg.subagents).toMatchObject({
+      mode: 'broker',
+      routeMode: 'manual',
+      readRoute: 'route-a',
+      writeRoute: 'route-write',
+      includeProgressSnapshot: false,
+      allowForkFallback: false,
+      mixagents: {
+        mcpCommand: 'fake-broker',
+        mcpArgs: ['mcp'],
+        credentialEnvKeys: ['BROKER_TOKEN'],
+      },
+    });
+    expect(cfg.subagents?.mixagents).not.toHaveProperty('token');
+    expect(cfg.rsi).toMatchObject({
+      runnerCommand: 'runner',
+      runnerArgs: ['--json'],
+      validatorCommand: 'validator',
+      validatorArgs: ['--strict'],
+    });
+  });
+
+  it('rejects inline credentials in MixAgents argv', () => {
+    expect(() => normalizeProfileConfig({
+      schemaVersion: 2,
+      agentKind: 'claude',
+      accounts: { app },
+      subagents: {
+        mixagents: {
+          mcpCommand: 'mixagents-broker',
+          mcpArgs: ['--token=sk-should-never-be-in-argv'],
+        },
+      },
+    })).toThrow(/inline credentials/i);
+  });
+
   it('requires codex configuration when agentKind is codex', () => {
     expect(() =>
       normalizeProfileConfig({

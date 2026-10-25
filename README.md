@@ -4,7 +4,9 @@ A lightweight bot that bridges Feishu / Lark messenger with your local Claude Co
 
 [中文 README](./README.zh.md)
 
-Version 1.6.7 makes old Codex threads resume after a `cc-switch` provider change. The bridge first resumes normally (so a model selected with `/model` is preserved); only when the server reports `Model provider <old-id> not found` does it retry once with the provider/model from the App Server's own `$CODEX_HOME`. It never rewrites history, never guesses `openai` when the config is unreadable, and never falls back to the bridge's own Codex home when the App Server does not report one.
+Version 1.7.0 adds an optional MixAgents Broker backend for `/btw`, dynamic `cc-switch` read-route selection, `arg-bridge settings`, `arg-bridge doctor --json`, Project RSI evidence gates, and `migrate-local-poc`. The main provider remains controlled only by `cc-switch`; Bridge never exports or prints provider secrets. `/btw` is read-only, re-reads routing on every use, and replaces an old side agent when route/config identity changes.
+
+Version 1.6.7 introduced provider-aware Codex resume. Version 1.7.0 applies the current provider/model at an idle resume boundary, including when the old provider still exists, while never switching a thread that has an active turn.
 
 Version 1.6.6 keeps structured commands on the right thread: `/goal`, `/model`, `/stop`, and `/compact` always act on the main conversation even while a `/btw` side is open, `/model` answers land on the thread that owns the picker, a plain `/stop` stops both the side and a running goal (including a goal the bridge never observed), and a command that still carries an `@bot` prefix is recognized instead of being typed into the agent. The live terminal relay leaves an open side before sending those commands, and the Claude harness reports `/goal` as unsupported and interrupts on `/stop`.
 
@@ -58,7 +60,7 @@ Install a pinned release or use a writable custom npm prefix when required:
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.6.7
+sh /tmp/install-arg-bridge.sh --version 1.7.0
 # Example for a machine without permission to write npm's configured global prefix:
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -102,10 +104,10 @@ Release tarballs are preferred. If a Git install is required, keep both compatib
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.7"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.7.0"
 ```
 
-`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.7`.
+`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.7.0`.
 
 ### 4. Node or npm global-prefix errors
 
@@ -221,6 +223,13 @@ arg-bridge status --profile codex
 ```text
 arg-bridge run [--profile <name>] [--agent claude|codex] [--workspace <path>] [-c <config>]
 arg-bridge migrate [--profile <name>] [--agent claude|codex]
+arg-bridge migrate-local-poc --profile codex --dry-run --json
+arg-bridge migrate-local-poc --profile codex --apply
+arg-bridge native [thread] [--profile <name>]
+arg-bridge codex [thread] [--profile <name>]
+arg-bridge settings --profile codex [--json]
+arg-bridge doctor --profile codex --json
+arg-bridge doctor --profile codex --json --probe-route <broker-route>
 arg-bridge ps
 arg-bridge kill <id|#>
 arg-bridge --help
@@ -243,6 +252,45 @@ arg-bridge profile export <name> --include-secrets --yes
 
 If a profile was created with the wrong agent kind, stop or unregister any matching background service first, then run `profile remove <name>` and recreate it with the intended `--agent`.
 
+### MixAgents `/btw`, `cc-switch`, MCP and Project RSI
+
+MixAgents is optional. Without it, `auto` mode keeps the legacy Codex fork fallback and reports the downgrade; explicit `broker` mode fails with an actionable install/configuration error. The production integration surface is the versioned MixAgents STDIO MCP contract (`routes`, `spawn_agent`, `send`, `wait_agent`, `interrupt_agent`, `list_agents`), not a plugin-cache path.
+
+Official installation hint:
+
+```bash
+codex plugin marketplace add Utopia-V/mixagents
+codex plugin add mixagents-broker@mixagents
+```
+
+`arg-bridge settings` edits the current profile through the existing config lock. It shows the active `cc-switch` provider, configured versus running Codex provider IDs, read/write Broker routes, availability, missing environment-variable **names**, credential delegation mode, reviewer route, and Project RSI initialization. `arg-bridge doctor --json` is read-only and must not spend money. Only an explicit `--probe-route <id>` sends one read-only generation probe and never retries or falls back.
+
+Configured and running providers are intentionally separate:
+
+1. `cc-switch` selects the current provider ID.
+2. Codex `config.toml` selects its internal `model_provider` and model.
+3. A Broker route is selected by mapping the **cc-switch provider ID**, not either display name or Codex's internal provider name.
+4. A provider change takes effect at the next idle turn or profile restart. A request already running is never moved to another provider.
+5. An old Codex thread whose historical provider still exists is rebound at an idle boundary; an active thread is left on its running provider until it becomes safe to switch.
+
+The optional route map lives at `~/.config/arg-bridge/broker-routes.json` and contains IDs only:
+
+```json
+{
+  "version": 1,
+  "defaultReadRoute": "review-read",
+  "providers": {
+    "cc-switch-provider-id": { "readRoute": "review-read" }
+  }
+}
+```
+
+Run `arg-bridge settings --profile codex` to configure the MixAgents MCP executable, MCP arguments, credential mode/provider reference, route mode, and RSI paths. Bridge never reads a provider key. With `credentialMode: "mixagents-managed"`, it only passes `MIXAGENTS_CREDENTIAL_PROVIDER=<opaque-ref>` to the MCP child; the MixAgents side or a trusted helper must resolve the `cc-switch` credential. Until that helper advertises and passes the compatibility probe, doctor reports `delegated-unverified`.
+
+Project RSI is separate from MixAgents and from historical Task RSI evidence. Bridge discovers only an already initialized `.project-rsi/config.json`; it never initializes `/`, `$HOME`, or a broad parent automatically. A bridge turn that writes files or records a high-impact conclusion cannot complete with a normal success card unless a run for that project/thread/task has a fresh upstream validator receipt. Reviewer output is evidence, not authorization. Direct `codex` and other native TUIs remain outside this Bridge gate unless the project installs and verifies a trusted Codex hook; `settings` reports that boundary instead of claiming full native coverage.
+
+See [MixAgents subagents](./docs/mixagents-subagents.md), [Project RSI](./docs/project-rsi.md), [credential and permission security](./docs/security-and-permissions.md), and [local PoC migration](./docs/migration-local-poc.md).
+
 ### Slash commands inside Feishu / Lark
 
 | Command | Effect |
@@ -258,7 +306,7 @@ If a profile was created with the wrong agent kind, stop or unregister any match
 | `/sendfile <absolute-path>` | Admin-only: reply with a regular file from the current workspace, bridge media cache, or an explicitly allowed outbound directory, without invoking the agent |
 | `/config` | Adjust presentation preferences, access settings, and lark-cli identity policy |
 | `/model` | Choose the model; Codex uses its native model/reasoning picker and syncs the result to the active profile. `/codex model` is a shorthand for `/codex /model`. |
-| `/btw [<text>]` | Codex only: open or reuse a side conversation; with text, submit it as a separate prompt, or send the text in a follow-up message. `/codex /btw [<text>]` is equivalent. |
+| `/btw [--route <id>] [<text>]` | Open or reuse an independent read-only side agent. When MixAgents is configured, this is a Broker agent (not a Codex fork) and the selected route is re-resolved on every use; otherwise `auto` reports and uses the legacy Codex fork. `/btw out` closes only the side. `/codex /btw ...` is equivalent in Feishu. |
 | `/session [status\|live\|turn]` | Inspect terminal execution. tmux/live is the default; `turn` remains a legacy compatibility fallback |
 | `/tmux list [socket]` | Admin-only: list every live Codex/Claude tmux pane on this host, including working directory, agent kind, adopted thread, shared App Server endpoint, and attach command. Optional `-S <absolute socket path>` or `-L <socket name>` selects one tmux server; plain shells are never listed |
 | `/tmux bind <number\|pane id\|socket::pane id>` | Admin-only: bind the current chat/topic scope to a listed pane. A pane with a shared Codex endpoint is driven through structured transport; a plain Codex/Claude pane falls back to live transport. `/tmux list` numbers are only valid for the most recent listing |
@@ -425,6 +473,8 @@ arg-bridge resolves this before every Codex run:
 - If a third-party provider is selected and no token can be found, the bridge logs `codex-credential-missing` and continues; the provider error is left for Codex to report rather than failing the bridge preflight.
 
 A shell wrapper is still useful for terminals you start yourself (`arg-bridge native` in your own shell, plain `codex`), but it is not required by the bridge. Keep `OPENAI_API_KEY` out of systemd units and service environments: if you need a fixed token there, prefer `experimental_bearer_token` in the Codex config, which the bridge reads directly.
+
+`arg-bridge codex [thread]` is an explicit alias for `arg-bridge native [thread]`. The installation does **not** replace or wrap the executable managed by `@openai/codex`. Running plain `codex` remains OpenAI Codex with its native `/btw`; that command is outside Bridge's MixAgents and Project RSI interception. Use Feishu `/btw`, the structured Bridge view, or the MixAgents plugin's own stable integration when Broker routing is required. To return an old terminal to a Bridge-known thread, use `arg-bridge codex <thread-id> --profile <name>`; inspect `/tmux status` for the exact attach command if the pane already exists.
 
 #### Third-party providers never inherit a local proxy
 

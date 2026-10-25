@@ -31,6 +31,13 @@ export interface CodexResumeDefaults {
   model?: string;
 }
 
+export interface CodexActiveConfigIdentity {
+  codexProviderId: string;
+  model?: string;
+  official: boolean;
+  preferredAuthMethod?: string;
+}
+
 export function providerSummaryFromConfig(config: CodexConfigSummary): CodexProviderSummary {
   const providerId = (config.modelProvider ?? '').trim() || undefined;
   const provider = providerId ? config.providers.get(providerId) : undefined;
@@ -48,6 +55,27 @@ export async function resolveCodexProvider(
   const home = codexHome ?? defaultCodexHome();
   if (!home) return { official: true };
   return providerSummaryFromConfig(await readCodexConfigSummary(join(home, 'config.toml')));
+}
+
+export async function resolveCodexActiveConfigIdentity(
+  codexHome: string | undefined,
+): Promise<CodexActiveConfigIdentity | undefined> {
+  const home = codexHome ?? defaultCodexHome();
+  if (!home) return undefined;
+  try {
+    const config = await readCodexConfigSummary(join(home, 'config.toml'));
+    const provider = providerSummaryFromConfig(config);
+    return {
+      codexProviderId: provider.providerId ?? 'openai',
+      ...(config.model?.trim() ? { model: config.model.trim() } : {}),
+      official: provider.official,
+      ...(provider.preferredAuthMethod
+        ? { preferredAuthMethod: provider.preferredAuthMethod }
+        : {}),
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 /** Synchronous twin for callers that resolve credentials lazily. */

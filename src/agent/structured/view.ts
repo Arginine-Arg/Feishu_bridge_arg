@@ -27,6 +27,13 @@ export class StructuredView {
     const name = `argbridge-api-${createHash('sha256').update(this.key).digest('hex').slice(0, 16)}`;
     this.logPath = join(this.directory, `${name}.log`);
     await appendFile(this.logPath, '', { mode: 0o600 });
+    if (!native) {
+      await appendFile(
+        this.logPath,
+        '\nOpenAI Codex (structured view; native TUI starts after the first turn)\n',
+        { mode: 0o600 },
+      );
+    }
     if (process.platform === 'win32' || spawnProcessSync('tmux', ['-V'], { stdio: 'ignore' }).status !== 0) return;
     const socket = join(this.directory, 'view.sock');
     if (Buffer.byteLength(socket) > 100) return;

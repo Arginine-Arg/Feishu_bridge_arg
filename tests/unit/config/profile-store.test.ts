@@ -81,6 +81,30 @@ describe('profile store canonical serialization', () => {
         proxyUrl: 'socks5h://127.0.0.1:7890',
         noProxy: 'localhost,127.0.0.1',
       },
+      subagents: {
+        enabled: true,
+        mode: 'broker' as const,
+        routeMode: 'manual' as const,
+        readRoute: 'review-route',
+        writeRoute: null,
+        includeProgressSnapshot: true,
+        reuse: 'scope-cwd' as const,
+        allowForkFallback: false,
+        mixagents: {
+          mcpCommand: 'mixagents-broker',
+          mcpArgs: ['mcp'],
+          credentialMode: 'mixagents-managed' as const,
+          credentialProvider: 'halflong',
+        },
+      },
+      rsi: {
+        mode: 'auto' as const,
+        projectRoot: '/repo',
+        runnerCommand: '.project-rsi/project_rsi.py',
+        reviewerRouteMode: 'manual' as const,
+        reviewerRoute: 'review-route',
+        validatorCommand: '.project-rsi/project_rsi.py',
+      },
       comments: {},
       larkCli: {
         identityPreset: 'user-default' as const,
@@ -132,6 +156,8 @@ describe('profile store canonical serialization', () => {
     expect(savedProfile.attachments).toEqual(profile.attachments);
     expect(savedProfile.outbound).toEqual(profile.outbound);
     expect(savedProfile.network).toEqual(profile.network);
+    expect(savedProfile.subagents).toEqual(profile.subagents);
+    expect(savedProfile.rsi).toEqual(profile.rsi);
     expect(savedProfile.comments).toEqual(profile.comments);
     expect(savedProfile.larkCli).toEqual(profile.larkCli);
     expect(savedProfile.permissions).toEqual({

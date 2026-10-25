@@ -17,6 +17,17 @@ export interface StructuredSession {
    */
   interrupt(): Promise<boolean | void>;
   diagnostics(): LiveSessionDiagnostics;
+  snapshot?(): {
+    threadId?: string;
+    sessionId?: string;
+    cwd?: string;
+    goal?: string;
+    goalActive?: boolean;
+    phase?: string;
+    lastUserText?: string;
+    lastAssistantText?: string;
+    lastToolStatus?: string;
+  };
   close(): Promise<void>;
 }
 

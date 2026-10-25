@@ -54,6 +54,8 @@ export interface TmuxPaneTail {
 export interface TmuxInterruptOptions {
   /** Only interrupt when the pane visibly confirms a side conversation. */
   sideOnly?: boolean;
+  /** Cancels the side-only backend operation, when applicable. */
+  signal?: AbortSignal;
 }
 
 export interface TmuxBindingStatus {

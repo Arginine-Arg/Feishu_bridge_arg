@@ -21,6 +21,7 @@ import {
   waitForIdleSocket,
   writeHostRegistry,
   type CodexHostEnvironmentFingerprint,
+  type CodexHostRuntimeIdentity,
 } from './host-registry';
 
 const HOST_FAILURE_BASE_MS = 3_000;
@@ -85,6 +86,7 @@ export async function connectCodexHost(options: {
    * instead of silently serving the previous configuration.
    */
   fingerprint?: CodexHostEnvironmentFingerprint;
+  runtimeIdentity?: CodexHostRuntimeIdentity;
 }): Promise<{ rpc: RpcClient; endpoint: string }> {
   return connectCodexHostInternal(options, 0);
 }
@@ -96,6 +98,7 @@ interface CodexHostOptions {
   cwd: string;
   env: NodeJS.ProcessEnv;
   fingerprint?: CodexHostEnvironmentFingerprint;
+  runtimeIdentity?: CodexHostRuntimeIdentity;
 }
 
 async function connectCodexHostInternal(
@@ -187,6 +190,7 @@ async function connectCodexHostInternal(
         startedAt: Date.now(),
         binary: options.binary,
         fingerprint: options.fingerprint,
+        ...(options.runtimeIdentity ? { runtimeIdentity: options.runtimeIdentity } : {}),
       });
     }
   }
@@ -265,6 +269,13 @@ export async function findStaleHost(
   const result = { directory: host.directory, pid: host.pid };
   if (host.pid <= 0 || !processAlive(host.pid)) return { ...result, reason: 'process-gone' };
   if (!sameFingerprint(host.fingerprint, fingerprint)) {
+    if (await hostHasActiveClients(host.directory)) {
+      log.warn('agent', 'app-server-provider-switch-deferred', {
+        directory: host.directory,
+        reason: 'active-client',
+      });
+      return undefined;
+    }
     return { ...result, reason: 'environment-changed' };
   }
   const owners = await liveOwners(profileDir);

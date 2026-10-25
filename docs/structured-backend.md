@@ -1,6 +1,6 @@
-# Structured backend (v1.6.0)
+# Structured backend (v1.7.0)
 
-Version 1.6.0 provides an opt-in structured-first backend with native fallback. The v1.2.7
+Version 1.7.0 keeps the opt-in structured-first backend with native fallback. The v1.2.7
 tag remains available for rollback. It does not automatically change any running
 profile or migrate an existing terminal session. The previously validated
 1.4.0 implementation is retained with the limitations below.
@@ -92,6 +92,12 @@ To create a shared Codex in your existing shell, run `clash on` if needed, then:
 arg-bridge native 019f8e13-6f7a-7403-8742-06688b2adf05 --profile codex
 ```
 
+`arg-bridge codex [thread]` is an exact alias. Neither command replaces the
+`@openai/codex` executable. Plain `codex` therefore retains its native `/btw`;
+Bridge MixAgents interception applies to Bridge/Feishu structured turns. Use
+the MixAgents plugin entry for direct Codex when that separate integration is
+installed.
+
 Omit the ID for a new native conversation using live fallback (older servers
 cannot share an empty, unmaterialized thread). With an existing ID, the command
 uses structured transport. This command inherits the current environment and
@@ -108,17 +114,16 @@ Use the intended proxy environment before first starting its server. Shared
 thread context does not imply that idle terminal-originated output is always
 pushed unsolicited to Feishu; the Bridge relay forwards its active requests.
 
-Codex persists the provider id in each thread. If `cc-switch` removes that id
-from `config.toml`, `thread/resume` fails before the thread can load with
-`Model provider <old-id> not found`. The bridge therefore retries **only that
-specific failure** once, using the `modelProvider`/`model` from the
-`$CODEX_HOME` reported by the App Server's `initialize` response. A normal
-resume sends no provider or model override, so a model selected with `/model`
-(or persisted in the thread) is preserved. If the App Server home or its
-`config.toml` is unavailable, the bridge does not guess: it logs
-`codex-resume-defaults-unavailable` / `codex-provider-rebind-unavailable` and
-surfaces the original error. The retry never rewrites history; it only changes
-the resume request parameters.
+Codex persists the provider id in each thread. Version 1.7.0 reads the thread
+snapshot at resume. If the thread is idle and its provider/model differ from the
+current `$CODEX_HOME/config.toml`, the current provider/model are applied to the
+resume request. This covers the case where both provider A and provider B still
+exist and `cc-switch` changed the active one. If the thread has an active turn,
+the bridge defers the switch and keeps the running provider. If the snapshot is
+unavailable, it preserves the old deterministic fallback for
+`Model provider <old-id> not found`. If the App Server home/config is unknown or
+unreadable, it does not guess `openai`. Resume changes request parameters only;
+it does not rewrite history.
 
 Claude uses the official Agent SDK streaming-input mode with one persistent
 Claude process per scope. The default `claude_code` preset and normal user/project
@@ -142,7 +147,7 @@ for Claude remote-service transport, not a verified local attach replacement.
 | `/status` | thread metadata and Bridge diagnostics | SDK session/model/phase and Bridge diagnostics |
 | `/goal` | native get/set/pause/resume/clear, with goal relay spanning turns | unsupported; no imitation goal loop |
 | `/stop` | pause active goal and interrupt the exact turn | SDK interrupt |
-| `/btw` | ephemeral fork with native side boundary; text submitted only after preparation | unsupported in the structured backend |
+| `/btw` | independently routed MixAgents read-only agent; explicit Codex fork fallback | MixAgents read-only side through the same backend; Codex-specific fork is unavailable |
 
 Other slash commands are not forwarded to the model as ordinary task text when
 unsupported. The stable terminal backend remains available for its full native
@@ -188,7 +193,7 @@ so that acceptance failure is not specific to the SDK path. The Codex real-turn
 probe additionally checks for the assistant's answer in the shared tmux TUI,
 not merely a repeated copy of the user prompt.
 
-After the user updated `/home/wanghaoran/.claude/settings.json` on 2026-09-07,
+After the operator updated the local Claude settings on 2026-09-07,
 Claude initialization and model selection passed again. Generation did not
 finish within the SDK probe's 120-second deadline; an independent native
 `claude -p` probe also produced no result before its 55-second deadline.
@@ -219,7 +224,10 @@ Set the intended model explicitly in the structured profile, or reconcile native
 Claude model configuration before relying on defaults. Alias mappings alone do
 not remove a conflicting explicit model setting.
 
-Native Codex side conversations include developer instructions and a boundary
+The optional MixAgents backend is now the preferred `/btw` backend when its six
+tools and selected route are available. It is selected for Codex and Claude
+structured sessions alike. The old ephemeral Codex fork remains an explicit
+auto-mode fallback and includes developer instructions and a boundary
 message defining inherited history as reference-only. The user approved retaining
 these native strings on 2026-09-07. The adapter preserves the effective existing
 developer policy and appends the verbatim native side policy, then injects the
@@ -228,12 +236,16 @@ equivalent. Ephemeral threads do not support goals; the server rejects combining
 `ephemeral` with `deferGoalContinuation`. No goal mutation is sent to the parent.
 
 `/btw` without text prepares side without a generation; `/btw text` submits only
-after preparation. `/btw out` interrupts and unsubscribes only the child ID.
-Its tmux view is currently read-only, avoiding an extra native subscription that
-could keep the ephemeral thread alive after exit. The main view remains native.
-Side state is currently connection-local: Bridge restart does not promise side
-recovery. Real Codex entry, answer, exit and subsequent main status have passed;
-this remains opt-in, not an automatic terminal-backend replacement.
+after preparation. With MixAgents, text is sent to an independent Broker agent,
+never to a Codex fork, and `access` is always `read-only`. Scope/cwd/route
+fingerprint are persisted so a Bridge restart can reconnect the same agent.
+Route/provider/model/backend/revision changes replace the old agent with an
+explicit notice. `/btw out` interrupts only that side; `/stop`, `/model`,
+`/goal`, and `/compact` stay main-scoped.
+
+See [MixAgents subagents](./mixagents-subagents.md) and
+[Project RSI](./project-rsi.md) for configuration, credentials, runtime
+diagnostics and completion gates.
 
 A separate real Codex test started a native goal that ran `sleep 25`, submitted
 a side question while that goal was active, exited side, and observed the main

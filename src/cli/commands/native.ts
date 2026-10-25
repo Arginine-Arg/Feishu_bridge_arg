@@ -21,7 +21,11 @@ import {
 } from '../../agent/codex/credentials';
 import { fileStamp, fingerprintCredentialEnv } from '../../agent/structured/host-registry';
 import { shutdownProfileHosts } from '../../agent/structured/host';
-import { resolveCodexProvider } from '../../agent/codex/provider';
+import {
+  resolveCodexActiveConfigIdentity,
+  resolveCodexProvider,
+} from '../../agent/codex/provider';
+import { readCcSwitchCurrentProvider } from '../../integrations/cc-switch';
 
 /** Run as an ordinary foreground shell command. The caller's shell (and its
  * Clash/Conda environment) survives both normal exit and Ctrl-C. */
@@ -45,8 +49,21 @@ export async function runNative(thread: string | undefined, opts: { profile?: st
     ?? (config.codex?.inheritCodexHome === false ? `${paths.profileDir}/codex-home` : undefined);
   // A third-party provider must not be diverted through a local clash port, so
   // the provider decides the network policy before the environment is prepared.
-  const provider = await resolveCodexProvider(codexHome ?? defaultCodexHome());
+  const activeHome = codexHome ?? defaultCodexHome();
+  const [provider, activeIdentity, ccSwitch] = await Promise.all([
+    resolveCodexProvider(activeHome),
+    resolveCodexActiveConfigIdentity(activeHome),
+    readCcSwitchCurrentProvider(process.env),
+  ]);
   const thirdParty = !provider.official;
+  const runtimeIdentity = activeIdentity
+    ? {
+        ...(ccSwitch.providerId ? { ccSwitchProviderId: ccSwitch.providerId } : {}),
+        codexProviderId: activeIdentity.codexProviderId,
+        ...(activeIdentity.model ? { model: activeIdentity.model } : {}),
+        recordedAt: Date.now(),
+      }
+    : undefined;
   const env = await sanitizeAgentEnv({ ...process.env }, config.network, {
     thirdPartyProvider: thirdParty,
   });
@@ -111,6 +128,7 @@ export async function runNative(thread: string | undefined, opts: { profile?: st
           configStamp: env.CODEX_HOME ? fileStamp(join(env.CODEX_HOME, 'config.toml')) : undefined,
           authStamp: env.CODEX_HOME ? fileStamp(join(env.CODEX_HOME, 'auth.json')) : undefined,
         },
+        ...(runtimeIdentity ? { runtimeIdentity } : {}),
       });
   try {
     if (endpoints[0]) await host.rpc.initialize();

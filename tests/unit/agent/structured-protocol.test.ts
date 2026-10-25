@@ -26,9 +26,9 @@ describe('structured transport contracts', () => {
     const result = await (adapter as unknown as { resumeLegacyThread: Function }).resumeLegacyThread(rpc, 'unix:///tmp/server.sock', 'thread-1', '/workspace');
     expect(result.rpc).toBe(rpc);
     expect(result.result.thread.id).toBe('thread-1');
-    expect(request).toHaveBeenCalledTimes(3);
-    expect(request.mock.calls[0]?.[0]).toBe('thread/resume');
+    expect(request.mock.calls[0]?.[0]).toBe('thread/read');
     expect(request.mock.calls.filter(call => call[0] === 'thread/resume')).toHaveLength(1);
+    expect(request.mock.calls.filter(call => call[0] === 'thread/loaded/list')).toHaveLength(1);
     await adapter.shutdown();
   });
 

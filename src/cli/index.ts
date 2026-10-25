@@ -26,6 +26,9 @@ import {
 import { runStart } from './commands/start';
 import { runAgentSendFile } from './commands/agent-sendfile';
 import { runNative } from './commands/native';
+import { runSettings } from './commands/settings';
+import { runDoctor } from './commands/doctor';
+import { runMigrateLocalPoc } from './commands/migrate-local-poc';
 
 const program = new Command();
 
@@ -40,6 +43,28 @@ program.command('native [thread]')
   .description('Open or resume an agent in this shell; Codex shares an App Server with Bridge')
   .option('--profile <name>', 'profile whose agent and permissions to use')
   .action(async (thread: string | undefined, opts: { profile?: string }) => runNative(thread, opts));
+
+program.command('codex [thread]')
+  .description('Alias for `native`/`native <thread>`; launches the official Codex binary without replacing it')
+  .option('--profile <name>', 'profile whose Codex agent and permissions to use')
+  .action(async (thread: string | undefined, opts: { profile?: string }) => runNative(thread, opts));
+
+program.command('settings')
+  .description('View or edit MixAgents /btw routing and Project RSI settings')
+  .option('--profile <name>', 'profile to inspect or edit (defaults to active profile)')
+  .option('--json', 'print a machine-readable, secret-free snapshot without prompting')
+  .action(async (opts: { profile?: string; json?: boolean }) => {
+    await runSettings(opts);
+  });
+
+program.command('doctor')
+  .description('Diagnose cc-switch, MixAgents routes, credentials presence and Project RSI')
+  .option('--profile <name>', 'profile to diagnose (defaults to active profile)')
+  .option('--json', 'print a machine-readable, secret-free report')
+  .option('--probe-route <id>', 'explicitly spend one read-only Broker request on this route; never falls back')
+  .action(async (opts: { profile?: string; json?: boolean; probeRoute?: string }) => {
+    await runDoctor(opts);
+  });
 
 program
   .command('run')
@@ -73,6 +98,21 @@ program
   .option('--agent <kind>', 'agent kind for legacy v1 profile migration (claude or codex)')
   .action(async (opts: { config?: string; profile?: string; agent?: string }) => {
     await runMigrate(opts);
+  });
+
+program.command('migrate-local-poc')
+  .description('Audit and migrate recognized direct-dist/local PoC state; default is dry-run')
+  .option('--profile <name>', 'profile whose side map and config are migrated')
+  .option('--dry-run', 'report planned changes without writing')
+  .option('--apply', 'backup and apply only recognized migrations')
+  .option('--json', 'print a machine-readable report')
+  .action(async (opts: {
+    profile?: string;
+    dryRun?: boolean;
+    apply?: boolean;
+    json?: boolean;
+  }) => {
+    await runMigrateLocalPoc(opts);
   });
 
 const profile = program

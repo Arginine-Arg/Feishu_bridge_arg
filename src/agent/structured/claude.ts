@@ -26,6 +26,10 @@ export class ClaudeStructuredSession implements StructuredSession {
   private selectedSkill?: string;
   private model?: string;
   private cumulativeCost = 0;
+  private lastUserText?: string;
+  private lastAssistantText = '';
+  private lastToolStatus?: string;
+  private lastCwd?: string;
 
   static async create(id: string, options: Options): Promise<ClaudeStructuredSession> {
     const { query } = await import('@anthropic-ai/claude-agent-sdk');
@@ -112,7 +116,19 @@ export class ClaudeStructuredSession implements StructuredSession {
     if (this.failure) throw this.failure;
     if (this.emit) throw new Error('Claude session already has an active relay');
     if (signal.aborted) return;
-    this.emit = emit; this.signal = signal; this.sentText = false; this.streamingMessages.clear(); this.streamingThinking.clear();
+    this.lastUserText = options.prompt.slice(0, 800);
+    this.lastCwd = options.cwd;
+    this.emit = event => {
+      if (event.type === 'text') {
+        this.lastAssistantText = `${this.lastAssistantText}${event.delta}`.slice(-2_000);
+      } else if (event.type === 'tool_use') {
+        this.lastToolStatus = `${event.name}: started`;
+      } else if (event.type === 'tool_result') {
+        this.lastToolStatus = `${event.id}: ${event.isError ? 'failed' : 'completed'}`;
+      }
+      emit(event);
+    };
+    this.signal = signal; this.sentText = false; this.streamingMessages.clear(); this.streamingThinking.clear();
     emit({ type: 'system', sessionId: this.id, cwd: options.cwd });
     const done = new Promise<void>(resolve => { this.complete = resolve; });
     const abort = () => { void this.interrupt().catch(error => { this.emit?.({ type: 'error', message: String(error), terminationReason: 'failed' }); this.complete?.(); }); };
@@ -218,5 +234,22 @@ export class ClaudeStructuredSession implements StructuredSession {
     });
   }
   diagnostics(): LiveSessionDiagnostics { return { phase: this.phase, inputState: this.complete ? 'submitted' : 'empty', retryCount: 0 }; }
+  snapshot(): {
+    sessionId: string;
+    cwd?: string;
+    phase: string;
+    lastUserText?: string;
+    lastAssistantText?: string;
+    lastToolStatus?: string;
+  } {
+    return {
+      sessionId: this.id,
+      ...(this.lastCwd ? { cwd: this.lastCwd } : {}),
+      phase: this.phase,
+      ...(this.lastUserText ? { lastUserText: this.lastUserText } : {}),
+      ...(this.lastAssistantText ? { lastAssistantText: this.lastAssistantText } : {}),
+      ...(this.lastToolStatus ? { lastToolStatus: this.lastToolStatus } : {}),
+    };
+  }
   async close(): Promise<void> { this.input.close(); this.query.close(); await this.reader; }
 }

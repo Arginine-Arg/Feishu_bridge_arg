@@ -10,6 +10,15 @@ describe('CLI command registration', () => {
     expect(source).toContain('runMigrate');
   });
 
+  it('registers settings, doctor, codex alias and local PoC migration entry points', async () => {
+    const source = await readFile(join(process.cwd(), 'src', 'cli', 'index.ts'), 'utf8');
+    expect(source).toMatch(/\.command\(['"]settings['"]\)/);
+    expect(source).toMatch(/\.command\(['"]doctor['"]\)/);
+    expect(source).toMatch(/\.command\(['"]codex \[thread\]['"]\)/);
+    expect(source).toMatch(/\.command\(['"]migrate-local-poc['"]\)/);
+    expect(source).toContain('--probe-route <id>');
+  });
+
   it('registers app-secret options for non-interactive app bootstrap commands', async () => {
     const source = await readFile(join(process.cwd(), 'src', 'cli', 'index.ts'), 'utf8');
 

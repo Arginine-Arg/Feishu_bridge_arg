@@ -35,6 +35,14 @@ export interface CodexHostRegistration {
   startedAt: number;
   binary: string;
   fingerprint: CodexHostEnvironmentFingerprint;
+  runtimeIdentity?: CodexHostRuntimeIdentity;
+}
+
+export interface CodexHostRuntimeIdentity {
+  ccSwitchProviderId?: string;
+  codexProviderId: string;
+  model?: string;
+  recordedAt: number;
 }
 
 interface CodexHostRegistryFile {

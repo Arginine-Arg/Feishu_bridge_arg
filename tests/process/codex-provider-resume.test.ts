@@ -38,6 +38,27 @@ describe('provider-aware Codex resume', () => {
     expect(calls).toEqual([{ threadId: 'thread-old', cwd: '/repo' }]);
   }, 30_000);
 
+  it('switches an idle old thread at the safe boundary when provider A still exists', async () => {
+    const fixture = await startFakeServer('provider-switch-idle-old-exists');
+    const calls = await fixture.resume();
+
+    expect(calls).toEqual([
+      {
+        threadId: 'thread-old',
+        cwd: '/repo',
+        modelProvider: 'custom',
+        model: 'model-new',
+      },
+    ]);
+  }, 30_000);
+
+  it('never switches provider while the old thread has an active turn', async () => {
+    const fixture = await startFakeServer('provider-switch-active');
+    const calls = await fixture.resume();
+
+    expect(calls).toEqual([{ threadId: 'thread-old', cwd: '/repo' }]);
+  }, 30_000);
+
   it('retries permission overrides first and keeps provider defaults out of it', async () => {
     const fixture = await startFakeServer('permission-then-normal');
     const calls = await fixture.resume({
@@ -159,6 +180,24 @@ wss.on('connection', (socket) => {
         return;
       }
       socket.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: { thread: { id: message.params.threadId } } }));
+      return;
+    }
+    if (message.method === 'thread/read' && mode.startsWith('provider-switch')) {
+      socket.send(JSON.stringify({
+        jsonrpc: '2.0',
+        id: message.id,
+        result: {
+          thread: {
+            id: 'thread-old',
+            modelProvider: 'old-provider',
+            model: 'model-old',
+            status: {
+              type: mode === 'provider-switch-active' ? 'active' : 'idle',
+            },
+            turns: [],
+          },
+        },
+      }));
       return;
     }
     socket.send(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: {} }));

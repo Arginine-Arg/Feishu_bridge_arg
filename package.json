@@ -1,6 +1,6 @@
 {
   "name": "arg-bridge",
-  "version": "1.6.7",
+  "version": "1.7.0",
   "description": "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   "type": "module",
   "packageManager": "pnpm@10.33.0",
@@ -32,7 +32,8 @@
     "skills",
     "README.md",
     "README.zh.md",
-    "docs/structured-backend.md",
+    "docs",
+    "CHANGELOG.md",
     "THIRD_PARTY_CODEX_NOTICE",
     "LICENSE"
   ],

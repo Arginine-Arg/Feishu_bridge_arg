@@ -4,7 +4,9 @@
 
 [English README](./README.md)
 
-`1.6.7` 修复 `cc-switch` 切换 provider 后旧 Codex thread 无法 resume 的问题。bridge 先按原样 resume（保留用户通过 `/model` 选择的模型）；仅当服务端明确返回 `Model provider <旧 id> not found` 时，才用 App Server 自己 `$CODEX_HOME` 中的 provider/model 重试一次。它不会重写历史；配置不可读时不会猜 `openai`，App Server 未报告 home 时也不会退到 bridge 自己的 Codex home。
+`1.7.0` 新增可选 MixAgents Broker `/btw`、`cc-switch` read route 动态解析、`arg-bridge settings`、`arg-bridge doctor --json`、Project RSI 证据门禁和 `migrate-local-poc`。主 provider 始终只由 `cc-switch` 控制；Bridge 不导出、打印或记录 provider key。`/btw` 严格只读，每次调用重新读取路由，route 配置身份变化时会明确结束旧 agent 并创建新 agent。
+
+`1.6.7` 引入 provider-aware Codex resume；`1.7.0` 在 idle turn 边界应用当前 provider/model，即使旧 provider 仍存在也会安全切换；已有活跃 turn 时绝不中途换 provider。
 
 `1.6.6` 修正 structured 模式下命令作用域：`/goal`、`/model`、`/stop`、`/compact` 在 `/btw` 侧对话打开时也始终作用于主线程；`/model` 的选择按卡片所属线程回填；普通 `/stop` 会同时停掉 side 与主线程上的 goal（包括 bridge 从未观测到的 goal）；带 `@bot` 前缀的命令会被正确识别，而不再被原样敲进 agent。终端转发路径在发送这些命令前会先退出 side；Claude harness 对 `/goal` 给出明确说明、`/stop` 走中断。
 
@@ -58,7 +60,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.6.7
+sh /tmp/install-arg-bridge.sh --version 1.7.0
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -102,10 +104,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.7"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.7.0"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.6.7`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.7.0`。
 
 ### 4. Node 或 npm 全局目录错误
 
@@ -221,6 +223,13 @@ arg-bridge status --profile codex
 ```text
 arg-bridge run [--profile <name>] [--agent claude|codex] [--workspace <path>] [-c <config>]
 arg-bridge migrate [--profile <name>] [--agent claude|codex]
+arg-bridge migrate-local-poc --profile codex --dry-run --json
+arg-bridge migrate-local-poc --profile codex --apply
+arg-bridge native [thread] [--profile <name>]
+arg-bridge codex [thread] [--profile <name>]
+arg-bridge settings --profile codex [--json]
+arg-bridge doctor --profile codex --json
+arg-bridge doctor --profile codex --json --probe-route <broker-route>
 arg-bridge ps
 arg-bridge kill <id|#>
 arg-bridge --help
@@ -243,6 +252,45 @@ arg-bridge profile export <name> --include-secrets --yes
 
 如果某个 profile 被建成了错误的 agent 类型，先 `stop` 或 `unregister --profile <name>` 清理对应后台服务，再 `profile remove <name>`，然后用正确的 `--agent` 重新创建。
 
+### MixAgents `/btw`、`cc-switch`、MCP 与 Project RSI
+
+MixAgents 是可选依赖。未安装时，`auto` 会明确提示并保留 Codex fork 降级；显式 `broker` 会直接给出可操作的安装/配置错误。正式集成面是带版本检查的 MixAgents STDIO MCP 六工具协议，不读取或硬编码 `$CODEX_HOME/plugins/cache/...`。
+
+官方安装提示：
+
+```bash
+codex plugin marketplace add Utopia-V/mixagents
+codex plugin add mixagents-broker@mixagents
+```
+
+`arg-bridge settings` 使用现有配置锁编辑当前 profile，显示 `cc-switch` 当前 provider、Codex 配置值与运行值、read/write Broker routes、可用性、缺失环境变量**名称**、凭据委托方式、RSI reviewer route 和初始化状态。`arg-bridge doctor --json` 只读且不会产生付费请求；只有显式 `--probe-route <id>` 会发起一次 read-only 生成 probe，失败后不重试、不降级。
+
+三类 provider 标识必须分开：
+
+1. `cc-switch` 的 provider ID；
+2. Codex `config.toml` 内部 `model_provider` 与 model；
+3. MixAgents Broker route ID。
+
+Broker 映射只使用第 1 类 ID，不使用显示名或 Codex 内部名。provider 切换只在下一个 idle turn 或 profile 重启时生效，正在执行的请求不会中途换供应商。旧 thread 的历史 provider 仍存在时，也会在 idle 边界切到当前配置；活跃 thread 保持原运行 provider，等安全后再切。
+
+可选映射文件为 `~/.config/arg-bridge/broker-routes.json`，其中只保存 ID：
+
+```json
+{
+  "version": 1,
+  "defaultReadRoute": "review-read",
+  "providers": {
+    "cc-switch-provider-id": { "readRoute": "review-read" }
+  }
+}
+```
+
+通过 `arg-bridge settings --profile codex` 配置 MCP 可执行文件、参数、凭据模式和 provider 引用。Bridge 不读取 provider key。`credentialMode: "mixagents-managed"` 时，Bridge 只向 MCP 子进程传 `MIXAGENTS_CREDENTIAL_PROVIDER=<opaque-ref>`；由 MixAgents 或其受信任 helper 解析 `cc-switch` 凭据。在 helper 通过兼容 probe 前，doctor 会明确显示 `delegated-unverified`。
+
+Project RSI 与 MixAgents、历史 Task RSI 是三个不同层次。Bridge 只发现已经初始化的 `.project-rsi/config.json`，不会在 `/`、`$HOME` 或宽泛父目录自动 init。Bridge turn 一旦产生持久修改或高影响结论，必须找到绑定当前项目/thread/task 的 fresh 上游 validator receipt，否则不会发送普通成功完成卡片。reviewer 是证据而不是授权。直接 `codex` 等原生 TUI 不在 Bridge 门禁范围内，除非项目安装并验证了可信 Codex hook；settings/doctor 会如实显示该边界。
+
+详见 [MixAgents 子代理](./docs/mixagents-subagents.md)、[Project RSI](./docs/project-rsi.md)、[凭据与权限安全](./docs/security-and-permissions.md)和[本地 PoC 迁移](./docs/migration-local-poc.md)。
+
 ### 飞书内斜杠命令
 
 | 命令 | 作用 |
@@ -258,7 +306,7 @@ arg-bridge profile export <name> --include-secrets --yes
 | `/sendfile <绝对路径>` | 仅管理员：直接回复发送当前工作目录、bridge 媒体缓存或显式允许目录内的普通文件，不调用 agent |
 | `/config` | 调整展示偏好、访问控制和 lark-cli 身份策略 |
 | `/model` | 选择模型；Codex 直接使用 CLI 原生模型/reasoning 选项，并把结果同步到当前 profile。`/codex model` 等价于 `/codex /model`。 |
-| `/btw [<内容>]` | 仅 Codex：开启或复用 side conversation；带内容时立即提交，省略内容时先进入 side，再用下一条消息发送正文。`/codex /btw [<内容>]` 等价。 |
+| `/btw [--route <id>] [<内容>]` | 开启或复用独立 read-only side agent。配置 MixAgents 后使用 Broker agent（不是 Codex fork），每次调用重新解析 route；否则 `auto` 明确提示并降级 Codex fork。`/btw out` 只关闭 side。飞书内 `/codex /btw ...` 等价。 |
 | `/session [status\|live\|turn]` | 查看终端执行状态。tmux/live 为默认模式；`turn` 仅作为兼容回退 |
 | `/tmux list [socket]` | 仅管理员：列出本机所有存活的 Codex/Claude tmux pane，包含工作目录、agent 类型、已识别 thread、共享 App Server endpoint 和 attach 命令。可选 `-S <绝对 socket 路径>` 或 `-L <名称>` 只扫描一个 tmux server；普通 shell 不会列出 |
 | `/tmux bind <编号\|pane id\|socket::pane id>` | 仅管理员：把当前 chat/topic scope 绑定到列表中的 pane。带有共享 Codex endpoint 的 pane 走 structured 转发，普通 Codex/Claude pane 回退到 live 转发。编号只在最近一次 `/tmux list` 结果内有效 |
@@ -429,6 +477,8 @@ arg-bridge 会在每次 Codex 运行前处理这个问题：
 - 如果确认是第三方 provider 但找不到任何 token，bridge 只记录 `codex-credential-missing` 并继续启动，把报错留给 Codex，而不是直接让 preflight 失败。
 
 shell 包装函数对**你自己开的终端**（自己 shell 里的 `arg-bridge native`、直接运行 `codex`）仍然有用，但 bridge 不再依赖它。不要把 `OPENAI_API_KEY` 写进 systemd unit 或服务环境；如果那里需要固定 token，建议写在 Codex 配置的 `experimental_bearer_token` 里，bridge 会直接读取。
+
+`arg-bridge codex [thread]` 是 `arg-bridge native [thread]` 的显式别名。安装过程**不会替换或包装** `@openai/codex` 管理的可执行文件；直接运行 `codex` 仍然使用 Codex 原生 `/btw`，不在 Bridge 的 MixAgents/Project RSI 拦截范围内。需要 Broker 路由时，请使用飞书 `/btw`、Bridge structured view，或 MixAgents 自身提供的稳定插件入口。旧终端回到 Bridge 已知 thread 时运行 `arg-bridge codex <thread-id> --profile <name>`；pane 已存在时用 `/tmux status` 显示的 attach 命令。
 
 #### 第三方 provider 不继承本机代理
 

@@ -7,6 +7,61 @@ import { StructuredAdapter } from '../../src/agent/structured/adapter';
 import type { AgentEvent } from '../../src/agent/types';
 
 const native = process.env.ARG_BRIDGE_NATIVE_PROTOCOL === '1' ? it : it.skip;
+const nativeResume = process.env.ARG_BRIDGE_NATIVE_RESUME === '1' ? it : it.skip;
+
+nativeResume('codex: resumes the same persisted thread after adapter recreation', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'bridge-native-resume-codex-'));
+  const profileDir = join(directory, 'state');
+  const first = new StructuredAdapter({
+    kind: 'codex',
+    binary: 'codex',
+    profileDir,
+    nativeView: false,
+  });
+  let threadId: string | undefined;
+  try {
+    const events: AgentEvent[] = [];
+    for await (const event of first.run({
+      runId: 'resume-fresh',
+      scopeId: 'resume-scope',
+      cwd: directory,
+      prompt: 'Reply with exactly BRIDGE_RESUME_FRESH_OK. Do not use tools.',
+    }).events) events.push(event);
+    expect(events.filter(event => event.type === 'error')).toEqual([]);
+    expect(events.filter(event => event.type === 'text').map(event => event.delta).join(''))
+      .toContain('BRIDGE_RESUME_FRESH_OK');
+    threadId = events.find((event): event is Extract<AgentEvent, { type: 'system' }> =>
+      event.type === 'system' && Boolean(event.threadId))?.threadId;
+    expect(threadId).toBeTruthy();
+  } finally {
+    await first.shutdown();
+  }
+
+  const second = new StructuredAdapter({
+    kind: 'codex',
+    binary: 'codex',
+    profileDir,
+    nativeView: false,
+  });
+  try {
+    const events: AgentEvent[] = [];
+    for await (const event of second.run({
+      runId: 'resume-followup',
+      scopeId: 'resume-scope',
+      cwd: directory,
+      prompt: 'Reply with exactly BRIDGE_RESUME_FOLLOWUP_OK. Do not use tools.',
+    }).events) events.push(event);
+    expect(events.filter(event => event.type === 'error')).toEqual([]);
+    expect(events.filter(event => event.type === 'text').map(event => event.delta).join(''))
+      .toContain('BRIDGE_RESUME_FOLLOWUP_OK');
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'system',
+      threadId,
+    }));
+  } finally {
+    await second.shutdown();
+  }
+}, 120000);
 for (const kind of ['codex', 'claude'] as const) {
   native(`${kind}: ${process.env.ARG_BRIDGE_NATIVE_PROTOCOL_TURN === '1' ? 'submits real text and verifies shared output' : 'queries and selects models without a model turn'}`, async () => {
     const directory = await mkdtemp(join(tmpdir(), `bridge-native-${kind}-`));

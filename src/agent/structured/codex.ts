@@ -13,8 +13,13 @@ export class CodexStructuredSession implements StructuredSession {
   private turnId?: string;
   private phase: LiveSessionDiagnostics['phase'] = 'idle';
   private goalActive = false;
+  private lastGoalText?: string;
   private finishedTurns = new Set<string>();
   private selectedSkill?: { name: string; path: string };
+  private lastUserText?: string;
+  private lastAssistantText = '';
+  private lastToolStatus?: string;
+  private lastCwd?: string;
   private pending = new Map<string, { choices: Map<string, unknown>; freeText?: boolean; respond(value: unknown): Promise<void> }>();
   private menus = new Set<string>();
   private deltas = new Map<string, string>();
@@ -85,9 +90,11 @@ export class CodexStructuredSession implements StructuredSession {
     if (message.method === 'item/agentMessage/delta') {
       const key = `${p.turnId}:${p.itemId}`;
       this.deltas.set(key, (this.deltas.get(key) ?? '') + p.delta);
+      this.lastAssistantText = `${this.lastAssistantText}${String(p.delta ?? '')}`.slice(-2000);
       this.emit?.(textEvent(p.delta));
     }
     if (message.method === 'item/started' && toolItems.has(p.item?.type)) {
+      this.lastToolStatus = `${p.item.type}: started`;
       this.emit?.({ type: 'tool_use', id: p.item.id, name: p.item.type, input: p.item.input ?? p.item.arguments ?? { command: p.item.command, cwd: p.item.cwd } });
     }
     if (message.method === 'item/completed') {
@@ -101,12 +108,22 @@ export class CodexStructuredSession implements StructuredSession {
       if (toolItems.has(item.type)) this.emit?.({ type: 'tool_result', id: item.id,
         output: item.aggregatedOutput ?? JSON.stringify(item.result ?? item.error ?? item.changes ?? ''),
         isError: item.status === 'failed' || (item.exitCode != null && item.exitCode !== 0) });
+      if (toolItems.has(item.type)) {
+        this.lastToolStatus = `${item.type}: ${item.status ?? (item.exitCode != null && item.exitCode !== 0 ? 'failed' : 'completed')}`;
+      }
     }
     if (message.method === 'thread/goal/updated') {
       this.goalActive = p.goal?.status === 'active';
+      if (typeof p.goal?.objective === 'string' && p.goal.objective.trim()) {
+        this.lastGoalText = p.goal.objective.trim().slice(0, 800);
+      }
       if (!this.goalActive && !this.turnId) this.finish();
     }
-    if (message.method === 'thread/goal/cleared') { this.goalActive = false; if (!this.turnId) this.finish(); }
+    if (message.method === 'thread/goal/cleared') {
+      this.goalActive = false;
+      this.lastGoalText = undefined;
+      if (!this.turnId) this.finish();
+    }
     if (message.method === 'thread/tokenUsage/updated') {
       const usage = p.tokenUsage?.last;
       const total = p.tokenUsage?.total;
@@ -139,6 +156,8 @@ export class CodexStructuredSession implements StructuredSession {
   async submit(options: AgentRunOptions, emit: (event: AgentEvent) => void, signal: AbortSignal): Promise<void> {
     if (this.emit) throw new Error('Structured thread already has an active relay');
     if (signal.aborted) return;
+    this.lastUserText = options.prompt.slice(0, 800);
+    this.lastCwd = options.cwd;
     this.emit = emit;
     emit({ type: 'system', threadId: this.id, cwd: options.cwd });
     for (const event of this.deferredInteractions.splice(0)) {
@@ -185,13 +204,20 @@ export class CodexStructuredSession implements StructuredSession {
       const action = args[0];
       let result: Wire;
       if (!action || action === 'status') result = await this.rpc.request('thread/goal/get', { threadId: this.id });
-      else if (action === 'clear') { result = await this.rpc.request('thread/goal/clear', { threadId: this.id }); this.goalActive = false; }
+      else if (action === 'clear') {
+        result = await this.rpc.request('thread/goal/clear', { threadId: this.id });
+        this.goalActive = false;
+        this.lastGoalText = undefined;
+      }
       else {
         const state = action === 'pause' ? 'paused' : 'active';
         const objective = input.trim().slice('/goal'.length).trim();
         result = await this.rpc.request('thread/goal/set', { threadId: this.id, ...(action === 'edit' ? {} : { status: state }),
           ...(['pause', 'resume'].includes(action) ? {} : { objective: action === 'edit' ? objective.slice('edit'.length).trimStart() : objective }) });
         this.goalActive = result.goal?.status === 'active';
+        if (typeof result.goal?.objective === 'string' && result.goal.objective.trim()) {
+          this.lastGoalText = result.goal.objective.trim().slice(0, 800);
+        }
       }
       return [textEvent(JSON.stringify(result, null, 2))];
     }
@@ -301,6 +327,30 @@ export class CodexStructuredSession implements StructuredSession {
     return acted;
   }
   diagnostics(): LiveSessionDiagnostics { return { phase: this.goalActive && this.phase === 'idle' ? 'busy' : this.phase, inputState: this.turnId || this.goalActive ? 'submitted' : 'empty', retryCount: 0 }; }
+  /** Bounded, redactable context for a /btw progress snapshot. */
+  snapshot(): {
+    threadId: string;
+    cwd?: string;
+    goalActive: boolean;
+    goal?: string;
+    turnId?: string;
+    phase: string;
+    lastUserText?: string;
+    lastAssistantText?: string;
+    lastToolStatus?: string;
+  } {
+    return {
+      threadId: this.id,
+      ...(this.lastCwd ? { cwd: this.lastCwd } : {}),
+      goalActive: this.goalActive,
+      ...(this.lastGoalText ? { goal: this.lastGoalText } : {}),
+      ...(this.turnId ? { turnId: this.turnId } : {}),
+      phase: this.phase,
+      ...(this.lastUserText ? { lastUserText: this.lastUserText } : {}),
+      ...(this.lastAssistantText ? { lastAssistantText: this.lastAssistantText } : {}),
+      ...(this.lastToolStatus ? { lastToolStatus: this.lastToolStatus } : {}),
+    };
+  }
   async syncState(): Promise<void> {
     try {
       const result = await this.rpc.request('thread/goal/get', { threadId: this.id });
@@ -309,6 +359,11 @@ export class CodexStructuredSession implements StructuredSession {
       // this session; only an explicit absent goal or a concrete status does.
       if (!result.goal) this.goalActive = false;
       else if (typeof status === 'string') this.goalActive = status === 'active';
+      if (typeof result.goal?.objective === 'string' && result.goal.objective.trim()) {
+        this.lastGoalText = result.goal.objective.trim().slice(0, 800);
+      } else if (!result.goal) {
+        this.lastGoalText = undefined;
+      }
     }
     catch { /* Older servers may lack goals; ordinary turns remain available. */ }
     try {

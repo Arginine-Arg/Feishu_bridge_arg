@@ -71,6 +71,55 @@ export interface NetworkConfig {
   noProxy?: string;
 }
 
+export type SubagentMode = 'off' | 'auto' | 'broker' | 'fork';
+export type SubagentRouteMode = 'follow-cc-switch' | 'manual';
+export type SubagentAccess = 'read-only' | 'workspace-write';
+
+export interface SubagentMixAgentsConfig {
+  /**
+   * Stable MCP server command. Until MixAgents publishes a public package this
+   * must be configured explicitly (or supplied through
+   * ARG_BRIDGE_MIXAGENTS_MCP); arg-bridge never reaches into a plugin cache.
+   */
+  mcpCommand?: string;
+  mcpArgs?: string[];
+  mcpCwd?: string;
+  /**
+   * `inherit-env` checks credential variable *names* in the MCP process
+   * environment. `mixagents-managed` delegates secret lookup to MixAgents or
+   * its trusted helper and passes only an opaque provider reference.
+   */
+  credentialMode?: 'inherit-env' | 'mixagents-managed';
+  credentialProvider?: string;
+  /** Environment variable names that must be present for the MCP server. */
+  credentialEnvKeys?: string[];
+}
+
+export interface SubagentConfig {
+  enabled: boolean;
+  mode: SubagentMode;
+  routeMode: SubagentRouteMode;
+  readRoute: string | null;
+  writeRoute: string | null;
+  includeProgressSnapshot: boolean;
+  reuse: 'scope-cwd';
+  allowForkFallback: boolean;
+  mixagents?: SubagentMixAgentsConfig;
+}
+
+export interface RsiConfig {
+  mode: 'off' | 'auto';
+  projectRoot: string | null;
+  reviewerRouteMode: SubagentRouteMode;
+  reviewerRoute: string | null;
+  /** Optional explicit upstream runner entry; task text is passed by file. */
+  runnerCommand?: string;
+  runnerArgs?: string[];
+  /** Optional explicit validator entry; the upstream validator is never copied. */
+  validatorCommand?: string;
+  validatorArgs?: string[];
+}
+
 export type CommentConfig = Record<string, never>;
 
 export type LarkCliIdentityPreset = 'bot-only' | 'user-default';
@@ -108,6 +157,8 @@ export interface ProfileConfig {
   permissions: PermissionConfig;
   permissionSource?: PermissionSource;
   network?: NetworkConfig;
+  subagents?: SubagentConfig;
+  rsi?: RsiConfig;
   codex?: CodexConfig;
   attachments: AttachmentConfig;
   outbound: OutboundConfig;
@@ -170,6 +221,8 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     sandbox?: Partial<SandboxConfig>;
     permissions?: Partial<PermissionConfig>;
     network?: Partial<NetworkConfig>;
+    subagents?: unknown;
+    rsi?: unknown;
     codex?: CodexConfig & { flags?: unknown };
     attachments?: Partial<AttachmentConfig>;
     outbound?: {
@@ -216,6 +269,8 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     permissions,
     permissionSource,
     network: normalizeNetwork(raw.network),
+    subagents: normalizeSubagents(raw.subagents),
+    rsi: normalizeRsi(raw.rsi),
     ...(raw.codex ? { codex: normalizeCodex(raw.codex) } : {}),
     attachments: {
       maxCount: numberOr(raw.attachments?.maxCount, 10),
@@ -340,6 +395,114 @@ function normalizeNetwork(input: Partial<NetworkConfig> | undefined): NetworkCon
   };
 }
 
+export const DEFAULT_SUBAGENT_CONFIG: SubagentConfig = {
+  enabled: true,
+  mode: 'auto',
+  routeMode: 'follow-cc-switch',
+  readRoute: null,
+  writeRoute: null,
+  includeProgressSnapshot: true,
+  reuse: 'scope-cwd',
+  allowForkFallback: true,
+};
+
+export const DEFAULT_RSI_CONFIG: RsiConfig = {
+  mode: 'auto',
+  projectRoot: null,
+  reviewerRouteMode: 'follow-cc-switch',
+  reviewerRoute: null,
+};
+
+function normalizeSubagents(input: unknown): SubagentConfig {
+  const raw = isRecord(input) ? input : {};
+  const mixagentsRaw = isRecord(raw.mixagents) ? raw.mixagents : undefined;
+  const mcpArgs = stringArray(mixagentsRaw?.mcpArgs);
+  if (
+    mcpArgs.some(value => looksLikeInlineSecret(value)) ||
+    (nonEmptyString(mixagentsRaw?.mcpCommand) &&
+      looksLikeInlineSecret(nonEmptyString(mixagentsRaw?.mcpCommand)!))
+  ) {
+    throw new Error('subagents.mixagents command/args must not contain inline credentials; use a trusted credential helper');
+  }
+  const mode: SubagentMode =
+    raw.mode === 'off' || raw.mode === 'broker' || raw.mode === 'fork'
+      ? raw.mode
+      : 'auto';
+  const routeMode: SubagentRouteMode =
+    raw.routeMode === 'manual' ? 'manual' : 'follow-cc-switch';
+  const mixagents = mixagentsRaw
+    ? {
+        ...(nonEmptyString(mixagentsRaw.mcpCommand)
+          ? { mcpCommand: nonEmptyString(mixagentsRaw.mcpCommand) }
+          : {}),
+        ...(mcpArgs.length > 0
+          ? { mcpArgs }
+          : {}),
+        ...(nonEmptyString(mixagentsRaw.mcpCwd)
+          ? { mcpCwd: nonEmptyString(mixagentsRaw.mcpCwd) }
+          : {}),
+        ...(mixagentsRaw.credentialMode === 'mixagents-managed'
+          ? { credentialMode: 'mixagents-managed' as const }
+          : mixagentsRaw.credentialMode === 'inherit-env'
+            ? { credentialMode: 'inherit-env' as const }
+            : {}),
+        ...(credentialReference(mixagentsRaw.credentialProvider)
+          ? { credentialProvider: credentialReference(mixagentsRaw.credentialProvider) }
+          : {}),
+        ...(stringArray(mixagentsRaw.credentialEnvKeys).length > 0
+          ? {
+              credentialEnvKeys: stringArray(mixagentsRaw.credentialEnvKeys)
+                .map(value => value.trim())
+                .filter(value => /^[A-Z_][A-Z0-9_]*$/u.test(value)),
+            }
+          : {}),
+      }
+    : undefined;
+  return {
+    enabled: raw.enabled !== false,
+    mode,
+    routeMode,
+    readRoute: nonEmptyString(raw.readRoute) ?? null,
+    writeRoute: nonEmptyString(raw.writeRoute) ?? null,
+    includeProgressSnapshot: raw.includeProgressSnapshot !== false,
+    reuse: 'scope-cwd',
+    allowForkFallback: raw.allowForkFallback !== false,
+    ...(mixagents && Object.keys(mixagents).length > 0 ? { mixagents } : {}),
+  };
+}
+
+function normalizeRsi(input: unknown): RsiConfig {
+  const raw = isRecord(input) ? input : {};
+  const runnerCommand = nonEmptyString(raw.runnerCommand);
+  const validatorCommand = nonEmptyString(raw.validatorCommand);
+  const runnerArgs = stringArray(raw.runnerArgs);
+  const validatorArgs = stringArray(raw.validatorArgs);
+  if (
+    [runnerCommand, validatorCommand].some(value => value && looksLikeInlineSecret(value)) ||
+    [...runnerArgs, ...validatorArgs].some(looksLikeInlineSecret)
+  ) {
+    throw new Error('rsi command/args must not contain inline credentials; use the trusted project runner environment');
+  }
+  return {
+    mode: raw.mode === 'off' ? 'off' : 'auto',
+    projectRoot: nonEmptyString(raw.projectRoot) ?? null,
+    reviewerRouteMode: raw.reviewerRouteMode === 'manual' ? 'manual' : 'follow-cc-switch',
+    reviewerRoute: nonEmptyString(raw.reviewerRoute) ?? null,
+    ...(runnerCommand
+      ? { runnerCommand }
+      : {}),
+    ...(runnerArgs.length > 0
+      ? { runnerArgs }
+      : {}),
+    ...(validatorCommand
+      ? { validatorCommand }
+      : {}),
+    ...(validatorArgs.length > 0
+      ? { validatorArgs }
+      : {}),
+  };
+}
+
 function normalizeComments(_input: unknown): CommentConfig {
   return {};
 }
@@ -397,4 +560,21 @@ function numberOr(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0
     ? value
     : fallback;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function looksLikeInlineSecret(value: string): boolean {
+  return /sk-[A-Za-z0-9_-]{8,}|Bearer\s+\S+|\b(?:api[_-]?key|token|secret|authorization)\s*=\s*\S+/iu.test(value);
+}
+
+function credentialReference(value: unknown): string | undefined {
+  const text = nonEmptyString(value);
+  return text && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(text) ? text : undefined;
 }

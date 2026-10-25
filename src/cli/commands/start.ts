@@ -453,6 +453,12 @@ export function createRuntimeAgent(
       nativeView: profileConfig.preferences.structuredNativeView !== false,
       sandbox: profileConfig.sandbox.defaultMode,
       network: profileConfig.network,
+      subagents: profileConfig.subagents,
+      rsi: profileConfig.rsi,
+      ...((appPaths.configPath ?? appPaths.configFile)
+        ? { configFile: appPaths.configPath ?? appPaths.configFile }
+        : {}),
+      ...(appPaths.profile ? { profile: appPaths.profile } : {}),
       larkChannel,
     });
     const live = profileConfig.agentKind === 'codex'
