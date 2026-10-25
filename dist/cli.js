@@ -5793,7 +5793,7 @@ function findSocketHolders(directory) {
 }
 function lsofUnixSocketHolders(socketPath) {
   try {
-    const output = execFileSync("lsof", ["-nP", "-U"], {
+    const output = execFileSync("lsof", ["-nP", "+U"], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
       timeout: 2e3
@@ -5802,14 +5802,18 @@ function lsofUnixSocketHolders(socketPath) {
       const fields = line.trim().split(/\s+/);
       if (fields.length < 9) return [];
       const pid = Number.parseInt(fields[1] ?? "", 10);
-      const node = fields[7];
-      const name = fields.slice(8).join(" ");
-      if (!Number.isSafeInteger(pid) || pid <= 0 || !node) return [];
-      return [{ pid, node, name }];
+      if (!Number.isSafeInteger(pid) || pid <= 0) return [];
+      return [{
+        pid,
+        device: fields[5] ?? "",
+        node: fields[7] ?? "",
+        name: fields.slice(8).join(" ")
+      }];
     });
-    const socketNodes = new Set(records.filter((record) => record.name.includes(socketPath)).map((record) => record.node));
-    if (socketNodes.size === 0) return [];
-    return [...new Set(records.filter((record) => socketNodes.has(record.node)).map((record) => record.pid))];
+    const serverRecords = records.filter((record) => record.name.includes(socketPath));
+    const devices = new Set(serverRecords.map((record) => record.device).filter(Boolean));
+    const nodes = new Set(serverRecords.map((record) => record.node).filter(Boolean));
+    return [...new Set(records.filter((record) => devices.has(record.device) || nodes.has(record.node)).map((record) => record.pid))];
   } catch {
     return void 0;
   }
