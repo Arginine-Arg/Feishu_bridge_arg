@@ -264,9 +264,10 @@ export function hostHasActiveClients(directory: string): boolean {
           stdio: ['ignore', 'pipe', 'ignore'],
           timeout: 2_000,
         });
-        return output.split('\n').some(line =>
+        const matches = output.split('\n').filter(line => line.includes(socketPath));
+        return matches.some(line =>
           line.includes(`->${socketPath}`) || line.includes(`-> ${socketPath}`)
-        );
+        ) || matches.length > 1;
       } catch {
         // Without a working process inspection tool, fail safe.
         return true;
@@ -329,6 +330,21 @@ export function findSocketHolders(directory: string): number[] {
       if (fields.length >= 7) inodes.add(fields[6]!);
     }
   } catch {
+    if (process.platform === 'darwin') {
+      try {
+        const output = execFileSync('lsof', ['-nP', '-U'], {
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+          timeout: 2_000,
+        });
+        return [...new Set(output.split('\n')
+          .filter(line => line.includes(resolved))
+          .map(line => Number.parseInt(line.trim().split(/\s+/)[1] ?? '', 10))
+          .filter(pid => Number.isSafeInteger(pid) && pid > 0))];
+      } catch {
+        return [];
+      }
+    }
     return [];
   }
   if (inodes.size === 0) return [];

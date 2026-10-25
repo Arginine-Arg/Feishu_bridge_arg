@@ -64,8 +64,8 @@ model_provider = "custom"
     expect(resolveCodexResumeDefaults(empty)).toBeUndefined();
 
     const unreadable = await writeHome('model = "m"\nmodel_provider = "custom"\n');
-    await chmod(join(unreadable, 'config.toml'), 0o000);
-    cleanups.push(() => chmod(join(unreadable, 'config.toml'), 0o600).catch(() => {}));
+    await rm(join(unreadable, 'config.toml'));
+    await mkdir(join(unreadable, 'config.toml'));
     expect(resolveCodexResumeDefaults(unreadable)).toBeUndefined();
   });
 });

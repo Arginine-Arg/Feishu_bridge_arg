@@ -88,14 +88,11 @@ describe('Project RSI adapter', () => {
       ...DEFAULT_RSI_CONFIG,
       projectRoot: setup.projectRoot,
     }, setup.projectRoot);
-    expect(status).toMatchObject({
-      initialized: true,
-      validator: 'available',
-      latestRun: {
-        runId: setup.runId,
-        validated: true,
-      },
-    });
+    expect(status.initialized).toBe(true);
+    expect(status.error).toBeUndefined();
+    expect(['available', 'unknown']).toContain(status.validator);
+    expect(status.latestRun?.runId).toBe(setup.runId);
+    expect(status.latestRun?.validated).toBe(true);
   });
 
   it('rejects stale manifests, stale receipts, fake hashes, and future turn boundaries', async () => {

@@ -4,7 +4,7 @@ A lightweight bot that bridges Feishu / Lark messenger with your local Claude Co
 
 [中文 README](./README.zh.md)
 
-Version 1.7.1 keeps the v1.7 feature set and fixes cross-platform validation for macOS canonical paths/socket symlinks and Windows Unix-only test scoping. Version 1.7.0 adds an optional MixAgents Broker backend for `/btw`, dynamic `cc-switch` read-route selection, `arg-bridge settings`, `arg-bridge doctor --json`, Project RSI evidence gates, and `migrate-local-poc`. The main provider remains controlled only by `cc-switch`; Bridge never exports or prints provider secrets. `/btw` is read-only, re-reads routing on every use, and replaces an old side agent when route/config identity changes.
+Version 1.7.2 completes cross-platform validation after the v1.7.0 feature release: macOS socket symlink/client detection, Windows path fixtures, and Unix-only test scoping. Version 1.7.0 adds an optional MixAgents Broker backend for `/btw`, dynamic `cc-switch` read-route selection, `arg-bridge settings`, `arg-bridge doctor --json`, Project RSI evidence gates, and `migrate-local-poc`. The main provider remains controlled only by `cc-switch`; Bridge never exports or prints provider secrets. `/btw` is read-only, re-reads routing on every use, and replaces an old side agent when route/config identity changes.
 
 Version 1.6.7 introduced provider-aware Codex resume. Version 1.7.0 applies the current provider/model at an idle resume boundary, including when the old provider still exists, while never switching a thread that has an active turn.
 
@@ -60,7 +60,7 @@ Install a pinned release or use a writable custom npm prefix when required:
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.7.1
+sh /tmp/install-arg-bridge.sh --version 1.7.2
 # Example for a machine without permission to write npm's configured global prefix:
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ Release tarballs are preferred. If a Git install is required, keep both compatib
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.7.1"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.7.2"
 ```
 
-`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.7.1`.
+`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.7.2`.
 
 ### 4. Node or npm global-prefix errors
 

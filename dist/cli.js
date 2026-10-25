@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.7.1",
+  version: "1.7.2",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -5725,9 +5725,10 @@ function hostHasActiveClients(directory) {
           stdio: ["ignore", "pipe", "ignore"],
           timeout: 2e3
         });
-        return output.split("\n").some(
+        const matches = output.split("\n").filter((line) => line.includes(socketPath));
+        return matches.some(
           (line) => line.includes(`->${socketPath}`) || line.includes(`-> ${socketPath}`)
-        );
+        ) || matches.length > 1;
       } catch {
         return true;
       }
@@ -5768,6 +5769,18 @@ function findSocketHolders(directory) {
       if (fields.length >= 7) inodes.add(fields[6]);
     }
   } catch {
+    if (process.platform === "darwin") {
+      try {
+        const output = execFileSync("lsof", ["-nP", "-U"], {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "ignore"],
+          timeout: 2e3
+        });
+        return [...new Set(output.split("\n").filter((line) => line.includes(resolved)).map((line) => Number.parseInt(line.trim().split(/\s+/)[1] ?? "", 10)).filter((pid) => Number.isSafeInteger(pid) && pid > 0))];
+      } catch {
+        return [];
+      }
+    }
     return [];
   }
   if (inodes.size === 0) return [];
