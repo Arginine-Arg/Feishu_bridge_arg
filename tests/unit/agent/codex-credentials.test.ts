@@ -1,6 +1,6 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   applyCodexCredentialEnv,
@@ -242,11 +242,11 @@ describe('codex credential env helpers', () => {
   });
 
   it('resolves CODEX_HOME relative paths against the home directory', () => {
-    expect(defaultCodexHome({}, '/home/user')).toBe(resolve('/home/user/.codex'));
+    expect(defaultCodexHome({}, '/home/user')).toBe(join('/home/user', '.codex'));
     expect(defaultCodexHome({ CODEX_HOME: '/custom/codex' }, '/home/user')).toBe('/custom/codex');
     expect(defaultCodexHome({ CODEX_HOME: 'relative-codex' }, '/home/user'))
-      .toBe(resolve('/home/user/relative-codex'));
-    expect(defaultCodexHome({ CODEX_HOME: '   ' }, '/home/user')).toBe(resolve('/home/user/.codex'));
+      .toBe(join('/home/user', 'relative-codex'));
+    expect(defaultCodexHome({ CODEX_HOME: '   ' }, '/home/user')).toBe(join('/home/user', '.codex'));
   });
 });
 

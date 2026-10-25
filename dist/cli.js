@@ -5719,19 +5719,9 @@ function hostHasActiveClients(directory) {
     table = readFileSync2("/proc/net/unix", "utf8");
   } catch {
     if (process.platform === "darwin") {
-      try {
-        const output = execFileSync("lsof", ["-nP", "-U"], {
-          encoding: "utf8",
-          stdio: ["ignore", "pipe", "ignore"],
-          timeout: 2e3
-        });
-        const matches = output.split("\n").filter((line) => line.includes(socketPath));
-        return matches.some(
-          (line) => line.includes(`->${socketPath}`) || line.includes(`-> ${socketPath}`)
-        ) || matches.length > 1;
-      } catch {
-        return true;
-      }
+      const holders = lsofUnixSocketHolders(socketPath);
+      if (holders !== void 0) return holders.length > 1;
+      return true;
     }
     return true;
   }
@@ -5770,16 +5760,7 @@ function findSocketHolders(directory) {
     }
   } catch {
     if (process.platform === "darwin") {
-      try {
-        const output = execFileSync("lsof", ["-nP", "-U"], {
-          encoding: "utf8",
-          stdio: ["ignore", "pipe", "ignore"],
-          timeout: 2e3
-        });
-        return [...new Set(output.split("\n").filter((line) => line.includes(resolved)).map((line) => Number.parseInt(line.trim().split(/\s+/)[1] ?? "", 10)).filter((pid) => Number.isSafeInteger(pid) && pid > 0))];
-      } catch {
-        return [];
-      }
+      return lsofUnixSocketHolders(resolved) ?? [];
     }
     return [];
   }
@@ -5809,6 +5790,29 @@ function findSocketHolders(directory) {
     }
   }
   return pids;
+}
+function lsofUnixSocketHolders(socketPath) {
+  try {
+    const output = execFileSync("lsof", ["-nP", "-U"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 2e3
+    });
+    const records = output.split("\n").flatMap((line) => {
+      const fields = line.trim().split(/\s+/);
+      if (fields.length < 9) return [];
+      const pid = Number.parseInt(fields[1] ?? "", 10);
+      const node = fields[7];
+      const name = fields.slice(8).join(" ");
+      if (!Number.isSafeInteger(pid) || pid <= 0 || !node) return [];
+      return [{ pid, node, name }];
+    });
+    const socketNodes = new Set(records.filter((record) => record.name.includes(socketPath)).map((record) => record.node));
+    if (socketNodes.size === 0) return [];
+    return [...new Set(records.filter((record) => socketNodes.has(record.node)).map((record) => record.pid))];
+  } catch {
+    return void 0;
+  }
 }
 async function waitForExit(pid, timeoutMs = 2e3) {
   if (!processAlive(pid)) return true;

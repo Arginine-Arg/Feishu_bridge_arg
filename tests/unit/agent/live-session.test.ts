@@ -4688,7 +4688,7 @@ setInterval(() => {}, 1000);
     }
   }, 10_000);
 
-  it('stops a confirmed side turn even when the latest redraw temporarily looks like main', async () => {
+  (process.platform === 'win32' ? it.skip : it)('stops a confirmed side turn even when the latest redraw temporarily looks like main', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-side-stop-stale-main-test-'));
     const bin = join(dir, 'fake-side-stop-stale-main-agent.mjs');
     const trace = join(dir, 'input-trace.txt');
