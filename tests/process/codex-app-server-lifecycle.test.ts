@@ -27,6 +27,7 @@ function wsWrapperPath(): string {
 const cleanups: Array<() => Promise<void>> = [];
 const oldKey = process.env.OPENAI_API_KEY;
 let otherOwnerPid = 0;
+const unixIt = process.platform === 'win32' ? it.skip : it;
 
 beforeAll(() => {
   // A stand-in for a paused native TUI: a live process that owns the profile.
@@ -51,7 +52,7 @@ afterEach(async () => {
 });
 
 describe('Codex App Server lifecycle', () => {
-  it('reuses a server whose environment still matches and replaces it after a provider switch', async () => {
+  unixIt('reuses a server whose environment still matches and replaces it after a provider switch', async () => {
     const fixture = await createAppServerFixture();
     const cwd = fixture.dir;
     const env = {
@@ -124,7 +125,7 @@ describe('Codex App Server lifecycle', () => {
     expect(await readHostRegistry(fixture.dir)).toEqual([]);
   }, 60_000);
 
-  it('keeps a detached server while another owner is alive', async () => {
+  unixIt('keeps a detached server while another owner is alive', async () => {
     const fixture = await createAppServerFixture();
     const directory = codexHostRuntimeDirectory(fixture.dir, 'scope-shared', fixture.dir);
     await recordOwner(fixture.dir, otherOwnerPid);

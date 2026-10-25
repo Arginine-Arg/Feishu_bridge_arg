@@ -9,13 +9,14 @@ import { codexHostRuntimeDirectory, processAlive } from '../../src/agent/structu
 
 const require = createRequire(import.meta.url);
 const cleanups: Array<() => Promise<void>> = [];
+const unixIt = process.platform === 'win32' ? it.skip : it;
 
 afterEach(async () => {
   await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
 });
 
 describe('draining App Server recovery', () => {
-  it('reclaims a draining orphan whose wrapper process already died', async () => {
+  unixIt('reclaims a draining orphan whose wrapper process already died', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'draining-app-server-'));
     cleanups.push(() => rm(dir, { recursive: true, force: true }));
     const binary = join(dir, 'codex');

@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.7.1
+
+- Fixed macOS canonical paths for Project RSI evidence and Codex daemon socket
+  symlinks.
+- Added macOS Unix-socket client detection through `lsof` so App Server
+  replacement remains safe without Linux `/proc`.
+- Kept Unix-socket-specific process tests skipped on Windows, where the
+  structured backend is explicitly unsupported, while preserving their Linux
+  and macOS assertions.
+- Made Windows path expectations use the host path implementation.
+
 ## 1.7.0
 
 - Added optional MixAgents MCP subagent backend for read-only `/btw`, with
@@ -23,4 +34,3 @@
 - Rebinds a resumed Codex thread only after a missing historical provider.
 
 See `docs/releases/` for release-specific notes.
-

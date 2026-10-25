@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.7.0",
+  version: "1.7.1",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -5580,6 +5580,7 @@ async function runCapture(cmd, args, timeoutMs, env) {
 
 // src/agent/structured/host-registry.ts
 import { createHash } from "crypto";
+import { execFileSync } from "child_process";
 import { readFileSync as readFileSync2, readdirSync, readlinkSync, realpathSync, statSync } from "fs";
 import { mkdir as mkdir13, readFile as readFile11, readdir as readdir4, rm as rm11, writeFile as writeFile8 } from "fs/promises";
 import { tmpdir as tmpdir2 } from "os";
@@ -5717,6 +5718,20 @@ function hostHasActiveClients(directory) {
   try {
     table = readFileSync2("/proc/net/unix", "utf8");
   } catch {
+    if (process.platform === "darwin") {
+      try {
+        const output = execFileSync("lsof", ["-nP", "-U"], {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "ignore"],
+          timeout: 2e3
+        });
+        return output.split("\n").some(
+          (line) => line.includes(`->${socketPath}`) || line.includes(`-> ${socketPath}`)
+        );
+      } catch {
+        return true;
+      }
+    }
     return true;
   }
   for (const line of table.split("\n").slice(1)) {
@@ -13994,7 +14009,7 @@ function errorMessage6(error) {
 import { createHash as createHash5 } from "crypto";
 import { lstat as lstat2, mkdtemp, readFile as readFile16, readdir as readdir5, realpath as realpath4, rm as rm13, stat as stat6, writeFile as writeFile9, mkdir as mkdir17 } from "fs/promises";
 import { homedir as homedir9, tmpdir as tmpdir4 } from "os";
-import { dirname as dirname18, isAbsolute as isAbsolute4, join as join27, parse, resolve as resolve4 } from "path";
+import { dirname as dirname18, isAbsolute as isAbsolute4, join as join27, parse, relative, resolve as resolve4 } from "path";
 var CONFIG_RELATIVE_PATH = join27(".project-rsi", "config.json");
 var EVIDENCE_RELATIVE_PATH = join27(".agent", "rsi");
 var MAX_CONFIG_BYTES = 256 * 1024;
@@ -14311,7 +14326,8 @@ async function listRuns(project) {
     const manifestRunId = typeof raw.runId === "string" ? raw.runId.trim() : "";
     if (manifestRunId !== entry.name) continue;
     const declaredRoot = typeof raw.projectRoot === "string" ? raw.projectRoot.trim() : typeof raw.project === "object" && raw.project && !Array.isArray(raw.project) ? raw.project.root : void 0;
-    if (typeof declaredRoot !== "string" || !declaredRoot.trim() || resolve4(project.root, declaredRoot.trim()) !== project.root) {
+    const canonicalDeclared = typeof declaredRoot === "string" && declaredRoot.trim() ? await realpath4(resolve4(project.root, declaredRoot.trim())).catch(() => void 0) : void 0;
+    if (canonicalDeclared !== project.root) {
       continue;
     }
     const rawManifest = await readFile16(manifestPath, "utf8");
@@ -14410,8 +14426,8 @@ async function isRegularFile(path) {
   return (await stat6(path).catch(() => void 0))?.isFile() ?? false;
 }
 function isWithin(root, candidate) {
-  const relative3 = candidate.slice(root.length);
-  return candidate === root || candidate.startsWith(`${root}/`) && !relative3.includes("..");
+  const rel = relative(root, candidate);
+  return rel === "" || !rel.startsWith("..") && !isAbsolute4(rel);
 }
 function safeError(error) {
   return redactSecrets(error instanceof Error ? error.message : String(error));
@@ -15809,9 +15825,12 @@ async function resolveAppServerSocketPath(candidate) {
     throw new Error("App Server endpoint \u4E0D\u5B89\u5168");
   }
   const requested = resolve5(candidate);
-  await assertOwnedParents(requested);
   const resolvedPath = await realpath5(requested);
   await assertOwnedParents(resolvedPath);
+  if (requested !== resolvedPath) {
+    const requestedParent = await realpath5(join29(requested, ".."));
+    await assertOwnedParents(requestedParent);
+  }
   const info = await stat7(resolvedPath);
   if (!info.isSocket()) throw new Error("App Server socket \u4E0D\u5B89\u5168");
   if (process.getuid && info.uid !== process.getuid()) {
@@ -17784,7 +17803,7 @@ function safeJsonStringify(value) {
 import { randomUUID as randomUUID4 } from "crypto";
 import { lstat as lstat5, readFile as readFile19, realpath as realpath6 } from "fs/promises";
 import { homedir as homedir11 } from "os";
-import { basename as basename7, dirname as dirname19, isAbsolute as isAbsolute5, relative, sep } from "path";
+import { basename as basename7, dirname as dirname19, isAbsolute as isAbsolute5, relative as relative2, sep } from "path";
 
 // src/card/account-cards.ts
 function maskAppId(id) {
@@ -20417,7 +20436,7 @@ function sendFileFailureMessage(err) {
   return "\u6587\u4EF6\u4E0A\u4F20\u5230\u98DE\u4E66\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u5E94\u7528\u6743\u9650\u3001token \u548C\u7F51\u7EDC\u540E\u91CD\u8BD5\u3002";
 }
 function isPathWithinRoot(path, root) {
-  const pathRelative = relative(root, path);
+  const pathRelative = relative2(root, path);
   return pathRelative === "" || pathRelative !== ".." && !pathRelative.startsWith(`..${sep}`) && !isAbsolute5(pathRelative);
 }
 function formatByteLimit(bytes) {
@@ -26134,7 +26153,7 @@ async function removeReaction(channel, messageId, reactionId) {
 import { createHash as createHash12, randomBytes as randomBytes5 } from "crypto";
 import { lstat as lstat6, mkdir as mkdir23, readFile as readFile21, realpath as realpath7, rm as rm15 } from "fs/promises";
 import { createServer } from "net";
-import { basename as basename8, dirname as dirname21, isAbsolute as isAbsolute6, relative as relative2, resolve as resolve6, sep as sep2 } from "path";
+import { basename as basename8, dirname as dirname21, isAbsolute as isAbsolute6, relative as relative3, resolve as resolve6, sep as sep2 } from "path";
 var ArtifactBroker = class {
   constructor(socketPath, channel, allowLocalFileRoot, persistentStatePath) {
     this.channel = channel;
@@ -26338,7 +26357,7 @@ var ArtifactBroker = class {
   }
 };
 function isPathWithinRoot2(path, root) {
-  const pathRelative = relative2(root, path);
+  const pathRelative = relative3(root, path);
   return pathRelative === "" || pathRelative !== ".." && !pathRelative.startsWith(`..${sep2}`) && !isAbsolute6(pathRelative);
 }
 function artifactBrokerSocketPath(socketPath) {
@@ -32240,13 +32259,13 @@ async function migrateLocalPoc(options = {}) {
     conflicts: [],
     rollback: []
   };
-  for (const relative3 of ["dist/cli.js", "dist/broker-side.js"]) {
-    const path = join37(packageDir, relative3);
+  for (const relative4 of ["dist/cli.js", "dist/broker-side.js"]) {
+    const path = join37(packageDir, relative4);
     const body = await readFile27(path, "utf8").catch(() => void 0);
     if (body === void 0) continue;
     const marker = POC_MARKERS.some((item) => body.includes(item));
     const sha2562 = createHash15("sha256").update(body).digest("hex");
-    const expectedHash = packageVersion ? KNOWN_CLEAN_HASHES[packageVersion]?.[relative3] : void 0;
+    const expectedHash = packageVersion ? KNOWN_CLEAN_HASHES[packageVersion]?.[relative4] : void 0;
     const unknownOneVersionSevenFile = packageVersion === "1.6.7" && !expectedHash;
     const unknownModifiedKnownVersion = Boolean(expectedHash && expectedHash !== sha2562);
     if (!marker) {

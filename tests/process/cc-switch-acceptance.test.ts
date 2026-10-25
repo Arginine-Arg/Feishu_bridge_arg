@@ -10,6 +10,7 @@ import { fileStamp, fingerprintCredentialEnv } from '../../src/agent/structured/
 
 const require = createRequire(import.meta.url);
 const cleanups: Array<() => Promise<void>> = [];
+const unixIt = process.platform === 'win32' ? it.skip : it;
 const savedEnv = {
   OPENAI_API_KEY: process.env.OPENAI_API_KEY,
   HTTPS_PROXY: process.env.HTTPS_PROXY,
@@ -26,7 +27,7 @@ afterEach(async () => {
 });
 
 describe('cc-switch acceptance path', () => {
-  it('runs a third-party provider directly with the configured token', async () => {
+unixIt('runs a third-party provider directly with the configured token', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'cc-switch-acceptance-'));
     const codexHome = join(dir, 'codex-home');
     const serverLog = join(dir, 'servers.json');

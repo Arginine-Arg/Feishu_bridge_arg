@@ -227,9 +227,15 @@ export async function resolveAppServerSocketPath(candidate: string): Promise<str
     throw new Error('App Server endpoint 不安全');
   }
   const requested = resolve(candidate);
-  await assertOwnedParents(requested);
   const resolvedPath = await realpath(requested);
   await assertOwnedParents(resolvedPath);
+  // macOS exposes system paths through symlinks such as `/var -> /private/var`.
+  // Validate the canonical directory chain rather than rejecting that system
+  // symlink, while still rejecting a group/world-writable real parent.
+  if (requested !== resolvedPath) {
+    const requestedParent = await realpath(join(requested, '..'));
+    await assertOwnedParents(requestedParent);
+  }
   const info = await stat(resolvedPath);
   if (!info.isSocket()) throw new Error('App Server socket 不安全');
   if (process.getuid && info.uid !== process.getuid()) {

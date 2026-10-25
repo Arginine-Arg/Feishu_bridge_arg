@@ -4,7 +4,7 @@
 
 [English README](./README.md)
 
-`1.7.0` 新增可选 MixAgents Broker `/btw`、`cc-switch` read route 动态解析、`arg-bridge settings`、`arg-bridge doctor --json`、Project RSI 证据门禁和 `migrate-local-poc`。主 provider 始终只由 `cc-switch` 控制；Bridge 不导出、打印或记录 provider key。`/btw` 严格只读，每次调用重新读取路由，route 配置身份变化时会明确结束旧 agent 并创建新 agent。
+`1.7.1` 保留 v1.7 功能集，并修复 macOS canonical path / Unix socket symlink 校验与 Windows Unix-only 测试作用域。`1.7.0` 新增可选 MixAgents Broker `/btw`、`cc-switch` read route 动态解析、`arg-bridge settings`、`arg-bridge doctor --json`、Project RSI 证据门禁和 `migrate-local-poc`。主 provider 始终只由 `cc-switch` 控制；Bridge 不导出、打印或记录 provider key。`/btw` 严格只读，每次调用重新读取路由，route 配置身份变化时会明确结束旧 agent 并创建新 agent。
 
 `1.6.7` 引入 provider-aware Codex resume；`1.7.0` 在 idle turn 边界应用当前 provider/model，即使旧 provider 仍存在也会安全切换；已有活跃 turn 时绝不中途换 provider。
 
@@ -60,7 +60,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.7.0
+sh /tmp/install-arg-bridge.sh --version 1.7.1
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.7.0"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.7.1"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.7.0`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.7.1`。
 
 ### 4. Node 或 npm 全局目录错误
 

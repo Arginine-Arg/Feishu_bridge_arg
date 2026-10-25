@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -77,11 +77,12 @@ describe('Project RSI adapter', () => {
     });
     const project = await discoverProjectRsi(setup.projectRoot, setup.projectRoot);
     expect(project).toBeDefined();
+    const canonicalRoot = await realpath(setup.projectRoot);
     const result = await verifyFreshRsiRun(project!, (now - 2) * 1000);
     expect(result).toMatchObject({
       ok: true,
       runId: setup.runId,
-      projectRoot: setup.projectRoot,
+      projectRoot: canonicalRoot,
     });
     const status = await projectRsiStatus({
       ...DEFAULT_RSI_CONFIG,

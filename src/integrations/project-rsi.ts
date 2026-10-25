@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { lstat, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile, mkdir } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { basename, dirname, isAbsolute, join, parse, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, parse, relative, resolve } from 'node:path';
 import { spawnProcess } from '../platform/spawn';
 import { redactSecrets } from '../agent/subagents/mcp-client';
 import type { RsiConfig } from '../config/profile-schema';
@@ -499,11 +499,10 @@ async function listRuns(project: ProjectRsiProject): Promise<ProjectRsiRun[]> {
       : typeof raw.project === 'object' && raw.project && !Array.isArray(raw.project)
         ? (raw.project as Record<string, unknown>).root
         : undefined;
-    if (
-      typeof declaredRoot !== 'string' ||
-      !declaredRoot.trim() ||
-      resolve(project.root, declaredRoot.trim()) !== project.root
-    ) {
+    const canonicalDeclared = typeof declaredRoot === 'string' && declaredRoot.trim()
+      ? await realpath(resolve(project.root, declaredRoot.trim())).catch(() => undefined)
+      : undefined;
+    if (canonicalDeclared !== project.root) {
       continue;
     }
     const rawManifest = await readFile(manifestPath, 'utf8');
@@ -651,8 +650,8 @@ async function isRegularFile(path: string): Promise<boolean> {
 }
 
 function isWithin(root: string, candidate: string): boolean {
-  const relative = candidate.slice(root.length);
-  return candidate === root || (candidate.startsWith(`${root}/`) && !relative.includes('..'));
+  const rel = relative(root, candidate);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 }
 
 function safeError(error: unknown): string {

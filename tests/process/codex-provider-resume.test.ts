@@ -11,6 +11,7 @@ import { resumeCodexThread } from '../../src/agent/structured/permissions.js';
 const require = createRequire(import.meta.url);
 const cleanups: Array<() => Promise<void>> = [];
 const children: ChildProcess[] = [];
+const unixIt = process.platform === 'win32' ? it.skip : it;
 
 afterEach(async () => {
   for (const child of children.splice(0)) {
@@ -21,7 +22,7 @@ afterEach(async () => {
 });
 
 describe('provider-aware Codex resume', () => {
-  it('rebinds only after a missing historical provider and then resumes', async () => {
+  unixIt('rebinds only after a missing historical provider and then resumes', async () => {
     const fixture = await startFakeServer('provider-missing');
     const calls = await fixture.resume();
 
@@ -31,14 +32,14 @@ describe('provider-aware Codex resume', () => {
     ]);
   }, 30_000);
 
-  it('does not touch the thread provider/model on a normal resume', async () => {
+  unixIt('does not touch the thread provider/model on a normal resume', async () => {
     const fixture = await startFakeServer('normal');
     const calls = await fixture.resume();
 
     expect(calls).toEqual([{ threadId: 'thread-old', cwd: '/repo' }]);
   }, 30_000);
 
-  it('switches an idle old thread at the safe boundary when provider A still exists', async () => {
+  unixIt('switches an idle old thread at the safe boundary when provider A still exists', async () => {
     const fixture = await startFakeServer('provider-switch-idle-old-exists');
     const calls = await fixture.resume();
 
@@ -52,14 +53,14 @@ describe('provider-aware Codex resume', () => {
     ]);
   }, 30_000);
 
-  it('never switches provider while the old thread has an active turn', async () => {
+  unixIt('never switches provider while the old thread has an active turn', async () => {
     const fixture = await startFakeServer('provider-switch-active');
     const calls = await fixture.resume();
 
     expect(calls).toEqual([{ threadId: 'thread-old', cwd: '/repo' }]);
   }, 30_000);
 
-  it('retries permission overrides first and keeps provider defaults out of it', async () => {
+  unixIt('retries permission overrides first and keeps provider defaults out of it', async () => {
     const fixture = await startFakeServer('permission-then-normal');
     const calls = await fixture.resume({
       sandbox: 'danger-full-access',
@@ -77,7 +78,7 @@ describe('provider-aware Codex resume', () => {
     ]);
   }, 30_000);
 
-  it('combines permission and provider retries in the correct order', async () => {
+  unixIt('combines permission and provider retries in the correct order', async () => {
     const fixture = await startFakeServer('permission-then-provider');
     const calls = await fixture.resume({
       sandbox: 'danger-full-access',

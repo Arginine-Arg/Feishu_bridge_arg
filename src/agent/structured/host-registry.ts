@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -256,7 +257,23 @@ export function hostHasActiveClients(directory: string): boolean {
   try {
     table = readFileSync('/proc/net/unix', 'utf8');
   } catch {
-    // Without /proc we cannot prove idleness; assume it is in use.
+    if (process.platform === 'darwin') {
+      try {
+        const output = execFileSync('lsof', ['-nP', '-U'], {
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+          timeout: 2_000,
+        });
+        return output.split('\n').some(line =>
+          line.includes(`->${socketPath}`) || line.includes(`-> ${socketPath}`)
+        );
+      } catch {
+        // Without a working process inspection tool, fail safe.
+        return true;
+      }
+    }
+    // Non-Unix structured transport is unsupported; keep the conservative
+    // answer if a caller reaches this path on another platform.
     return true;
   }
   for (const line of table.split('\n').slice(1)) {

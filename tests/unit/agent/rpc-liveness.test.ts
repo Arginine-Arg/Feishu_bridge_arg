@@ -13,6 +13,7 @@ import {
 
 const cleanups: Array<() => Promise<void>> = [];
 const servers: any[] = [];
+const unixIt = process.platform === 'win32' ? it.skip : it;
 
 afterEach(async () => {
   for (const server of servers.splice(0)) {
@@ -22,7 +23,7 @@ afterEach(async () => {
 });
 
 describe('RPC channel liveness', () => {
-  it('reports closed after the App Server drops the connection', async () => {
+  unixIt('reports closed after the App Server drops the connection', async () => {
     const socketPath = await unixSocketPath();
     const { wss, client } = await connectPair(socketPath);
 
@@ -47,7 +48,7 @@ describe('RPC channel liveness', () => {
 });
 
 describe('stale endpoint detection', () => {
-  it('turns a vanished socket into a typed stale-endpoint error', async () => {
+  unixIt('turns a vanished socket into a typed stale-endpoint error', async () => {
     const profileDir = await mkdtemp(join(tmpdir(), 'rpc-liveness-'));
     cleanups.push(() => rm(profileDir, { recursive: true, force: true }));
     const adapter = new StructuredAdapter({ kind: 'codex', binary: '/nonexistent', profileDir });
@@ -59,7 +60,7 @@ describe('stale endpoint detection', () => {
       .rejects.toBeInstanceOf(StaleStructuredEndpointError);
   });
 
-  it('keeps a live socket connectable', async () => {
+  unixIt('keeps a live socket connectable', async () => {
     const socketPath = await unixSocketPath();
     const { wss, client } = await connectPair(socketPath);
 
