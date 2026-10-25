@@ -36,23 +36,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Test source
-        id: test
-        continue-on-error: true
-        run: |
-          mkdir -p .ci
-          pnpm exec vitest run --reporter=json --outputFile=.ci/vitest.json
-
-      - name: Report test failures
-        if: always()
-        run: node scripts/report-vitest-failures.mjs .ci/vitest.json
-
-      - name: Upload test report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: vitest-report
-          path: .ci/vitest.json
-          if-no-files-found: ignore
+        run: pnpm test
 
       - name: Verify types
         run: pnpm typecheck
