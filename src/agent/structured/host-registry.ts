@@ -359,8 +359,7 @@ function macProcessSocketHolders(socketPath: string): number[] | undefined {
       .filter(pid => Number.isSafeInteger(pid) && pid > 0);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    if (String(code) === '1') return [];
-    if (code !== 'ENOENT') return undefined;
+    if (String(code) !== '1' && code !== 'ENOENT') return undefined;
   }
   try {
     const output = execFileSync('ps', ['-A', '-ww', '-o', 'pid=,command='], {

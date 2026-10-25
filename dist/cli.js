@@ -5801,8 +5801,7 @@ function macProcessSocketHolders(socketPath) {
     return output.split("\n").map((line) => Number.parseInt(line.trim(), 10)).filter((pid) => Number.isSafeInteger(pid) && pid > 0);
   } catch (error) {
     const code = error.code;
-    if (String(code) === "1") return [];
-    if (code !== "ENOENT") return void 0;
+    if (String(code) !== "1" && code !== "ENOENT") return void 0;
   }
   try {
     const output = execFileSync("ps", ["-A", "-ww", "-o", "pid=,command="], {

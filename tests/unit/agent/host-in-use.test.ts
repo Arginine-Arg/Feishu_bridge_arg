@@ -40,7 +40,15 @@ describe('App Server reclaim safety', () => {
 
     const client = spawn(
       process.execPath,
-      ['-e', `require('node:net').connect(${JSON.stringify(socketPath)}); setInterval(() => {}, 1000);`],
+      ['-e', `
+const net = require('node:net');
+const connect = () => {
+  const socket = net.connect(${JSON.stringify(socketPath)});
+  socket.once('connect', () => setInterval(() => {}, 1000));
+  socket.once('error', () => setTimeout(connect, 50));
+};
+connect();
+`],
       { stdio: 'ignore' },
     );
     cleanups.push(async () => {
