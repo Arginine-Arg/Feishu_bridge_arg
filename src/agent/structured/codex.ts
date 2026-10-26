@@ -1,5 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import type { AgentEvent, AgentRunOptions, LiveSessionDiagnostics } from '../types';
+import type {
+  AgentEvent,
+  AgentRunOptions,
+  AgentSteerRequest,
+  AgentSteerResult,
+  LiveSessionDiagnostics,
+} from '../types';
 import { interactionEvent, textEvent, type StructuredSession } from './contracts';
 import { RpcClient, type Wire } from './rpc';
 import { SIDE_BOUNDARY_PROMPT, SIDE_DEVELOPER_INSTRUCTIONS } from './side-boundary';
@@ -363,6 +369,39 @@ export class CodexStructuredSession implements StructuredSession {
     return acted;
   }
   diagnostics(): LiveSessionDiagnostics { return { phase: this.goalActive && this.phase === 'idle' ? 'busy' : this.phase, inputState: this.turnId || this.goalActive ? 'submitted' : 'empty', retryCount: 0 }; }
+  async steer(request: AgentSteerRequest): Promise<AgentSteerResult> {
+    const text = request.text.trim();
+    if (!text) return { status: 'unavailable', reason: 'empty input' };
+    const expectedTurnId = this.turnId;
+    if (!expectedTurnId) return { status: 'unavailable', reason: 'no active turn' };
+    try {
+      const result = await this.rpc.request('turn/steer', {
+        threadId: this.id,
+        expectedTurnId,
+        input: [{ type: 'text', text }],
+        ...(request.clientUserMessageId
+          ? { clientUserMessageId: request.clientUserMessageId }
+          : {}),
+      }, 20_000);
+      if (typeof result.turnId !== 'string' || !result.turnId) {
+        return {
+          status: 'uncertain',
+          reason: 'turn/steer response did not include a turn id',
+        };
+      }
+      this.lastUserText = text.slice(0, 800);
+      return { status: 'steered' };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (
+        /no active turn to steer|expected active turn id|cannot steer|input must not be empty|different output schema/iu
+          .test(message)
+      ) {
+        return { status: 'unavailable', reason: message };
+      }
+      return { status: 'uncertain', reason: message };
+    }
+  }
   /** Bounded, redactable context for a /btw progress snapshot. */
   snapshot(): {
     threadId: string;

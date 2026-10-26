@@ -60,7 +60,7 @@ describe('provider-aware Codex resume', () => {
     expect(calls).toEqual([{ threadId: 'thread-old', cwd: '/repo' }]);
   }, 30_000);
 
-  unixIt('retries permission overrides first and keeps provider defaults out of it', async () => {
+  unixIt('strips permission overrides before the first remote resume request', async () => {
     const fixture = await startFakeServer('permission-then-normal');
     const calls = await fixture.resume({
       sandbox: 'danger-full-access',
@@ -68,30 +68,18 @@ describe('provider-aware Codex resume', () => {
     });
 
     expect(calls).toEqual([
-      {
-        threadId: 'thread-old',
-        cwd: '/repo',
-        sandbox: 'danger-full-access',
-        approvalPolicy: 'never',
-      },
       { threadId: 'thread-old', cwd: '/repo' },
     ]);
   }, 30_000);
 
-  unixIt('combines permission and provider retries in the correct order', async () => {
-    const fixture = await startFakeServer('permission-then-provider');
+  unixIt('keeps permission overrides stripped during a provider rebind retry', async () => {
+    const fixture = await startFakeServer('provider-missing');
     const calls = await fixture.resume({
       sandbox: 'danger-full-access',
       approvalPolicy: 'never',
     });
 
     expect(calls).toEqual([
-      {
-        threadId: 'thread-old',
-        cwd: '/repo',
-        sandbox: 'danger-full-access',
-        approvalPolicy: 'never',
-      },
       { threadId: 'thread-old', cwd: '/repo' },
       { threadId: 'thread-old', cwd: '/repo', modelProvider: 'custom', model: 'model-new' },
     ]);

@@ -4,9 +4,9 @@ A lightweight bot that bridges Feishu / Lark messenger with your local Claude Co
 
 [中文 README](./README.zh.md)
 
-Version 1.8.1 makes cc-switch provider discovery automatic for Broker workers. The default `follow-cc-switch` flow reads the current Codex provider, model, endpoint, wire API and credential from cc-switch, then materializes a profile-scoped MixAgents route without a hand-written `broker-routes.json` or `MIXAGENTS_BROKER_CREDENTIALS_JSON`. It also adds persistent queue-only `send_message`, fail-closed third-party fallback, real three-round provider E2E coverage and stricter runtime-binding diagnostics. Version 1.8.0 introduced model-visible `arg_bridge` dynamic tools and native MultiAgentV2 shadowing.
+Version 1.9.1 adds mid-turn Feishu steering and a Bridge-managed native TUI path: messages sent while a Codex task is running use `turn/steer` for the structured backend or Codex's native Tab-to-queue composer for a live terminal. `arg-bridge native --bridge` creates a new parent thread with `arg_bridge.*` dynamic tools, and `arg-bridge native --adopt <thread-id>` safely migrates old user/assistant text into a new Bridge-managed thread with a visible old/new ID pair. Ordinary `arg-bridge native` remains vanilla Codex. Version 1.8.1 introduced automatic cc-switch provider, model, endpoint and credential resolution for Broker workers.
 
-Version 1.6.7 introduced provider-aware Codex resume. Version 1.7.0 applies the current provider/model at an idle resume boundary, including when the old provider still exists, while never switching a thread that has an active turn.
+Version 1.6.7 introduced provider-aware Codex resume, and 1.7.0 added idle-boundary rebinding. Version 1.9.1 narrows reattachment semantics: reconnecting to an existing native or structured thread preserves the provider/model recorded by that thread instead of silently following a newly selected cc-switch route.
 
 Version 1.6.6 keeps structured commands on the right thread: `/goal`, `/model`, `/stop`, and `/compact` always act on the main conversation even while a `/btw` side is open, `/model` answers land on the thread that owns the picker, a plain `/stop` stops both the side and a running goal (including a goal the bridge never observed), and a command that still carries an `@bot` prefix is recognized instead of being typed into the agent. The live terminal relay leaves an open side before sending those commands, and the Claude harness reports `/goal` as unsupported and interrupts on `/stop`.
 
@@ -60,7 +60,7 @@ Install a pinned release or use a writable custom npm prefix when required:
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.8.1
+sh /tmp/install-arg-bridge.sh --version 1.9.1
 # Example for a machine without permission to write npm's configured global prefix:
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ Release tarballs are preferred. If a Git install is required, keep both compatib
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.8.1"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.9.1"
 ```
 
-`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.8.1`.
+`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.9.1`.
 
 ### 4. Node or npm global-prefix errors
 
@@ -226,6 +226,8 @@ arg-bridge migrate [--profile <name>] [--agent claude|codex]
 arg-bridge migrate-local-poc --profile codex --dry-run --json
 arg-bridge migrate-local-poc --profile codex --apply
 arg-bridge native [thread] [--profile <name>]
+arg-bridge native --bridge [--profile <name>]
+arg-bridge native --adopt <thread-id> [--profile <name>]
 arg-bridge codex [thread] [--profile <name>]
 arg-bridge settings --profile codex [--json]
 arg-bridge doctor --profile codex --json
@@ -273,13 +275,49 @@ codex plugin add mixagents-broker@mixagents
 
 `arg-bridge settings` now guides the user through main-account context, fallback policy, **follow current provider or a fixed cc-switch provider**, automatic cc-switch credential resolution, Project RSI, and a plain-language confirmation. No route ID or Key entry is required. Technical concurrency/native-tool/write-worker controls are behind an explicit advanced prompt. The default flow does not create `broker-routes.json` and never changes the main provider. `arg-bridge doctor --json` is read-only and must not spend money. Only an explicit `--probe-route <id>` sends one read-only generation probe and never retries or falls back.
 
+Version 1.9.1 adds two explicit terminal entry points:
+
+```bash
+arg-bridge native --bridge
+arg-bridge native --adopt <old-thread-id>
+```
+
+`--bridge` starts a Bridge-managed native TUI with `arg_bridge.*` dynamic tools
+and keeps the Bridge tool host alive while the TUI is open. Ordinary
+`arg-bridge native` stays on the native Codex execution path, but now resolves
+the actual thread writer before resume. `--yolo` and
+`--dangerously-bypass-approvals-and-sandbox` are equivalent for a new thread;
+resume inherits the permissions frozen when that thread was created.
+
+An old thread cannot be upgraded by editing JSONL or adding a marker: Codex
+0.164 `thread/resume` has no `dynamicTools` parameter. `--adopt` reads idle
+user/assistant text, applies a bounded redacted handoff, starts a new
+Bridge-managed thread, and prints both the old and new IDs. See
+[native bridge](./docs/native-bridge.md).
+
+### Mid-turn messages
+
+Ordinary text sent while Codex is working is treated as steering, not as a
+second task:
+
+- structured sessions call `turn/steer` with the exact active turn ID;
+- live Codex terminals use the native Tab-to-queue composer;
+- multiple messages are serialized and the original turn continues;
+- `/stop`, `/goal`, `/btw`, picker controls, side conversations, attachments
+  and quoted reply batches keep their dedicated routing;
+- if steering is unavailable, the message falls back to the normal next-turn
+  queue; an uncertain timeout is reported and never automatically replayed.
+
+The agent normally consumes the steering input at its next model/tool boundary,
+matching Codex's own interactive behavior.
+
 Configured and running providers are intentionally separate:
 
 1. `cc-switch` selects the current provider ID.
 2. Codex `config.toml` selects its internal `model_provider` and model.
 3. An automatically generated Broker route uses the **cc-switch provider ID** and a config fingerprint, not a display name or Codex's internal provider name.
-4. A provider change takes effect at the next idle turn or profile restart. A request already running is never moved to another provider.
-5. An old Codex thread whose historical provider still exists is rebound at an idle boundary; an active thread is left on its running provider until it becomes safe to switch.
+4. A running or reattached thread keeps its recorded provider/model. A provider change applies to a newly created thread or other work explicitly started after the change.
+5. If a historical provider no longer exists, reconnect reports the error instead of silently switching that thread to another provider.
 
 The optional legacy/manual route map lives at `~/.config/arg-bridge/broker-routes.json` and contains IDs only:
 
@@ -301,7 +339,7 @@ Run `arg-bridge settings --profile codex` to configure the MCP executable, read/
 
 Project RSI is separate from MixAgents and from historical Task RSI evidence. Bridge discovers only an already initialized `.project-rsi/config.json`; it never initializes `/`, `$HOME`, or a broad parent automatically. A substantive Bridge turn must obtain a fresh upstream validator receipt and reviewer evidence. Validator findings can be returned to the same parent thread for a bounded repair loop (`maxRepairRounds`, timeout), then the upstream runner/validator is rerun. The Bridge never fabricates receipts, lowers thresholds or approves proposals. Direct `codex` and other native TUIs remain outside this gate unless the project installs and verifies a trusted hook.
 
-See [MixAgents subagents](./docs/mixagents-subagents.md), [Project RSI](./docs/project-rsi.md), [credential and permission security](./docs/security-and-permissions.md), and [local PoC migration](./docs/migration-local-poc.md).
+See [MixAgents subagents](./docs/mixagents-subagents.md), [Bridge-managed native TUI](./docs/native-bridge.md), [Project RSI](./docs/project-rsi.md), [credential and permission security](./docs/security-and-permissions.md), and [local PoC migration](./docs/migration-local-poc.md).
 
 ### Slash commands inside Feishu / Lark
 
@@ -486,7 +524,7 @@ arg-bridge resolves this before every Codex run:
 
 A shell wrapper is still useful for terminals you start yourself (`arg-bridge native` in your own shell, plain `codex`), but it is not required by the bridge. Keep `OPENAI_API_KEY` out of systemd units and service environments: if you need a fixed token there, prefer `experimental_bearer_token` in the Codex config, which the bridge reads directly.
 
-`arg-bridge codex [thread]` is an explicit alias for `arg-bridge native [thread]`. The installation does **not** replace or wrap the executable managed by `@openai/codex`. Running plain `codex` remains OpenAI Codex with its native `/btw`; that command is outside Bridge's MixAgents and Project RSI interception. Use Feishu `/btw`, the structured Bridge view, or the MixAgents plugin's own stable integration when Broker routing is required. To return an old terminal to a Bridge-known thread, use `arg-bridge codex <thread-id> --profile <name>`; inspect `/tmux status` for the exact attach command if the pane already exists.
+`arg-bridge codex` is an explicit alias for `arg-bridge native`. The installation does **not** replace or wrap the executable managed by `@openai/codex`. Plain `arg-bridge native` remains vanilla Codex and is outside Broker interception. For a new Broker-managed terminal session use `arg-bridge native --bridge`; to migrate an old thread use `arg-bridge native --adopt <thread-id>`. To attach to an already marked Bridge thread use `arg-bridge native --bridge <thread-id>`. Inspect `/tmux status` for the exact attach command if the pane already exists.
 
 #### Third-party providers never inherit a local proxy
 
@@ -512,12 +550,14 @@ The bridge now tracks them per profile in `<profile>/structured/app-server-regis
 | Next turn, same provider and credentials | The running server is reused; nothing is restarted |
 | Next turn after `cc-switch` rewrote `config.toml` or the token changed | The stale server is terminated and replaced before the turn starts |
 | `arg-bridge restart --profile <name>` | Recorded App Servers for that profile are reclaimed, so the next turn spawns a server with the current environment; the command prints how many were released |
-| `arg-bridge native` exits and no other owner is left | The server it started is stopped instead of lingering with a stale environment |
+| `arg-bridge native` exits | Its frontend and RPC subscription close, but the loaded backend and running task are left intact for reconnect |
 | Another bridge or a paused native TUI still owns the profile | The server stays available for reconnection |
 
 This is the `cc-switch` acceptance path end to end: switch provider, send a message (or run `arg-bridge restart` first), and the next turn runs with the new provider, credentials, and proxy policy. The registry stores credential **digests**, never token values, and is written `0600`; delete `<profile>/structured/app-server-registry.json` to reset the bookkeeping.
 
-Codex CLI 0.154.0 and later reject permission overrides on `codex --remote ... resume <id>`; a remote task keeps the permissions frozen when it was created. Bridge now attaches to that contract, and the old bypass flags are used only for a brand-new local session. App Server start failures back off at 3s / 6s / 12s / ... up to 60s and pause instead of retrying immediately, and the systemd/launchd service definitions set a minimum restart interval and failure limit so a crash loop cannot create a burst of new provider sessions.
+Codex CLI 0.154.0 and later reject permission overrides on `codex --remote ... resume <id>`; a remote task keeps the permissions frozen when it was created. Bridge now strips permission fields before the first `thread/resume` request, so the deterministic retry path cannot leak them. App Server start failures back off at 3s / 6s / 12s / ... up to 60s and pause instead of retrying immediately, and the systemd/launchd service definitions set a minimum restart interval and failure limit so a crash loop cannot create a burst of new provider sessions.
+
+A loaded Codex thread keeps a writer lock even while idle. `arg-bridge native <thread-id>` uses that lock to find the owning App Server before resume; readable JSONL history from another server is not treated as ownership. A live owner is reattached, a dead owner is cold-resumed from history, and unknown or ambiguous ownership fails closed. Plain local `codex resume <id>` cannot attach to a thread owned by another App Server; use `arg-bridge native <id>` or the printed `codex --remote <socket> resume <id>` command. See [resume ownership and reconnect](./docs/native-bridge.md#resume-and-writer-ownership).
 
 ## Permission modes
 

@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, realpath, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { expect, it } from 'vitest';
@@ -28,11 +28,12 @@ native('native launcher attaches to a frozen remote thread and leaves the origin
     // timing instead of the native/structured discovery contract.
     await expect.poll(() => tmux('capture-pane', '-p', '-t', 'test').stdout.trimEnd(), { timeout: 15000 }).toMatch(/[$#]$/);
     const quote = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
-    const command = `${quote(process.execPath)} ${quote(join(process.cwd(), 'dist/cli.js'))} native ${quote(started.thread_id)} --profile codex`;
-    tmux('send-keys', '-t', 'test', '-l', command);
+    const command = (threadId: string) => `${quote(process.execPath)} ${quote(join(process.cwd(), 'dist/cli.js'))} native ${quote(threadId)} --profile codex`;
+    tmux('send-keys', '-t', 'test', '-l', command(started.thread_id));
     tmux('send-keys', '-t', 'test', 'Enter');
     await expect.poll(() => listStructuredTmuxPanes(socket).find(pane => pane.structured.endpoint)?.structured.threadId, { timeout: 30000 }).toBeTruthy();
     const identity = listStructuredTmuxPanes(socket)[0]!.structured;
+    const canonicalEndpoint = `unix://${await realpath(identity.endpoint!.slice('unix://'.length))}`;
     rpc = await RpcClient.connect(`ws+unix://${identity.endpoint!.slice('unix://'.length)}:/`);
     await rpc.initialize();
     const loaded = await rpc.request('thread/loaded/list', {});
@@ -68,10 +69,10 @@ native('native launcher attaches to a frozen remote thread and leaves the origin
     tmux('send-keys', '-t', 'test', 'Enter');
     await expect.poll(() => tmux('capture-pane', '-p', '-t', 'test').stdout, { timeout: 5000 }).toContain('ORIGINAL_SHELL');
     expect(tmux('display-message', '-p', '-t', 'test', '#{pane_dead}').stdout.trim()).toBe('0');
-    tmux('send-keys', '-t', 'test', '-l', command);
+    tmux('send-keys', '-t', 'test', '-l', command(identity.threadId));
     tmux('send-keys', '-t', 'test', 'Enter');
     await expect.poll(() => listStructuredTmuxPanes(socket)[0]?.structured, { timeout: 30000 }).toMatchObject({
-      endpoint: identity.endpoint, threadId: identity.threadId,
+      endpoint: canonicalEndpoint, threadId: identity.threadId,
     });
   } finally { rpc?.close(); tmux('kill-session', '-t', 'test'); }
 }, 120000);

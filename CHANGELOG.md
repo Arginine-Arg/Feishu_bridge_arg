@@ -1,5 +1,45 @@
 # Changelog
 
+## 1.9.1
+
+- Added mid-turn Feishu/terminal steering. A normal message sent while a
+  Bridge-managed Codex task is active now enters the current turn through
+  `turn/steer` on the structured backend, or through Codex's native
+  Tab-to-queue composer on a live terminal.
+- Mid-turn input is serialized per scope, preserves FIFO when an earlier
+  message could not be steered, and explicitly reports an uncertain outcome
+  without automatically replaying a possible accepted message.
+- Unsupported or unavailable steering falls back to the existing post-turn
+  queue; `/stop`, `/goal`, `/btw`, picker controls, side conversations,
+  attachments and quoted batches retain their dedicated routing.
+
+- Added `arg-bridge native --bridge` for a native Codex TUI whose parent thread
+  owns the `arg_bridge.*` dynamic-tool namespace and a persistent Bridge tool
+  host for the lifetime of the TUI.
+- Added `arg-bridge native --adopt <thread-id>` for legacy sessions. Codex 0.164
+  `thread/resume` does not accept `dynamicTools`, so adoption starts a new
+  Bridge-managed thread and injects bounded, redacted user/assistant text from
+  the old thread. Both IDs are printed; no JSONL or encrypted payload is
+  rewritten.
+- Added attach support for existing Bridge-marked threads, thread marker
+  persistence with `adoptedFrom`, malformed-marker fail-closed behavior, and
+  real App Server regression coverage for new, attach, and migration paths.
+- Added writer-owner discovery for `arg-bridge native`: a live thread reconnects
+  to the App Server that owns Codex's writer lock, while a cold thread resumes
+  from persisted history. Reading a rollout from another host is no longer
+  treated as ownership.
+- Fixed active-writer failures caused by selecting a registry host that could
+  read the thread but did not own its loaded runtime. Unknown or ambiguous
+  ownership now fails closed instead of starting another writer.
+- Native and structured reattachment preserve the provider/model recorded by
+  the thread. A later cc-switch selection no longer silently moves a reconnected
+  conversation to a different route.
+- Kept the backend socket alive after TUI exit and made Codex's printed
+  reconnect command target the resolved owner rather than a transient router.
+- Unified `--yolo`, `--dangerously-bypass-approvals-and-sandbox`, `--sandbox`
+  and `--ask-for-approval` parsing. New sessions apply the selected policy;
+  resumed sessions inherit the thread's frozen permissions.
+
 ## 1.8.1
 
 - Added a complete cc-switch Codex provider resolver for SQLite and legacy JSON

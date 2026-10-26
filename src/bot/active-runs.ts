@@ -1,4 +1,9 @@
-import type { AgentRun, AgentRunStopOptions } from '../agent/types';
+import type {
+  AgentRun,
+  AgentRunStopOptions,
+  AgentSteerRequest,
+  AgentSteerResult,
+} from '../agent/types';
 
 export interface RunHandle {
   run: AgentRun;
@@ -64,6 +69,7 @@ export class ActiveRuns {
   // per-scope claim so concurrent/repeated `/stop` commands cannot inject
   // duplicate Ctrl-C bytes while the first fallback is still in flight.
   private readonly durableStops = new Map<string, 'in-flight' | 'requested'>();
+  private readonly steerTails = new Map<string, Promise<void>>();
   private pauseDepth = 0;
   private pauseReason: string | undefined;
 
@@ -165,6 +171,42 @@ export class ActiveRuns {
 
   getSide(chatId: string): RunHandle | undefined {
     return this.sideHandles.get(chatId);
+  }
+
+  /** Serialize mid-turn steering into the active main run. */
+  async steer(chatId: string, request: AgentSteerRequest): Promise<AgentSteerResult> {
+    const handle = this.handles.get(chatId);
+    if (
+      !handle ||
+      handle.interrupted ||
+      handle.stopRequested ||
+      handle.detached ||
+      !handle.run.steer
+    ) {
+      return { status: 'unavailable', reason: 'no steerable active run' };
+    }
+    const key = `${chatId}\0main`;
+    const previous = this.steerTails.get(key) ?? Promise.resolve();
+    const operation = previous.catch(() => undefined).then(async () => {
+      const current = this.handles.get(chatId);
+      if (
+        current !== handle ||
+        handle.interrupted ||
+        handle.stopRequested ||
+        handle.detached ||
+        !handle.run.steer
+      ) {
+        return { status: 'unavailable' as const, reason: 'active run changed before steer' };
+      }
+      return handle.run.steer(request);
+    });
+    const tail = operation.then(() => undefined, () => undefined);
+    this.steerTails.set(key, tail);
+    try {
+      return await operation;
+    } finally {
+      if (this.steerTails.get(key) === tail) this.steerTails.delete(key);
+    }
   }
 
   hasAny(chatId: string): boolean {

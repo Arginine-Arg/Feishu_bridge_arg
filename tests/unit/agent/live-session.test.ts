@@ -6,6 +6,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import type { AgentEvent } from '../../../src/agent/types';
 import {
   cleanTerminalOutput,
+  canSteerLiveTerminal,
   detectLiveTerminalFailure,
   isLiveControlInput,
   LiveSessionPool,
@@ -714,6 +715,21 @@ describe('tmux input framing and snapshots', () => {
           '› Check recently modified functions for compatibility',
       ),
     ).toBe(true);
+    expect(canSteerLiveTerminal(
+      '• Working (14s • esc to interrupt)\n' +
+        'gpt-5.6-luna max · /tmp · Main [default]\n' +
+        '› Ask Codex to do anything\n' +
+        'tab to queue message 99% context left',
+    )).toBe(true);
+    expect(canSteerLiveTerminal(
+      '• Working (14s • esc to interrupt)\n' +
+        '› an unsent user draft\n' +
+        'tab to queue message 99% context left',
+    )).toBe(false);
+    expect(canSteerLiveTerminal(
+      '› Ask Codex to do anything\n' +
+        'tab to queue message 99% context left',
+    )).toBe(false);
     expect(isLiveSideConversation('gpt-5.6-terra xhigh · /workspace · Side from main thread')).toBe(true);
     expect(isLiveSideConversation('Tip: Use /side to start a side conversation')).toBe(false);
   });
@@ -2276,6 +2292,95 @@ setInterval(() => {}, 1000);
     expect(textOf(choice)).toBe('• Model changed to gpt-5.4 medium\n');
     expect(textOf(fast)).toBe('• Service tier set to fast\n');
   }, 15_000);
+
+  tmuxIt('queues a steer into an active Codex composer without starting a new bridge run', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-steer-test-'));
+    const bin = join(dir, 'fake-tmux-steer-agent.mjs');
+    const inputTrace = join(dir, 'steer-trace.txt');
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs';
+process.stdin.setEncoding('utf8');
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
+let draft = '';
+let state = 'idle';
+function screen(lines) {
+  process.stdout.write('\\x1b[2J\\x1b[H' + lines.join('\\n') + '\\n');
+}
+process.stdin.on('data', (chunk) => {
+  for (const char of chunk) {
+    if (char === '\\t' && state === 'working') {
+      appendFileSync(${JSON.stringify(inputTrace)}, 'steer:' + draft + '\\n');
+      draft = '';
+      screen([
+        '› ' + 'mid-course instruction',
+        'queued message',
+        '• Working (1s • esc to interrupt)',
+        'tab to queue message 99% context left'
+      ]);
+      continue;
+    }
+    if (char === '\\r' || char === '\\n') {
+      const input = draft;
+      draft = '';
+      if (state === 'idle' && input === 'start long task') {
+        state = 'working';
+        screen([
+          '• Working (0s • esc to interrupt)',
+          'gpt-5.6-luna max · /tmp · Main [default]',
+          '› Ask Codex to do anything',
+          'tab to queue message 99% context left'
+        ]);
+      }
+      continue;
+    }
+    if (char !== '\\x1b' && char !== '\\x03') draft += char;
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+
+    const pool = new LiveSessionPool();
+    const scope = 'tmux-steer-active-scope';
+    const options = {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      signature: 'tmux-steer-active',
+      usePty: true,
+      backend: 'tmux' as const,
+      idleMs: 500,
+      outputFlushMs: 30,
+      startupTimeoutMs: 2_000,
+    };
+    const session = pool.getOrCreate(scope, options);
+    const runId = 'tmux-steer-active-run';
+    try {
+      const run = session.run(runId, 'start long task', dir);
+      const iterator = run.events[Symbol.asyncIterator]();
+      await iterator.next();
+      // Advance the generator past its initial system frame so submitTurn can
+      // write the task while the assertion below observes the busy screen.
+      void iterator.next();
+      await expect.poll(() => session.getDiagnostics().phase, { timeout: 5_000 }).toBe('busy');
+
+      await expect(pool.steerActive(
+        scope,
+        'mid-course instruction',
+        runId,
+        () => true,
+      )).resolves.toBe(true);
+      await waitForFileText(inputTrace, 'steer:mid-course instruction', 3_000);
+      expect(session.getDiagnostics().generation).toBe(runId);
+      await iterator.return?.();
+    } finally {
+      await pool.closeAll();
+    }
+  }, 20_000);
 
   it('does not press enter after a picker literal when typing it already produces output', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-control-literal-test-'));

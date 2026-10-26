@@ -42,12 +42,40 @@ program
 program.command('native [thread]')
   .description('Open or resume an agent in this shell; Codex shares an App Server with Bridge')
   .option('--profile <name>', 'profile whose agent and permissions to use')
-  .action(async (thread: string | undefined, opts: { profile?: string }) => runNative(thread, opts));
+  .option('--yolo', 'alias for --dangerously-bypass-approvals-and-sandbox on a new Codex thread')
+  .option('--dangerously-bypass-approvals-and-sandbox', 'skip approvals and sandboxing on a new Codex thread')
+  .option('-s, --sandbox <mode>', 'read-only, workspace-write, or danger-full-access')
+  .option('-a, --ask-for-approval <policy>', 'never or on-request (resume inherits frozen permissions)')
+  .option('--bridge', 'Open a Bridge-managed native TUI with Broker dynamic tools')
+  .option('--adopt <thread-id>', 'Migrate an existing Codex thread into a new Bridge-managed thread')
+  .action(async (thread: string | undefined, opts: {
+    profile?: string;
+    yolo?: boolean;
+    dangerouslyBypassApprovalsAndSandbox?: boolean;
+    sandbox?: string;
+    askForApproval?: string;
+    bridge?: boolean;
+    adopt?: string;
+  }) => runNative(thread, opts));
 
 program.command('codex [thread]')
   .description('Alias for `native`/`native <thread>`; launches the official Codex binary without replacing it')
   .option('--profile <name>', 'profile whose Codex agent and permissions to use')
-  .action(async (thread: string | undefined, opts: { profile?: string }) => runNative(thread, opts));
+  .option('--yolo', 'alias for --dangerously-bypass-approvals-and-sandbox on a new Codex thread')
+  .option('--dangerously-bypass-approvals-and-sandbox', 'skip approvals and sandboxing on a new Codex thread')
+  .option('-s, --sandbox <mode>', 'read-only, workspace-write, or danger-full-access')
+  .option('-a, --ask-for-approval <policy>', 'never or on-request (resume inherits frozen permissions)')
+  .option('--bridge', 'Open a Bridge-managed native TUI with Broker dynamic tools')
+  .option('--adopt <thread-id>', 'Migrate an existing Codex thread into a new Bridge-managed thread')
+  .action(async (thread: string | undefined, opts: {
+    profile?: string;
+    yolo?: boolean;
+    dangerouslyBypassApprovalsAndSandbox?: boolean;
+    sandbox?: string;
+    askForApproval?: string;
+    bridge?: boolean;
+    adopt?: string;
+  }) => runNative(thread, opts));
 
 program.command('settings')
   .description('Open the guided cc-switch/MixAgents/Project RSI settings flow')

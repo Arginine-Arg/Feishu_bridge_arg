@@ -127,6 +127,7 @@ const COMMAND_FRESH_SESSION_GRACE_MS = 1200;
 const FRESH_TERMINAL_GRACE_MS = 2500;
 const CONTROL_KEY_GAP_MS = 40;
 const CONTROL_PICKER_WAIT_MS = 5_000;
+const STEER_QUEUE_SETTLE_MS = 120;
 const SIDE_COMMAND_SETTLE_MS = 450;
 // Codex can take tens of seconds to redraw a side conversation when the
 // provider or the local machine is loaded. Keep the request alive while the
@@ -244,6 +245,22 @@ export class LiveSessionPool {
     const session = this.sessions.get(key);
     if (!session) return false;
     return session.sendControlInput(input, stillActive);
+  }
+
+  /**
+   * Insert a new user message into the currently running native turn. Codex's
+   * composer uses Tab to queue a steer while Working; it is delivered at the
+   * next upstream model boundary rather than starting a second bridge run.
+   */
+  async steerActive(
+    key: string,
+    input: string,
+    expectedRunId: string,
+    stillActive: () => boolean = () => true,
+  ): Promise<boolean> {
+    const session = this.sessions.get(key);
+    if (!session) return false;
+    return session.steerActiveTurn(input, expectedRunId, stillActive);
   }
 }
 
@@ -437,6 +454,41 @@ export class LiveTerminalSession {
     // one click cannot interleave with the next click.
     const generation = this.controlInputGeneration;
     const task = this.controlInputTail.then(() => this.sendControlInputNow(input, generation, stillActive));
+    this.controlInputTail = task.then(() => undefined, () => undefined);
+    return task;
+  }
+
+  async steerActiveTurn(
+    input: string,
+    expectedRunId: string,
+    stillActive: () => boolean,
+  ): Promise<boolean> {
+    const text = input.trim();
+    if (!text) return false;
+    const task = this.controlInputTail.then(async () => {
+      if (
+        !stillActive() ||
+        this.closed ||
+        !this.isAlive() ||
+        this.turnGeneration !== expectedRunId ||
+        !['submitted', 'busy', 'streaming'].includes(this.turnPhase)
+      ) {
+        return false;
+      }
+      const state = this.latestTerminalState();
+      if (!canSteerLiveTerminal(state)) return false;
+      this.write(text, false);
+      await delay(STEER_QUEUE_SETTLE_MS);
+      this.write('\t', false, 'keys');
+      this.turnLastInputAt = Date.now();
+      log.info('agent-live', 'turn-steer-queued', {
+        generation: expectedRunId,
+        chars: text.length,
+      });
+      // Let the TUI consume the queue key before a second steer is serialized.
+      await delay(STEER_QUEUE_SETTLE_MS);
+      return true;
+    });
     this.controlInputTail = task.then(() => undefined, () => undefined);
     return task;
   }
@@ -4350,6 +4402,27 @@ export function isLiveTerminalBusy(input: string): boolean {
   return /(?:(?:working|waiting\s+for\s+background\s+terminal)\s*\([^)]*(?:esc|escape)\s+to\s+interrupt|esc(?:ape)?\s+to\s+interrupt|compacting(?:\s+context)?|^\s*[•◦]\s+running\b)/imu.test(
     recent,
   );
+}
+
+/**
+ * Codex can queue a steer only from an empty composer while a main turn is
+ * actively running. Picker and side surfaces have different key semantics, so
+ * those always fall back to Bridge's post-turn queue.
+ */
+export function canSteerLiveTerminal(input: string): boolean {
+  const cleaned = cleanTerminalOutput(input);
+  if (
+    !cleaned.trim() ||
+    !isLiveTerminalBusy(cleaned) ||
+    isStructuredLiveInteraction(cleaned) ||
+    isLiveSideConversation(cleaned)
+  ) {
+    return false;
+  }
+  const recent = cleaned.split('\n').map(line => line.trim()).slice(-14);
+  const composer = [...recent].reverse().find(line => /^[›❯]/u.test(line));
+  if (!composer) return false;
+  return /^[›❯]\s*$/u.test(composer) || isTerminalSuggestionLine(composer);
 }
 
 /** The native Codex footer identifies a side conversation without using a

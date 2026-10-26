@@ -10,7 +10,10 @@ import {
   isModelProviderMissingError,
   isRemotePermissionOverrideError,
   proxyEnvironment,
+  releaseCodexThreadWriter,
+  resolveCodexPermissionSettings,
   resumeCodexThread,
+  stripCodexPermissionOverrides,
 } from '../../../src/agent/structured/permissions';
 import type { RpcClient } from '../../../src/agent/structured/rpc';
 
@@ -25,6 +28,47 @@ const permissionError = 'Permission overrides are not supported when resuming a 
 const providerError = 'failed to load configuration: Model provider `deepseek` not found';
 
 describe('structured Codex permissions', () => {
+  it('treats --yolo and the long bypass flag identically for new and resumed sessions', () => {
+    expect(resolveCodexPermissionSettings('read-only', { yolo: true })).toEqual({
+      sandbox: 'danger-full-access',
+      approvalPolicy: 'never',
+      explicit: true,
+    });
+    expect(resolveCodexPermissionSettings('read-only', {
+      dangerouslyBypassApprovalsAndSandbox: true,
+    })).toEqual({
+      sandbox: 'danger-full-access',
+      approvalPolicy: 'never',
+      explicit: true,
+    });
+    expect(resolveCodexPermissionSettings('read-only', {
+      sandbox: 'workspace-write',
+      askForApproval: 'on-request',
+    })).toEqual({
+      sandbox: 'workspace-write',
+      approvalPolicy: 'on-request',
+      explicit: true,
+    });
+    expect(resolveCodexPermissionSettings('read-only', {})).toEqual({
+      sandbox: 'read-only',
+      approvalPolicy: 'never',
+      explicit: false,
+    });
+  });
+
+  it('rejects unsafe or unsupported native permission combinations', () => {
+    expect(() => resolveCodexPermissionSettings('read-only', {
+      yolo: true,
+      sandbox: 'workspace-write',
+    })).toThrow(/lower --sandbox/u);
+    expect(() => resolveCodexPermissionSettings('read-only', {
+      sandbox: 'full-access',
+    })).toThrow(/Invalid --sandbox/u);
+    expect(() => resolveCodexPermissionSettings('read-only', {
+      askForApproval: 'sometimes',
+    })).toThrow(/Invalid --ask-for-approval/u);
+  });
+
   it('maps full access to the App Server YOLO contract', () => {
     expect(codexThreadPermissionOverrides('danger-full-access')).toEqual({
       sandbox: 'danger-full-access', approvalPolicy: 'never',
@@ -46,6 +90,12 @@ describe('structured Codex permissions', () => {
     });
     expect(codexRemotePermissionArgs('read-only')).toEqual([
       '--sandbox', 'read-only', '--ask-for-approval', 'never',
+    ]);
+    expect(codexRemotePermissionArgs('workspace-write', 'on-request')).toEqual([
+      '--sandbox', 'workspace-write', '--ask-for-approval', 'on-request',
+    ]);
+    expect(codexRemotePermissionArgs('danger-full-access', 'on-request')).toEqual([
+      '--sandbox', 'danger-full-access', '--ask-for-approval', 'on-request',
     ]);
     expect(proxyEnvironment({ HTTP_PROXY: 'http://127.0.0.1:7890', SECRET_TOKEN: 'do-not-copy' })).toEqual({
       HTTP_PROXY: 'http://127.0.0.1:7890',
@@ -73,6 +123,40 @@ describe('structured Codex permissions', () => {
     expect(isModelProviderMissingError(new Error('network timeout'))).toBe(false);
   });
 
+  it('strips any permission fields merged into remote resume params', async () => {
+    const request = requestWithoutIdleSnapshot();
+    const rpc = { request, codexHome: await writeCodexHome() } as unknown as RpcClient;
+
+    await resumeCodexThread(rpc, {
+      threadId: 'thread-1',
+      cwd: '/repo',
+      sandbox: 'danger-full-access',
+      approvalPolicy: 'never',
+      permissions: { type: 'dangerFullAccess' },
+      yolo: true,
+    }, {});
+
+    const resume = request.mock.calls.find(call => call[0] === 'thread/resume');
+    expect(resume?.[1]).toEqual({ threadId: 'thread-1', cwd: '/repo' });
+    expect(stripCodexPermissionOverrides({
+      threadId: 'thread-1',
+      sandboxPolicy: { type: 'dangerFullAccess' },
+      approvalsReviewer: 'user',
+      yolo: true,
+    })).toEqual({ threadId: 'thread-1' });
+  });
+
+  it('releases a writer by unsubscribing without stopping the host', async () => {
+    const request = vi.fn(async () => ({}));
+    const rpc = { request, closed: false } as unknown as RpcClient;
+    await releaseCodexThreadWriter(rpc, 'thread-1');
+    expect(request).toHaveBeenCalledWith(
+      'thread/unsubscribe',
+      { threadId: 'thread-1' },
+      10_000,
+    );
+  });
+
   it('resumes normally without touching provider or model', async () => {
     const request = requestWithoutIdleSnapshot();
     const rpc = { request, codexHome: await writeCodexHome() } as unknown as RpcClient;
@@ -86,6 +170,38 @@ describe('structured Codex permissions', () => {
       threadId: 'thread-1',
       cwd: '/repo',
       }, 30_000,
+    ]]);
+  });
+
+  it('preserves the loaded provider/model when reconnecting instead of applying current config', async () => {
+    const request = vi.fn(async (method: string) => {
+      if (method === 'thread/read') {
+        return {
+          thread: {
+            id: 'thread-1',
+            status: { type: 'idle' },
+            modelProvider: 'old-provider',
+            model: 'old-model',
+            turns: [],
+          },
+        };
+      }
+      return { thread: { id: 'thread-1' } };
+    });
+    const rpc = { request, codexHome: await writeCodexHome() } as unknown as RpcClient;
+
+    await resumeCodexThread(
+      rpc,
+      { threadId: 'thread-1', cwd: '/repo' },
+      {},
+      30_000,
+      { preserveProviderModel: true },
+    );
+
+    expect(request.mock.calls.filter(call => call[0] === 'thread/resume')).toEqual([[
+      'thread/resume',
+      { threadId: 'thread-1', cwd: '/repo' },
+      30_000,
     ]]);
   });
 
@@ -114,6 +230,25 @@ describe('structured Codex permissions', () => {
     }, 30_000]);
   });
 
+  it('does not silently rebind when reconnect policy requires preserving the route', async () => {
+    const request = vi.fn(async (method: string) => {
+      if (method === 'thread/read') return {};
+      if (method === 'thread/resume') throw new Error(providerError);
+      return {};
+    });
+    const rpc = { request, codexHome: await writeCodexHome() } as unknown as RpcClient;
+
+    await expect(resumeCodexThread(
+      rpc,
+      { threadId: 'thread-old', cwd: '/repo' },
+      {},
+      30_000,
+      { preserveProviderModel: true },
+    )).rejects.toThrow(providerError);
+
+    expect(request.mock.calls.filter(call => call[0] === 'thread/resume')).toHaveLength(1);
+  });
+
   it('keeps explicit caller provider/model overrides during the rebind retry', async () => {
     const request = vi.fn()
       .mockRejectedValueOnce(new Error(providerError))
@@ -133,14 +268,8 @@ describe('structured Codex permissions', () => {
     }, 30_000);
   });
 
-  it('retries a rejected remote resume once without permission overrides', async () => {
-    let resumeAttempts = 0;
-    const request = vi.fn(async (method: string) => {
-      if (method === 'thread/read') return {};
-      if (method === 'thread/resume' && ++resumeAttempts === 1) throw new Error(permissionError);
-      if (method === 'thread/resume') return { thread: { id: 'thread-1' } };
-      return {};
-    });
+  it('does not send permission overrides on a remote resume', async () => {
+    const request = requestWithoutIdleSnapshot();
     const rpc = { request, codexHome: await writeCodexHome() } as unknown as RpcClient;
 
     const result = await resumeCodexThread(
@@ -152,20 +281,16 @@ describe('structured Codex permissions', () => {
 
     expect(result.thread.id).toBe('thread-1');
     const resumes = request.mock.calls.filter(call => call[0] === 'thread/resume');
-    expect(resumes[0]).toEqual(['thread/resume', {
-      threadId: 'thread-1', cwd: '/repo', sandbox: 'danger-full-access', approvalPolicy: 'never',
-    }, 12_345]);
-    expect(resumes[1]).toEqual(['thread/resume', {
+    expect(resumes).toEqual([['thread/resume', {
       threadId: 'thread-1', cwd: '/repo',
-    }, 12_345]);
+    }, 12_345]]);
   });
 
-  it('combines permission and provider retries without exceeding three attempts', async () => {
+  it('combines safe resume and provider retries without exceeding three attempts', async () => {
     let resumeAttempts = 0;
     const request = vi.fn(async (method: string) => {
       if (method === 'thread/read') return {};
-      if (method === 'thread/resume' && ++resumeAttempts === 1) throw new Error(permissionError);
-      if (method === 'thread/resume' && resumeAttempts === 2) throw new Error(providerError);
+      if (method === 'thread/resume' && ++resumeAttempts === 1) throw new Error(providerError);
       if (method === 'thread/resume') return { thread: { id: 'thread-1' } };
       return {};
     });
@@ -179,12 +304,9 @@ describe('structured Codex permissions', () => {
 
     const resumes = request.mock.calls.filter(call => call[0] === 'thread/resume');
     expect(resumes[0]).toEqual(['thread/resume', {
-      threadId: 'thread-1', sandbox: 'danger-full-access', approvalPolicy: 'never',
-    }, 30_000]);
-    expect(resumes[1]).toEqual(['thread/resume', {
       threadId: 'thread-1',
     }, 30_000]);
-    expect(resumes[2]).toEqual(['thread/resume', {
+    expect(resumes[1]).toEqual(['thread/resume', {
       threadId: 'thread-1',
       modelProvider: 'custom',
       model: 'gpt-current',
@@ -233,7 +355,7 @@ describe('structured Codex permissions', () => {
 });
 
 function requestWithoutIdleSnapshot() {
-  return vi.fn(async (method: string) => {
+  return vi.fn(async (method: string, ..._args: unknown[]) => {
     if (method === 'thread/read') return {};
     return { thread: { id: 'thread-1' } };
   });

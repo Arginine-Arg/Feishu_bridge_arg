@@ -13,6 +13,13 @@ import { SessionStore } from '../../../src/session/store.js';
 import { WorkspaceStore } from '../../../src/workspace/store.js';
 import { FakeAgentAdapter } from '../../helpers/fake-agent.js';
 import { createTmpProfile, type TmpProfile } from '../../helpers/tmp-profile.js';
+import type {
+  AgentEvent,
+  AgentRun,
+  AgentRunOptions,
+  AgentSteerRequest,
+  AgentSteerResult,
+} from '../../../src/agent/types.js';
 
 const sdkMock = vi.hoisted(() => ({
   channel: undefined as FakeLarkChannel | undefined,
@@ -91,6 +98,83 @@ afterEach(async () => {
 });
 
 describe('markdown stream startup failures', () => {
+  it('steers a new Feishu message into the active task instead of queueing behind it', async () => {
+    const agent = new SteerableHangingAgent();
+    const h = await createHarness({ agent });
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_active_start', 'start a long task'));
+    await agent.started.promise;
+    await h.channel.handlers.message?.(message('om_mid_turn', 'also check the failing test'));
+
+    expect(agent.runCalls).toBe(1);
+    expect(agent.steers).toEqual([{
+      text: 'also check the failing test',
+      clientUserMessageId: 'om_mid_turn',
+    }]);
+    expect(h.channel.sent).toContainEqual(expect.objectContaining({
+      content: { text: '↪ 已插入当前 Codex 任务，将在下一个模型边界生效。' },
+    }));
+    agent.finish();
+  });
+
+  it('does not replay a mid-turn message when steer acceptance is uncertain', async () => {
+    const agent = new SteerableHangingAgent({
+      status: 'uncertain',
+      reason: 'turn/steer timed out; outcome unknown',
+    });
+    const h = await createHarness({ agent });
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_uncertain_start', 'start a long task'));
+    await agent.started.promise;
+    await h.channel.handlers.message?.(message('om_uncertain_mid', 'do not duplicate this'));
+
+    expect(h.channel.sent).toContainEqual(expect.objectContaining({
+      content: { text: '⚠️ 中途消息状态未知，未自动重发；请检查当前任务后再决定是否重发。' },
+    }));
+    agent.finish();
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(agent.runCalls).toBe(1);
+  });
+
+  it('falls back to the next turn when native steering is unavailable', async () => {
+    const agent = new SteerableHangingAgent({
+      status: 'unavailable',
+      reason: 'composer contains a draft',
+    });
+    const h = await createHarness({ agent });
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_fallback_start', 'start a long task'));
+    await agent.started.promise;
+    await h.channel.handlers.message?.(message('om_fallback_mid', 'run this after the current turn'));
+    agent.finish();
+
+    await expect.poll(() => agent.runCalls, { timeout: 3_000 }).toBe(2);
+  });
+
+  it('does not let a later steer jump ahead of an earlier queued message', async () => {
+    const agent = new SteerableHangingAgent([
+      { status: 'unavailable', reason: 'composer contains a draft' },
+      { status: 'steered' },
+    ]);
+    const h = await createHarness({ agent });
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_fifo_start', 'start a long task'));
+    await agent.started.promise;
+    await h.channel.handlers.message?.(message('om_fifo_first', 'first follow-up'));
+    await h.channel.handlers.message?.(message('om_fifo_second', 'second follow-up'));
+
+    expect(agent.steers).toEqual([{
+      text: 'first follow-up',
+      clientUserMessageId: 'om_fifo_first',
+    }]);
+    agent.finish();
+    await expect.poll(() => agent.runCalls, { timeout: 3_000 }).toBe(2);
+  });
+
   it.each(['markdown', 'card'] as const)(
     'delivers an oversized academic answer completely in %s mode',
     async (messageReply) => {
@@ -1986,11 +2070,54 @@ describe('markdown stream startup failures', () => {
   }, 10_000);
 });
 
+class SteerableHangingAgent extends FakeAgentAdapter {
+  readonly started = deferred<void>();
+  readonly steers: AgentSteerRequest[] = [];
+  runCalls = 0;
+  private finishRun?: () => void;
+
+  private readonly steerResults: AgentSteerResult[];
+
+  constructor(steerResult: AgentSteerResult | AgentSteerResult[] = { status: 'steered' }) {
+    super({ id: 'codex', displayName: 'Codex' });
+    this.steerResults = Array.isArray(steerResult) ? [...steerResult] : [steerResult];
+  }
+
+  override run(opts: AgentRunOptions): AgentRun {
+    this.runCalls += 1;
+    const gate = deferred<void>();
+    this.finishRun = gate.resolve;
+    return {
+      runId: opts.runId,
+      events: this.events(gate.promise),
+      steer: async (request: AgentSteerRequest) => {
+        this.steers.push(request);
+        return this.steerResults.shift() ?? { status: 'steered' };
+      },
+      stop: async () => gate.resolve(),
+      detach: async () => gate.resolve(),
+      waitForExit: async () => true,
+    };
+  }
+
+  finish(): void {
+    this.finishRun?.();
+  }
+
+  private async *events(gate: Promise<void>): AsyncIterable<AgentEvent> {
+    yield { type: 'system', cwd: '/workspace' };
+    this.started.resolve();
+    await gate;
+    yield { type: 'done', terminationReason: 'normal' };
+  }
+}
+
 async function createHarness(options: {
   reactionCreate?: () => Promise<{ data: { reaction_id: string } }>;
   stream?: StreamFn;
   failCardSendOnce?: boolean;
   agentKind?: 'claude' | 'codex';
+  agent?: FakeAgentAdapter;
 } = {}): Promise<{
   tmp: TmpProfile;
   channel: FakeLarkChannel;
@@ -2029,7 +2156,7 @@ async function createHarness(options: {
   await saveRootConfig(createRootConfig(agentKind, profileConfig), configPath);
   const sessions = new SessionStore(join(tmp.profile, 'sessions.json'));
   const workspaces = new WorkspaceStore(join(tmp.profile, 'workspaces.json'));
-  const agent = new FakeAgentAdapter({
+  const agent = options.agent ?? new FakeAgentAdapter({
     id: agentKind,
     displayName: agentKind === 'codex' ? 'Codex' : 'Claude Code',
     events: [

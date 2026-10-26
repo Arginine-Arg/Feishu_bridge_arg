@@ -3,6 +3,55 @@ import { resolveCodexResumeDefaults } from '../codex/provider';
 import { log } from '../../core/logger';
 import type { RpcClient, Wire } from './rpc';
 
+export type CodexApprovalPolicy = 'never' | 'on-request';
+
+export interface CodexPermissionCliOptions {
+  yolo?: boolean;
+  dangerouslyBypassApprovalsAndSandbox?: boolean;
+  sandbox?: string;
+  askForApproval?: string;
+}
+
+export interface CodexPermissionSettings {
+  sandbox: CodexSandboxMode;
+  approvalPolicy: CodexApprovalPolicy;
+  explicit: boolean;
+}
+
+export interface CodexResumeOptions {
+  /**
+   * Reattach/cold-resume must keep the provider and model recorded by the
+   * thread. Explicit caller fields still win; this only disables automatic
+   * config-derived switching.
+   */
+  preserveProviderModel?: boolean;
+}
+
+/**
+ * Parse native CLI permission aliases once so a new local TUI, a Bridge-owned
+ * thread and a resumed remote TUI all use the same model. `--yolo` is the
+ * legacy alias for Codex's long bypass flag.
+ */
+export function resolveCodexPermissionSettings(
+  profileSandbox: CodexSandboxMode,
+  options: CodexPermissionCliOptions,
+): CodexPermissionSettings {
+  const bypass = Boolean(options.yolo || options.dangerouslyBypassApprovalsAndSandbox);
+  const explicit = bypass || options.sandbox !== undefined || options.askForApproval !== undefined;
+  if (options.sandbox !== undefined && !isCodexSandboxMode(options.sandbox)) {
+    throw new Error(`Invalid --sandbox value: ${options.sandbox}`);
+  }
+  if (options.askForApproval !== undefined && !isCodexApprovalPolicy(options.askForApproval)) {
+    throw new Error(`Invalid --ask-for-approval value: ${options.askForApproval}`);
+  }
+  if (bypass && options.sandbox !== undefined && options.sandbox !== 'danger-full-access') {
+    throw new Error('--yolo/--dangerously-bypass-approvals-and-sandbox cannot be combined with a lower --sandbox');
+  }
+  const sandbox = bypass ? 'danger-full-access' : options.sandbox ?? profileSandbox;
+  const approvalPolicy = bypass ? 'never' : options.askForApproval ?? 'never';
+  return { sandbox, approvalPolicy, explicit };
+}
+
 /**
  * The terminal backend has always used Codex's non-interactive permission
  * contract: the selected sandbox is authoritative and approval prompts are
@@ -12,28 +61,30 @@ import type { RpcClient, Wire } from './rpc';
  */
 export function codexThreadPermissionOverrides(
   sandbox: CodexSandboxMode | undefined,
-): { sandbox?: CodexSandboxMode; approvalPolicy?: 'never' } {
-  return sandbox ? { sandbox, approvalPolicy: 'never' } : {};
+  approvalPolicy: CodexApprovalPolicy = 'never',
+): { sandbox?: CodexSandboxMode; approvalPolicy?: CodexApprovalPolicy } {
+  return sandbox ? { sandbox, approvalPolicy } : {};
 }
 
 export function codexTurnPermissionOverrides(
   sandbox: CodexSandboxMode | undefined,
   cwd: string | undefined,
-): { sandboxPolicy?: Record<string, unknown>; approvalPolicy?: 'never' } {
+  approvalPolicy: CodexApprovalPolicy = 'never',
+): { sandboxPolicy?: Record<string, unknown>; approvalPolicy?: CodexApprovalPolicy } {
   if (!sandbox) return {};
   switch (sandbox) {
     case 'danger-full-access':
-      return { sandboxPolicy: { type: 'dangerFullAccess' }, approvalPolicy: 'never' };
+      return { sandboxPolicy: { type: 'dangerFullAccess' }, approvalPolicy };
     case 'workspace-write':
       return {
         sandboxPolicy: {
           type: 'workspaceWrite',
           ...(cwd ? { writableRoots: [cwd] } : {}),
         },
-        approvalPolicy: 'never',
+        approvalPolicy,
       };
     case 'read-only':
-      return { sandboxPolicy: { type: 'readOnly' }, approvalPolicy: 'never' };
+      return { sandboxPolicy: { type: 'readOnly' }, approvalPolicy };
   }
 }
 
@@ -42,10 +93,15 @@ export function codexTurnPermissionOverrides(
  * only valid when the CLI owns the session it starts; they must never be
  * appended to `--remote ... resume`.
  */
-export function codexRemotePermissionArgs(sandbox: CodexSandboxMode | undefined): string[] {
+export function codexRemotePermissionArgs(
+  sandbox: CodexSandboxMode | undefined,
+  approvalPolicy: CodexApprovalPolicy = 'never',
+): string[] {
   if (!sandbox) return [];
-  if (sandbox === 'danger-full-access') return ['--dangerously-bypass-approvals-and-sandbox'];
-  return ['--sandbox', sandbox, '--ask-for-approval', 'never'];
+  if (sandbox === 'danger-full-access' && approvalPolicy === 'never') {
+    return ['--dangerously-bypass-approvals-and-sandbox'];
+  }
+  return ['--sandbox', sandbox, '--ask-for-approval', approvalPolicy];
 }
 
 /**
@@ -77,6 +133,52 @@ export function isRemotePermissionOverrideError(error: unknown): boolean {
   return /permission overrides are not supported/i.test(message);
 }
 
+function isCodexSandboxMode(value: string): value is CodexSandboxMode {
+  return value === 'read-only' || value === 'workspace-write' || value === 'danger-full-access';
+}
+
+function isCodexApprovalPolicy(value: string): value is CodexApprovalPolicy {
+  return value === 'never' || value === 'on-request';
+}
+
+const REMOTE_RESUME_PERMISSION_KEYS = new Set([
+  'sandbox',
+  'sandboxPolicy',
+  'approvalPolicy',
+  'approvalsReviewer',
+  'permissions',
+  'dangerouslyBypassApprovalsAndSandbox',
+  'dangerously_bypass_approvals_and_sandbox',
+  'yolo',
+]);
+
+/**
+ * Codex freezes permissions when a thread is created. `thread/resume` must
+ * inherit those permissions, even when a caller accidentally merges a CLI
+ * permission override into the resume params or retry defaults.
+ */
+export function stripCodexPermissionOverrides(params: Wire): Wire {
+  return Object.fromEntries(
+    Object.entries(params).filter(([key]) => !REMOTE_RESUME_PERMISSION_KEYS.has(key)),
+  );
+}
+
+/**
+ * Release the caller's writer subscription without stopping the App Server.
+ * `thread/unsubscribe` is what lets a later native TUI resume the same thread;
+ * closing the WebSocket alone may leave the server-side writer held.
+ */
+export async function releaseCodexThreadWriter(
+  rpc: RpcClient,
+  threadId: string | undefined,
+): Promise<void> {
+  if (!threadId || rpc.closed) return;
+  await rpc.request('thread/unsubscribe', { threadId }, 10_000).catch(() => {
+    // The TUI may already have released it; never turn cleanup into a task
+    // interruption.
+  });
+}
+
 /**
  * True only for the deterministic "the thread persists a provider id that the
  * current config no longer defines" failure. The server rejects the resume
@@ -98,16 +200,20 @@ export async function resumeCodexThread(
   params: Wire,
   overrides: Wire,
   timeoutMs = 30_000,
+  options: CodexResumeOptions = {},
 ): Promise<Wire> {
-  const boundaryDefaults = await providerDefaultsAtIdleBoundary(
-    rpc,
-    params,
-  );
+  const boundaryDefaults = options.preserveProviderModel
+    ? undefined
+    : await providerDefaultsAtIdleBoundary(rpc, params);
   // Explicit caller params remain authoritative. Configuration defaults are
   // applied only when the read-only thread snapshot proves the previous turn
   // is idle, so a running request is never switched to another provider.
-  let effectiveParams: Wire = { ...(boundaryDefaults ?? {}), ...params };
-  let includeOverrides = Object.keys(overrides).length > 0;
+  let effectiveParams: Wire = stripCodexPermissionOverrides({
+    ...(boundaryDefaults ?? {}),
+    ...params,
+  });
+  let safeOverrides = stripCodexPermissionOverrides(overrides);
+  let includeOverrides = Object.keys(safeOverrides).length > 0;
   let permissionRetried = false;
   let providerRetried = false;
   let lastError: unknown;
@@ -118,7 +224,7 @@ export async function resumeCodexThread(
   // gone.
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const request = includeOverrides
-      ? { ...effectiveParams, ...overrides }
+      ? { ...effectiveParams, ...safeOverrides }
       : effectiveParams;
     try {
       return await rpc.request('thread/resume', request, timeoutMs);
@@ -133,6 +239,7 @@ export async function resumeCodexThread(
         continue;
       }
       if (!providerRetried && isModelProviderMissingError(error)) {
+        if (options.preserveProviderModel) throw error;
         providerRetried = true;
         const defaults = resolveCodexResumeDefaults(rpc.codexHome);
         if (!defaults) {
@@ -144,7 +251,7 @@ export async function resumeCodexThread(
           throw error;
         }
         // Explicit caller params win over the configuration defaults.
-        effectiveParams = { ...defaults, ...params };
+        effectiveParams = stripCodexPermissionOverrides({ ...defaults, ...params });
         log.info('agent', 'codex-provider-rebind', {
           threadId: params.threadId ?? null,
           codexHome: rpc.codexHome ?? null,

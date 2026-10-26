@@ -1319,6 +1319,59 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     }
   }
   const priorityLiveInput = priorityLiveControl || priorityNativeCommand;
+  const activeMainHandle = activeRuns.get(scope);
+  const steerText = agentMsg.content.trim();
+  const earlierPending = pending.snapshot(scope)[0];
+  const canSteerActive =
+    !priorityLiveInput &&
+    !nativeInputMode &&
+    !activeRuns.getSide(scope) &&
+    Boolean(activeMainHandle && !activeMainHandle.interrupted &&
+      !activeMainHandle.stopRequested && !activeMainHandle.detached &&
+      activeMainHandle.run.steer) &&
+    Boolean(steerText) &&
+    !steerText.startsWith('/') &&
+    agentMsg.resources.length === 0 &&
+    (earlierPending?.queued ?? 0) === 0 &&
+    (earlierPending?.deferred ?? 0) === 0 &&
+    !replyQuoteTargetForMessage(agentMsg, chatMode);
+  if (canSteerActive) {
+    const result = await activeRuns.steer(scope, {
+      text: steerText,
+      clientUserMessageId: agentMsg.messageId,
+    });
+    if (result.status === 'steered') {
+      log.info('intake', 'turn-steered', {
+        scope,
+        messageId: agentMsg.messageId,
+        chars: steerText.length,
+      });
+      await channel.send(
+        msg.chatId,
+        { text: '↪ 已插入当前 Codex 任务，将在下一个模型边界生效。' },
+        { replyTo: msg.messageId },
+      ).catch((err) => log.warn('intake', 'steer-ack-failed', { scope, err: String(err) }));
+      return;
+    }
+    if (result.status === 'uncertain') {
+      log.warn('intake', 'turn-steer-uncertain', {
+        scope,
+        messageId: agentMsg.messageId,
+        err: result.reason,
+      });
+      await channel.send(
+        msg.chatId,
+        { text: '⚠️ 中途消息状态未知，未自动重发；请检查当前任务后再决定是否重发。' },
+        { replyTo: msg.messageId },
+      ).catch((err) => log.warn('intake', 'steer-uncertain-ack-failed', { scope, err: String(err) }));
+      return;
+    }
+    log.info('intake', 'turn-steer-unavailable', {
+      scope,
+      messageId: agentMsg.messageId,
+      reason: result.reason ?? 'not steerable',
+    });
+  }
   const size = priorityLiveInput
     ? pending.pushFront(scope, agentMsg, {
         immediate: true,

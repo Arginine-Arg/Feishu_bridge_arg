@@ -6,7 +6,14 @@ import { join, resolve } from 'node:path';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
 import { AsyncEventQueue } from '../event-queue';
 import { log, redactDiagnosticText } from '../../core/logger';
-import type { AgentAdapter, AgentEvent, AgentRun, AgentRunOptions } from '../types';
+import type {
+  AgentAdapter,
+  AgentEvent,
+  AgentRun,
+  AgentRunOptions,
+  AgentSteerRequest,
+  AgentSteerResult,
+} from '../types';
 import { checkAgentAvailability } from '../preflight';
 import { ensureBundledCodexSkill } from '../bundled-skill';
 import { captureTmuxPaneTail, discoverTmuxSockets, listTmuxAgentPanes, type AgentTmuxControl, type TmuxPaneTarget } from '../tmux-control';
@@ -63,6 +70,7 @@ import {
 } from '../../integrations/project-rsi';
 import { CodexStructuredSession } from './codex';
 import { ClaudeStructuredSession } from './claude';
+import { findLoadedThreadHost } from './native-bridge';
 import type { StructuredSession } from './contracts';
 import { textEvent } from './contracts';
 import { StructuredView } from './view';
@@ -1378,6 +1386,7 @@ export class StructuredAdapter implements AgentAdapter {
         { threadId, excludeTurns: true, cwd },
         codexThreadPermissionOverrides(this.options.sandbox ?? 'danger-full-access'),
         LEGACY_RESUME_TIMEOUT_MS,
+        { preserveProviderModel: true },
       ) };
     } catch (error) {
       if (!(error instanceof Error) || !/thread\/resume timed out|outcome unknown/iu.test(error.message)) throw error;
@@ -1503,6 +1512,7 @@ export class StructuredAdapter implements AgentAdapter {
     let highImpact = false;
     let mainFailed = false;
     let authorizedMain: CodexStructuredSession | undefined;
+    let activeTarget: StructuredSession | undefined;
     let bufferedDone: Extract<AgentEvent, { type: 'done' }> | undefined;
     let assistantOutput = '';
     const turnStartedAt = Date.now();
@@ -1657,6 +1667,7 @@ export class StructuredAdapter implements AgentAdapter {
         }
         if (!options.liveInputMode || side) (side ? current.sideView : current.view)?.event(textEvent(`\n[user]\n${prompt}\n`));
         const payload = { ...options, prompt, ...(side ? { liveInputMode: undefined } : {}) };
+        activeTarget = target;
         try {
           await target.submit(payload, submitEmit, abort.signal);
         } catch (error) {
@@ -1683,6 +1694,7 @@ export class StructuredAdapter implements AgentAdapter {
             rebuiltMain.setBrokerWriteAuthorization(writeAuthorization);
             authorizedMain = rebuiltMain;
           }
+          activeTarget = target;
           await target.submit(payload, submitEmit, abort.signal);
         }
         if (!side && target === current.main && !mainFailed) {
@@ -1735,6 +1747,7 @@ export class StructuredAdapter implements AgentAdapter {
         });
       }
       finally {
+        activeTarget = undefined;
         authorizedMain?.setBrokerWriteAuthorization(undefined);
         if (!terminal && !detached) {
           emit({
@@ -1747,6 +1760,19 @@ export class StructuredAdapter implements AgentAdapter {
     })();
     return { runId: options.runId, events,
       stop: async () => { abort.abort(); },
+      steer: async (request: AgentSteerRequest): Promise<AgentSteerResult> => {
+        if (
+          side ||
+          terminal ||
+          detached ||
+          abort.signal.aborted ||
+          options.liveInputMode ||
+          !(activeTarget instanceof CodexStructuredSession)
+        ) {
+          return { status: 'unavailable', reason: 'active target is not a steerable Codex turn' };
+        }
+        return activeTarget.steer(request);
+      },
       detach: async () => { detached = true; events.close(); },
       waitForExit: async () => true };
   }
@@ -1888,6 +1914,7 @@ export class StructuredAdapter implements AgentAdapter {
         let rpc: RpcClient;
         let endpoint = bound.endpoint;
         let spawnedFresh = false;
+        let rpcInitialized = false;
         try {
           rpc = await this.connectExisting(endpoint);
         } catch (error) {
@@ -1900,24 +1927,36 @@ export class StructuredAdapter implements AgentAdapter {
             endpoint,
             thread: bound.threadId,
           });
-          const spawned = await connectCodexHost({
-            binary: this.options.binary,
-            profileDir: this.options.profileDir,
-            scope,
-            cwd,
+          const discovered = await findLoadedThreadHost(
+            this.options.profileDir,
+            bound.threadId,
             env,
-            fingerprint: this.codexHostFingerprint(env),
-            ...(this.runtimeIdentity ? { runtimeIdentity: this.runtimeIdentity } : {}),
-          });
-          rpc = spawned.rpc;
-          endpoint = spawned.endpoint;
-          spawnedFresh = true;
-          this.bindings.delete(scope);
-          await this.saveBindings();
+          );
+          if (discovered) {
+            rpc = discovered.rpc;
+            endpoint = discovered.endpoint;
+            rpcInitialized = true;
+          } else {
+            const spawned = await connectCodexHost({
+              binary: this.options.binary,
+              profileDir: this.options.profileDir,
+              scope,
+              cwd,
+              env,
+              fingerprint: this.codexHostFingerprint(env),
+              ...(this.runtimeIdentity ? { runtimeIdentity: this.runtimeIdentity } : {}),
+            });
+            rpc = spawned.rpc;
+            endpoint = spawned.endpoint;
+            spawnedFresh = true;
+            rpcInitialized = true;
+            this.bindings.delete(scope);
+            await this.saveBindings();
+          }
         }
         try {
           // `connectCodexHost` already initialized the fresh channel.
-          if (!spawnedFresh) await rpc.initialize();
+          if (!rpcInitialized) await rpc.initialize();
           const loaded = await rpc.request('thread/loaded/list', {});
           if (!Array.isArray(loaded.data) || !loaded.data.includes(bound.threadId)) throw new Error('tmux 当前 resume 的 thread 不在对应 App Server 中');
           const resumed = await resumeCodexThread(
@@ -1931,6 +1970,8 @@ export class StructuredAdapter implements AgentAdapter {
                 : {}),
             },
             options.liveInputMode ? {} : codexThreadPermissionOverrides(options.sandbox ?? this.options.sandbox),
+            30_000,
+            { preserveProviderModel: true },
           );
           if (resumed.thread?.id !== bound.threadId) throw new Error('App Server 返回了不同的 thread');
           const brokerTools = brokerState.enabled
@@ -1975,9 +2016,15 @@ export class StructuredAdapter implements AgentAdapter {
         } catch (error) { rpc.close(); throw error; }
       }
       const readOnlyReconnect = saved && options.liveInputMode && !/^\/goal\s+(?!pause\b|clear\b|edit\b|status\b)/.test(options.prompt);
-      let rpc: RpcClient;
-      let endpoint: string;
-      if (readOnlyReconnect) {
+      let rpc: RpcClient | undefined;
+      let endpoint: string | undefined;
+      const discovered = saved
+        ? await findLoadedThreadHost(this.options.profileDir, saved.id, env)
+        : undefined;
+      if (discovered) {
+        rpc = discovered.rpc;
+        endpoint = discovered.endpoint;
+      } else if (readOnlyReconnect) {
         if (!saved?.endpoint?.startsWith('unix://')) throw new Error('旧连接信息不足，控制操作未启动任何新服务');
         endpoint = saved.endpoint;
         try {
@@ -1993,15 +2040,39 @@ export class StructuredAdapter implements AgentAdapter {
           const loaded = await rpc.request('thread/loaded/list', {});
           if (!loaded.data?.includes(saved.id)) throw new Error('原会话未运行；控制操作不会自动恢复任务');
         } catch (error) { rpc.close(); throw error; }
-      } else ({ rpc, endpoint } = await connectCodexHost({
-        binary: this.options.binary,
-        profileDir: this.options.profileDir,
-        scope,
-        cwd,
-        env,
-        fingerprint: this.codexHostFingerprint(env),
-        ...(this.runtimeIdentity ? { runtimeIdentity: this.runtimeIdentity } : {}),
-      }));
+      } else {
+        let reusedSavedEndpoint = false;
+        if (saved?.endpoint?.startsWith('unix://')) {
+          try {
+            const candidate = await this.connectExisting(saved.endpoint);
+            try {
+              await candidate.initialize();
+              const loaded = await candidate.request('thread/loaded/list', {});
+              if (loaded.data?.includes(saved.id)) {
+                rpc = candidate;
+                endpoint = saved.endpoint;
+                reusedSavedEndpoint = true;
+              }
+            } finally {
+              if (!reusedSavedEndpoint) candidate.close();
+            }
+          } catch (error) {
+            if (!(error instanceof StaleStructuredEndpointError)) throw error;
+          }
+        }
+        if (!reusedSavedEndpoint) {
+          ({ rpc, endpoint } = await connectCodexHost({
+            binary: this.options.binary,
+            profileDir: this.options.profileDir,
+            scope,
+            cwd,
+            env,
+            fingerprint: this.codexHostFingerprint(env),
+            ...(this.runtimeIdentity ? { runtimeIdentity: this.runtimeIdentity } : {}),
+          }));
+        }
+      }
+      if (!rpc || !endpoint) throw new Error('结构化 App Server 路由未建立');
       const savedHasBrokerTools = saved
         ? this.hasBrokerTools(saved.id, brokerState.config.toolNamespace)
         : false;
@@ -2059,7 +2130,13 @@ export class StructuredAdapter implements AgentAdapter {
         let result: Wire;
         try {
           result = saved
-            ? await resumeCodexThread(rpc, { ...common, threadId: saved.id, excludeTurns: true }, overrides)
+            ? await resumeCodexThread(
+                rpc,
+                { ...common, threadId: saved.id, excludeTurns: true },
+                overrides,
+                30_000,
+                { preserveProviderModel: true },
+              )
             : await rpc.request('thread/start', { ...common, ...overrides });
         } catch (error) {
           if (!saved && brokerState.enabled) {

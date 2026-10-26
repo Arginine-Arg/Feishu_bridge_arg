@@ -4,9 +4,9 @@
 
 [English README](./README.md)
 
-`1.8.1` 让 Broker worker 自动读取 cc-switch 当前 Codex provider 的模型、endpoint、wire API 和凭据，并生成 profile 私有 MixAgents route；不再需要手写 `broker-routes.json` 或 `MIXAGENTS_BROKER_CREDENTIALS_JSON`。同时加入持久化 queue-only `send_message`、第三方 provider fail-closed、真实三轮 provider E2E 和更严格的 runtime binding 诊断。`1.8.0` 引入了模型可见的 `arg_bridge` dynamic tools 与 native MultiAgentV2 遮蔽。
+`1.9.1` 增加长任务中途消息插入和 Bridge-managed native TUI：Codex 任务运行期间的新消息，在 structured 模式下通过 `turn/steer` 进入当前 turn；live 终端模式使用 Codex 原生 Tab 排队机制，不再只能等整轮结束。`arg-bridge native --bridge` 创建带 `arg_bridge.*` dynamic tools 的新父 thread；`arg-bridge native --adopt <thread-id>` 把旧 session 的用户/助手文本安全迁移到新的 Bridge-managed thread，并明确显示旧、新 thread ID。普通 `arg-bridge native` 仍保持原生 Codex 行为。`1.8.1` 引入了自动 cc-switch provider、模型、endpoint 和凭据解析。
 
-`1.6.7` 引入 provider-aware Codex resume；`1.7.0` 在 idle turn 边界应用当前 provider/model，即使旧 provider 仍存在也会安全切换；已有活跃 turn 时绝不中途换 provider。
+`1.6.7` 引入 provider-aware Codex resume，`1.7.0` 增加 idle 边界重绑。`1.9.1` 收紧重连语义：附着已有 native 或 structured thread 时，保留该 thread 记录的 provider/model，不会因为 cc-switch 后来切换了 route 而静默改路。
 
 `1.6.6` 修正 structured 模式下命令作用域：`/goal`、`/model`、`/stop`、`/compact` 在 `/btw` 侧对话打开时也始终作用于主线程；`/model` 的选择按卡片所属线程回填；普通 `/stop` 会同时停掉 side 与主线程上的 goal（包括 bridge 从未观测到的 goal）；带 `@bot` 前缀的命令会被正确识别，而不再被原样敲进 agent。终端转发路径在发送这些命令前会先退出 side；Claude harness 对 `/goal` 给出明确说明、`/stop` 走中断。
 
@@ -60,7 +60,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.8.1
+sh /tmp/install-arg-bridge.sh --version 1.9.1
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.8.1"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.9.1"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.8.1`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.9.1`。
 
 ### 4. Node 或 npm 全局目录错误
 
@@ -226,6 +226,8 @@ arg-bridge migrate [--profile <name>] [--agent claude|codex]
 arg-bridge migrate-local-poc --profile codex --dry-run --json
 arg-bridge migrate-local-poc --profile codex --apply
 arg-bridge native [thread] [--profile <name>]
+arg-bridge native --bridge [--profile <name>]
+arg-bridge native --adopt <thread-id> [--profile <name>]
 arg-bridge codex [thread] [--profile <name>]
 arg-bridge settings --profile codex [--json]
 arg-bridge doctor --profile codex --json
@@ -273,13 +275,45 @@ codex plugin add mixagents-broker@mixagents
 
 `arg-bridge settings` 现在会用五步向导说明：当前主对话、是否允许降级、子代理跟随当前 provider 还是固定某个 cc-switch provider、Key 自动由 cc-switch 解析、是否启用项目证据校验。用户不需要填写 route ID 或 Key；并发、native 工具遮蔽、写权限和自定义 MCP 等参数收在“高级设置”里。默认不创建 `broker-routes.json`，也不会切换主 provider。
 
+`1.9.1` 新增两个显式终端入口：
+
+```bash
+arg-bridge native --bridge
+arg-bridge native --adopt <old-thread-id>
+```
+
+`--bridge` 会启动一个由 Bridge 托管的 native TUI：Codex 父 thread 获得
+`arg_bridge.*` dynamic tools，Bridge tool host 在 TUI 打开期间持续处理
+`item/tool/call`。普通 `arg-bridge native` 仍走原生 Codex 执行路径，但
+resume 前会定位真实 writer owner。新建 thread 时 `--yolo` 与
+`--dangerously-bypass-approvals-and-sandbox` 等价；resume 始终继承 thread
+创建时固化的权限。
+
+老 thread 不能通过修改 JSONL 或补 marker 原地升级：Codex 0.164 的
+`thread/resume` 协议没有 `dynamicTools` 参数。`--adopt` 会在 idle 边界读取老
+thread 的用户/助手文本，有限截断并脱敏后，创建新 Bridge-managed thread 注入
+历史，再附着 TUI；命令会明确打印旧 ID 和新 ID。详见
+[native bridge](./docs/native-bridge.md)。
+
+### 长任务中途消息
+
+Codex 工作期间发送的普通文本会作为当前 turn 的 steering 输入，而不会启动第二个任务：
+
+- structured 会话调用 `turn/steer`，并绑定当前准确的 turn ID；
+- live Codex 终端使用原生 Tab-to-queue 编辑器机制；
+- 多条中途消息按顺序串行插入，原任务继续运行；
+- `/stop`、`/goal`、`/btw`、选择器控制、side conversation、附件和引用消息继续走各自专用路径；
+- 不支持 steering 时自动退回原来的“下一轮执行”队列；结果不确定的超时会明确提示，绝不自动重发。
+
+Agent 通常会在下一次模型调用或工具边界读取这些输入，行为与 Codex 原生交互一致。
+
 三类 provider 标识必须分开：
 
 1. `cc-switch` 的 provider ID；
 2. Codex `config.toml` 内部 `model_provider` 与 model；
 3. MixAgents Broker route ID。
 
-自动生成的 Broker route 使用第 1 类 ID，并附带配置 fingerprint；不使用显示名或 Codex 内部名。provider 切换只在下一个 idle turn 或 profile 重启时生效，正在执行的请求不会中途换供应商。旧 thread 的历史 provider 仍存在时，也会在 idle 边界切到当前配置；活跃 thread 保持原运行 provider，等安全后再切。
+自动生成的 Broker route 使用第 1 类 ID，并附带配置 fingerprint；不使用显示名或 Codex 内部名。正在运行或重新附着的 thread 保留其记录 provider/model；provider 切换只应用于新建 thread 或切换后显式启动的其它任务。旧 thread 的历史 provider 已不存在时，重连会明确报错，不会静默换成另一个 provider。
 
 旧版或显式 manual 模式才需要可选映射文件 `~/.config/arg-bridge/broker-routes.json`，其中只保存 ID：
 
@@ -301,7 +335,7 @@ codex plugin add mixagents-broker@mixagents
 
 Project RSI 与 MixAgents、历史 Task RSI 是三个不同层次。Bridge 只发现已经初始化的 `.project-rsi/config.json`，不会在 `/`、`$HOME` 或宽泛父目录自动 init。实质性 Bridge turn 必须获得 fresh 上游 validator receipt 和 reviewer evidence。validator failure findings 会回传给同一父 thread，在 `maxRepairRounds` 与超时限制内修复，然后重新运行上游 runner/validator。Bridge 不会伪造 receipt、降低门槛或自动批准 proposal。直接 `codex` 等原生 TUI 不在门禁范围内，除非安装并验证 trusted hook。
 
-详见 [MixAgents 子代理](./docs/mixagents-subagents.md)、[Project RSI](./docs/project-rsi.md)、[凭据与权限安全](./docs/security-and-permissions.md)和[本地 PoC 迁移](./docs/migration-local-poc.md)。
+详见 [MixAgents 子代理](./docs/mixagents-subagents.md)、[Bridge-managed native TUI](./docs/native-bridge.md)、[Project RSI](./docs/project-rsi.md)、[凭据与权限安全](./docs/security-and-permissions.md)和[本地 PoC 迁移](./docs/migration-local-poc.md)。
 
 ### 飞书内斜杠命令
 
@@ -490,7 +524,7 @@ arg-bridge 会在每次 Codex 运行前处理这个问题：
 
 shell 包装函数对**你自己开的终端**（自己 shell 里的 `arg-bridge native`、直接运行 `codex`）仍然有用，但 bridge 不再依赖它。不要把 `OPENAI_API_KEY` 写进 systemd unit 或服务环境；如果那里需要固定 token，建议写在 Codex 配置的 `experimental_bearer_token` 里，bridge 会直接读取。
 
-`arg-bridge codex [thread]` 是 `arg-bridge native [thread]` 的显式别名。安装过程**不会替换或包装** `@openai/codex` 管理的可执行文件；直接运行 `codex` 仍然使用 Codex 原生 `/btw`，不在 Bridge 的 MixAgents/Project RSI 拦截范围内。需要 Broker 路由时，请使用飞书 `/btw`、Bridge structured view，或 MixAgents 自身提供的稳定插件入口。旧终端回到 Bridge 已知 thread 时运行 `arg-bridge codex <thread-id> --profile <name>`；pane 已存在时用 `/tmux status` 显示的 attach 命令。
+`arg-bridge codex` 是 `arg-bridge native` 的显式别名。安装过程**不会替换或包装** `@openai/codex` 管理的可执行文件；普通 `arg-bridge native` 仍保持原生 Codex 行为，不在 Broker 拦截范围内。需要新的 Broker-managed 终端会话时用 `arg-bridge native --bridge`；迁移老 thread 时用 `arg-bridge native --adopt <thread-id>`；附着已经带 marker 的 Bridge thread 时用 `arg-bridge native --bridge <thread-id>`。pane 已存在时用 `/tmux status` 显示的 attach 命令。
 
 #### 第三方 provider 不继承本机代理
 
@@ -516,12 +550,14 @@ bridge 现在按 profile 在 `<profile>/structured/app-server-registry.json` 里
 | 下一次运行，provider 与凭据未变 | 复用正在运行的 server，不做任何重启 |
 | 下一次运行，`cc-switch` 已改写 `config.toml` 或 token 变化 | 在该轮开始前终止并替换旧 server |
 | `arg-bridge restart --profile <名称>` | 回收该 profile 记录的 App Server，下一轮用当前环境重新拉起；命令会打印回收数量 |
-| `arg-bridge native` 退出且没有其它 owner | 停掉它启动的 server，而不是留着旧环境当孤儿 |
+| `arg-bridge native` 退出 | 只关闭前端和 RPC 订阅；已加载后台与正在运行的任务保留，供后续重连 |
 | 仍有其它 bridge 或暂停的 native TUI 持有该 profile | server 保持可用，等待重连 |
 
 这就是 `cc-switch` 的完整验收路径：切换 provider 后直接发消息（或先跑一次 `arg-bridge restart`），下一轮就会用新的 provider、凭据和代理策略执行。注册表只保存凭据的**摘要**（不保存 token 明文）且权限为 `0600`；需要重置记录时删除 `<profile>/structured/app-server-registry.json` 即可。
 
-Codex CLI 0.154.0 起，`codex --remote ... resume <id>` 不再接受 `--sandbox`、`--ask-for-approval`、`--dangerously-bypass-approvals-and-sandbox` 等权限覆盖；远程任务必须继承创建时固化的权限。Bridge 现在按这个规则附加 TUI，旧的绕过参数只用于新建本地会话。App Server 启动连续失败时使用 3s / 6s / 12s …（上限 60s）退避并暂停，systemd/launchd 也配置了最小重启间隔和失败上限，避免短时间内重复建立会话触发供应商风控。
+Codex CLI 0.154.0 起，`codex --remote ... resume <id>` 不再接受 `--sandbox`、`--ask-for-approval`、`--dangerously-bypass-approvals-and-sandbox` 等权限覆盖；远程任务必须继承创建时固化的权限。Bridge 现在会在第一次 `thread/resume` 前剥离权限字段，避免后续重试路径再次泄漏。App Server 启动连续失败时使用 3s / 6s / 12s …（上限 60s）退避并暂停，systemd/launchd 也配置了最小重启间隔和失败上限，避免短时间内重复建立会话触发供应商风控。
+
+Codex thread 即使 idle，也会由已加载后台持有 writer lock。`arg-bridge native <thread-id>` 会先用该锁定位真实 App Server：owner 存活就重连原后台；owner 已退出才从持久化历史冷恢复；所有权未知或冲突则 fail closed。另一个后台即使能读取同一份 JSONL，也不会被误认为 owner。普通本地 `codex resume <id>` 不能接管由另一个 App Server 持有的 thread；应使用 `arg-bridge native <id>` 或 TUI 打印的 `codex --remote <socket> resume <id>`。详见[恢复所有权与重连](./docs/native-bridge.md#resume-and-writer-ownership)。
 
 ## 权限模式
 

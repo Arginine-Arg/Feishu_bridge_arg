@@ -1,11 +1,12 @@
 # MixAgents subagents, model tools and `cc-switch` routing
 
-Version 1.8.1 makes MixAgents available through two separate paths and adds
+Version 1.9.1 makes MixAgents available through three separate paths and adds
 automatic cc-switch provider discovery for workers:
 
 1. the explicit `/btw` side conversation;
 2. Bridge-owned dynamic tools that the parent Codex model can call without a
    user entering `/btw` first.
+3. the explicit `arg-bridge native --bridge`/`--adopt` terminal path.
 
 The main conversation always stays on the Codex provider selected by
 `cc-switch`. A Broker route is a worker route and never changes the main
@@ -408,6 +409,10 @@ read-only task, never installs anything, never retries, and never forks. HTTP
 
 `arg-bridge codex [thread]` is an alias for `arg-bridge native [thread]`.
 Installation never replaces the executable managed by `@openai/codex`, and plain
-`codex` keeps its native `/btw`. Bridge MixAgents routing applies to its
-structured/Feishu path. A MixAgents Codex plugin provides its own stable
-integration for direct Codex sessions when installed by the user.
+`codex` keeps its native `/btw`.
+
+Use `arg-bridge native --bridge` for a new Bridge-managed terminal TUI, and
+`arg-bridge native --adopt <thread-id>` for a bounded, safe history migration to
+a new Bridge-managed thread. Ordinary `arg-bridge native` remains vanilla Codex.
+The migration is necessary because Codex 0.164 `thread/resume` has no
+`dynamicTools` parameter. See [Bridge-managed native TUI](./native-bridge.md).

@@ -160,6 +160,10 @@ native('Codex 0.164 App Server routes dynamic Broker calls as function_call_outp
   let rpc: AppServerHarness | undefined;
   let child: ChildProcessWithoutNullStreams | undefined;
   const toolCalls: Array<{ namespace?: string; tool: string; arguments: unknown }> = [];
+  let markSpawnStarted!: () => void;
+  const spawnStarted = new Promise<void>(resolve => { markSpawnStarted = resolve; });
+  let releaseSpawn!: () => void;
+  const spawnGate = new Promise<void>(resolve => { releaseSpawn = resolve; });
   try {
     child = spawn('codex', ['app-server'], {
       cwd: workspace,
@@ -181,6 +185,10 @@ native('Codex 0.164 App Server routes dynamic Broker calls as function_call_outp
         tool,
         arguments: params.arguments,
       });
+      if (tool === 'spawn_agent') {
+        markSpawnStarted();
+        await spawnGate;
+      }
       const result = await controller.call(tool, params.arguments);
       rpc!.respond(request.id!, {
         contentItems: [{ type: 'inputText', text: result.text }],
@@ -209,7 +217,7 @@ native('Codex 0.164 App Server routes dynamic Broker calls as function_call_outp
       message.method === 'turn/completed' &&
       message.params?.threadId === threadId
     );
-    await rpc.request('turn/start', {
+    const turn = await rpc.request('turn/start', {
       threadId,
       cwd: workspace,
       input: [{
@@ -217,6 +225,18 @@ native('Codex 0.164 App Server routes dynamic Broker calls as function_call_outp
         text: 'Delegate a read-only review, collect the worker result, then report completion.',
       }],
     });
+    await spawnStarted;
+    try {
+      const steered = await rpc.request('turn/steer', {
+        threadId,
+        expectedTurnId: turn.turn?.id,
+        input: [{ type: 'text', text: 'MID_TURN_STEER_CHECK' }],
+        clientUserMessageId: 'om-mid-turn-steer',
+      });
+      expect(steered.turnId).toBe(turn.turn?.id);
+    } finally {
+      releaseSpawn();
+    }
     await completed;
 
     expect(toolCalls).toEqual([
@@ -246,6 +266,7 @@ native('Codex 0.164 App Server routes dynamic Broker calls as function_call_outp
     expect(providerRequests).toHaveLength(3);
     expect(JSON.stringify(providerRequests[1])).toContain('function_call_output');
     expect(JSON.stringify(providerRequests[2])).toContain('WORKER_RESULT_TRACE_OK');
+    expect(JSON.stringify(providerRequests)).toContain('MID_TURN_STEER_CHECK');
     const providerInput = Array.isArray(providerRequests[2]?.input)
       ? providerRequests[2]!.input as Array<Record<string, unknown>>
       : [];

@@ -24,6 +24,35 @@ function runWithCounters(counter: { stopCalls: number; detachCalls: number; forc
 }
 
 describe('ActiveRuns stop delivery', () => {
+  it('serializes concurrent steers into the active main run', async () => {
+    const seen: string[] = [];
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const run: AgentRun = {
+      ...runWithCounters({ stopCalls: 0, detachCalls: 0 }),
+      steer: async request => {
+        seen.push(request.text);
+        if (request.text === 'first') await firstGate;
+        return { status: 'steered' };
+      },
+    };
+    const activeRuns = new ActiveRuns();
+    activeRuns.register('scope-steer', run);
+
+    const first = activeRuns.steer('scope-steer', { text: 'first' });
+    await Promise.resolve();
+    const second = activeRuns.steer('scope-steer', { text: 'second' });
+    await Promise.resolve();
+    expect(seen).toEqual(['first']);
+
+    releaseFirst();
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      { status: 'steered' },
+      { status: 'steered' },
+    ]);
+    expect(seen).toEqual(['first', 'second']);
+  });
+
   it('upgrades a queued non-force stop to force without sending twice', async () => {
     const counter: { stopCalls: number; detachCalls: number; forceCalls?: number } = {
       stopCalls: 0,

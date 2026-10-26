@@ -23,6 +23,17 @@ export interface AgentRunStopOptions {
   force?: boolean;
 }
 
+export interface AgentSteerRequest {
+  text: string;
+  /** Stable upstream message identity when the backend supports idempotency. */
+  clientUserMessageId?: string;
+}
+
+export type AgentSteerResult =
+  | { status: 'steered' }
+  | { status: 'unavailable'; reason?: string }
+  | { status: 'uncertain'; reason: string };
+
 export interface LiveSessionDiagnostics {
   phase: LiveTurnPhase;
   /** True when the persistent terminal is currently in a side conversation. */
@@ -120,6 +131,13 @@ export interface AgentRun {
   readonly runId: string;
   readonly events: AsyncIterable<AgentEvent>;
   stop(options?: AgentRunStopOptions): Promise<void>;
+  /**
+   * Add user input to the currently active turn. `unavailable` means the
+   * backend rejected the steer before applying it; callers may safely queue
+   * the message for a later turn. `uncertain` must never be replayed
+   * automatically because the server may already have accepted it.
+   */
+  steer?(request: AgentSteerRequest): Promise<AgentSteerResult>;
   detach?(): Promise<void>;
   /**
    * Wait up to `timeoutMs` for the agent process to exit on its own.

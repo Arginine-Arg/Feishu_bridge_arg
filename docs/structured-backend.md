@@ -59,13 +59,33 @@ an existing App Server task (`--remote ... resume <id>`). The permissions frozen
 when the task was created are authoritative. arg-bridge now builds that TUI
 command without `--sandbox`, `--ask-for-approval`, or
 `--dangerously-bypass-approvals-and-sandbox`; those flags remain only for a
-brand-new local Codex session. `thread/resume` RPC calls still apply the profile
-policy where the server allows it, and fall back once to the frozen remote
-context on the deterministic rejection. Threads created by Bridge itself record
-the profile policy at creation, so a full-access profile keeps
-`dangerFullAccess` across later remote resumes. A thread created elsewhere with
-a weaker policy cannot be upgraded by the TUI; `arg-bridge native` prints a
-notice and attaches with the frozen permissions instead of failing.
+brand-new local Codex session. `thread/resume` RPC calls strip permission
+fields even when a caller accidentally merges them into the base params or
+retry overrides. Threads created by Bridge itself record the profile policy at
+creation, so a full-access profile keeps `dangerFullAccess` across later remote
+resumes. A thread created elsewhere with a weaker policy cannot be upgraded by
+the TUI; `arg-bridge native` prints a notice and attaches with the frozen
+permissions instead of failing.
+
+`--yolo` and `--dangerously-bypass-approvals-and-sandbox` are parsed as the same
+new-thread request. `--sandbox` and `--ask-for-approval` use the same resolver.
+On resume, those arguments are consumed but never forwarded; the thread's frozen
+permissions are inherited.
+
+### Writer-owner discovery
+
+A loaded Codex thread owns
+`$CODEX_HOME/thread-writer-locks/<thread-id>.lock`. Before resume,
+`arg-bridge native` resolves the owner PID, its App Server socket and
+`thread/loaded/list` membership. It deliberately does not use `thread/read` as
+an ownership test because every App Server with the same `CODEX_HOME` can read
+the saved rollout.
+
+If the owner is alive, Bridge attaches to that endpoint instead of starting a
+second writer. If the owner exited, Bridge cold-resumes history on the normal
+profile host. Missing owner sockets and multiple owners fail closed. This also
+allows a backend that is idle but kept loaded for Codex's default 30-minute
+unload interval to be reattached without deleting locks or killing processes.
 
 ### Network policy
 
@@ -108,22 +128,34 @@ pane selected elsewhere in the tmux session. A plain `codex resume` remains
 usable through live fallback. Claude's native entry uses `--profile claude` and
 the optional Claude session ID, and retains native live transport.
 
+For a Bridge-managed terminal session, use:
+
+```sh
+arg-bridge native --bridge --profile codex
+arg-bridge native --adopt <old-thread-id> --profile codex
+```
+
+`--bridge` registers `arg_bridge.*` dynamic tools and keeps the Bridge tool host
+alive while the TUI is open. `--adopt` migrates bounded user/assistant text to a
+new Bridge thread because Codex 0.164 `thread/resume` has no `dynamicTools`
+parameter. See [Bridge-managed native TUI](./native-bridge.md) for the protocol
+and marker details.
+
 An empty shell is not automatically overwritten: run the native command there
 when ready. Proxy environment changes cannot modify an already-running server.
 Use the intended proxy environment before first starting its server. Shared
 thread context does not imply that idle terminal-originated output is always
 pushed unsolicited to Feishu; the Bridge relay forwards its active requests.
 
-Codex persists the provider id in each thread. Version 1.7.0 reads the thread
-snapshot at resume. If the thread is idle and its provider/model differ from the
-current `$CODEX_HOME/config.toml`, the current provider/model are applied to the
-resume request. This covers the case where both provider A and provider B still
-exist and `cc-switch` changed the active one. If the thread has an active turn,
-the bridge defers the switch and keeps the running provider. If the snapshot is
-unavailable, it preserves the old deterministic fallback for
-`Model provider <old-id> not found`. If the App Server home/config is unknown or
-unreadable, it does not guess `openai`. Resume changes request parameters only;
-it does not rewrite history.
+Codex persists the provider id and model in each thread. Native and structured
+reattachment calls `resumeCodexThread` with `preserveProviderModel`, so a later
+cc-switch selection does not silently move an existing conversation to another
+route. Explicit caller fields still win. An `active` thread is likewise never
+changed mid-turn. If the historical provider no longer exists, reconnect returns
+the provider error; the operator must start a new thread or otherwise make an
+explicit migration decision. If the App Server home/config is unknown or
+unreadable, the bridge does not guess `openai`. Resume changes request
+parameters only; it does not rewrite history.
 
 Claude uses the official Agent SDK streaming-input mode with one persistent
 Claude process per scope. The default `claude_code` preset and normal user/project

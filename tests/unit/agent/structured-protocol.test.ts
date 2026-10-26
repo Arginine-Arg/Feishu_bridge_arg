@@ -11,6 +11,41 @@ import { join } from 'node:path';
 import { sendStructuredCard } from '../../../src/card/structured-interaction';
 
 describe('structured transport contracts', () => {
+  it('steers the exact active Codex turn and classifies rejection safely', async () => {
+    const rpc = new EventEmitter() as EventEmitter & { request: ReturnType<typeof vi.fn> };
+    rpc.request = vi.fn(async () => ({ turnId: 'turn-1' }));
+    const session = new CodexStructuredSession('main', '', rpc as unknown as RpcClient);
+
+    expect(await session.steer({ text: 'new direction' })).toMatchObject({
+      status: 'unavailable',
+    });
+
+    rpc.emit('message', {
+      method: 'turn/started',
+      params: { threadId: 'main', turn: { id: 'turn-1' } },
+    });
+    expect(await session.steer({
+      text: 'new direction',
+      clientUserMessageId: 'om_message',
+    })).toEqual({ status: 'steered' });
+    expect(rpc.request).toHaveBeenCalledWith('turn/steer', {
+      threadId: 'main',
+      expectedTurnId: 'turn-1',
+      input: [{ type: 'text', text: 'new direction' }],
+      clientUserMessageId: 'om_message',
+    }, 20_000);
+
+    rpc.request.mockRejectedValueOnce(new Error('no active turn to steer'));
+    expect(await session.steer({ text: 'late input' })).toMatchObject({
+      status: 'unavailable',
+    });
+    rpc.request.mockRejectedValueOnce(new Error('RPC turn/steer timed out; outcome unknown, not retried'));
+    expect(await session.steer({ text: 'uncertain input' })).toMatchObject({
+      status: 'uncertain',
+    });
+    await session.close();
+  });
+
   it('reconciles a timed-out legacy resume with read-only loaded checks and never retries it', async () => {
     let probes = 0;
     const request = vi.fn(async (method: string) => {
@@ -26,9 +61,9 @@ describe('structured transport contracts', () => {
     const result = await (adapter as unknown as { resumeLegacyThread: Function }).resumeLegacyThread(rpc, 'unix:///tmp/server.sock', 'thread-1', '/workspace');
     expect(result.rpc).toBe(rpc);
     expect(result.result.thread.id).toBe('thread-1');
-    expect(request.mock.calls[0]?.[0]).toBe('thread/read');
+    expect(request.mock.calls[0]?.[0]).toBe('thread/resume');
     expect(request.mock.calls.filter(call => call[0] === 'thread/resume')).toHaveLength(1);
-    expect(request.mock.calls.filter(call => call[0] === 'thread/loaded/list')).toHaveLength(1);
+    expect(request.mock.calls.filter(call => call[0] === 'thread/loaded/list')).toHaveLength(2);
     await adapter.shutdown();
   });
 

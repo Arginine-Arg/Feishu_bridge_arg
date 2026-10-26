@@ -28,6 +28,8 @@ import type {
   AgentEvent,
   AgentRun,
   AgentRunOptions,
+  AgentSteerRequest,
+  AgentSteerResult,
 } from '../types';
 import { buildCodexArgs } from './argv';
 import {
@@ -500,13 +502,33 @@ export class CodexAdapter implements AgentAdapter {
         opts.sideConversationConfirmed,
       );
     }
-    return session.run(
+    const run = session.run(
       opts.runId,
       opts.prompt,
       opts.cwd,
       opts.liveInputMode,
       opts.sideConversationConfirmed,
     );
+    if (side || opts.liveInputMode) return run;
+    return {
+      ...run,
+      steer: async (request: AgentSteerRequest): Promise<AgentSteerResult> => {
+        const stillActive = (): boolean =>
+          this.liveSessions.diagnostics(scopeKey).generation === opts.runId;
+        const steered = await this.liveSessions.steerActive(
+          scopeKey,
+          request.text,
+          opts.runId,
+          stillActive,
+        );
+        return steered
+          ? { status: 'steered' }
+          : {
+              status: 'unavailable',
+              reason: 'native terminal is not in an empty-composer active turn',
+            };
+      },
+    };
   }
 }
 
