@@ -4,7 +4,7 @@ A lightweight bot that bridges Feishu / Lark messenger with your local Claude Co
 
 [中文 README](./README.zh.md)
 
-Version 1.8.0 adds model-visible, cross-provider Broker orchestration to Bridge-managed Codex sessions. Codex 0.164 App Server dynamic tools expose `arg_bridge.spawn_agent`, `followup_task`, `wait_agent`, `list_agents`, route, interrupt and close operations without requiring `/btw`; native MultiAgentV2 tools are shadowed for new Bridge threads, and task text reaches workers as ordinary MixAgents input rather than `agent_message.encrypted_content`. Read/write routes, concurrency limits, persisted worker mappings, result mailboxes and Project RSI bounded repair loops are configurable through `arg-bridge settings`. Version 1.7.2 completed the preceding cross-platform validation release.
+Version 1.8.1 makes cc-switch provider discovery automatic for Broker workers. The default `follow-cc-switch` flow reads the current Codex provider, model, endpoint, wire API and credential from cc-switch, then materializes a profile-scoped MixAgents route without a hand-written `broker-routes.json` or `MIXAGENTS_BROKER_CREDENTIALS_JSON`. It also adds persistent queue-only `send_message`, fail-closed third-party fallback, real three-round provider E2E coverage and stricter runtime-binding diagnostics. Version 1.8.0 introduced model-visible `arg_bridge` dynamic tools and native MultiAgentV2 shadowing.
 
 Version 1.6.7 introduced provider-aware Codex resume. Version 1.7.0 applies the current provider/model at an idle resume boundary, including when the old provider still exists, while never switching a thread that has an active turn.
 
@@ -60,7 +60,7 @@ Install a pinned release or use a writable custom npm prefix when required:
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.8.0
+sh /tmp/install-arg-bridge.sh --version 1.8.1
 # Example for a machine without permission to write npm's configured global prefix:
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ Release tarballs are preferred. If a Git install is required, keep both compatib
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.8.0"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.8.1"
 ```
 
-`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.8.0`.
+`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.8.1`.
 
 ### 4. Node or npm global-prefix errors
 
@@ -254,11 +254,11 @@ If a profile was created with the wrong agent kind, stop or unregister any match
 
 ### MixAgents model tools, `/btw`, `cc-switch`, MCP and Project RSI
 
-MixAgents is optional. `/btw` supports the legacy fork fallback in `auto` mode, but the parent model's automatic Broker tools never pretend a native Codex child is a worker. New Bridge-managed Codex threads receive the requested `arg_bridge` dynamic-tool namespace and set `features.multi_agent_v2.disable_native_tools=true`. The exact 0.164.0 trace is recorded in [the structured Broker smoke](./docs/smoke-structured-broker-e2e-0.164.0.json).
+MixAgents is optional. The default `follow-cc-switch` flow reads the current cc-switch provider and automatically generates the Broker route, model, base URL, and credential. Users do not need a hand-written `broker-routes.json` or a manual `MIXAGENTS_BROKER_CREDENTIALS_JSON`; third-party providers never fall back to native fork/collaboration. New Bridge-managed Codex threads receive the requested `arg_bridge` dynamic-tool namespace and set `features.multi_agent_v2.disable_native_tools=true`. The exact 0.164.0 trace is recorded in [the structured Broker smoke](./docs/smoke-structured-broker-e2e-0.164.0.json).
 
 The public `mixagents-broker` npm package is an optional dependency and is resolved through its stable package entry, not a plugin-cache path. Explicit MCP command/profile overrides still take priority.
 
-Automatic delegation uses `spawn_agent`, `followup_task`, `wait_agent`, `list_agents`, `list_routes`, `interrupt_agent`, `close_agent`, and an explicit queue-only `send_message` surface. The current MixAgents MCP does not prove queue-only `send` semantics, so `send_message` fails clearly instead of silently becoming trigger-turn. Workers default to read-only; write workers additionally require an enabled write route and exact per-task/per-workspace authorization.
+Automatic delegation uses `spawn_agent`, `followup_task`, `wait_agent`, `list_agents`, `list_routes`, `interrupt_agent`, `close_agent`, and a queue-only `send_message` surface. `send_message` stores plaintext locally without waking the worker; the next `followup_task` delivers the queued text and new task together as ordinary input. Workers default to read-only; write workers additionally require an enabled write route and exact per-task/per-workspace authorization.
 
 For an authorized write worker, the user starts the turn with `arg-bridge-write --workspace /canonical/path --task <exact task>`. Bridge consumes that directive before the parent model turn and binds the authorization outside model-controlled tool arguments.
 
@@ -271,17 +271,17 @@ codex plugin marketplace add Utopia-V/mixagents
 codex plugin add mixagents-broker@mixagents
 ```
 
-`arg-bridge settings` now auto-reads safe `cc-switch` account metadata and the available Broker routes, then guides the user through main-account context, subagent route mapping, credential source, Project RSI, and a plain-language confirmation. Technical concurrency/native-tool/write-worker controls are behind an explicit advanced prompt. Follow-mode route mappings are written as provider-ID to route-ID metadata without changing the main provider. `arg-bridge doctor --json` is read-only and must not spend money. Only an explicit `--probe-route <id>` sends one read-only generation probe and never retries or falls back.
+`arg-bridge settings` now guides the user through main-account context, fallback policy, **follow current provider or a fixed cc-switch provider**, automatic cc-switch credential resolution, Project RSI, and a plain-language confirmation. No route ID or Key entry is required. Technical concurrency/native-tool/write-worker controls are behind an explicit advanced prompt. The default flow does not create `broker-routes.json` and never changes the main provider. `arg-bridge doctor --json` is read-only and must not spend money. Only an explicit `--probe-route <id>` sends one read-only generation probe and never retries or falls back.
 
 Configured and running providers are intentionally separate:
 
 1. `cc-switch` selects the current provider ID.
 2. Codex `config.toml` selects its internal `model_provider` and model.
-3. A Broker route is selected by mapping the **cc-switch provider ID**, not either display name or Codex's internal provider name.
+3. An automatically generated Broker route uses the **cc-switch provider ID** and a config fingerprint, not a display name or Codex's internal provider name.
 4. A provider change takes effect at the next idle turn or profile restart. A request already running is never moved to another provider.
 5. An old Codex thread whose historical provider still exists is rebound at an idle boundary; an active thread is left on its running provider until it becomes safe to switch.
 
-The optional route map lives at `~/.config/arg-bridge/broker-routes.json` and contains IDs only:
+The optional legacy/manual route map lives at `~/.config/arg-bridge/broker-routes.json` and contains IDs only:
 
 ```json
 {
@@ -318,7 +318,7 @@ See [MixAgents subagents](./docs/mixagents-subagents.md), [Project RSI](./docs/p
 | `/sendfile <absolute-path>` | Admin-only: reply with a regular file from the current workspace, bridge media cache, or an explicitly allowed outbound directory, without invoking the agent |
 | `/config` | Adjust presentation preferences, access settings, and lark-cli identity policy |
 | `/model` | Choose the model; Codex uses its native model/reasoning picker and syncs the result to the active profile. `/codex model` is a shorthand for `/codex /model`. |
-| `/btw [--route <id>] [<text>]` | Open or reuse an independent read-only side agent. When MixAgents is configured, this is a Broker agent (not a Codex fork) and the selected route is re-resolved on every use; otherwise `auto` reports and uses the legacy Codex fork. `/btw out` closes only the side. `/codex /btw ...` is equivalent in Feishu. |
+| `/btw [--route <id>] [<text>]` | Open or reuse an independent read-only side agent. This is a Broker agent (not a Codex fork), and the route is re-resolved from the current cc-switch provider on every use. Third-party provider failures fail closed; only official providers may use the configured fallback. `/btw out` closes only the side. `/codex /btw ...` is equivalent in Feishu. |
 | `/session [status\|live\|turn]` | Inspect terminal execution. tmux/live is the default; `turn` remains a legacy compatibility fallback |
 | `/tmux list [socket]` | Admin-only: list every live Codex/Claude tmux pane on this host, including working directory, agent kind, adopted thread, shared App Server endpoint, and attach command. Optional `-S <absolute socket path>` or `-L <socket name>` selects one tmux server; plain shells are never listed |
 | `/tmux bind <number\|pane id\|socket::pane id>` | Admin-only: bind the current chat/topic scope to a listed pane. A pane with a shared Codex endpoint is driven through structured transport; a plain Codex/Claude pane falls back to live transport. `/tmux list` numbers are only valid for the most recent listing |

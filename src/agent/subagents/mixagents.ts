@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module';
+import { isAbsolute } from 'node:path';
 import type { SubagentConfig, SubagentMixAgentsConfig } from '../../config/profile-schema';
 import { McpStdioClient, McpToolError, redactSecrets } from './mcp-client';
 import {
@@ -33,6 +34,14 @@ export interface MixAgentsLaunchConfig {
   credentialEnvKeys?: string[];
 }
 
+export interface MixAgentsRuntimeOverrides {
+  brokerConfigPath: string;
+  credentials: Record<string, string>;
+  fingerprint: string;
+  /** The route generated from the same cc-switch snapshot as the config/key. */
+  route?: SubagentRoute;
+}
+
 /**
  * Optional MixAgents Broker backend over its official STDIO MCP server.
  *
@@ -51,6 +60,7 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
   constructor(
     private readonly config: SubagentConfig,
     env: NodeJS.ProcessEnv = process.env,
+    private readonly runtime?: MixAgentsRuntimeOverrides,
   ) {
     this.env = env;
     const launch = resolveMixAgentsLaunchConfig(config, env);
@@ -70,7 +80,7 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
     const client = await this.ensureClient();
     const result = await client.callTool('routes', {}, { timeoutMs: 30_000, signal });
     const raw = Array.isArray(result.routes) ? result.routes : [];
-    return raw.flatMap((entry): SubagentRoute[] => {
+    const routes = raw.flatMap((entry): SubagentRoute[] => {
       if (!isRecord(entry)) return [];
       const id = stringValue(entry.id);
       const provider = stringValue(entry.provider);
@@ -95,8 +105,15 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
         ...(stringValue(entry.targetFingerprint)
           ? { targetFingerprint: stringValue(entry.targetFingerprint) }
           : {}),
+        ...(stringValue(entry.ccSwitchProviderId)
+          ? { ccSwitchProviderId: stringValue(entry.ccSwitchProviderId) }
+          : {}),
+        ...(entry.source === 'cc-switch' || entry.source === 'broker-config'
+          ? { source: entry.source }
+          : {}),
       }];
     });
+    return mergeRuntimeRoutes(routes, this.runtime?.route);
   }
 
   get serverVersion(): string | undefined {
@@ -105,6 +122,10 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
 
   get launchConfig(): Readonly<MixAgentsLaunchConfig> {
     return this.launch;
+  }
+
+  get runtimeFingerprint(): string | undefined {
+    return this.runtime?.fingerprint;
   }
 
   async createOrReuse(input: SideAgentInput): Promise<SideAgent> {
@@ -214,7 +235,9 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
 
   private async ensureClient(): Promise<McpStdioClient> {
     if (this.client) return this.client;
-    if (this.launch.credentialMode === 'mixagents-managed') {
+    if (this.runtime) {
+      validateRuntimeOverrides(this.runtime);
+    } else if (this.launch.credentialMode === 'mixagents-managed') {
       if (!this.launch.credentialProvider?.trim()) {
         throw new SubagentUnavailableError(
           'mixagents-not-configured',
@@ -234,7 +257,13 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
     }
     try {
       const childEnv: NodeJS.ProcessEnv = { ...this.env };
-      if (this.launch.credentialMode === 'mixagents-managed') {
+      if (this.runtime) {
+        childEnv.MIXAGENTS_BROKER_CONFIG = this.runtime.brokerConfigPath;
+        childEnv.MIXAGENTS_BROKER_CREDENTIALS_JSON = JSON.stringify(this.runtime.credentials);
+        if (this.runtime.route?.tags.includes('third-party')) {
+          stripLoopbackProxyEnvironment(childEnv);
+        }
+      } else if (this.launch.credentialMode === 'mixagents-managed') {
         childEnv.MIXAGENTS_CREDENTIAL_PROVIDER = this.launch.credentialProvider;
         childEnv.MIXAGENTS_CREDENTIAL_SOURCE = 'cc-switch';
       }
@@ -269,6 +298,94 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
     }
     return this.client;
   }
+}
+
+function validateRuntimeOverrides(runtime: MixAgentsRuntimeOverrides): void {
+  if (!isAbsolute(runtime.brokerConfigPath) || !runtime.fingerprint.trim()) {
+    throw new SubagentUnavailableError(
+      'mixagents-not-configured',
+      '自动 cc-switch Broker runtime 配置无效',
+    );
+  }
+  for (const [name, value] of Object.entries(runtime.credentials)) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name) || !value) {
+      throw new SubagentUnavailableError(
+        'mixagents-not-configured',
+        '自动 cc-switch Broker 凭据字段无效（只显示字段名）',
+        { environmentNames: Object.keys(runtime.credentials) },
+      );
+    }
+  }
+}
+
+function stripLoopbackProxyEnvironment(env: NodeJS.ProcessEnv): void {
+  for (const key of [
+    'http_proxy',
+    'https_proxy',
+    'HTTP_PROXY',
+    'HTTPS_PROXY',
+    'all_proxy',
+    'ALL_PROXY',
+  ]) {
+    const value = env[key];
+    if (!value) continue;
+    try {
+      const host = new URL(value.includes('://') ? value : `http://${value}`).hostname.toLowerCase();
+      if (host === 'localhost' || host === '127.0.0.1' || host === '::1') {
+        delete env[key];
+      }
+    } catch {
+      delete env[key];
+    }
+  }
+}
+
+/**
+ * MixAgents 0.1.1 intentionally returns only its public RouteView fields.
+ * cc-switch identity, revision, and source are generated by ArgBridge and
+ * therefore have to be merged onto the matching MCP route. Availability and
+ * missingEnvironment must come from MixAgents, not from the generated copy.
+ */
+export function mergeRuntimeRoutes(
+  routes: SubagentRoute[],
+  runtimeRoute: SubagentRoute | undefined,
+): SubagentRoute[] {
+  if (!runtimeRoute) return routes;
+  const actual = routes.find(route => route.id === runtimeRoute.id);
+  if (!actual) {
+    throw new SubagentUnavailableError(
+      'route-unavailable',
+      `MixAgents 没有返回 cc-switch runtime 生成的 route ${runtimeRoute.id}；` +
+        '为避免把任务发给错误模型，已停止 subagent。',
+      { expectedRoute: runtimeRoute.id, returnedRoutes: routes.map(route => route.id) },
+    );
+  }
+  if (
+    actual.provider !== runtimeRoute.provider ||
+    actual.model !== runtimeRoute.model
+  ) {
+    throw new SubagentUnavailableError(
+      'route-unavailable',
+      `MixAgents route ${runtimeRoute.id} 与 cc-switch 配置不匹配：` +
+        `expected=${runtimeRoute.provider}/${runtimeRoute.model} ` +
+        `actual=${actual.provider}/${actual.model}`,
+    );
+  }
+  return routes.map(route => route.id !== runtimeRoute.id
+    ? route
+    : {
+        ...route,
+        ...(runtimeRoute.description ? { description: runtimeRoute.description } : {}),
+        tags: [...new Set([...route.tags, ...runtimeRoute.tags])],
+        ...(runtimeRoute.revision ? { revision: runtimeRoute.revision } : {}),
+        ...(runtimeRoute.targetFingerprint
+          ? { targetFingerprint: runtimeRoute.targetFingerprint }
+          : {}),
+        ...(runtimeRoute.ccSwitchProviderId
+          ? { ccSwitchProviderId: runtimeRoute.ccSwitchProviderId }
+          : {}),
+        ...(runtimeRoute.source ? { source: runtimeRoute.source } : {}),
+      });
 }
 
 /** Resolve the official MCP launch command without scanning plugin caches. */

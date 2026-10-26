@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.8.1
+
+- Added a complete cc-switch Codex provider resolver for SQLite and legacy JSON
+  layouts, including provider ID/name, Codex provider/model, base URL, wire API,
+  headers, model parameters and the credential field path.
+- `follow-cc-switch` now generates a profile-scoped MixAgents route and passes
+  the credential only in the MCP child environment. Manual
+  `broker-routes.json` and `MIXAGENTS_BROKER_CREDENTIALS_JSON` are no longer
+  required for the normal flow.
+- Provider switches now change the generated route fingerprint; stale workers
+  are closed and recreated on the next spawn/followup. Third-party providers
+  fail closed instead of using native fork/collaboration fallback.
+- `send_message` now implements persistent Bridge-local queue-only semantics;
+  the next `followup_task` delivers queued plaintext and the new task together.
+- Added fixed-provider selection in settings and a non-jargon five-step flow:
+  choose follow-current or a specific cc-switch provider, with no route or key
+  entry.
+- Doctor now separates cc-switch provider details, generated route identity,
+  thread markers, live identified App Server hosts and actual Broker wiring;
+  missing/mismatched runtime state cannot be reported as wired.
+- Added SQLite/legacy resolver, provider-switch, route augmentation, queue
+  persistence, runtime-binding, native-shadow and real three-round
+  cc-switch/MixAgents regression coverage.
+
 ## 1.8.0
 
 - Added Bridge-owned App Server dynamic tools for model-initiated cross-provider

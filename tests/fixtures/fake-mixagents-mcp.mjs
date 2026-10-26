@@ -8,6 +8,19 @@ const statePath = process.env.FAKE_MIXAGENTS_STATE;
 if (!statePath) throw new Error('FAKE_MIXAGENTS_STATE is required');
 await mkdir(dirname(statePath), { recursive: true });
 
+const generatedBrokerConfigPath = process.env.MIXAGENTS_BROKER_CONFIG;
+let generatedBrokerConfig;
+if (generatedBrokerConfigPath) {
+  generatedBrokerConfig = JSON.parse(await readFile(generatedBrokerConfigPath, 'utf8'));
+}
+let credentialNames = [];
+try {
+  const credentials = JSON.parse(process.env.MIXAGENTS_BROKER_CREDENTIALS_JSON ?? '{}');
+  credentialNames = Object.keys(credentials);
+} catch {
+  credentialNames = [];
+}
+
 let state = {
   calls: [],
   agents: {},
@@ -49,8 +62,30 @@ try {
 } catch {
   // First run.
 }
+if (generatedBrokerConfig?.routes) {
+  state.routes = Object.entries(generatedBrokerConfig.routes).map(([id, route]) => ({
+    id,
+    description: route.description ?? id,
+    provider: route.provider,
+    model: route.model,
+    tags: route.tags ?? [],
+    available: !route.envKey || credentialNames.includes(route.envKey),
+    missingEnvironment: route.envKey && !credentialNames.includes(route.envKey)
+      ? [route.envKey]
+      : [],
+    maxAccess: route.maxAccess ?? 'read-only',
+    backend: 'app_server',
+    selectionReason: 'generated test route',
+    default: generatedBrokerConfig.defaultRoute === id,
+  }));
+}
 state.lastCredentialProvider = process.env.MIXAGENTS_CREDENTIAL_PROVIDER ?? null;
 state.lastCredentialSource = process.env.MIXAGENTS_CREDENTIAL_SOURCE ?? null;
+state.brokerConfigPath = generatedBrokerConfigPath ?? null;
+state.credentialNames = credentialNames;
+state.proxyEnvironmentNames = Object.keys(process.env)
+  .filter(name => /^(?:http|https|all)_proxy$/iu.test(name) && process.env[name])
+  .sort();
 
 const pending = new Map();
 

@@ -99,6 +99,11 @@ export interface SubagentConfig {
   enabled: boolean;
   mode: SubagentMode;
   routeMode: SubagentRouteMode;
+  /**
+   * Optional fixed cc-switch provider ID for subagents. `null` follows the
+   * current cc-switch provider on every dispatch.
+   */
+  ccSwitchProviderId?: string | null;
   readRoute: string | null;
   writeRoute: string | null;
   /**
@@ -412,6 +417,7 @@ export const DEFAULT_SUBAGENT_CONFIG: SubagentConfig = {
   enabled: true,
   mode: 'auto',
   routeMode: 'follow-cc-switch',
+  ccSwitchProviderId: null,
   readRoute: null,
   writeRoute: null,
   modelTools: true,
@@ -483,6 +489,7 @@ function normalizeSubagents(input: unknown): SubagentConfig {
     enabled: raw.enabled !== false,
     mode,
     routeMode,
+    ccSwitchProviderId: ccSwitchProviderId(raw.ccSwitchProviderId),
     readRoute: nonEmptyString(raw.readRoute) ?? null,
     writeRoute: nonEmptyString(raw.writeRoute) ?? null,
     modelTools: raw.modelTools !== false,
@@ -496,6 +503,15 @@ function normalizeSubagents(input: unknown): SubagentConfig {
     allowForkFallback: raw.allowForkFallback !== false,
     ...(mixagents && Object.keys(mixagents).length > 0 ? { mixagents } : {}),
   };
+}
+
+function ccSwitchProviderId(value: unknown): string | null {
+  const text = nonEmptyString(value);
+  if (!text) return null;
+  if (!/^[A-Za-z0-9._-]{1,128}$/u.test(text)) {
+    throw new Error('subagents.ccSwitchProviderId must be a safe cc-switch provider id');
+  }
+  return text;
 }
 
 function normalizeRsi(input: unknown): RsiConfig {

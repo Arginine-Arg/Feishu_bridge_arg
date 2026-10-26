@@ -34,7 +34,7 @@ afterEach(async () => {
 });
 
 describe('guided settings flow', () => {
-  it('shows cc-switch accounts and writes a provider-to-route mapping in plain flow', async () => {
+  it('lets the user choose a cc-switch provider without hand-writing routes or credentials', async () => {
     const root = await mkdtemp(join(tmpdir(), 'arg-bridge-guided-settings-'));
     temporary.push(root);
     const ccHome = join(root, 'cc-switch');
@@ -82,12 +82,8 @@ describe('guided settings flow', () => {
 
     prompts.select
       .mockResolvedValueOnce('auto')
-      .mockResolvedValueOnce('provider-a')
-      .mockResolvedValueOnce('read-a')
-      .mockResolvedValueOnce('follow')
-      .mockResolvedValueOnce('inherit-env')
+      .mockResolvedValueOnce('__follow_current__')
       .mockResolvedValueOnce('off');
-    prompts.text.mockResolvedValueOnce('MIXAGENTS_BROKER_CREDENTIALS_JSON');
     prompts.confirm
       .mockResolvedValueOnce(true)
       .mockResolvedValueOnce(false)
@@ -110,30 +106,25 @@ describe('guided settings flow', () => {
     expect(savedProfile!.subagents).toMatchObject({
       mode: 'auto',
       routeMode: 'follow-cc-switch',
+      ccSwitchProviderId: null,
       readRoute: null,
       allowWriteWorkers: false,
       mixagents: {
         credentialMode: 'inherit-env',
-        credentialEnvKeys: ['MIXAGENTS_BROKER_CREDENTIALS_JSON'],
       },
     });
     expect(savedProfile!.rsi?.mode).toBe('off');
-    const routeMap = JSON.parse(await readFile(join(xdg, 'arg-bridge', 'broker-routes.json'), 'utf8'));
-    expect(routeMap).toMatchObject({
-      version: 1,
-      providers: {
-        'provider-a': { readRoute: 'read-a' },
-      },
-    });
+    await expect(readFile(join(xdg, 'arg-bridge', 'broker-routes.json'), 'utf8'))
+      .rejects.toMatchObject({ code: 'ENOENT' });
     expect(prompts.note.mock.calls.map(call => call[1])).toEqual(expect.arrayContaining([
       '步骤 1 / 5 · 自动读取主对话配置',
-      '步骤 2 / 5 · 选择子代理账号',
-      '步骤 3 / 5 · 子代理 Key 由谁提供',
+      '步骤 2 / 5 · 选择子代理 provider',
+      '步骤 3 / 5 · 自动凭据',
       '步骤 4 / 5 · 项目完成证据校验',
       '步骤 5 / 5 · 保存前确认',
     ]));
     expect(JSON.stringify(prompts.note.mock.calls)).toContain('provider-a');
-    expect(JSON.stringify(prompts.select.mock.calls)).toContain('read-a');
+    expect(JSON.stringify(prompts.select.mock.calls)).toContain('__follow_current__');
     expect(JSON.stringify(prompts.note.mock.calls)).not.toContain('sk-super-secret-value');
   });
 });

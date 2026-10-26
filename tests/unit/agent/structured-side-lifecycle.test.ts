@@ -3,6 +3,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { StructuredAdapter } from '../../../src/agent/structured/adapter';
 import { CodexStructuredSession } from '../../../src/agent/structured/codex';
 import { StructuredView } from '../../../src/agent/structured/view';
+import { DEFAULT_SUBAGENT_CONFIG } from '../../../src/config/profile-schema';
 import type { RpcClient } from '../../../src/agent/structured/rpc';
 import type { AgentRun } from '../../../src/agent/types';
 
@@ -33,7 +34,13 @@ it('serializes a slow side opening with exit and never sends its queued body', a
   vi.spyOn(StructuredView.prototype, 'start').mockResolvedValue();
   vi.spyOn(StructuredView.prototype, 'dispose').mockResolvedValue();
   const main = new CodexStructuredSession('main', '', rpc as unknown as RpcClient);
-  const adapter = new StructuredAdapter({ kind: 'codex', binary: 'not-spawned', profileDir: '/not-used' });
+  const adapter = new StructuredAdapter({
+    kind: 'codex',
+    binary: 'not-spawned',
+    profileDir: '/not-used',
+    subagents: { ...DEFAULT_SUBAGENT_CONFIG, mode: 'fork' },
+    env: { ...process.env, CC_SWITCH_HOME: '/not-used/cc-switch' },
+  });
   Reflect.get(adapter, 'sessions').set('scope', { main, cwd: '/workspace', view: new StructuredView('/not-used', 'main') });
   const opening = drain(adapter.runSide({ runId: 'open', scopeId: 'scope', cwd: '/workspace', prompt: '/btw never send this after exit', liveInputMode: 'side' }));
   await vi.waitFor(() => expect(resolveFork).toBeTypeOf('function'));

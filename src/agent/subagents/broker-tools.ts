@@ -6,7 +6,11 @@ import type { SubagentAccess, SubagentConfig } from '../../config/profile-schema
 import { loadBrokerRouteMap } from '../../integrations/broker-routes';
 import { readCcSwitchState } from '../../integrations/cc-switch';
 import { writeFileAtomic } from '../../platform/atomic-write';
-import { MixAgentsBrokerBackend } from './mixagents';
+import {
+  mergeRuntimeRoutes,
+  MixAgentsBrokerBackend,
+  type MixAgentsRuntimeOverrides,
+} from './mixagents';
 import { redactSecrets } from './mcp-client';
 import { selectSubagentRoute } from './registry';
 import {
@@ -24,6 +28,8 @@ export const DEFAULT_BROKER_TOOL_NAMESPACE = 'arg_bridge';
 
 const MAX_TASK_BYTES = 128 * 1024;
 const MAX_RESULT_BYTES = 64 * 1024;
+const MAX_QUEUED_MESSAGES = 16;
+const MAX_QUEUED_BYTES = 256 * 1024;
 const MAX_IDEMPOTENCY_ENTRIES = 256;
 const MAX_WAIT_MS = 60 * 60_000;
 
@@ -90,6 +96,9 @@ interface BrokerWorkerRecord {
   error?: string;
   updatedAt: number;
   idempotencyKeys: string[];
+  /** Plaintext messages accepted by send_message and delivered by the next followup_task. */
+  queuedMessages: string[];
+  backend?: SubagentBackend;
 }
 
 interface PersistedState {
@@ -111,6 +120,8 @@ export interface BrokerToolControllerOptions {
   namespace?: string;
   getConfig(): Promise<SubagentConfig>;
   backendFactory?: (config: SubagentConfig, env: NodeJS.ProcessEnv) => SubagentBackend;
+  /** Re-resolved before every backend operation so cc-switch changes fail closed. */
+  runtimeResolver?: () => Promise<MixAgentsRuntimeOverrides | undefined>;
   /** Test seam. Production resolves routes from cc-switch and Broker MCP. */
   routeResolver?: (input: {
     access: SubagentAccess;
@@ -135,6 +146,7 @@ export class BrokerToolController implements BrokerToolHost {
   private inFlightCalls = new Map<string, Promise<DynamicToolCallResult>>();
   private backend?: SubagentBackend;
   private backendConfigKey?: string;
+  private currentRuntime?: MixAgentsRuntimeOverrides;
   private writeChain = Promise.resolve();
   private workerTimers = new Map<string, NodeJS.Timeout>();
   private restoredTimeoutsArmed = false;
@@ -158,7 +170,7 @@ export class BrokerToolController implements BrokerToolHost {
       '- Do not report delegated work as complete until wait_agent has returned the relevant worker result or an explicit terminal status.',
       `- Use ${namespace}.list_agents / ${namespace}.interrupt_agent / ${namespace}.close_agent to inspect or stop workers, and ${namespace}.list_routes before choosing a non-default route.`,
       '- Task text passed to spawn_agent or followup_task is delivered as ordinary user input. Do not depend on native agent_message, encrypted_content, or a Codex child thread.',
-      `- ${namespace}.send_message is queue-only semantics. If the Broker cannot prove queue-only delivery, it must return an explicit unsupported error; use followup_task instead.`,
+      `- ${namespace}.send_message is queue-only: it stores plaintext locally and returns without waking the worker. The next ${namespace}.followup_task delivers the queued text and the new task together.`,
       '- Workers are read-only unless this profile enables write workers AND the user authorizes the exact task with `arg-bridge-write --workspace <canonical-path> --task <task>` for this turn. Tool arguments cannot self-grant write access.',
     ].join('\n');
   }
@@ -232,10 +244,7 @@ export class BrokerToolController implements BrokerToolHost {
       case 'followup_task':
         return this.followup(args, signal);
       case 'send_message':
-        return Promise.resolve(failure(
-          'send_message is not exposed with uncertain semantics: MixAgents MCP `send` may trigger a worker turn. ' +
-            'Use followup_task for trigger-turn behavior; queue-only delivery remains unsupported.',
-        ));
+        return this.sendMessage(args, signal);
       case 'wait_agent':
         return this.wait(args, signal);
       case 'list_agents':
@@ -325,12 +334,16 @@ export class BrokerToolController implements BrokerToolHost {
     const config = await this.requireConfig();
     const requestedRoute = optionalString(args.route, 'route', 64);
     const resolved = await this.resolveRoute(target.access, requestedRoute, signal);
+    const delivery = [...target.queuedMessages, task].join('\n\n');
+    if (Buffer.byteLength(delivery, 'utf8') > MAX_TASK_BYTES) {
+      return failure(`followup_task combined task is larger than ${MAX_TASK_BYTES} bytes`);
+    }
     const nextFingerprint = subagentRouteFingerprint(resolved.route);
     if (nextFingerprint !== target.routeFingerprint) {
       await this.closeRecord(target);
       const replacement = await this.createWorker({
         name: target.logicalName,
-        task,
+        task: delivery,
         access: target.access,
         workspace: target.workspace,
         resolved,
@@ -346,16 +359,17 @@ export class BrokerToolController implements BrokerToolHost {
       if (!config.allowWriteWorkers) {
         return failure('workspace-write workers are disabled by the current profile');
       }
-      await assertWriteAuthorization(this.writeAuthorization, task, target.workspace);
+      await assertWriteAuthorization(this.writeAuthorization, delivery, target.workspace);
     }
     try {
       target.agent = { ...target.agent, status: 'running' };
-      target.task = task;
+      target.task = delivery;
       target.result = undefined;
       target.error = undefined;
       target.updatedAt = Date.now();
       await this.persist();
-      const result = await resolved.backend.send(target.agent, task, signal);
+      const result = await resolved.backend.send(target.agent, delivery, signal);
+      target.queuedMessages = [];
       this.applyResult(target, result);
       await this.persist();
       this.options.onEvent?.(
@@ -373,7 +387,7 @@ export class BrokerToolController implements BrokerToolHost {
         this.rebuildAliases();
         const replacement = await this.createWorker({
           name: target.logicalName,
-          task,
+          task: delivery,
           access: target.access,
           workspace: target.workspace,
           resolved,
@@ -387,6 +401,36 @@ export class BrokerToolController implements BrokerToolHost {
       }
       throw error;
     }
+  }
+
+  private async sendMessage(
+    args: Record<string, unknown>,
+    signal: AbortSignal,
+  ): Promise<DynamicToolCallResult> {
+    if (signal.aborted) throw new Error('send_message aborted');
+    const target = await this.resolveWorker(args);
+    const message = requiredString(args.message, 'message', MAX_TASK_BYTES);
+    if (target.queuedMessages.length >= MAX_QUEUED_MESSAGES) {
+      return failure(`send_message queue limit reached (${MAX_QUEUED_MESSAGES})`);
+    }
+    const queuedBytes = target.queuedMessages.reduce(
+      (total, item) => total + Buffer.byteLength(item, 'utf8'),
+      0,
+    );
+    if (queuedBytes + Buffer.byteLength(message, 'utf8') > MAX_QUEUED_BYTES) {
+      return failure(`send_message queue exceeds ${MAX_QUEUED_BYTES} bytes`);
+    }
+    target.queuedMessages.push(message);
+    target.updatedAt = Date.now();
+    await this.persist();
+    return success(JSON.stringify({
+      logical_name: target.logicalName,
+      logical_path: target.logicalPath,
+      agent_id: target.agent.agentId,
+      status: 'queued',
+      queued_messages: target.queuedMessages.length,
+      mailbox: 'Use followup_task to trigger the worker turn; queued text is sent as ordinary input and cleared only after send succeeds.',
+    }, null, 2));
   }
 
   private async wait(
@@ -403,7 +447,11 @@ export class BrokerToolController implements BrokerToolHost {
     const combined = AbortSignal.any([signal, timeoutSignal]);
     const results = await Promise.all(targets.map(async target => {
       try {
-        const result = await backend.wait(target.agent, combined, requestedTimeout);
+        const result = await (target.backend ?? backend).wait(
+          target.agent,
+          combined,
+          requestedTimeout,
+        );
         this.applyResult(target, result);
         this.options.onEvent?.(
           result.status === 'completed' ? 'worker_completed' : 'worker_failed',
@@ -454,10 +502,11 @@ export class BrokerToolController implements BrokerToolHost {
     const config = await this.requireConfig();
     const backend = await this.ensureBackend(config);
     const routes = await backend.listRoutes(signal);
+    const visibleRoutes = mergeRuntimeRoutes(routes, this.currentRuntime?.route);
     const ccSwitch = await readCcSwitchState(this.env);
     return success(JSON.stringify({
       configured_main_provider: ccSwitch.currentProviderCodex ?? null,
-      routes: routes.map(route => ({
+      routes: visibleRoutes.map(route => ({
         id: route.id,
         provider: route.provider,
         model: route.model,
@@ -479,9 +528,10 @@ export class BrokerToolController implements BrokerToolHost {
     const targets = this.resolveTargets(args);
     if (targets.length === 0) return failure(`${close ? 'close_agent' : 'interrupt_agent'} requires a target`);
     const config = await this.requireConfig();
-    const backend = await this.ensureBackend(config);
+    const defaultBackend = await this.ensureBackend(config);
     const results: Array<Record<string, unknown>> = [];
     for (const target of targets) {
+      const backend = target.backend ?? defaultBackend;
       try {
         if (close) await backend.close(target.agent, signal);
         else await backend.interrupt(target.agent, signal);
@@ -518,6 +568,9 @@ export class BrokerToolController implements BrokerToolHost {
       cwd: input.workspace,
       scope: `${this.options.scope}:${input.name}`,
       access: input.access,
+      ...(input.access === 'workspace-write' && this.writeAuthorization
+        ? { writeAuthorization: this.writeAuthorization }
+        : {}),
       signal: input.signal,
     });
     const record: BrokerWorkerRecord = {
@@ -527,11 +580,13 @@ export class BrokerToolController implements BrokerToolHost {
       route: input.resolved.route,
       routeFingerprint: subagentRouteFingerprint(input.resolved.route),
       access: input.access,
+      backend: input.resolved.backend,
       workspace: input.workspace,
       scope: this.options.scope,
       task: input.task,
       updatedAt: Date.now(),
       idempotencyKeys: [],
+      queuedMessages: [],
     };
     this.workers.set(workerKey(input.name), record);
     this.rebuildAliases();
@@ -560,14 +615,17 @@ export class BrokerToolController implements BrokerToolHost {
     const [routes, ccSwitch, routeMap] = await Promise.all([
       backend.listRoutes(signal),
       readCcSwitchState(this.env),
-      loadBrokerRouteMap(this.env),
+      config.routeMode === 'manual'
+        ? loadBrokerRouteMap(this.env)
+        : Promise.resolve({ path: '', config: undefined }),
     ]);
-    if (routeMap.error) throw new Error(routeMap.error);
+    if ('error' in routeMap && routeMap.error) throw new Error(routeMap.error);
+    const visibleRoutes = mergeRuntimeRoutes(routes, this.currentRuntime?.route);
     const selection = selectSubagentRoute({
       config,
       ccSwitch,
       routeMap: routeMap.config,
-      routes,
+      routes: visibleRoutes,
       requestedRoute,
       access,
     });
@@ -585,7 +643,7 @@ export class BrokerToolController implements BrokerToolHost {
             : ''),
       );
     }
-    return { backend, route: selection.route, routes };
+    return { backend, route: selection.route, routes: visibleRoutes };
   }
 
   private async ensureBackend(config: SubagentConfig): Promise<SubagentBackend> {
@@ -596,13 +654,17 @@ export class BrokerToolController implements BrokerToolHost {
       );
     }
     const key = backendConfigKey(config);
+    const runtime = await this.options.runtimeResolver?.();
+    this.currentRuntime = runtime;
+    const runtimeKey = runtime?.fingerprint ?? 'broker-config';
     if (this.options.routeResolver && this.backend) return this.backend;
-    if (this.backend && this.backendConfigKey === key) return this.backend;
+    const combinedKey = `${key}:${runtimeKey}`;
+    if (this.backend && this.backendConfigKey === combinedKey) return this.backend;
     if (this.backend) await this.backend.closeBackend?.().catch(() => {});
     this.backend = this.options.backendFactory
       ? this.options.backendFactory(config, this.env)
-      : new MixAgentsBrokerBackend(config, this.env);
-    this.backendConfigKey = key;
+      : new MixAgentsBrokerBackend(config, this.env, runtime);
+    this.backendConfigKey = combinedKey;
     return this.backend;
   }
 
@@ -706,7 +768,9 @@ export class BrokerToolController implements BrokerToolHost {
         record.agent.status !== 'running' &&
         record.agent.status !== 'starting'
       ) return;
-      void this.backend?.interrupt(record.agent, AbortSignal.timeout(30_000)).catch(() => {});
+      void (record.backend ?? this.backend)
+        ?.interrupt(record.agent, AbortSignal.timeout(30_000))
+        .catch(() => {});
       record.agent.status = 'timeout';
       record.error = `worker timed out after ${config.workerTimeoutMs}ms`;
       record.updatedAt = Date.now();
@@ -722,7 +786,7 @@ export class BrokerToolController implements BrokerToolHost {
     if (timer) clearTimeout(timer);
     this.workerTimers.delete(record.logicalPath);
     const config = await this.requireConfig();
-    const backend = await this.ensureBackend(config);
+    const backend = record.backend ?? await this.ensureBackend(config);
     await backend.interrupt(record.agent, AbortSignal.timeout(30_000)).catch(() => {});
     await backend.close(record.agent, AbortSignal.timeout(30_000)).catch(() => {});
     this.workers.delete(workerKey(record.logicalName));
@@ -775,6 +839,9 @@ export class BrokerToolController implements BrokerToolHost {
       this.workers.set(workerKey(worker.logicalName), {
         ...worker,
         idempotencyKeys: Array.isArray(worker.idempotencyKeys) ? worker.idempotencyKeys : [],
+        queuedMessages: Array.isArray(worker.queuedMessages)
+          ? worker.queuedMessages.filter(message => typeof message === 'string')
+          : [],
       });
     }
     for (const [key, value] of Object.entries(parsed.completedCalls ?? {})) {
@@ -788,7 +855,7 @@ export class BrokerToolController implements BrokerToolHost {
   private async persist(): Promise<void> {
     const body: PersistedState = {
       version: 1,
-      workers: [...this.workers.values()],
+      workers: [...this.workers.values()].map(({ backend: _backend, ...worker }) => worker),
       completedCalls: Object.fromEntries(this.completedCalls),
     };
     const snapshot = `${JSON.stringify(body, null, 2)}\n`;
@@ -855,7 +922,7 @@ export function brokerToolSpecs(
       {
         type: 'function',
         name: 'send_message',
-        description: 'Queue-only send. Returns explicit unsupported when the backend cannot prove queue-only semantics.',
+        description: 'Queue plaintext locally without waking the worker; the next followup_task delivers it.',
         inputSchema: {
           type: 'object',
           properties: { ...target.properties, message: { type: 'string' } },

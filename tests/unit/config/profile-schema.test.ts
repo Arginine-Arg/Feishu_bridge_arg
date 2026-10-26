@@ -60,6 +60,7 @@ describe('profile schema', () => {
       enabled: true,
       mode: 'auto',
       routeMode: 'follow-cc-switch',
+      ccSwitchProviderId: null,
       readRoute: null,
       writeRoute: null,
       modelTools: true,
@@ -91,6 +92,7 @@ describe('profile schema', () => {
         enabled: true,
         mode: 'broker',
         routeMode: 'manual',
+        ccSwitchProviderId: 'provider-a',
         readRoute: 'route-a',
         writeRoute: 'route-write',
         includeProgressSnapshot: false,
@@ -117,6 +119,7 @@ describe('profile schema', () => {
     expect(cfg.subagents).toMatchObject({
       mode: 'broker',
       routeMode: 'manual',
+      ccSwitchProviderId: 'provider-a',
       readRoute: 'route-a',
       writeRoute: 'route-write',
       includeProgressSnapshot: false,

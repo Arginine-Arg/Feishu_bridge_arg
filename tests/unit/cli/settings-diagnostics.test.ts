@@ -52,6 +52,9 @@ async function setup(options: { mcp: boolean }) {
   profile.subagents = {
     ...DEFAULT_SUBAGENT_CONFIG,
     mode: 'broker',
+    routeMode: 'manual',
+    readRoute: 'read-a',
+    writeRoute: 'write-b',
     allowForkFallback: false,
     ...(options.mcp
       ? {
@@ -128,7 +131,7 @@ describe('arg-bridge settings and doctor', () => {
       env: context.env,
     });
     expect(second.ccSwitch.currentProviderCodex).toBe('provider-b');
-    expect(second.subagents.diagnostics.selectedRoute.id).toBe('write-b');
+    expect(second.subagents.diagnostics.selectedRoute.id).toBe('read-a');
     const output = `${JSON.stringify(second)}\n${formatSettings(second)}`;
     expect(output).not.toContain('sk-super-secret-value');
     expect(output).toContain('MIXAGENTS_TEST_SECRET');
@@ -136,6 +139,33 @@ describe('arg-bridge settings and doctor', () => {
 
   it('reports explicit broker configuration failure without crashing settings', async () => {
     const context = await setup({ mcp: false });
+    const paths = resolveAppPaths({ rootDir: context.root, profile: 'codex' });
+    await mkdir(join(paths.profileDir, 'structured'), { recursive: true });
+    await writeFile(join(paths.profileDir, 'structured', 'broker-threads.json'), JSON.stringify({
+      version: 1,
+      threads: {
+        'thread-without-mcp': {
+          version: 1,
+          namespace: 'arg_bridge',
+          createdAt: 1,
+        },
+      },
+    }));
+    await writeFile(join(paths.profileDir, 'structured', 'app-server-registry.json'), JSON.stringify({
+      version: 1,
+      hosts: [{
+        directory: '/tmp/runtime-without-mcp',
+        pid: process.pid,
+        startedAt: 1,
+        binary: 'codex',
+        fingerprint: { credentials: {}, networkMode: 'inherit' },
+        runtimeIdentity: {
+          codexProviderId: 'provider-a',
+          model: 'model-a',
+          recordedAt: 1,
+        },
+      }],
+    }));
     const report = await loadDoctorReport({
       profile: 'codex',
       env: context.env,
@@ -143,8 +173,59 @@ describe('arg-bridge settings and doctor', () => {
     });
     expect(report.status).toBe('error');
     expect(['not-configured', 'unavailable']).toContain(report.mixagents.mcpStatus);
+    expect(report.mixagents.modelTools.brokerWired).toBe(false);
     expect(report.checks).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: 'mixagents-mcp', status: 'fail' }),
+    ]));
+    expect(JSON.stringify(report)).not.toContain('sk-super-secret-value');
+  });
+
+  it('reports a Broker runtime as wired only when a marker and live identified host exist', async () => {
+    const context = await setup({ mcp: true });
+    const paths = resolveAppPaths({ rootDir: context.root, profile: 'codex' });
+    await mkdir(join(paths.profileDir, 'structured'), { recursive: true });
+    await writeFile(join(paths.profileDir, 'structured', 'broker-threads.json'), JSON.stringify({
+      version: 1,
+      threads: {
+        'thread-bridge': {
+          version: 1,
+          namespace: 'arg_bridge',
+          createdAt: 1,
+        },
+      },
+    }));
+    await writeFile(join(paths.profileDir, 'structured', 'app-server-registry.json'), JSON.stringify({
+      version: 1,
+      hosts: [{
+        directory: '/tmp/runtime',
+        pid: process.pid,
+        startedAt: 1,
+        binary: 'codex',
+        fingerprint: {
+          credentials: {},
+          networkMode: 'inherit',
+        },
+        runtimeIdentity: {
+          ccSwitchProviderId: 'provider-a',
+          codexProviderId: 'provider-a',
+          model: 'model-a',
+          recordedAt: 1,
+        },
+      }],
+    }));
+    const report = await loadDoctorReport({
+      profile: 'codex',
+      env: context.env,
+      json: true,
+    });
+    expect(report.runtimeBinding).toMatchObject({
+      match: 'bound',
+      namespaceBound: true,
+      liveIdentifiedAppServerHosts: 1,
+    });
+    expect(report.mixagents.modelTools.brokerWired).toBe(true);
+    expect(report.checks).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'runtime-binding', status: 'pass' }),
     ]));
     expect(JSON.stringify(report)).not.toContain('sk-super-secret-value');
   });
@@ -243,7 +324,7 @@ describe('arg-bridge settings and doctor', () => {
       })],
       pendingSwitch: 'pending-next-turn',
     });
-    expect(snapshot.subagents.diagnostics.selectedRoute.id).toBe('write-b');
+    expect(snapshot.subagents.diagnostics.selectedRoute.id).toBe('read-a');
     expect(snapshot.mainProvider.configuredCcSwitchProviderId).not.toBe(
       snapshot.mainProvider.configuredCodexProviderId,
     );

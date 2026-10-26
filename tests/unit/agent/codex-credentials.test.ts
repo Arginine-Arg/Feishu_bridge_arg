@@ -39,9 +39,12 @@ describe('codex config summary parsing', () => {
     expect(summary.modelProvider).toBe('deepseek');
     expect(summary.preferredAuthMethod).toBe('apikey');
     expect(summary.providers.get('deepseek')).toEqual({
+      name: 'deepseek',
       baseUrl: 'https://api.xinlab-ioz.cn/v1',
       envKey: 'OPENAI_API_KEY',
       bearerToken: 'sk-config-token',
+      wireApi: 'responses',
+      requiresOpenAiAuth: false,
     });
   });
 

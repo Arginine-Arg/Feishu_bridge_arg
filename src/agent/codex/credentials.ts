@@ -22,15 +22,23 @@ import { log } from '../../core/logger';
  */
 
 export interface CodexProviderEntry {
+  name?: string;
   baseUrl?: string;
   envKey?: string;
   bearerToken?: string;
+  wireApi?: string;
+  requiresOpenAiAuth?: boolean;
+  envHttpHeaders?: Record<string, string>;
+  httpHeaders?: Record<string, string>;
 }
 
 export interface CodexConfigSummary {
   model?: string;
   modelProvider?: string;
   preferredAuthMethod?: string;
+  modelReasoningEffort?: string;
+  modelContextWindow?: number;
+  modelMaxOutputTokens?: number;
   providers: Map<string, CodexProviderEntry>;
 }
 
@@ -62,9 +70,14 @@ const OFFICIAL_HOSTS = new Set([
   'chat.openai.com',
 ]);
 const INTERESTING_PROVIDER_KEYS = new Set([
+  'name',
   'base_url',
   'env_key',
   'experimental_bearer_token',
+  'wire_api',
+  'requires_openai_auth',
+  'env_http_headers',
+  'http_headers',
 ]);
 
 export async function resolveCodexCredentialEnv(
@@ -266,14 +279,26 @@ export function parseCodexConfigSummary(raw: string): CodexConfigSummary {
     const assignment = /^([A-Za-z0-9_-]+)\s*=\s*(.+)$/u.exec(line);
     if (!assignment) continue;
     const key = assignment[1]!;
-    const value = parseTomlScalar(assignment[2]!);
+    const value = parseTomlScalar(assignment[2]!) ?? parseTomlPrimitive(assignment[2]!);
     if (value === undefined) continue;
 
     if (providerName && providerEntry) {
       if (!INTERESTING_PROVIDER_KEYS.has(key)) continue;
-      if (key === 'base_url') providerEntry.baseUrl = value;
+      if (key === 'name') providerEntry.name = value;
+      else if (key === 'base_url') providerEntry.baseUrl = value;
       else if (key === 'env_key') providerEntry.envKey = value;
-      else providerEntry.bearerToken = value;
+      else if (key === 'experimental_bearer_token') providerEntry.bearerToken = value;
+      else if (key === 'wire_api') providerEntry.wireApi = value;
+      else if (key === 'requires_openai_auth') {
+        const boolean = parseTomlBoolean(value);
+        if (boolean !== undefined) providerEntry.requiresOpenAiAuth = boolean;
+      } else if (key === 'env_http_headers') {
+        const headers = parseTomlInlineStringMap(value);
+        if (headers) providerEntry.envHttpHeaders = headers;
+      } else if (key === 'http_headers') {
+        const headers = parseTomlInlineStringMap(value);
+        if (headers) providerEntry.httpHeaders = headers;
+      }
       continue;
     }
     if (profileName) {
@@ -293,6 +318,15 @@ export function parseCodexConfigSummary(raw: string): CodexConfigSummary {
     modelProvider: profile?.get('model_provider') ?? topLevel.get('model_provider'),
     preferredAuthMethod:
       topLevel.get('preferred_auth_method') ?? profile?.get('preferred_auth_method'),
+    ...(positiveInteger(topLevel.get('model_context_window'))
+      ? { modelContextWindow: positiveInteger(topLevel.get('model_context_window')) }
+      : {}),
+    ...(positiveInteger(topLevel.get('model_max_output_tokens'))
+      ? { modelMaxOutputTokens: positiveInteger(topLevel.get('model_max_output_tokens')) }
+      : {}),
+    ...(topLevel.get('model_reasoning_effort')
+      ? { modelReasoningEffort: topLevel.get('model_reasoning_effort') }
+      : {}),
     providers,
   };
 }
@@ -356,6 +390,66 @@ function parseTomlScalar(rawValue: string): string | undefined {
     return value.slice(1, end);
   }
   return undefined;
+}
+
+function parseTomlBoolean(value: string): boolean | undefined {
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  return undefined;
+}
+
+function parseTomlPrimitive(rawValue: string): string | undefined {
+  const value = rawValue.trim();
+  if (/^(?:true|false)$/u.test(value) || /^-?[0-9]+$/u.test(value)) return value;
+  return undefined;
+}
+
+function positiveInteger(value: string | undefined): number | undefined {
+  if (!value || !/^[1-9][0-9]*$/u.test(value)) return undefined;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
+}
+
+function parseTomlInlineStringMap(rawValue: string): Record<string, string> | undefined {
+  const value = rawValue.trim();
+  if (!value.startsWith('{') || !value.endsWith('}')) return undefined;
+  const body = value.slice(1, -1).trim();
+  if (!body) return {};
+  const result: Record<string, string> = {};
+  for (const entry of splitTomlInlineEntries(body)) {
+    const match = /^\s*("(?:[^"\\]|\\.)*"|'[^']*')\s*=\s*("(?:[^"\\]|\\.)*"|'[^']*')\s*$/u
+      .exec(entry);
+    if (!match) return undefined;
+    const key = parseTomlScalar(match[1]!);
+    const item = parseTomlScalar(match[2]!);
+    if (key === undefined || item === undefined) return undefined;
+    result[key] = item;
+  }
+  return result;
+}
+
+function splitTomlInlineEntries(value: string): string[] {
+  const entries: string[] = [];
+  let quote: '"' | "'" | undefined;
+  let start = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index]!;
+    if (quote) {
+      if (char === '\\' && quote === '"') index += 1;
+      else if (char === quote) quote = undefined;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (char === ',') {
+      entries.push(value.slice(start, index));
+      start = index + 1;
+    }
+  }
+  entries.push(value.slice(start));
+  return entries;
 }
 
 function unescapeBasicString(value: string): string {

@@ -28,6 +28,10 @@ export interface SubagentRoute {
   revision?: string;
   /** Optional non-secret hash of provider endpoint/config identity. */
   targetFingerprint?: string;
+  /** cc-switch provider ID that produced this automatically generated route. */
+  ccSwitchProviderId?: string;
+  /** Route origin used for deterministic runtime selection. */
+  source?: 'cc-switch' | 'broker-config';
 }
 
 export interface SideAgent {

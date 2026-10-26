@@ -1,6 +1,6 @@
 import { realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, parse, resolve } from 'node:path';
+import { dirname, join, parse, resolve } from 'node:path';
 import * as p from '@clack/prompts';
 import {
   collectSubagentDiagnostics,
@@ -119,7 +119,8 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
     'cc-switch 中的 Codex 账号：',
     providerSummary,
     '',
-    '这里只读取账号 ID、名称和运行状态；不会读取、显示或导出 API Key。' +
+    '这里只显示账号 ID、名称和运行状态；API Key 不会显示或写入配置。' +
+      '子代理派发时由 cc-switch resolver 在内存中读取，并只传给 MixAgents 子进程。' +
       '主对话 provider 仍由 cc-switch 决定。',
   ].join('\n'), '步骤 1 / 5 · 自动读取主对话配置');
 
@@ -157,9 +158,7 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
   }
   let routeMode: SubagentRouteMode = currentSubagents.routeMode;
   let readRoute = currentSubagents.readRoute;
-  let selectedCcProvider = diagnostics.ccSwitch.currentProviderCodex
-    ?? ccProviders[0]?.id
-    ?? null;
+  let selectedCcProvider = currentSubagents.ccSwitchProviderId;
   let selectedReadRoute = readRoute;
   const routeMapState = await loadBrokerRouteMap(settingsEnv);
   if (routeMapState.error) throw new Error(routeMapState.error);
@@ -169,80 +168,53 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
     ccProviders.length > 0
   ) {
     p.note([
-      '子代理可以使用与主对话不同的 provider。下面先选 cc-switch 账号，再选该账号对应的 MixAgents 线路。',
-      '选择备用账号只会保存映射；主对话不会因此切换，等你在 cc-switch 真正切换账号时才生效。',
+      'Bridge 会自动读取这里选中的 cc-switch Codex provider，并生成 Broker route、模型和凭据。',
+      '默认“跟随当前 provider”：以后在 cc-switch 切换 provider 后，下一条子代理任务自动使用新 provider，无需改 Key 或手写 route。',
+      '如果选择固定 provider，子代理始终使用该 provider；主对话仍由 cc-switch 当前 provider 控制。',
       availableReadRoutes.length === 0
-        ? '当前没有可用线路。请先配置 MixAgents broker.json 或补齐线路凭据。'
-        : `发现 ${availableReadRoutes.length} 条可用只读线路。`,
+        ? '当前 provider 的 Broker route 会在首次派发时自动生成；doctor 会显示真实可用性。'
+        : `当前已解析 ${availableReadRoutes.length} 条可用只读 route。`,
       ...(unavailableRoutes.length
-        ? [`不可用线路：${unavailableRoutes.map(route =>
+        ? [`当前不可用 route：${unavailableRoutes.map(route =>
             `${route.id}(${route.missingEnvironment.join(',') || 'unavailable'})`
           ).join('、')}`]
         : []),
-    ].join('\n'), '步骤 2 / 5 · 选择子代理账号');
+    ].join('\n'), '步骤 2 / 5 · 选择子代理 provider');
+    const followCurrent = '__follow_current__';
     const providerChoice = await p.select<string>({
-      message: '把子代理线路绑定到哪个 cc-switch 账号？',
+      message: '子代理用哪个 cc-switch Codex provider？',
       initialValue: selectedCcProvider && ccProviders.some(provider => provider.id === selectedCcProvider)
         ? selectedCcProvider
-        : ccProviders[0]!.id,
-      options: ccProviders.map(provider => ({
-        value: provider.id,
-        label: `${provider.name} (${provider.id})`,
-        hint: provider.current ? '当前主对话账号' : '备用账号；切换过去后生效',
-      })),
-    });
-    assertPrompt(providerChoice);
-    selectedCcProvider = providerChoice;
-
-    const mappedRoute = routeMapState.config?.providers[selectedCcProvider]?.readRoute;
-    const routeOptions = availableReadRoutes.map(route => ({
-      value: route.id,
-      label: `${route.provider} / ${route.model}`,
-      hint: `${route.id} · 默认只读`,
-    }));
-    if (routeOptions.length > 0) {
-      const initialRoute = readRoute && routeOptions.some(route => route.value === readRoute)
-        ? readRoute
-        : mappedRoute && routeOptions.some(route => route.value === mappedRoute)
-          ? mappedRoute
-          : diagnostics.selectedRoute.id && routeOptions.some(route => route.value === diagnostics.selectedRoute.id)
-            ? diagnostics.selectedRoute.id
-            : routeOptions[0]!.value;
-      const routeChoice = await p.select<string>({
-        message: '这个账号使用哪条子代理线路？',
-        initialValue: initialRoute,
-        options: routeOptions,
-      });
-      assertPrompt(routeChoice);
-      selectedReadRoute = routeChoice;
-    }
-
-    const strategy = await p.select<'follow' | 'manual'>({
-      message: '以后在 cc-switch 切换主账号时，子代理线路怎么处理？',
-      initialValue: currentSubagents.routeMode === 'manual' ? 'manual' : 'follow',
+        : followCurrent,
       options: [
         {
-          value: 'follow',
-          label: '自动使用该账号绑定的线路（推荐）',
-          hint: '同一个 cc-switch 账号始终使用上面选定的线路',
+          value: followCurrent,
+          label: '跟随当前 provider（推荐）',
+          hint: `现在使用 ${diagnostics.ccSwitch.currentProviderName ?? '(unknown)'}，以后随 cc-switch 切换自动更新`,
         },
-        {
-          value: 'manual',
-          label: '始终固定这一条线路',
-          hint: '不管主对话账号怎么切换，子代理都用这条线路',
-        },
+        ...ccProviders.map(provider => ({
+          value: provider.id,
+          label: `${provider.name} (${provider.id})`,
+          hint: provider.current ? '当前主对话 provider；也可固定使用' : '固定使用这个 provider',
+        })),
       ],
     });
-    assertPrompt(strategy);
-    routeMode = strategy === 'follow' ? 'follow-cc-switch' : 'manual';
-    readRoute = strategy === 'manual' ? selectedReadRoute : null;
+    assertPrompt(providerChoice);
+    selectedCcProvider = providerChoice === followCurrent ? null : providerChoice;
+
+    routeMode = 'follow-cc-switch';
+    selectedReadRoute = null;
+    readRoute = null;
   }
 
   const currentCredential = currentMcpCredentials(rawProfile);
   let credentialMode = currentCredential.mode;
   let credentialEnvKeys = currentCredential.credentialEnvKeys.join(', ');
   let credentialProvider = currentCredential.credentialProvider ?? '';
-  if (selectedMode === 'auto' || selectedMode === 'broker') {
+  if (
+    (selectedMode === 'auto' || selectedMode === 'broker') &&
+    routeMode === 'manual'
+  ) {
     p.note([
       'Bridge 不会读取、打印或保存 API Key。',
       `当前启动环境中的 MIXAGENTS_BROKER_CREDENTIALS_JSON：${
@@ -299,6 +271,14 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
     credentialProvider = credentialMode === 'mixagents-managed'
       ? (selectedCcProvider ?? diagnostics.ccSwitch.currentProviderCodex ?? '')
       : '';
+  } else if (selectedMode === 'auto' || selectedMode === 'broker') {
+    p.note([
+      'Bridge 会从当前 cc-switch provider 自动读取模型、Base URL 和 Key 字段，并仅把它们传给 MixAgents 子进程。',
+      'Key 不会写入 profile、broker-routes.json、worker mapping、日志或 doctor JSON；你不需要手工设置 MIXAGENTS_BROKER_CREDENTIALS_JSON。',
+    ].join('\n'), '步骤 3 / 5 · 自动凭据');
+    credentialMode = 'inherit-env';
+    credentialEnvKeys = '';
+    credentialProvider = '';
   }
 
   p.note([
@@ -514,12 +494,16 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
         : '关闭子代理';
   const routeText = selectedMode === 'auto' || selectedMode === 'broker'
     ? routeMode === 'follow-cc-switch'
-      ? `账号 ${selectedCcProvider ?? '(none)'} 自动绑定线路 ${selectedReadRoute ?? '(none)'}`
+      ? selectedCcProvider
+        ? `固定 provider=${selectedCcProvider}，route 自动生成`
+        : '跟随 cc-switch 当前 provider，route 自动生成'
       : `固定线路 ${selectedReadRoute ?? readRoute ?? '(none)'}`
     : '(不适用)';
-  const credentialText = credentialMode === 'inherit-env'
-    ? `启动环境变量 ${credentialEnvKeys || '(未配置)'}`
-    : 'MixAgents managed（当前版本未验证）';
+  const credentialText = routeMode === 'follow-cc-switch'
+    ? 'cc-switch 自动解析 provider Key（不显示、不写入配置）'
+    : credentialMode === 'inherit-env'
+      ? `启动环境变量 ${credentialEnvKeys || '(未配置)'}`
+      : 'MixAgents managed（当前版本未验证）';
   p.note([
     `主对话：${diagnostics.ccSwitch.currentProviderName ?? '(unknown)'}（保持不变）`,
     `子代理：${modeText}`,
@@ -577,6 +561,9 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
         enabled: selectedMode !== 'off',
         mode: selectedMode,
         routeMode,
+        ccSwitchProviderId: routeMode === 'follow-cc-switch'
+          ? selectedCcProvider
+          : currentSubagents.ccSwitchProviderId ?? null,
         readRoute,
         writeRoute: routeMode === 'manual' ? writeRoute : null,
         modelTools,
@@ -628,6 +615,9 @@ export async function loadSettingsSnapshot(
       config: subagentConfig,
       cwd,
       env,
+      stateDir: join(paths.profileDir, 'structured'),
+      codexHome,
+      codexBin: profile.codex?.binaryPath ?? 'codex',
     }),
     projectRsiStatus(rsiConfig, cwd),
     profile.agentKind === 'codex'
@@ -765,6 +755,7 @@ function formatSnapshot(snapshot: SettingsSnapshot): string {
     `main running with legacy/unknown identity=${snapshot.mainProvider.runningUnknown}`,
     `provider switch=${snapshot.mainProvider.pendingSwitch}; safe point=${snapshot.mainProvider.safeSwitchPoint}`,
     `MixAgents mode=${snapshot.subagents.config.mode} routeMode=${snapshot.subagents.config.routeMode}` +
+      ` provider=${snapshot.subagents.config.ccSwitchProviderId ?? '(follow-current)'}` +
       ` MCP=${diagnostics.mcp.status} version=${diagnostics.packageVersion ?? '(unknown)'}`,
     `Broker tools=${diagnostics.modelTools.brokerWired ? 'wired' : 'degraded'}` +
       ` namespace=${diagnostics.modelTools.namespace}` +

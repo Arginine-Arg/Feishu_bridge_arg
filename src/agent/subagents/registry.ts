@@ -5,8 +5,19 @@ import {
 } from '../../config/profile-schema';
 import { loadBrokerRouteMap, resolveRouteForProvider, type BrokerRouteMap } from '../../integrations/broker-routes';
 import { readCcSwitchState, type CcSwitchState } from '../../integrations/cc-switch';
+import {
+  CcSwitchProviderError,
+  materializeCcSwitchBrokerRuntime,
+  resolveCurrentCcSwitchCodexProvider,
+} from '../../integrations/cc-switch-provider';
 import { log } from '../../core/logger';
-import { MixAgentsBrokerBackend } from './mixagents';
+import {
+  mergeRuntimeRoutes,
+  MixAgentsBrokerBackend,
+  type MixAgentsRuntimeOverrides,
+} from './mixagents';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import {
   SubagentUnavailableError,
   type SubagentBackend,
@@ -21,6 +32,11 @@ export interface ResolveSubagentInput {
   requestedRoute?: string;
   /** Access requested for the worker. /btw always supplies read-only. */
   access?: SubagentAccess;
+  /** Profile-scoped structured state directory for generated runtime files. */
+  stateDir?: string;
+  codexHome?: string;
+  codexBin?: string;
+  parentProviderId?: string;
   signal: AbortSignal;
 }
 
@@ -54,22 +70,57 @@ export async function resolveSubagents(input: ResolveSubagentInput): Promise<Res
     return { ...base, kind: 'off', routes: [] };
   }
   if (config.mode === 'fork') {
+    await assertNativeForkAllowed(input, config, env);
     return { ...base, kind: 'fork', routes: [] };
   }
 
   let backend: MixAgentsBrokerBackend | undefined;
   let routes: SubagentRoute[] = [];
+  let runtime: MixAgentsRuntimeOverrides | undefined;
   try {
-    backend = new MixAgentsBrokerBackend(config, env);
+    if (
+      config.routeMode === 'follow-cc-switch' &&
+      (input.stateDir || input.parentProviderId || config.ccSwitchProviderId)
+    ) {
+      const generated = await materializeCcSwitchBrokerRuntime({
+        env,
+        ...(input.codexHome ? { codexHome: input.codexHome } : {}),
+        ...(input.parentProviderId ? { parentProviderId: input.parentProviderId } : {}),
+        ...(config.ccSwitchProviderId ? { providerId: config.ccSwitchProviderId } : {}),
+        cwd: input.cwd,
+        codexBin: input.codexBin ?? env.CODEX_BINARY?.trim() ?? 'codex',
+        stateDir: input.stateDir ?? defaultGeneratedRuntimeDir(env),
+      });
+      runtime = {
+        brokerConfigPath: generated.brokerConfigPath,
+        credentials: generated.credentials,
+        fingerprint: generated.fingerprint,
+        route: generated.route,
+      };
+    }
+    backend = new MixAgentsBrokerBackend(config, env, runtime);
     routes = await backend.listRoutes(input.signal);
+    routes = mergeRuntimeRoutes(routes, runtime?.route);
   } catch (error) {
     const message = errorMessage(error);
+    await backend?.closeBackend?.().catch(() => {});
     const unavailable = error instanceof SubagentUnavailableError
       ? error
       : new SubagentUnavailableError(
           'mixagents-start-failed',
           `MixAgents 启动或路由读取失败：${message}`,
         );
+    if (
+      config.routeMode === 'follow-cc-switch' &&
+      (input.stateDir || input.parentProviderId || config.ccSwitchProviderId)
+    ) {
+      await backend?.closeBackend?.().catch(() => {});
+      throw new SubagentUnavailableError(
+        'mixagents-not-configured',
+        `当前 cc-switch provider 的 Broker runtime 不可用：${message}`,
+        error instanceof CcSwitchProviderError ? { code: error.code } : undefined,
+      );
+    }
     if (config.mode === 'broker') throw unavailable;
     if (!config.allowForkFallback) {
       throw new SubagentUnavailableError(
@@ -77,6 +128,7 @@ export async function resolveSubagents(input: ResolveSubagentInput): Promise<Res
         `MixAgents 不可用，且已禁用 fork fallback：${message}`,
       );
     }
+    await assertNativeForkAllowed(input, config, env);
     log.warn('agent', 'subagent-fallback-fork', { reason: message });
     return {
       ...base,
@@ -97,15 +149,29 @@ export async function resolveSubagents(input: ResolveSubagentInput): Promise<Res
   });
   if (!selection.route) {
     const message = selection.error ?? '没有可用的 MixAgents read route';
-    if (config.mode === 'broker' || config.routeMode === 'manual' || input.requestedRoute) {
+    if (
+      config.mode === 'broker' ||
+      config.routeMode === 'manual' ||
+      input.requestedRoute ||
+      (config.routeMode === 'follow-cc-switch' &&
+        (input.stateDir || input.parentProviderId || config.ccSwitchProviderId))
+    ) {
+      await backend?.closeBackend?.().catch(() => {});
       throw new SubagentUnavailableError('route-unavailable', message, {
         routes: routes.map(route => ({ id: route.id, available: route.available })),
       });
     }
     if (!config.allowForkFallback) {
+      await backend?.closeBackend?.().catch(() => {});
       throw new SubagentUnavailableError('route-unavailable', message);
     }
-    await backend.closeBackend?.();
+    try {
+      await assertNativeForkAllowed(input, config, env);
+    } catch (error) {
+      await backend?.closeBackend?.().catch(() => {});
+      throw error;
+    }
+    await backend.closeBackend?.().catch(() => {});
     log.warn('agent', 'subagent-fallback-fork', { reason: message });
     return {
       ...base,
@@ -120,22 +186,7 @@ export async function resolveSubagents(input: ResolveSubagentInput): Promise<Res
       ? `（缺少环境变量：${selection.route.missingEnvironment.join(', ')}）`
       : '';
     const message = `MixAgents route ${selection.route.id} 不可用${missing}`;
-    if (
-      config.mode === 'auto' &&
-      config.routeMode === 'follow-cc-switch' &&
-      !input.requestedRoute &&
-      config.allowForkFallback
-    ) {
-      await backend.closeBackend?.();
-      log.warn('agent', 'subagent-fallback-fork', { reason: message });
-      return {
-        ...base,
-        kind: 'fork',
-        routes,
-        notice: `${message}，已降级到 Codex fork`,
-        error: message,
-      };
-    }
+    await backend.closeBackend?.().catch(() => {});
     throw new SubagentUnavailableError('route-unavailable', message);
   }
   return {
@@ -145,6 +196,11 @@ export async function resolveSubagents(input: ResolveSubagentInput): Promise<Res
     route: selection.route,
     routes,
   };
+}
+
+function defaultGeneratedRuntimeDir(env: NodeJS.ProcessEnv): string {
+  const stateHome = env.XDG_STATE_HOME?.trim() || join(homedir(), '.local', 'state');
+  return join(stateHome, 'arg-bridge', 'cc-switch-runtime');
 }
 
 export function selectSubagentRoute(input: {
@@ -178,15 +234,23 @@ export function selectSubagentRoute(input: {
       ? { route }
       : { error: `手动配置的 MixAgents ${access} route 不存在或不支持该权限：${configured}` };
   }
+  const expectedProvider = input.config.ccSwitchProviderId ??
+    input.ccSwitch.currentProviderCodex;
+  const automatic = input.routes.find(route =>
+    route.source === 'cc-switch' &&
+    (!expectedProvider || route.ccSwitchProviderId === expectedProvider) &&
+    (access === 'read-only' || route.maxAccess === 'workspace-write')
+  );
+  if (automatic) return { route: automatic };
   const mapped = resolveRouteForProvider(
     input.routeMap,
-    input.ccSwitch.currentProviderCodex,
+    input.config.ccSwitchProviderId ?? input.ccSwitch.currentProviderCodex,
     access,
   );
   if (!mapped.routeId) {
     return {
-      error: input.ccSwitch.currentProviderCodex
-        ? `cc-switch 当前 provider ${input.ccSwitch.currentProviderCodex} 没有 ${access} route 映射`
+      error: expectedProvider
+        ? `cc-switch provider ${expectedProvider} 没有 ${access} route 映射`
         : access === 'workspace-write'
           ? '无法确定 cc-switch 当前 provider，且没有 defaultWriteRoute'
           : '无法确定 cc-switch 当前 provider，且没有 defaultReadRoute',
@@ -200,4 +264,35 @@ export function selectSubagentRoute(input: {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+async function assertNativeForkAllowed(
+  input: ResolveSubagentInput,
+  config: SubagentConfig,
+  env: NodeJS.ProcessEnv,
+): Promise<void> {
+  // A Bridge-managed third-party session must never silently fall back to a
+  // native child: the child task is encoded as agent_message/encrypted_content
+  // for some Responses-compatible providers. If cc-switch metadata is not
+  // readable, explicit fork mode remains available as a user-selected mode.
+  if (!input.stateDir && !input.parentProviderId && !config.ccSwitchProviderId) return;
+  try {
+    const provider = await resolveCurrentCcSwitchCodexProvider({
+      env,
+      ...(input.codexHome ? { codexHome: input.codexHome } : {}),
+      ...(input.parentProviderId ? { parentProviderId: input.parentProviderId } : {}),
+      ...(config.ccSwitchProviderId ? { providerId: config.ccSwitchProviderId } : {}),
+    });
+    if (provider.summary.thirdParty) {
+      throw new SubagentUnavailableError(
+        'route-unavailable',
+        `当前 cc-switch provider ${provider.summary.id} 是第三方 Responses provider；` +
+          '禁止 native Codex fork/collaboration fallback，请先修复 MixAgents provider 或 route。',
+      );
+    }
+  } catch (error) {
+    if (error instanceof SubagentUnavailableError) throw error;
+    // Missing cc-switch metadata is reported by the normal provider preflight;
+    // an explicit fork request should not be turned into an unrelated failure.
+  }
 }

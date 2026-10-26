@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  mergeRuntimeRoutes,
   MixAgentsBrokerBackend,
   resolveMixAgentsLaunchConfig,
 } from '../../../src/agent/subagents/mixagents';
@@ -211,6 +212,56 @@ describe('MixAgentsBrokerBackend', () => {
   });
 });
 
+describe('cc-switch runtime route augmentation', () => {
+  it('adds cc-switch identity without replacing MixAgents availability', () => {
+    const actual = {
+      id: 'generated-route',
+      provider: 'custom',
+      model: 'model-a',
+      maxAccess: 'workspace-write' as const,
+      available: false,
+      missingEnvironment: ['OPENAI_API_KEY'],
+      tags: ['configured'],
+    };
+    const generated = {
+      ...actual,
+      available: true,
+      missingEnvironment: [],
+      tags: ['cc-switch', 'third-party'],
+      source: 'cc-switch' as const,
+      ccSwitchProviderId: 'provider-a',
+      targetFingerprint: 'f'.repeat(64),
+    };
+    expect(mergeRuntimeRoutes([actual], generated)).toEqual([
+      expect.objectContaining({
+        id: 'generated-route',
+        available: false,
+        missingEnvironment: ['OPENAI_API_KEY'],
+        source: 'cc-switch',
+        ccSwitchProviderId: 'provider-a',
+      }),
+    ]);
+  });
+
+  it('fails closed when MixAgents returns a different provider/model', () => {
+    const generated = {
+      id: 'generated-route',
+      provider: 'custom',
+      model: 'model-a',
+      maxAccess: 'read-only' as const,
+      available: true,
+      missingEnvironment: [],
+      tags: [],
+      source: 'cc-switch' as const,
+      ccSwitchProviderId: 'provider-a',
+    };
+    expect(() => mergeRuntimeRoutes([{
+      ...generated,
+      provider: 'other',
+    }], generated)).toThrow(/不匹配/);
+  });
+});
+
 describe('subagent route resolution', () => {
   it('re-reads cc-switch on every resolution without changing the main provider', async () => {
     const { root, env, config } = await setup();
@@ -280,7 +331,7 @@ describe('subagent route resolution', () => {
       .rejects.toBeInstanceOf(SubagentUnavailableError);
   });
 
-  it('auto mode reports an unavailable mapped route and falls back to fork', async () => {
+  it('auto mode fails closed when the selected mapped route is unavailable', async () => {
     const { root, env, config } = await setup();
     const ccDir = join(root, 'cc-switch');
     const routeDir = join(root, 'config', 'arg-bridge');
@@ -297,7 +348,7 @@ describe('subagent route resolution', () => {
         'provider-b': { readRoute: 'write-b' },
       },
     }), { mode: 0o600 });
-    const resolved = await resolveSubagents({
+    await expect(resolveSubagents({
       subagents: {
         ...config,
         mode: 'auto',
@@ -306,10 +357,9 @@ describe('subagent route resolution', () => {
       env: { ...env, FAKE_ROUTE_B_MISSING: 'MISSING_PROVIDER_KEY' },
       cwd: root,
       signal: new AbortController().signal,
+    })).rejects.toMatchObject({
+      code: 'route-unavailable',
     });
-    expect(resolved.kind).toBe('fork');
-    expect(resolved.notice).toMatch(/不可用/);
-    expect(resolved.notice).toMatch(/fork/);
   });
 
   it('never forks when the user explicitly requests a missing route', async () => {

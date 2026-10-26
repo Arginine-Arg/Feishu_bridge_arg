@@ -24,6 +24,7 @@ import {
   resolveCodexProvider,
 } from '../codex/provider';
 import { readCcSwitchCurrentProvider } from '../../integrations/cc-switch';
+import { materializeCcSwitchBrokerRuntime } from '../../integrations/cc-switch-provider';
 import {
   DEFAULT_RSI_CONFIG,
   DEFAULT_SUBAGENT_CONFIG,
@@ -32,7 +33,10 @@ import {
 } from '../../config/profile-schema';
 import { loadRootConfig } from '../../config/profile-store';
 import { resolveSubagents, type ResolvedSubagents } from '../subagents/registry';
-import { MixAgentsBrokerBackend } from '../subagents/mixagents';
+import {
+  MixAgentsBrokerBackend,
+  type MixAgentsRuntimeOverrides,
+} from '../subagents/mixagents';
 import {
   BROKER_TOOL_VERSION,
   BrokerToolController,
@@ -693,7 +697,38 @@ export class StructuredAdapter implements AgentAdapter {
       env: this.options.env ?? process.env,
       namespace,
       getConfig: () => this.currentSubagentsConfig(),
+      runtimeResolver: async () => {
+        const config = await this.currentSubagentsConfig();
+        return this.autoBrokerRuntime(config, cwd);
+      },
     });
+  }
+  private async autoBrokerRuntime(
+    config: SubagentConfig,
+    cwd: string,
+  ): Promise<MixAgentsRuntimeOverrides | undefined> {
+    if (
+      !config.enabled ||
+      config.routeMode !== 'follow-cc-switch' ||
+      (config.mode !== 'auto' && config.mode !== 'broker')
+    ) return undefined;
+    const generated = await materializeCcSwitchBrokerRuntime({
+      env: this.options.env ?? process.env,
+      ...(this.options.codexHome ? { codexHome: this.options.codexHome } : {}),
+      ...(this.runtimeIdentity?.ccSwitchProviderId
+        ? { parentProviderId: this.runtimeIdentity.ccSwitchProviderId }
+        : {}),
+      ...(config.ccSwitchProviderId ? { providerId: config.ccSwitchProviderId } : {}),
+      cwd,
+      codexBin: this.options.binary,
+      stateDir: join(this.options.profileDir, 'structured'),
+    });
+    return {
+      brokerConfigPath: generated.brokerConfigPath,
+      credentials: generated.credentials,
+      fingerprint: generated.fingerprint,
+      route: generated.route,
+    };
   }
   private async reloadProfileConfig() {
     if (!this.options.configFile || !this.options.profile) return undefined;
@@ -706,13 +741,18 @@ export class StructuredAdapter implements AgentAdapter {
     return profile;
   }
   private async mixagentsBackendFor(
-    _cwd: string,
+    cwd: string,
     state: MixAgentsSideState,
   ): Promise<SubagentBackend | undefined> {
     if (state.backend) return state.backend;
     const config = await this.currentSubagentsConfig();
     if (!config.enabled || config.mode === 'off' || config.mode === 'fork') return undefined;
-    const backend = new MixAgentsBrokerBackend(config, this.options.env ?? process.env);
+    const runtime = await this.autoBrokerRuntime(config, cwd);
+    const backend = new MixAgentsBrokerBackend(
+      config,
+      this.options.env ?? process.env,
+      runtime,
+    );
     state.backend = backend;
     return backend;
   }
@@ -1044,6 +1084,12 @@ export class StructuredAdapter implements AgentAdapter {
         subagents: reviewerConfig,
         env: this.options.env ?? process.env,
         cwd: projectRoot,
+        stateDir: join(this.options.profileDir, 'structured'),
+        codexBin: this.options.binary,
+        ...(this.options.codexHome ? { codexHome: this.options.codexHome } : {}),
+        ...(this.runtimeIdentity?.ccSwitchProviderId
+          ? { parentProviderId: this.runtimeIdentity.ccSwitchProviderId }
+          : {}),
         signal,
       });
     } catch (error) {
@@ -1559,6 +1605,12 @@ export class StructuredAdapter implements AgentAdapter {
             subagents,
             env: this.options.env ?? process.env,
             cwd: options.cwd!,
+            stateDir: join(this.options.profileDir, 'structured'),
+            codexBin: this.options.binary,
+            ...(this.options.codexHome ? { codexHome: this.options.codexHome } : {}),
+            ...(this.runtimeIdentity?.ccSwitchProviderId
+              ? { parentProviderId: this.runtimeIdentity.ccSwitchProviderId }
+              : {}),
             signal: abort.signal,
             ...(btw.route ? { requestedRoute: btw.route } : {}),
           });

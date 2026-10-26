@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.8.0",
+  version: "1.8.1",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -145,7 +145,7 @@ async function checkAgentVersion(input) {
   const args = input.args ?? ["--version"];
   const timeoutMs = input.timeoutMs ?? 5e3;
   const executable = input.realpath ?? input.binaryPath;
-  return new Promise((resolve8, reject4) => {
+  return new Promise((resolve9, reject4) => {
     let settled = false;
     let stdout = "";
     let stderr = "";
@@ -250,7 +250,7 @@ async function checkAgentVersion(input) {
           );
           return;
         }
-        resolve8(version);
+        resolve9(version);
       });
     });
   });
@@ -700,6 +700,7 @@ var DEFAULT_SUBAGENT_CONFIG = {
   enabled: true,
   mode: "auto",
   routeMode: "follow-cc-switch",
+  ccSwitchProviderId: null,
   readRoute: null,
   writeRoute: null,
   modelTools: true,
@@ -743,6 +744,7 @@ function normalizeSubagents(input) {
     enabled: raw.enabled !== false,
     mode,
     routeMode,
+    ccSwitchProviderId: ccSwitchProviderId(raw.ccSwitchProviderId),
     readRoute: nonEmptyString(raw.readRoute) ?? null,
     writeRoute: nonEmptyString(raw.writeRoute) ?? null,
     modelTools: raw.modelTools !== false,
@@ -756,6 +758,14 @@ function normalizeSubagents(input) {
     allowForkFallback: raw.allowForkFallback !== false,
     ...mixagents && Object.keys(mixagents).length > 0 ? { mixagents } : {}
   };
+}
+function ccSwitchProviderId(value) {
+  const text2 = nonEmptyString(value);
+  if (!text2) return null;
+  if (!/^[A-Za-z0-9._-]{1,128}$/u.test(text2)) {
+    throw new Error("subagents.ccSwitchProviderId must be a safe cc-switch provider id");
+  }
+  return text2;
 }
 function normalizeRsi(input) {
   const raw = isRecord(input) ? input : {};
@@ -1017,7 +1027,7 @@ function codexBootstrapBinaryErrorCode(errno) {
 import { createInterface } from "readline";
 import { Writable } from "stream";
 async function promptLine(prompt) {
-  return new Promise((resolve8) => {
+  return new Promise((resolve9) => {
     const rl = createInterface({
       input: process.stdin,
       output: process.stdout,
@@ -1025,13 +1035,13 @@ async function promptLine(prompt) {
     });
     rl.question(prompt, (answer) => {
       rl.close();
-      resolve8(answer.trim());
+      resolve9(answer.trim());
     });
   });
 }
 async function promptPassword(prompt) {
   const isTTY = Boolean(process.stdin.isTTY);
-  return new Promise((resolve8) => {
+  return new Promise((resolve9) => {
     const muted = new Writable({
       write(_chunk, _enc, cb) {
         cb();
@@ -1046,7 +1056,7 @@ async function promptPassword(prompt) {
     rl.question("", (answer) => {
       rl.close();
       process.stdout.write("\n");
-      resolve8(answer.trim());
+      resolve9(answer.trim());
     });
   });
 }
@@ -1216,7 +1226,7 @@ async function fsyncDir(path) {
   }
 }
 function sleep(ms) {
-  return new Promise((resolve8) => setTimeout(resolve8, ms));
+  return new Promise((resolve9) => setTimeout(resolve9, ms));
 }
 
 // src/runtime/locks.ts
@@ -2777,13 +2787,13 @@ async function listSecretProfiles(rootDir) {
 }
 async function readAllStdin() {
   if (process.stdin.isTTY) return "";
-  return new Promise((resolve8, reject4) => {
+  return new Promise((resolve9, reject4) => {
     let data = "";
     process.stdin.setEncoding("utf8");
     process.stdin.on("data", (chunk) => {
       data += chunk;
     });
-    process.stdin.on("end", () => resolve8(data));
+    process.stdin.on("end", () => resolve9(data));
     process.stdin.on("error", reject4);
   });
 }
@@ -2882,7 +2892,7 @@ async function spawnExecProvider(pc, ref) {
   const timeoutMs = pc.noOutputTimeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
   const maxOutput = pc.maxOutputBytes ?? DEFAULT_EXEC_MAX_OUTPUT;
   const providerName = ref.provider ?? DEFAULT_PROVIDER;
-  return new Promise((resolve8, reject4) => {
+  return new Promise((resolve9, reject4) => {
     const env = {};
     if (pc.passEnv) {
       for (const k of pc.passEnv) {
@@ -2940,7 +2950,7 @@ async function spawnExecProvider(pc, ref) {
         const parsed = JSON.parse(stdout);
         const value = parsed.values?.[ref.id];
         if (typeof value === "string") {
-          resolve8(value);
+          resolve9(value);
           return;
         }
         const err = parsed.errors?.[ref.id]?.message;
@@ -2967,7 +2977,7 @@ import * as p from "@clack/prompts";
 import { registerApp } from "@larksuite/channel";
 import qrcode from "qrcode-terminal";
 async function requestScopeGrantLink(opts) {
-  return new Promise((resolve8, reject4) => {
+  return new Promise((resolve9, reject4) => {
     let urlDelivered = false;
     const completion = registerApp({
       source: "arg-bridge",
@@ -2976,7 +2986,7 @@ async function requestScopeGrantLink(opts) {
       ...opts.signal ? { signal: opts.signal } : {},
       onQRCodeReady: (info) => {
         urlDelivered = true;
-        resolve8({ url: info.url, expireIn: info.expireIn, completion });
+        resolve9({ url: info.url, expireIn: info.expireIn, completion });
       }
     }).then(() => void 0);
     completion.catch((err) => {
@@ -4974,7 +4984,7 @@ async function applyLarkCliIdentityPolicy(context, identityPreset) {
 }
 async function runQuiet(cmd, args, env) {
   let timedOut = false;
-  const exitCode = await new Promise((resolve8) => {
+  const exitCode = await new Promise((resolve9) => {
     const child = spawnProcess(cmd, args, {
       env: mergeProcessEnv(process.env, env),
       stdio: ["ignore", "ignore", "ignore"]
@@ -4985,11 +4995,11 @@ async function runQuiet(cmd, args, env) {
     }, POLICY_TIMEOUT_MS);
     child.once("error", () => {
       clearTimeout(timer);
-      resolve8(null);
+      resolve9(null);
     });
     child.once("exit", (code) => {
       clearTimeout(timer);
-      resolve8(code);
+      resolve9(code);
     });
   });
   return !timedOut && exitCode === 0;
@@ -5577,7 +5587,7 @@ function isLarkCliInstalled() {
 async function runCapture(cmd, args, timeoutMs, env) {
   let captured = "";
   let timedOut = false;
-  const exitCode = await new Promise((resolve8) => {
+  const exitCode = await new Promise((resolve9) => {
     const child = spawnProcess(cmd, args, {
       env: env ? mergeProcessEnv(process.env, env) : void 0,
       stdio: ["ignore", "pipe", "pipe"]
@@ -5594,11 +5604,11 @@ async function runCapture(cmd, args, timeoutMs, env) {
     }, timeoutMs);
     child.once("error", () => {
       clearTimeout(timer);
-      resolve8(null);
+      resolve9(null);
     });
     child.once("exit", (code) => {
       clearTimeout(timer);
-      resolve8(code);
+      resolve9(code);
     });
   });
   return { success: !timedOut && exitCode === 0, output: captured };
@@ -5759,7 +5769,7 @@ async function waitForIdleSocket(directory, timeoutMs = 1500) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (!hostHasActiveClients(directory)) return true;
-    await new Promise((resolve8) => setTimeout(resolve8, 100));
+    await new Promise((resolve9) => setTimeout(resolve9, 100));
   }
   return !hostHasActiveClients(directory);
 }
@@ -5818,7 +5828,7 @@ async function waitForExit(pid, timeoutMs = 2e3) {
   if (!processAlive(pid)) return true;
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    await new Promise((resolve8) => setTimeout(resolve8, 100));
+    await new Promise((resolve9) => setTimeout(resolve9, 100));
     if (!processAlive(pid)) return true;
   }
   terminateHost(pid, "SIGKILL");
@@ -5944,7 +5954,7 @@ async function confirmStopRuntimeLockProcess() {
   const rl = createInterface2({ input: process.stdin, output: process.stdout });
   try {
     const answer = await new Promise(
-      (resolve8) => rl.question("\u662F\u5426\u505C\u6B62\u65E7\u8FDB\u7A0B\u5E76\u7EE7\u7EED\u542F\u52A8\u540E\u53F0\u670D\u52A1? [y/N]: ", resolve8)
+      (resolve9) => rl.question("\u662F\u5426\u505C\u6B62\u65E7\u8FDB\u7A0B\u5E76\u7EE7\u7EED\u542F\u52A8\u540E\u53F0\u670D\u52A1? [y/N]: ", resolve9)
     );
     const normalized = answer.trim().toLowerCase();
     return normalized === "y" || normalized === "yes";
@@ -6185,7 +6195,7 @@ var AsyncEventQueue = class {
         const value = this.values.shift();
         if (value !== void 0) return Promise.resolve({ value, done: false });
         if (this.closed) return Promise.resolve({ value: void 0, done: true });
-        return new Promise((resolve8) => this.waiters.push(resolve8));
+        return new Promise((resolve9) => this.waiters.push(resolve9));
       }
     };
   }
@@ -6211,9 +6221,14 @@ var OFFICIAL_HOSTS = /* @__PURE__ */ new Set([
   "chat.openai.com"
 ]);
 var INTERESTING_PROVIDER_KEYS = /* @__PURE__ */ new Set([
+  "name",
   "base_url",
   "env_key",
-  "experimental_bearer_token"
+  "experimental_bearer_token",
+  "wire_api",
+  "requires_openai_auth",
+  "env_http_headers",
+  "http_headers"
 ]);
 async function resolveCodexCredentialEnv(codexHome, defaults) {
   const home = codexHome ?? defaultCodexHome();
@@ -6360,13 +6375,25 @@ function parseCodexConfigSummary(raw) {
     const assignment = /^([A-Za-z0-9_-]+)\s*=\s*(.+)$/u.exec(line);
     if (!assignment) continue;
     const key = assignment[1];
-    const value = parseTomlScalar(assignment[2]);
+    const value = parseTomlScalar(assignment[2]) ?? parseTomlPrimitive(assignment[2]);
     if (value === void 0) continue;
     if (providerName && providerEntry) {
       if (!INTERESTING_PROVIDER_KEYS.has(key)) continue;
-      if (key === "base_url") providerEntry.baseUrl = value;
+      if (key === "name") providerEntry.name = value;
+      else if (key === "base_url") providerEntry.baseUrl = value;
       else if (key === "env_key") providerEntry.envKey = value;
-      else providerEntry.bearerToken = value;
+      else if (key === "experimental_bearer_token") providerEntry.bearerToken = value;
+      else if (key === "wire_api") providerEntry.wireApi = value;
+      else if (key === "requires_openai_auth") {
+        const boolean = parseTomlBoolean(value);
+        if (boolean !== void 0) providerEntry.requiresOpenAiAuth = boolean;
+      } else if (key === "env_http_headers") {
+        const headers = parseTomlInlineStringMap(value);
+        if (headers) providerEntry.envHttpHeaders = headers;
+      } else if (key === "http_headers") {
+        const headers = parseTomlInlineStringMap(value);
+        if (headers) providerEntry.httpHeaders = headers;
+      }
       continue;
     }
     if (profileName) {
@@ -6384,6 +6411,9 @@ function parseCodexConfigSummary(raw) {
     model: profile2?.get("model") ?? topLevel.get("model"),
     modelProvider: profile2?.get("model_provider") ?? topLevel.get("model_provider"),
     preferredAuthMethod: topLevel.get("preferred_auth_method") ?? profile2?.get("preferred_auth_method"),
+    ...positiveInteger(topLevel.get("model_context_window")) ? { modelContextWindow: positiveInteger(topLevel.get("model_context_window")) } : {},
+    ...positiveInteger(topLevel.get("model_max_output_tokens")) ? { modelMaxOutputTokens: positiveInteger(topLevel.get("model_max_output_tokens")) } : {},
+    ...topLevel.get("model_reasoning_effort") ? { modelReasoningEffort: topLevel.get("model_reasoning_effort") } : {},
     providers
   };
 }
@@ -6442,6 +6472,60 @@ function parseTomlScalar(rawValue) {
     return value.slice(1, end);
   }
   return void 0;
+}
+function parseTomlBoolean(value) {
+  if (value === "true") return true;
+  if (value === "false") return false;
+  return void 0;
+}
+function parseTomlPrimitive(rawValue) {
+  const value = rawValue.trim();
+  if (/^(?:true|false)$/u.test(value) || /^-?[0-9]+$/u.test(value)) return value;
+  return void 0;
+}
+function positiveInteger(value) {
+  if (!value || !/^[1-9][0-9]*$/u.test(value)) return void 0;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : void 0;
+}
+function parseTomlInlineStringMap(rawValue) {
+  const value = rawValue.trim();
+  if (!value.startsWith("{") || !value.endsWith("}")) return void 0;
+  const body = value.slice(1, -1).trim();
+  if (!body) return {};
+  const result = {};
+  for (const entry of splitTomlInlineEntries(body)) {
+    const match = /^\s*("(?:[^"\\]|\\.)*"|'[^']*')\s*=\s*("(?:[^"\\]|\\.)*"|'[^']*')\s*$/u.exec(entry);
+    if (!match) return void 0;
+    const key = parseTomlScalar(match[1]);
+    const item = parseTomlScalar(match[2]);
+    if (key === void 0 || item === void 0) return void 0;
+    result[key] = item;
+  }
+  return result;
+}
+function splitTomlInlineEntries(value) {
+  const entries = [];
+  let quote2;
+  let start = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index];
+    if (quote2) {
+      if (char === "\\" && quote2 === '"') index += 1;
+      else if (char === quote2) quote2 = void 0;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote2 = char;
+      continue;
+    }
+    if (char === ",") {
+      entries.push(value.slice(start, index));
+      start = index + 1;
+    }
+  }
+  entries.push(value.slice(start));
+  return entries;
 }
 function unescapeBasicString(value) {
   return value.replace(/\\(u[0-9A-Fa-f]{4}|.)/gu, (_match, escape) => {
@@ -8311,14 +8395,14 @@ var LiveTerminalSession = class {
     if (child && child.exitCode === null && child.signalCode === null) {
       log.info("agent-live", "close", { pid: child.pid ?? null, reason });
       child.kill("SIGTERM");
-      await new Promise((resolve8) => {
+      await new Promise((resolve9) => {
         const timer = setTimeout(() => {
           if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-          resolve8();
+          resolve9();
         }, 2e3);
         child.once("exit", () => {
           clearTimeout(timer);
-          resolve8();
+          resolve9();
         });
       });
     }
@@ -8334,11 +8418,11 @@ var LiveTerminalSession = class {
     if (this.isAlive()) return;
     if (this.closed) throw new Error("live session is closed");
     const spawned = spawnLiveProcess(this.opts);
-    this.terminalReady = new Promise((resolve8) => {
-      this.resolveTerminalReady = resolve8;
+    this.terminalReady = new Promise((resolve9) => {
+      this.resolveTerminalReady = resolve9;
     });
-    this.firstTerminalOutput = new Promise((resolve8) => {
-      this.resolveFirstTerminalOutput = resolve8;
+    this.firstTerminalOutput = new Promise((resolve9) => {
+      this.resolveFirstTerminalOutput = resolve9;
     });
     this.child = spawned.child;
     this.terminalInfo = spawned.terminal;
@@ -9134,8 +9218,8 @@ var LiveTerminalSession = class {
       }
       while (!done || queue.length > 0) {
         if (queue.length === 0) {
-          await new Promise((resolve8) => {
-            wake = resolve8;
+          await new Promise((resolve9) => {
+            wake = resolve9;
           });
           wake = void 0;
           continue;
@@ -11428,7 +11512,7 @@ function isIncompleteEscapeSequence(seq) {
   return false;
 }
 function delay(ms) {
-  return new Promise((resolve8) => setTimeout(resolve8, ms));
+  return new Promise((resolve9) => setTimeout(resolve9, ms));
 }
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -11623,14 +11707,14 @@ function isLoopbackHost(host) {
   return normalized === "localhost" || normalized === "::1" || normalized === "0:0:0:0:0:0:0:1" || /^127(?:\.\d{1,3}){3}$/u.test(normalized);
 }
 function probeProxy(host, port, timeoutMs) {
-  return new Promise((resolve8) => {
+  return new Promise((resolve9) => {
     const socket = connect({ host, port });
     let settled = false;
     const finish = (result) => {
       if (settled) return;
       settled = true;
       socket.destroy();
-      resolve8(result);
+      resolve9(result);
     };
     socket.setTimeout(timeoutMs);
     socket.once("connect", () => finish("open"));
@@ -11825,7 +11909,7 @@ var ClaudeAdapter = class {
         if (child.exitCode !== null || child.signalCode !== null) return;
         log.info("agent", "stop-sigterm", { pid: child.pid ?? null, graceMs: stopGraceMs });
         child.kill("SIGTERM");
-        await new Promise((resolve8) => {
+        await new Promise((resolve9) => {
           const timer = setTimeout(() => {
             if (child.exitCode === null && child.signalCode === null) {
               log.warn("agent", "stop-sigkill", {
@@ -11835,11 +11919,11 @@ var ClaudeAdapter = class {
               });
               child.kill("SIGKILL");
             }
-            resolve8();
+            resolve9();
           }, stopGraceMs);
           child.once("exit", () => {
             clearTimeout(timer);
-            resolve8();
+            resolve9();
           });
         });
       },
@@ -11847,14 +11931,14 @@ var ClaudeAdapter = class {
         if (child.exitCode !== null || child.signalCode !== null) {
           return Promise.resolve(true);
         }
-        return new Promise((resolve8) => {
+        return new Promise((resolve9) => {
           const onExit = () => {
             clearTimeout(timer);
-            resolve8(true);
+            resolve9(true);
           };
           const timer = setTimeout(() => {
             child.removeListener("exit", onExit);
-            resolve8(false);
+            resolve9(false);
           }, timeoutMs);
           child.once("exit", onExit);
         });
@@ -12644,7 +12728,7 @@ var CodexAdapter = class {
         stopReason = "interrupted";
         log.info("agent", "stop-sigterm", { pid: child.pid ?? null, graceMs: stopGraceMs });
         child.kill("SIGTERM");
-        await new Promise((resolve8) => {
+        await new Promise((resolve9) => {
           const timer = setTimeout(() => {
             if (child.exitCode === null && child.signalCode === null) {
               log.warn("agent", "stop-sigkill", {
@@ -12654,11 +12738,11 @@ var CodexAdapter = class {
               });
               child.kill("SIGKILL");
             }
-            resolve8();
+            resolve9();
           }, stopGraceMs);
           child.once("exit", () => {
             clearTimeout(timer);
-            resolve8();
+            resolve9();
           });
         });
       },
@@ -12666,14 +12750,14 @@ var CodexAdapter = class {
         if (child.exitCode !== null || child.signalCode !== null) {
           return Promise.resolve(true);
         }
-        return new Promise((resolve8) => {
+        return new Promise((resolve9) => {
           const onExit = () => {
             clearTimeout(timer);
-            resolve8(true);
+            resolve9(true);
           };
           const timer = setTimeout(() => {
             child.removeListener("exit", onExit);
-            resolve8(false);
+            resolve9(false);
           }, timeoutMs);
           child.once("exit", onExit);
         });
@@ -12869,11 +12953,11 @@ function artifactDeliveryEnv(artifact) {
 }
 
 // src/agent/structured/adapter.ts
-import { createHash as createHash8, randomUUID as randomUUID3 } from "crypto";
-import { readFile as readFile18, mkdir as mkdir19, lstat as lstat5, realpath as realpath6, stat as stat7 } from "fs/promises";
-import { readFileSync as readFileSync8 } from "fs";
+import { createHash as createHash9, randomUUID as randomUUID3 } from "crypto";
+import { readFile as readFile19, mkdir as mkdir20, lstat as lstat5, realpath as realpath7, stat as stat7 } from "fs/promises";
+import { readFileSync as readFileSync9 } from "fs";
 import { tmpdir as tmpdir5 } from "os";
-import { join as join29, resolve as resolve5 } from "path";
+import { join as join31, resolve as resolve6 } from "path";
 
 // src/agent/structured/host.ts
 import { mkdir as mkdir15, lstat, chmod as chmod5, open as open3, rm as rm12 } from "fs/promises";
@@ -12928,8 +13012,8 @@ var RpcClient = class _RpcClient extends EventEmitter2 {
     const socket = new WebSocket(url, { handshakeTimeout: 5e3, maxPayload: 32 * 1024 * 1024, perMessageDeflate: false });
     const client = new _RpcClient(socket);
     if (options.codexHome) client.codexHome = options.codexHome;
-    await new Promise((resolve8, reject4) => {
-      socket.once("open", resolve8);
+    await new Promise((resolve9, reject4) => {
+      socket.once("open", resolve9);
       socket.once("error", reject4);
     });
     return client;
@@ -12955,12 +13039,12 @@ var RpcClient = class _RpcClient extends EventEmitter2 {
   request(method, params, timeoutMs = 3e4) {
     if (this.failure || this.socket.readyState !== WebSocket.OPEN) return Promise.reject(this.failure ?? new Error("RPC connection is not open"));
     const id = this.nextId++;
-    return new Promise((resolve8, reject4) => {
+    return new Promise((resolve9, reject4) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject4(new Error(`RPC ${method} timed out; outcome unknown, not retried`));
       }, timeoutMs);
-      this.pending.set(id, { resolve: resolve8, reject: reject4, timer });
+      this.pending.set(id, { resolve: resolve9, reject: reject4, timer });
       this.socket.send(JSON.stringify({ id, method, params }), (error) => {
         if (!error) return;
         clearTimeout(timer);
@@ -13094,7 +13178,7 @@ async function connectCodexHostInternal(options, attempt) {
         connected = await RpcClient.connect(url, { codexHome: options.env.CODEX_HOME });
         break;
       } catch {
-        await new Promise((resolve8) => setTimeout(resolve8, 150));
+        await new Promise((resolve9) => setTimeout(resolve9, 150));
       }
     }
     if (!connected) {
@@ -13244,10 +13328,10 @@ async function listProviders(env, timeoutMs) {
   const stderr = [];
   child.stdout?.on("data", (chunk) => stdout.push(Buffer.from(chunk)));
   child.stderr?.on("data", (chunk) => stderr.push(Buffer.from(chunk)));
-  const code = await new Promise((resolve8, reject4) => {
+  const code = await new Promise((resolve9, reject4) => {
     const timer = setTimeout(() => {
       child.kill("SIGTERM");
-      resolve8(null);
+      resolve9(null);
     }, timeoutMs);
     timer.unref?.();
     child.once("error", (error) => {
@@ -13256,7 +13340,7 @@ async function listProviders(env, timeoutMs) {
     });
     child.once("exit", (exitCode) => {
       clearTimeout(timer);
-      resolve8(exitCode);
+      resolve9(exitCode);
     });
   });
   if (code !== 0) {
@@ -13283,19 +13367,692 @@ function errorMessage3(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
-// src/integrations/broker-routes.ts
-import { chmod as chmod6, mkdir as mkdir16, readFile as readFile15 } from "fs/promises";
+// src/integrations/cc-switch-provider.ts
+import { createHash as createHash4 } from "crypto";
+import { readFileSync as readFileSync6 } from "fs";
+import { chmod as chmod6, mkdir as mkdir16, readFile as readFile15, realpath as realpath4 } from "fs/promises";
+import { createRequire } from "module";
 import { homedir as homedir8 } from "os";
-import { dirname as dirname17, join as join26 } from "path";
+import { join as join26, parse, resolve as resolve4 } from "path";
+var DEFAULT_CODEX_ENV_KEY = "OPENAI_API_KEY";
+var MAX_DB_ROW_BYTES = 8 * 1024 * 1024;
+var require2 = createRequire(import.meta.url);
+var CcSwitchProviderError = class extends Error {
+  constructor(code, message, details) {
+    super(message);
+    this.code = code;
+    this.details = details;
+    this.name = "CcSwitchProviderError";
+  }
+  code;
+  details;
+};
+function ccSwitchPaths(env = process.env) {
+  const root = resolve4(env.CC_SWITCH_HOME?.trim() || join26(homedir8(), ".cc-switch"));
+  return {
+    root,
+    settingsPath: join26(root, "settings.json"),
+    databasePath: join26(root, "cc-switch.db")
+  };
+}
+async function readCcSwitchProviderCatalog(env = process.env) {
+  const paths2 = ccSwitchPaths(env);
+  const settings = await readSettingsJson(paths2.settingsPath);
+  const currentProviderId = typeof settings?.currentProviderCodex === "string" ? settings.currentProviderCodex.trim() || void 0 : void 0;
+  try {
+    const providers = await readSqliteProviders(paths2.databasePath, "codex", currentProviderId);
+    if (providers.length > 0) {
+      return {
+        provider: "codex",
+        ...currentProviderId ? { currentProviderId } : {},
+        providers,
+        settingsPath: paths2.settingsPath,
+        databasePath: paths2.databasePath,
+        source: "sqlite"
+      };
+    }
+  } catch (error) {
+    const legacy2 = readLegacyProviders(settings, "codex", currentProviderId);
+    if (legacy2.length > 0) {
+      return {
+        provider: "codex",
+        ...currentProviderId ? { currentProviderId } : {},
+        providers: legacy2,
+        settingsPath: paths2.settingsPath,
+        databasePath: paths2.databasePath,
+        source: "legacy-json"
+      };
+    }
+    return {
+      provider: "codex",
+      ...currentProviderId ? { currentProviderId } : {},
+      providers: [],
+      settingsPath: paths2.settingsPath,
+      databasePath: paths2.databasePath,
+      source: "sqlite",
+      error: safeCcSwitchError(error)
+    };
+  }
+  const legacy = readLegacyProviders(settings, "codex", currentProviderId);
+  return {
+    provider: "codex",
+    ...currentProviderId ? { currentProviderId } : {},
+    providers: legacy,
+    settingsPath: paths2.settingsPath,
+    databasePath: paths2.databasePath,
+    source: legacy.length > 0 ? "legacy-json" : "sqlite"
+  };
+}
+async function resolveCurrentCcSwitchCodexProvider(input = {}) {
+  const env = input.env ?? process.env;
+  const catalog = await readCcSwitchProviderCatalog(env);
+  if (catalog.error) {
+    throw new CcSwitchProviderError("database-unreadable", catalog.error);
+  }
+  const currentRows = catalog.providers.filter((provider2) => provider2.current);
+  if (currentRows.length > 1) {
+    throw new CcSwitchProviderError(
+      "provider-ambiguous",
+      `cc-switch \u6709\u591A\u4E2A Codex current provider\uFF1A${currentRows.map((provider2) => provider2.id).join(", ")}`
+    );
+  }
+  const sqliteCurrent = currentRows[0]?.id;
+  if (catalog.currentProviderId && sqliteCurrent && catalog.currentProviderId !== sqliteCurrent) {
+    throw new CcSwitchProviderError(
+      "provider-current-mismatch",
+      `cc-switch settings.currentProviderCodex=${catalog.currentProviderId}\uFF0C\u4F46\u6570\u636E\u5E93 is_current=${sqliteCurrent}`
+    );
+  }
+  const selectedId = input.providerId?.trim() || catalog.currentProviderId || sqliteCurrent || input.parentProviderId;
+  if (!selectedId) {
+    throw new CcSwitchProviderError(
+      "provider-not-found",
+      "\u65E0\u6CD5\u786E\u5B9A cc-switch \u5F53\u524D Codex provider"
+    );
+  }
+  const metadata = catalog.providers.find((provider2) => provider2.id === selectedId);
+  if (!metadata) {
+    throw new CcSwitchProviderError(
+      "provider-not-found",
+      `cc-switch \u5F53\u524D Codex provider \u4E0D\u5B58\u5728\uFF1A${selectedId}`
+    );
+  }
+  const record = await readSelectedProviderRecord(
+    catalog.source,
+    ccSwitchPaths(env),
+    metadata,
+    env
+  );
+  const parsed = parseSelectedConfig(record, input.codexHome);
+  const providerId = parsed.config.modelProvider?.trim() || metadata.id;
+  const provider = parsed.config.providers.get(providerId) ?? {};
+  const configText = settingsConfigText(record.settingsConfig);
+  const credential = resolveCredential(providerId, provider, record.settingsConfig, configText);
+  const baseUrl = normalizeBaseUrl(
+    provider.baseUrl ?? chooseEndpoint(record.endpointUrls),
+    providerId,
+    provider.requiresOpenAiAuth
+  );
+  if (provider.httpHeaders && Object.keys(provider.httpHeaders).length > 0) {
+    for (const [header, value] of Object.entries(provider.httpHeaders)) {
+      if (!value.trim()) continue;
+      const envName = `ARG_BRIDGE_CCSWITCH_HEADER_${createHash4("sha256").update(header).digest("hex").slice(0, 12).toUpperCase()}`;
+      credential.envHttpHeaders[header] = envName;
+      credential.credentials[envName] = value;
+    }
+  }
+  if (provider.envHttpHeaders) {
+    for (const [header, envName] of Object.entries(provider.envHttpHeaders)) {
+      credential.envHttpHeaders[header] = envName;
+      const value = findCredentialValue(record.settingsConfig, [envName]);
+      if (value) credential.credentials[envName] = value.value;
+    }
+  }
+  const model = parsed.config.model?.trim();
+  if (!model) {
+    throw new CcSwitchProviderError(
+      "model-missing",
+      `cc-switch provider ${selectedId} \u7684\u914D\u7F6E\u4E2D\u6CA1\u6709 model`
+    );
+  }
+  const wireApi = provider.wireApi?.trim() || "responses";
+  const thirdParty = isThirdPartyProvider(providerId, provider);
+  const activeConfig = parsed.activeConfig;
+  const mismatches = configMismatches(parsed.config, activeConfig, providerId);
+  const credentialStatus = credential.status;
+  const credentialFingerprint = credential.value ? createHash4("sha256").update(credential.value).digest("hex").slice(0, 16) : null;
+  const credentialSetFingerprint = createHash4("sha256").update(JSON.stringify(Object.entries(credential.credentials).sort())).digest("hex").slice(0, 16);
+  const configFingerprint = createHash4("sha256").update(JSON.stringify({
+    providerId: selectedId,
+    codexProviderId: providerId,
+    model,
+    baseUrl,
+    wireApi,
+    envKey: provider.envKey ?? credential.envKey ?? null,
+    envHttpHeaders: credential.envHttpHeaders,
+    reasoningEffort: parsed.config.modelReasoningEffort ?? null,
+    contextWindow: parsed.config.modelContextWindow ?? null,
+    credentialFingerprint,
+    credentialSetFingerprint
+  })).digest("hex");
+  const summary = {
+    id: selectedId,
+    name: metadata.name,
+    source: metadata.source,
+    codexProviderId: providerId,
+    model,
+    baseUrl,
+    baseUrlHost: safeHostname(baseUrl),
+    wireApi,
+    envKey: provider.envKey ?? credential.envKey ?? null,
+    envHttpHeaders: { ...credential.envHttpHeaders },
+    reasoningEffort: parsed.config.modelReasoningEffort ?? null,
+    contextWindow: parsed.config.modelContextWindow ?? null,
+    thirdParty,
+    requiresOpenAiAuth: provider.requiresOpenAiAuth ?? null,
+    credential: {
+      status: credentialStatus,
+      sourcePath: credential.sourcePath,
+      fingerprint: credentialFingerprint
+    },
+    configFingerprint,
+    parentProviderId: input.parentProviderId ?? null,
+    providerSwitchPending: Boolean(
+      input.parentProviderId && input.parentProviderId !== selectedId
+    ),
+    configMismatches: mismatches
+  };
+  return {
+    summary,
+    config: parsed.config,
+    providerConfig: provider,
+    credentials: credential.credentials
+  };
+}
+async function materializeCcSwitchBrokerRuntime(input) {
+  const resolved = await resolveCurrentCcSwitchCodexProvider(input);
+  const summary = resolved.summary;
+  if (summary.credential.status === "oauth-only") {
+    throw new CcSwitchProviderError(
+      "oauth-broker-unsupported",
+      "\u5F53\u524D cc-switch provider \u53EA\u6709 ChatGPT OAuth token\uFF0CMixAgents 0.1.1 \u65E0\u6CD5\u5B89\u5168\u590D\u7528\u8BE5\u767B\u5F55\uFF1B\u8BF7\u4E3A\u8BE5 provider \u914D\u7F6E API Key\uFF0C\u5B98\u65B9\u4E3B\u4F1A\u8BDD\u4E0D\u53D7\u5F71\u54CD\u3002"
+    );
+  }
+  if (summary.credential.status !== "present") {
+    throw new CcSwitchProviderError(
+      "credential-missing",
+      `cc-switch provider ${summary.id} \u7F3A\u5C11 Broker \u51ED\u636E` + (summary.envKey ? `\uFF08${summary.envKey}\uFF09` : "")
+    );
+  }
+  if (summary.wireApi !== "responses") {
+    throw new CcSwitchProviderError(
+      "wire-api-unsupported",
+      `MixAgents 0.1.1 \u53EA\u652F\u6301 wire_api=responses\uFF0C\u5F53\u524D provider \u4E3A ${summary.wireApi}`
+    );
+  }
+  const routeId2 = ccSwitchRouteId(summary);
+  const route = {
+    id: routeId2,
+    description: `${summary.name} current cc-switch Codex provider`,
+    provider: summary.codexProviderId,
+    model: summary.model,
+    maxAccess: "workspace-write",
+    available: true,
+    missingEnvironment: [],
+    tags: ["cc-switch", ...summary.thirdParty ? ["third-party"] : ["official"]],
+    backend: "mixagents",
+    default: true,
+    selectionReason: "Current cc-switch Codex provider resolved automatically",
+    revision: summary.configFingerprint.slice(0, 16),
+    targetFingerprint: summary.configFingerprint,
+    ccSwitchProviderId: summary.id,
+    source: "cc-switch"
+  };
+  const workspaceRoot = await realpath4(input.cwd).catch(() => resolve4(input.cwd));
+  if (!workspaceRoot || workspaceRoot === parse(workspaceRoot).root || workspaceRoot === resolve4(homedir8())) {
+    throw new CcSwitchProviderError(
+      "workspace-invalid",
+      "Broker workspace \u4E0D\u80FD\u662F\u6587\u4EF6\u7CFB\u7EDF\u6839\u76EE\u5F55\u6216\u7528\u6237 home\uFF1B\u8BF7\u5728\u5177\u4F53\u9879\u76EE\u76EE\u5F55\u4E2D\u542F\u52A8\u5B50\u4EE3\u7406"
+    );
+  }
+  const configPath = join26(
+    input.stateDir,
+    "cc-switch",
+    `broker-${summary.configFingerprint.slice(0, 16)}.json`
+  );
+  await mkdir16(resolve4(input.stateDir, "cc-switch"), { recursive: true, mode: 448 });
+  await chmod6(resolve4(input.stateDir, "cc-switch"), 448).catch(() => {
+  });
+  const dataDir = join26(input.stateDir, "cc-switch", "mixagents-data");
+  await mkdir16(dataDir, { recursive: true, mode: 448 });
+  await chmod6(dataDir, 448).catch(() => {
+  });
+  const brokerConfig = {
+    version: 1,
+    defaultRoute: route.id,
+    workspaceRoots: [workspaceRoot],
+    dataDir,
+    codexBin: input.codexBin,
+    routes: {
+      [route.id]: {
+        description: route.description,
+        provider: route.provider,
+        providerName: summary.name,
+        model: route.model,
+        ...summary.contextWindow ? { contextWindow: summary.contextWindow } : {},
+        baseUrl: summary.baseUrl,
+        ...summary.envKey ? { envKey: summary.envKey } : {},
+        ...Object.keys(summary.envHttpHeaders).length > 0 ? { envHttpHeaders: summary.envHttpHeaders } : {},
+        tags: route.tags,
+        maxAccess: "workspace-write",
+        ccSwitchProviderId: summary.id,
+        source: "cc-switch",
+        ...summary.reasoningEffort ? { reasoningEffort: normalizeReasoningEffort(summary.reasoningEffort) } : {}
+      }
+    }
+  };
+  await writeFileAtomic(configPath, `${JSON.stringify(brokerConfig, null, 2)}
+`, {
+    mode: 384
+  });
+  return {
+    summary,
+    route,
+    credentials: resolved.credentials,
+    brokerConfigPath: configPath,
+    fingerprint: summary.configFingerprint
+  };
+}
+async function readSqliteProviders(databasePath, appType, currentProviderId) {
+  const sql = [
+    "SELECT id, app_type, name, is_current, provider_type, category",
+    "FROM providers",
+    `WHERE app_type = '${appType.replace(/'/g, "''")}'`,
+    "ORDER BY sort_index, id"
+  ].join(" ");
+  const rows = await querySqlite(databasePath, sql);
+  return rows.flatMap((row) => {
+    const id = string(row.id);
+    const name = string(row.name);
+    if (!id || !name) return [];
+    const isCurrent = Number(row.is_current) === 1;
+    return [{
+      id,
+      appType: string(row.app_type) ?? appType,
+      name,
+      current: isCurrent,
+      ...string(row.provider_type) ? { providerType: string(row.provider_type) } : {},
+      ...string(row.category) ? { category: string(row.category) } : {},
+      source: "sqlite"
+    }];
+  });
+}
+async function readSelectedProviderRecord(source, paths2, metadata, env) {
+  if (source === "sqlite") {
+    const sql = [
+      "SELECT settings_config",
+      "FROM providers",
+      `WHERE app_type = '${metadata.appType.replace(/'/g, "''")}'`,
+      `AND id = '${metadata.id.replace(/'/g, "''")}'`,
+      "LIMIT 1"
+    ].join(" ");
+    const rows = await querySqlite(paths2.databasePath, sql);
+    const raw = string(rows[0]?.settings_config);
+    if (!raw) {
+      throw new CcSwitchProviderError(
+        "provider-not-found",
+        `cc-switch provider ${metadata.id} \u6CA1\u6709 settings_config`
+      );
+    }
+    const settingsConfig = parseJsonRecord(raw, "settings_config");
+    const endpointUrls = await readSqliteEndpoints(paths2.databasePath, metadata);
+    return { ...metadata, settingsConfig, endpointUrls };
+  }
+  const settings = await readSettingsJson(paths2.settingsPath);
+  const legacy = readLegacyProviderRecords(settings, metadata.appType, metadata.id);
+  const found = legacy.find((record) => record.id === metadata.id);
+  if (!found) {
+    throw new CcSwitchProviderError(
+      "provider-not-found",
+      `\u65E7\u7248 cc-switch settings.json \u4E2D\u627E\u4E0D\u5230 provider ${metadata.id}`
+    );
+  }
+  void env;
+  return found;
+}
+async function readSqliteEndpoints(databasePath, metadata) {
+  try {
+    const rows = await querySqlite(
+      databasePath,
+      [
+        "SELECT url FROM provider_endpoints",
+        `WHERE app_type = '${metadata.appType.replace(/'/g, "''")}'`,
+        `AND provider_id = '${metadata.id.replace(/'/g, "''")}'`,
+        "ORDER BY id"
+      ].join(" ")
+    );
+    return rows.flatMap((row) => {
+      const url = string(row.url);
+      return url ? [url] : [];
+    });
+  } catch {
+    return [];
+  }
+}
+async function querySqlite(databasePath, sql) {
+  try {
+    const sqlite = require2("node:sqlite");
+    const database = new sqlite.DatabaseSync(databasePath, { readOnly: true });
+    try {
+      return database.prepare(sql).all();
+    } finally {
+      database.close();
+    }
+  } catch (nodeSqliteError) {
+    try {
+      return await querySqliteCli(databasePath, `${sql};`);
+    } catch (cliError) {
+      throw new CcSwitchProviderError(
+        "database-unreadable",
+        `\u65E0\u6CD5\u8BFB\u53D6 cc-switch SQLite\uFF1A${safeCcSwitchError(cliError ?? nodeSqliteError)}`
+      );
+    }
+  }
+}
+async function querySqliteCli(databasePath, sql) {
+  const child = spawnProcess("sqlite3", ["-readonly", "-json", databasePath, sql], {
+    env: process.env,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  const stdout = [];
+  const stderr = [];
+  let bytes = 0;
+  child.stdout?.on("data", (chunk) => {
+    const buffer = Buffer.from(chunk);
+    bytes += buffer.length;
+    if (bytes <= MAX_DB_ROW_BYTES) stdout.push(buffer);
+  });
+  child.stderr?.on("data", (chunk) => stderr.push(Buffer.from(chunk)));
+  const code = await new Promise((resolvePromise, reject4) => {
+    child.once("error", reject4);
+    child.once("exit", resolvePromise);
+  });
+  if (code !== 0 || bytes > MAX_DB_ROW_BYTES) {
+    throw new Error(
+      `sqlite3 exited ${code ?? "signal"}${bytes > MAX_DB_ROW_BYTES ? "; output exceeded limit" : ""}` + (stderr.length ? `: ${Buffer.concat(stderr).toString("utf8").slice(0, 500)}` : "")
+    );
+  }
+  const parsed = JSON.parse(Buffer.concat(stdout).toString("utf8") || "[]");
+  if (!Array.isArray(parsed)) throw new Error("sqlite3 returned invalid JSON");
+  return parsed.filter(isRecord3);
+}
+function readLegacyProviders(settings, appType, currentProviderId) {
+  return readLegacyProviderRecords(settings, appType, currentProviderId).map(({ settingsConfig: _settingsConfig, endpointUrls: _endpointUrls, ...metadata }) => metadata);
+}
+function readLegacyProviderRecords(settings, appType, currentProviderId) {
+  const candidates = collectLegacyProviderValues(settings, appType);
+  return candidates.flatMap((value) => {
+    if (!isRecord3(value)) return [];
+    const id = string(value.id) ?? string(value.providerId) ?? string(value.provider_id);
+    const name = string(value.name) ?? id;
+    if (!id || !name) return [];
+    const rawConfig = value.settings_config ?? value.settingsConfig ?? value;
+    const settingsConfig = typeof rawConfig === "string" ? parseJsonRecord(rawConfig, `${id}.settings_config`) : isRecord3(rawConfig) ? rawConfig : {};
+    const endpointUrls = [
+      string(value.endpoint),
+      string(value.baseUrl),
+      ...Array.isArray(value.endpoints) ? value.endpoints.map((item) => isRecord3(item) ? string(item.url) : string(item)) : []
+    ].filter((item) => Boolean(item));
+    const isCurrent = value.is_current === true || value.isCurrent === true || id === currentProviderId;
+    return [{
+      id,
+      appType: string(value.app_type) ?? string(value.appType) ?? appType,
+      name,
+      current: isCurrent,
+      ...string(value.provider_type) ? { providerType: string(value.provider_type) } : {},
+      ...string(value.category) ? { category: string(value.category) } : {},
+      source: "legacy-json",
+      settingsConfig,
+      endpointUrls
+    }];
+  });
+}
+function collectLegacyProviderValues(settings, appType) {
+  if (!settings) return [];
+  const values = [];
+  const add = (value) => {
+    if (Array.isArray(value)) values.push(...value);
+    else if (isRecord3(value)) {
+      for (const entry of Object.values(value)) add(entry);
+    }
+  };
+  add(settings.providers);
+  if (isRecord3(settings.apps)) {
+    const app = settings.apps[appType];
+    if (isRecord3(app)) add(app.providers);
+  }
+  if (isRecord3(settings[appType])) {
+    add(settings[appType].providers);
+    add(settings[appType]);
+  }
+  add(settings[`${appType}Providers`]);
+  return values.filter((value) => {
+    if (!isRecord3(value)) return false;
+    const type = string(value.app_type) ?? string(value.appType);
+    return !type || type === appType;
+  });
+}
+function parseSelectedConfig(record, codexHome) {
+  const configText = settingsConfigText(record.settingsConfig);
+  if (!configText) {
+    throw new CcSwitchProviderError(
+      "config-invalid",
+      `cc-switch provider ${record.id} \u7F3A\u5C11 settings_config.config TOML`
+    );
+  }
+  const config = parseCodexConfigSummary(configText);
+  const activeConfig = codexHome ? parseCodexConfigSummary(readConfigTextSync(join26(codexHome, "config.toml"))) : void 0;
+  return { config, ...activeConfig ? { activeConfig } : {} };
+}
+function resolveCredential(providerId, provider, settingsConfig, configText) {
+  const envKey = provider.envKey?.trim() || DEFAULT_CODEX_ENV_KEY;
+  const candidates = [
+    ...credentialCandidates(settingsConfig),
+    {
+      path: `model_providers.${providerId}.experimental_bearer_token`,
+      value: provider.bearerToken
+    },
+    {
+      path: `config.model_providers.${providerId}.experimental_bearer_token`,
+      value: configText ? extractConfigBearerToken(configText, providerId) : void 0
+    }
+  ];
+  const exact = candidates.find(
+    (item) => item.value?.trim() && (item.path.endsWith(`.${envKey}`) || item.path.endsWith(".OPENAI_API_KEY") || item.path.includes("experimental_bearer_token"))
+  );
+  const generic = exact ?? candidates.find(
+    (item) => item.value?.trim() && /(?:api[_-]?key|bearer|auth[_-]?token|access[_-]?token)$/iu.test(item.path)
+  );
+  if (generic?.value?.trim()) {
+    return {
+      envKey,
+      value: generic.value.trim(),
+      status: "present",
+      sourcePath: generic.path,
+      credentials: { [envKey]: generic.value.trim() },
+      envHttpHeaders: { ...provider.envHttpHeaders ?? {} }
+    };
+  }
+  const auth = isRecord3(settingsConfig.auth) ? settingsConfig.auth : {};
+  const oauthTokenNames = isRecord3(auth.tokens) ? Object.keys(auth.tokens) : [];
+  const oauthOnly = oauthTokenNames.length > 0 && oauthTokenNames.some((name) => /(?:access|refresh|id)_?token/iu.test(name)) && (auth.auth_mode === "chatgpt" || auth.authMode === "chatgpt" || auth.auth_mode === void 0 && auth.authMode === void 0);
+  return {
+    envKey,
+    status: oauthOnly ? "oauth-only" : "missing",
+    sourcePath: oauthOnly ? "settings_config.auth.tokens" : null,
+    credentials: {},
+    envHttpHeaders: { ...provider.envHttpHeaders ?? {} }
+  };
+}
+function credentialCandidates(settingsConfig) {
+  const result = [];
+  const walk = (value, path, depth) => {
+    if (depth > 4 || !isRecord3(value)) return;
+    for (const [key, child] of Object.entries(value)) {
+      const childPath = `${path}.${key}`;
+      if (typeof child === "string") {
+        if (/(?:api[_-]?key|bearer|auth[_-]?token)$/iu.test(key) || /^(?:OPENAI|ANTHROPIC)_API_KEY$/u.test(key) || key === "OPENAI_API_KEY") {
+          result.push({ path: childPath, value: child });
+        }
+      } else if (isRecord3(child)) {
+        walk(child, childPath, depth + 1);
+      }
+    }
+  };
+  walk(settingsConfig.auth, "settings_config.auth", 0);
+  walk(settingsConfig.env, "settings_config.env", 0);
+  return result;
+}
+function findCredentialValue(settingsConfig, names) {
+  for (const candidate of credentialCandidates(settingsConfig)) {
+    const key = candidate.path.split(".").at(-1);
+    if (key && names.includes(key) && candidate.value?.trim()) {
+      return { value: candidate.value.trim(), path: candidate.path };
+    }
+  }
+  return void 0;
+}
+function settingsConfigText(settingsConfig) {
+  const config = settingsConfig.config;
+  if (typeof config === "string") return config;
+  return void 0;
+}
+function extractConfigBearerToken(configText, providerId) {
+  const summary = parseCodexConfigSummary(configText);
+  return summary.providers.get(providerId)?.bearerToken;
+}
+function normalizeBaseUrl(value, providerId, requiresOpenAiAuth) {
+  const candidate = value?.trim() || (["openai", "codex"].includes(providerId.toLowerCase()) || requiresOpenAiAuth === true ? "https://api.openai.com/v1" : void 0);
+  if (!candidate) {
+    throw new CcSwitchProviderError(
+      "base-url-missing",
+      `cc-switch provider ${providerId} \u7F3A\u5C11 base_url\uFF0C\u4E14\u6CA1\u6709\u53EF\u7528\u7684 provider_endpoints`
+    );
+  }
+  let url;
+  try {
+    url = new URL(candidate);
+  } catch {
+    throw new CcSwitchProviderError("endpoint-invalid", "cc-switch provider base_url \u65E0\u6548");
+  }
+  if (url.username || url.password) {
+    throw new CcSwitchProviderError(
+      "endpoint-invalid",
+      "cc-switch provider base_url \u4E0D\u80FD\u5305\u542B\u7528\u6237\u540D\u6216\u5BC6\u7801"
+    );
+  }
+  if (url.search || url.hash) {
+    throw new CcSwitchProviderError(
+      "endpoint-invalid",
+      "cc-switch provider base_url \u4E0D\u80FD\u5305\u542B\u67E5\u8BE2\u53C2\u6570\u6216\u7247\u6BB5\uFF0C\u907F\u514D\u628A\u51ED\u636E\u5199\u5165 Broker \u914D\u7F6E"
+    );
+  }
+  const localHttp = url.protocol === "http:" && ["localhost", "127.0.0.1", "::1"].includes(url.hostname);
+  if (url.protocol !== "https:" && !localHttp) {
+    throw new CcSwitchProviderError(
+      "endpoint-invalid",
+      "cc-switch provider base_url \u5FC5\u987B\u4F7F\u7528 HTTPS\uFF08\u56DE\u73AF\u6D4B\u8BD5\u5730\u5740\u9664\u5916\uFF09"
+    );
+  }
+  return url.toString().replace(/\/$/u, "");
+}
+function chooseEndpoint(urls) {
+  const unique = [...new Set(urls.map((url) => url.trim()).filter(Boolean))];
+  return unique.length === 1 ? unique[0] : void 0;
+}
+function configMismatches(selected, active2, providerId) {
+  if (!active2) return ["active-codex-config-unavailable"];
+  const mismatches = [];
+  if (selected.model && active2.model && selected.model !== active2.model) {
+    mismatches.push(`model:${active2.model}->${selected.model}`);
+  }
+  if (selected.modelProvider && active2.modelProvider && selected.modelProvider !== active2.modelProvider) {
+    mismatches.push(`provider:${active2.modelProvider}->${selected.modelProvider}`);
+  }
+  const selectedBase = selected.providers.get(providerId)?.baseUrl;
+  const activeProviderId = active2.modelProvider ?? providerId;
+  const activeBase = active2.providers.get(activeProviderId)?.baseUrl;
+  if (selectedBase && activeBase && selectedBase !== activeBase) {
+    mismatches.push("base_url");
+  }
+  return mismatches;
+}
+function ccSwitchRouteId(summary) {
+  const id = summary.id.replace(/[^A-Za-z0-9_-]/gu, "-").slice(0, 30);
+  return `ccswitch-${id}-${summary.configFingerprint.slice(0, 10)}`.slice(0, 64);
+}
+function normalizeReasoningEffort(value) {
+  return ["low", "medium", "high", "xhigh", "max", "ultra"].includes(value) ? value : void 0;
+}
+function safeHostname(value) {
+  try {
+    return new URL(value).hostname;
+  } catch {
+    return null;
+  }
+}
+async function readSettingsJson(path) {
+  try {
+    return parseJsonRecord(await readFile15(path, "utf8"), path);
+  } catch {
+    return void 0;
+  }
+}
+function readConfigTextSync(path) {
+  try {
+    return readFileSync6(path, "utf8");
+  } catch {
+    return "";
+  }
+}
+function parseJsonRecord(raw, label) {
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new CcSwitchProviderError(
+      "config-invalid",
+      `${label} \u4E0D\u662F\u6709\u6548 JSON`
+    );
+  }
+  if (!isRecord3(parsed)) {
+    throw new CcSwitchProviderError("config-invalid", `${label} \u5FC5\u987B\u662F JSON object`);
+  }
+  return parsed;
+}
+function safeCcSwitchError(error) {
+  return (error instanceof Error ? error.message : String(error)).replace(/sk-[A-Za-z0-9_-]{8,}/gu, "sk-[REDACTED]").replace(/Bearer\s+\S+/giu, "Bearer [REDACTED]");
+}
+function string(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : void 0;
+}
+function isRecord3(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+// src/integrations/broker-routes.ts
+import { chmod as chmod7, mkdir as mkdir17, readFile as readFile16 } from "fs/promises";
+import { homedir as homedir9 } from "os";
+import { dirname as dirname17, join as join27 } from "path";
 function brokerRoutesPath(env = process.env) {
-  const configHome = env.XDG_CONFIG_HOME?.trim() || join26(homedir8(), ".config");
-  return join26(configHome, "arg-bridge", "broker-routes.json");
+  const configHome = env.XDG_CONFIG_HOME?.trim() || join27(homedir9(), ".config");
+  return join27(configHome, "arg-bridge", "broker-routes.json");
 }
 async function loadBrokerRouteMap(env = process.env) {
   const path = brokerRoutesPath(env);
   let raw;
   try {
-    raw = await readFile15(path, "utf8");
+    raw = await readFile16(path, "utf8");
   } catch (error) {
     if (error.code === "ENOENT") return { path };
     return { path, error: `\u65E0\u6CD5\u8BFB\u53D6 ${path}: ${errorMessage4(error)}` };
@@ -13351,10 +14108,10 @@ function parseBrokerRouteMap(input) {
 async function saveBrokerRouteMap(config, env = process.env) {
   const path = brokerRoutesPath(env);
   const checked = parseBrokerRouteMap(config);
-  await mkdir16(dirname17(path), { recursive: true, mode: 448 });
+  await mkdir17(dirname17(path), { recursive: true, mode: 448 });
   await writeFileAtomic(path, `${JSON.stringify(checked, null, 2)}
 `, { mode: 384 });
-  await chmod6(path, 384).catch(() => {
+  await chmod7(path, 384).catch(() => {
   });
   return path;
 }
@@ -13380,7 +14137,8 @@ function errorMessage4(error) {
 }
 
 // src/agent/subagents/mixagents.ts
-import { createRequire } from "module";
+import { createRequire as createRequire2 } from "module";
+import { isAbsolute as isAbsolute4 } from "path";
 
 // src/agent/subagents/mcp-client.ts
 import { createInterface as createInterface5 } from "readline";
@@ -13481,14 +14239,14 @@ var McpStdioClient = class _McpStdioClient {
     if (this.closedError) return Promise.reject(this.closedError);
     if (signal?.aborted) return Promise.reject(abortError());
     const id = `arg-bridge-${this.nextId++}`;
-    return new Promise((resolve8, reject4) => {
+    return new Promise((resolve9, reject4) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         this.notify("notifications/cancelled", { requestId: id, reason: "timeout" });
         reject4(new McpRequestError(void 0, `${method} timed out after ${timeoutMs}ms`));
       }, timeoutMs);
       timer.unref?.();
-      const pending = { resolve: resolve8, reject: reject4, timer };
+      const pending = { resolve: resolve9, reject: reject4, timer };
       if (signal) {
         const onAbort = () => {
           this.pending.delete(id);
@@ -13573,7 +14331,7 @@ function redactSecrets(value) {
 }
 
 // src/agent/subagents/types.ts
-import { createHash as createHash4 } from "crypto";
+import { createHash as createHash5 } from "crypto";
 var SubagentUnavailableError = class extends Error {
   constructor(code, message, details) {
     super(message);
@@ -13593,7 +14351,7 @@ var SubagentAgentNotFoundError = class extends Error {
   agentId;
 };
 function subagentRouteFingerprint(route) {
-  return createHash4("sha256").update(JSON.stringify({
+  return createHash5("sha256").update(JSON.stringify({
     id: route.id,
     provider: route.provider,
     model: route.model,
@@ -13617,10 +14375,11 @@ var REQUIRED_TOOLS = [
 ];
 var WAIT_REQUEST_MS = 12e4;
 var DEFAULT_TOTAL_WAIT_MS = 15 * 6e4;
-var require2 = createRequire(import.meta.url);
+var require3 = createRequire2(import.meta.url);
 var MixAgentsBrokerBackend = class {
-  constructor(config, env = process.env) {
+  constructor(config, env = process.env, runtime) {
     this.config = config;
+    this.runtime = runtime;
     this.env = env;
     const launch = resolveMixAgentsLaunchConfig(config, env);
     if (!launch) {
@@ -13633,6 +14392,7 @@ var MixAgentsBrokerBackend = class {
     this.timeoutMs = 3e4;
   }
   config;
+  runtime;
   id = "mixagents";
   client;
   launch;
@@ -13643,8 +14403,8 @@ var MixAgentsBrokerBackend = class {
     const client = await this.ensureClient();
     const result = await client.callTool("routes", {}, { timeoutMs: 3e4, signal });
     const raw = Array.isArray(result.routes) ? result.routes : [];
-    return raw.flatMap((entry) => {
-      if (!isRecord3(entry)) return [];
+    const routes = raw.flatMap((entry) => {
+      if (!isRecord4(entry)) return [];
       const id = stringValue2(entry.id);
       const provider = stringValue2(entry.provider);
       const model = stringValue2(entry.model);
@@ -13663,15 +14423,21 @@ var MixAgentsBrokerBackend = class {
         default: entry.default === true,
         ...stringValue2(entry.selectionReason) ? { selectionReason: stringValue2(entry.selectionReason) } : {},
         ...stringValue2(entry.revision) ? { revision: stringValue2(entry.revision) } : {},
-        ...stringValue2(entry.targetFingerprint) ? { targetFingerprint: stringValue2(entry.targetFingerprint) } : {}
+        ...stringValue2(entry.targetFingerprint) ? { targetFingerprint: stringValue2(entry.targetFingerprint) } : {},
+        ...stringValue2(entry.ccSwitchProviderId) ? { ccSwitchProviderId: stringValue2(entry.ccSwitchProviderId) } : {},
+        ...entry.source === "cc-switch" || entry.source === "broker-config" ? { source: entry.source } : {}
       }];
     });
+    return mergeRuntimeRoutes(routes, this.runtime?.route);
   }
   get serverVersion() {
     return this.client?.serverVersion;
   }
   get launchConfig() {
     return this.launch;
+  }
+  get runtimeFingerprint() {
+    return this.runtime?.fingerprint;
   }
   async createOrReuse(input) {
     if (input.access !== "read-only") {
@@ -13754,7 +14520,9 @@ var MixAgentsBrokerBackend = class {
   }
   async ensureClient() {
     if (this.client) return this.client;
-    if (this.launch.credentialMode === "mixagents-managed") {
+    if (this.runtime) {
+      validateRuntimeOverrides(this.runtime);
+    } else if (this.launch.credentialMode === "mixagents-managed") {
       if (!this.launch.credentialProvider?.trim()) {
         throw new SubagentUnavailableError(
           "mixagents-not-configured",
@@ -13773,7 +14541,13 @@ var MixAgentsBrokerBackend = class {
     }
     try {
       const childEnv = { ...this.env };
-      if (this.launch.credentialMode === "mixagents-managed") {
+      if (this.runtime) {
+        childEnv.MIXAGENTS_BROKER_CONFIG = this.runtime.brokerConfigPath;
+        childEnv.MIXAGENTS_BROKER_CREDENTIALS_JSON = JSON.stringify(this.runtime.credentials);
+        if (this.runtime.route?.tags.includes("third-party")) {
+          stripLoopbackProxyEnvironment(childEnv);
+        }
+      } else if (this.launch.credentialMode === "mixagents-managed") {
         childEnv.MIXAGENTS_CREDENTIAL_PROVIDER = this.launch.credentialProvider;
         childEnv.MIXAGENTS_CREDENTIAL_SOURCE = "cc-switch";
       }
@@ -13809,6 +14583,70 @@ var MixAgentsBrokerBackend = class {
     return this.client;
   }
 };
+function validateRuntimeOverrides(runtime) {
+  if (!isAbsolute4(runtime.brokerConfigPath) || !runtime.fingerprint.trim()) {
+    throw new SubagentUnavailableError(
+      "mixagents-not-configured",
+      "\u81EA\u52A8 cc-switch Broker runtime \u914D\u7F6E\u65E0\u6548"
+    );
+  }
+  for (const [name, value] of Object.entries(runtime.credentials)) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name) || !value) {
+      throw new SubagentUnavailableError(
+        "mixagents-not-configured",
+        "\u81EA\u52A8 cc-switch Broker \u51ED\u636E\u5B57\u6BB5\u65E0\u6548\uFF08\u53EA\u663E\u793A\u5B57\u6BB5\u540D\uFF09",
+        { environmentNames: Object.keys(runtime.credentials) }
+      );
+    }
+  }
+}
+function stripLoopbackProxyEnvironment(env) {
+  for (const key of [
+    "http_proxy",
+    "https_proxy",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "all_proxy",
+    "ALL_PROXY"
+  ]) {
+    const value = env[key];
+    if (!value) continue;
+    try {
+      const host = new URL(value.includes("://") ? value : `http://${value}`).hostname.toLowerCase();
+      if (host === "localhost" || host === "127.0.0.1" || host === "::1") {
+        delete env[key];
+      }
+    } catch {
+      delete env[key];
+    }
+  }
+}
+function mergeRuntimeRoutes(routes, runtimeRoute) {
+  if (!runtimeRoute) return routes;
+  const actual = routes.find((route) => route.id === runtimeRoute.id);
+  if (!actual) {
+    throw new SubagentUnavailableError(
+      "route-unavailable",
+      `MixAgents \u6CA1\u6709\u8FD4\u56DE cc-switch runtime \u751F\u6210\u7684 route ${runtimeRoute.id}\uFF1B\u4E3A\u907F\u514D\u628A\u4EFB\u52A1\u53D1\u7ED9\u9519\u8BEF\u6A21\u578B\uFF0C\u5DF2\u505C\u6B62 subagent\u3002`,
+      { expectedRoute: runtimeRoute.id, returnedRoutes: routes.map((route) => route.id) }
+    );
+  }
+  if (actual.provider !== runtimeRoute.provider || actual.model !== runtimeRoute.model) {
+    throw new SubagentUnavailableError(
+      "route-unavailable",
+      `MixAgents route ${runtimeRoute.id} \u4E0E cc-switch \u914D\u7F6E\u4E0D\u5339\u914D\uFF1Aexpected=${runtimeRoute.provider}/${runtimeRoute.model} actual=${actual.provider}/${actual.model}`
+    );
+  }
+  return routes.map((route) => route.id !== runtimeRoute.id ? route : {
+    ...route,
+    ...runtimeRoute.description ? { description: runtimeRoute.description } : {},
+    tags: [.../* @__PURE__ */ new Set([...route.tags, ...runtimeRoute.tags])],
+    ...runtimeRoute.revision ? { revision: runtimeRoute.revision } : {},
+    ...runtimeRoute.targetFingerprint ? { targetFingerprint: runtimeRoute.targetFingerprint } : {},
+    ...runtimeRoute.ccSwitchProviderId ? { ccSwitchProviderId: runtimeRoute.ccSwitchProviderId } : {},
+    ...runtimeRoute.source ? { source: runtimeRoute.source } : {}
+  });
+}
 function resolveMixAgentsLaunchConfig(config, env = process.env) {
   const explicit = config.mixagents;
   if (explicit?.mcpCommand?.trim()) {
@@ -13825,7 +14663,7 @@ function resolveMixAgentsLaunchConfig(config, env = process.env) {
   if (descriptor?.trim()) {
     try {
       const parsed = JSON.parse(descriptor);
-      if (!isRecord3(parsed) || typeof parsed.command !== "string" || !parsed.command.trim()) {
+      if (!isRecord4(parsed) || typeof parsed.command !== "string" || !parsed.command.trim()) {
         return void 0;
       }
       return {
@@ -13847,7 +14685,7 @@ function resolveMixAgentsLaunchConfig(config, env = process.env) {
     };
   }
   try {
-    const server = require2.resolve("mixagents-broker/dist/server.js");
+    const server = require3.resolve("mixagents-broker/dist/server.js");
     return {
       command: process.execPath,
       args: [server]
@@ -13880,7 +14718,7 @@ function agentFromSnapshot(value, fallback) {
 }
 function firstAgent(value) {
   if (!Array.isArray(value.agents)) return void 0;
-  return value.agents.find(isRecord3);
+  return value.agents.find(isRecord4);
 }
 function sideStatus(value) {
   return value === "starting" || value === "running" || value === "completed" || value === "failed" || value === "interrupted" || value === "not_found" || value === "timeout" || value === "closed" ? value : "running";
@@ -13915,7 +14753,7 @@ function abortError2() {
   error.name = "AbortError";
   return error;
 }
-function isRecord3(value) {
+function isRecord4(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function stringValue2(value) {
@@ -13938,6 +14776,8 @@ function errorMessage5(error) {
 }
 
 // src/agent/subagents/registry.ts
+import { homedir as homedir10 } from "os";
+import { join as join28 } from "path";
 async function resolveSubagents(input) {
   const env = input.env ?? process.env;
   const config = input.subagents ?? DEFAULT_SUBAGENT_CONFIG;
@@ -13952,19 +14792,50 @@ async function resolveSubagents(input) {
     return { ...base, kind: "off", routes: [] };
   }
   if (config.mode === "fork") {
+    await assertNativeForkAllowed(input, config, env);
     return { ...base, kind: "fork", routes: [] };
   }
   let backend;
   let routes = [];
+  let runtime;
   try {
-    backend = new MixAgentsBrokerBackend(config, env);
+    if (config.routeMode === "follow-cc-switch" && (input.stateDir || input.parentProviderId || config.ccSwitchProviderId)) {
+      const generated = await materializeCcSwitchBrokerRuntime({
+        env,
+        ...input.codexHome ? { codexHome: input.codexHome } : {},
+        ...input.parentProviderId ? { parentProviderId: input.parentProviderId } : {},
+        ...config.ccSwitchProviderId ? { providerId: config.ccSwitchProviderId } : {},
+        cwd: input.cwd,
+        codexBin: input.codexBin ?? env.CODEX_BINARY?.trim() ?? "codex",
+        stateDir: input.stateDir ?? defaultGeneratedRuntimeDir(env)
+      });
+      runtime = {
+        brokerConfigPath: generated.brokerConfigPath,
+        credentials: generated.credentials,
+        fingerprint: generated.fingerprint,
+        route: generated.route
+      };
+    }
+    backend = new MixAgentsBrokerBackend(config, env, runtime);
     routes = await backend.listRoutes(input.signal);
+    routes = mergeRuntimeRoutes(routes, runtime?.route);
   } catch (error) {
     const message = errorMessage6(error);
+    await backend?.closeBackend?.().catch(() => {
+    });
     const unavailable = error instanceof SubagentUnavailableError ? error : new SubagentUnavailableError(
       "mixagents-start-failed",
       `MixAgents \u542F\u52A8\u6216\u8DEF\u7531\u8BFB\u53D6\u5931\u8D25\uFF1A${message}`
     );
+    if (config.routeMode === "follow-cc-switch" && (input.stateDir || input.parentProviderId || config.ccSwitchProviderId)) {
+      await backend?.closeBackend?.().catch(() => {
+      });
+      throw new SubagentUnavailableError(
+        "mixagents-not-configured",
+        `\u5F53\u524D cc-switch provider \u7684 Broker runtime \u4E0D\u53EF\u7528\uFF1A${message}`,
+        error instanceof CcSwitchProviderError ? { code: error.code } : void 0
+      );
+    }
     if (config.mode === "broker") throw unavailable;
     if (!config.allowForkFallback) {
       throw new SubagentUnavailableError(
@@ -13972,6 +14843,7 @@ async function resolveSubagents(input) {
         `MixAgents \u4E0D\u53EF\u7528\uFF0C\u4E14\u5DF2\u7981\u7528 fork fallback\uFF1A${message}`
       );
     }
+    await assertNativeForkAllowed(input, config, env);
     log.warn("agent", "subagent-fallback-fork", { reason: message });
     return {
       ...base,
@@ -13991,15 +14863,27 @@ async function resolveSubagents(input) {
   });
   if (!selection.route) {
     const message = selection.error ?? "\u6CA1\u6709\u53EF\u7528\u7684 MixAgents read route";
-    if (config.mode === "broker" || config.routeMode === "manual" || input.requestedRoute) {
+    if (config.mode === "broker" || config.routeMode === "manual" || input.requestedRoute || config.routeMode === "follow-cc-switch" && (input.stateDir || input.parentProviderId || config.ccSwitchProviderId)) {
+      await backend?.closeBackend?.().catch(() => {
+      });
       throw new SubagentUnavailableError("route-unavailable", message, {
         routes: routes.map((route) => ({ id: route.id, available: route.available }))
       });
     }
     if (!config.allowForkFallback) {
+      await backend?.closeBackend?.().catch(() => {
+      });
       throw new SubagentUnavailableError("route-unavailable", message);
     }
-    await backend.closeBackend?.();
+    try {
+      await assertNativeForkAllowed(input, config, env);
+    } catch (error) {
+      await backend?.closeBackend?.().catch(() => {
+      });
+      throw error;
+    }
+    await backend.closeBackend?.().catch(() => {
+    });
     log.warn("agent", "subagent-fallback-fork", { reason: message });
     return {
       ...base,
@@ -14012,17 +14896,8 @@ async function resolveSubagents(input) {
   if (!selection.route.available) {
     const missing = selection.route.missingEnvironment.length > 0 ? `\uFF08\u7F3A\u5C11\u73AF\u5883\u53D8\u91CF\uFF1A${selection.route.missingEnvironment.join(", ")}\uFF09` : "";
     const message = `MixAgents route ${selection.route.id} \u4E0D\u53EF\u7528${missing}`;
-    if (config.mode === "auto" && config.routeMode === "follow-cc-switch" && !input.requestedRoute && config.allowForkFallback) {
-      await backend.closeBackend?.();
-      log.warn("agent", "subagent-fallback-fork", { reason: message });
-      return {
-        ...base,
-        kind: "fork",
-        routes,
-        notice: `${message}\uFF0C\u5DF2\u964D\u7EA7\u5230 Codex fork`,
-        error: message
-      };
-    }
+    await backend.closeBackend?.().catch(() => {
+    });
     throw new SubagentUnavailableError("route-unavailable", message);
   }
   return {
@@ -14032,6 +14907,10 @@ async function resolveSubagents(input) {
     route: selection.route,
     routes
   };
+}
+function defaultGeneratedRuntimeDir(env) {
+  const stateHome = env.XDG_STATE_HOME?.trim() || join28(homedir10(), ".local", "state");
+  return join28(stateHome, "arg-bridge", "cc-switch-runtime");
 }
 function selectSubagentRoute(input) {
   const access3 = input.access ?? "read-only";
@@ -14049,14 +14928,19 @@ function selectSubagentRoute(input) {
     const route2 = input.routes.find((item) => item.id === configured);
     return route2 && (access3 === "read-only" || route2.maxAccess === "workspace-write") ? { route: route2 } : { error: `\u624B\u52A8\u914D\u7F6E\u7684 MixAgents ${access3} route \u4E0D\u5B58\u5728\u6216\u4E0D\u652F\u6301\u8BE5\u6743\u9650\uFF1A${configured}` };
   }
+  const expectedProvider = input.config.ccSwitchProviderId ?? input.ccSwitch.currentProviderCodex;
+  const automatic = input.routes.find(
+    (route2) => route2.source === "cc-switch" && (!expectedProvider || route2.ccSwitchProviderId === expectedProvider) && (access3 === "read-only" || route2.maxAccess === "workspace-write")
+  );
+  if (automatic) return { route: automatic };
   const mapped = resolveRouteForProvider(
     input.routeMap,
-    input.ccSwitch.currentProviderCodex,
+    input.config.ccSwitchProviderId ?? input.ccSwitch.currentProviderCodex,
     access3
   );
   if (!mapped.routeId) {
     return {
-      error: input.ccSwitch.currentProviderCodex ? `cc-switch \u5F53\u524D provider ${input.ccSwitch.currentProviderCodex} \u6CA1\u6709 ${access3} route \u6620\u5C04` : access3 === "workspace-write" ? "\u65E0\u6CD5\u786E\u5B9A cc-switch \u5F53\u524D provider\uFF0C\u4E14\u6CA1\u6709 defaultWriteRoute" : "\u65E0\u6CD5\u786E\u5B9A cc-switch \u5F53\u524D provider\uFF0C\u4E14\u6CA1\u6709 defaultReadRoute"
+      error: expectedProvider ? `cc-switch provider ${expectedProvider} \u6CA1\u6709 ${access3} route \u6620\u5C04` : access3 === "workspace-write" ? "\u65E0\u6CD5\u786E\u5B9A cc-switch \u5F53\u524D provider\uFF0C\u4E14\u6CA1\u6709 defaultWriteRoute" : "\u65E0\u6CD5\u786E\u5B9A cc-switch \u5F53\u524D provider\uFF0C\u4E14\u6CA1\u6709 defaultReadRoute"
     };
   }
   const route = input.routes.find((item) => item.id === mapped.routeId);
@@ -14065,16 +14949,37 @@ function selectSubagentRoute(input) {
 function errorMessage6(error) {
   return error instanceof Error ? error.message : String(error);
 }
+async function assertNativeForkAllowed(input, config, env) {
+  if (!input.stateDir && !input.parentProviderId && !config.ccSwitchProviderId) return;
+  try {
+    const provider = await resolveCurrentCcSwitchCodexProvider({
+      env,
+      ...input.codexHome ? { codexHome: input.codexHome } : {},
+      ...input.parentProviderId ? { parentProviderId: input.parentProviderId } : {},
+      ...config.ccSwitchProviderId ? { providerId: config.ccSwitchProviderId } : {}
+    });
+    if (provider.summary.thirdParty) {
+      throw new SubagentUnavailableError(
+        "route-unavailable",
+        `\u5F53\u524D cc-switch provider ${provider.summary.id} \u662F\u7B2C\u4E09\u65B9 Responses provider\uFF1B\u7981\u6B62 native Codex fork/collaboration fallback\uFF0C\u8BF7\u5148\u4FEE\u590D MixAgents provider \u6216 route\u3002`
+      );
+    }
+  } catch (error) {
+    if (error instanceof SubagentUnavailableError) throw error;
+  }
+}
 
 // src/agent/subagents/broker-tools.ts
-import { createHash as createHash5 } from "crypto";
-import { readFileSync as readFileSync6 } from "fs";
-import { lstat as lstat2, realpath as realpath4 } from "fs/promises";
-import { isAbsolute as isAbsolute4, parse, relative } from "path";
+import { createHash as createHash6 } from "crypto";
+import { readFileSync as readFileSync7 } from "fs";
+import { lstat as lstat2, realpath as realpath5 } from "fs/promises";
+import { isAbsolute as isAbsolute5, parse as parse2, relative } from "path";
 var BROKER_TOOL_VERSION = 1;
 var DEFAULT_BROKER_TOOL_NAMESPACE = "arg_bridge";
 var MAX_TASK_BYTES = 128 * 1024;
 var MAX_RESULT_BYTES = 64 * 1024;
+var MAX_QUEUED_MESSAGES = 16;
+var MAX_QUEUED_BYTES = 256 * 1024;
 var MAX_IDEMPOTENCY_ENTRIES = 256;
 var MAX_WAIT_MS = 60 * 6e4;
 var BrokerToolController = class {
@@ -14093,6 +14998,7 @@ var BrokerToolController = class {
   inFlightCalls = /* @__PURE__ */ new Map();
   backend;
   backendConfigKey;
+  currentRuntime;
   writeChain = Promise.resolve();
   workerTimers = /* @__PURE__ */ new Map();
   restoredTimeoutsArmed = false;
@@ -14108,7 +15014,7 @@ var BrokerToolController = class {
       "- Do not report delegated work as complete until wait_agent has returned the relevant worker result or an explicit terminal status.",
       `- Use ${namespace}.list_agents / ${namespace}.interrupt_agent / ${namespace}.close_agent to inspect or stop workers, and ${namespace}.list_routes before choosing a non-default route.`,
       "- Task text passed to spawn_agent or followup_task is delivered as ordinary user input. Do not depend on native agent_message, encrypted_content, or a Codex child thread.",
-      `- ${namespace}.send_message is queue-only semantics. If the Broker cannot prove queue-only delivery, it must return an explicit unsupported error; use followup_task instead.`,
+      `- ${namespace}.send_message is queue-only: it stores plaintext locally and returns without waking the worker. The next ${namespace}.followup_task delivers the queued text and the new task together.`,
       "- Workers are read-only unless this profile enables write workers AND the user authorizes the exact task with `arg-bridge-write --workspace <canonical-path> --task <task>` for this turn. Tool arguments cannot self-grant write access."
     ].join("\n");
   }
@@ -14116,7 +15022,7 @@ var BrokerToolController = class {
     if (this.closed) return failure("Broker tool controller is closed");
     if (signal?.aborted) return failure("Broker tool call aborted");
     try {
-      const record = isRecord4(args) ? args : {};
+      const record = isRecord5(args) ? args : {};
       const idempotencyKey = optionalString(record.idempotency_key, "idempotency_key", 200);
       if (idempotencyKey) {
         const cached = this.completedCalls.get(idempotencyKey);
@@ -14170,9 +15076,7 @@ var BrokerToolController = class {
       case "followup_task":
         return this.followup(args, signal);
       case "send_message":
-        return Promise.resolve(failure(
-          "send_message is not exposed with uncertain semantics: MixAgents MCP `send` may trigger a worker turn. Use followup_task for trigger-turn behavior; queue-only delivery remains unsupported."
-        ));
+        return this.sendMessage(args, signal);
       case "wait_agent":
         return this.wait(args, signal);
       case "list_agents":
@@ -14212,7 +15116,7 @@ var BrokerToolController = class {
     if (access3 === "read-only") {
       const parentWorkspace = await canonicalWorkspace(void 0, this.options.cwd);
       const rel = relative(parentWorkspace, workspace);
-      if (rel.startsWith("..") || isAbsolute4(rel)) {
+      if (rel.startsWith("..") || isAbsolute5(rel)) {
         throw new SubagentUnavailableError(
           "workspace-denied",
           "read-only workers may only access the parent workspace or a subdirectory of it."
@@ -14253,12 +15157,16 @@ var BrokerToolController = class {
     const config = await this.requireConfig();
     const requestedRoute = optionalString(args.route, "route", 64);
     const resolved = await this.resolveRoute(target.access, requestedRoute, signal);
+    const delivery = [...target.queuedMessages, task].join("\n\n");
+    if (Buffer.byteLength(delivery, "utf8") > MAX_TASK_BYTES) {
+      return failure(`followup_task combined task is larger than ${MAX_TASK_BYTES} bytes`);
+    }
     const nextFingerprint = subagentRouteFingerprint(resolved.route);
     if (nextFingerprint !== target.routeFingerprint) {
       await this.closeRecord(target);
       const replacement = await this.createWorker({
         name: target.logicalName,
-        task,
+        task: delivery,
         access: target.access,
         workspace: target.workspace,
         resolved,
@@ -14274,16 +15182,17 @@ var BrokerToolController = class {
       if (!config.allowWriteWorkers) {
         return failure("workspace-write workers are disabled by the current profile");
       }
-      await assertWriteAuthorization(this.writeAuthorization, task, target.workspace);
+      await assertWriteAuthorization(this.writeAuthorization, delivery, target.workspace);
     }
     try {
       target.agent = { ...target.agent, status: "running" };
-      target.task = task;
+      target.task = delivery;
       target.result = void 0;
       target.error = void 0;
       target.updatedAt = Date.now();
       await this.persist();
-      const result = await resolved.backend.send(target.agent, task, signal);
+      const result = await resolved.backend.send(target.agent, delivery, signal);
+      target.queuedMessages = [];
       this.applyResult(target, result);
       await this.persist();
       this.options.onEvent?.(
@@ -14301,7 +15210,7 @@ var BrokerToolController = class {
         this.rebuildAliases();
         const replacement = await this.createWorker({
           name: target.logicalName,
-          task,
+          task: delivery,
           access: target.access,
           workspace: target.workspace,
           resolved,
@@ -14316,6 +15225,32 @@ var BrokerToolController = class {
       throw error;
     }
   }
+  async sendMessage(args, signal) {
+    if (signal.aborted) throw new Error("send_message aborted");
+    const target = await this.resolveWorker(args);
+    const message = requiredString(args.message, "message", MAX_TASK_BYTES);
+    if (target.queuedMessages.length >= MAX_QUEUED_MESSAGES) {
+      return failure(`send_message queue limit reached (${MAX_QUEUED_MESSAGES})`);
+    }
+    const queuedBytes = target.queuedMessages.reduce(
+      (total, item) => total + Buffer.byteLength(item, "utf8"),
+      0
+    );
+    if (queuedBytes + Buffer.byteLength(message, "utf8") > MAX_QUEUED_BYTES) {
+      return failure(`send_message queue exceeds ${MAX_QUEUED_BYTES} bytes`);
+    }
+    target.queuedMessages.push(message);
+    target.updatedAt = Date.now();
+    await this.persist();
+    return success(JSON.stringify({
+      logical_name: target.logicalName,
+      logical_path: target.logicalPath,
+      agent_id: target.agent.agentId,
+      status: "queued",
+      queued_messages: target.queuedMessages.length,
+      mailbox: "Use followup_task to trigger the worker turn; queued text is sent as ordinary input and cleared only after send succeeds."
+    }, null, 2));
+  }
   async wait(args, signal) {
     const targets = this.resolveTargets(args);
     if (targets.length === 0) return failure("wait_agent requires logical_names or agent_ids");
@@ -14326,7 +15261,11 @@ var BrokerToolController = class {
     const combined = AbortSignal.any([signal, timeoutSignal]);
     const results = await Promise.all(targets.map(async (target) => {
       try {
-        const result = await backend.wait(target.agent, combined, requestedTimeout);
+        const result = await (target.backend ?? backend).wait(
+          target.agent,
+          combined,
+          requestedTimeout
+        );
         this.applyResult(target, result);
         this.options.onEvent?.(
           result.status === "completed" ? "worker_completed" : "worker_failed",
@@ -14375,10 +15314,11 @@ var BrokerToolController = class {
     const config = await this.requireConfig();
     const backend = await this.ensureBackend(config);
     const routes = await backend.listRoutes(signal);
+    const visibleRoutes = mergeRuntimeRoutes(routes, this.currentRuntime?.route);
     const ccSwitch = await readCcSwitchState(this.env);
     return success(JSON.stringify({
       configured_main_provider: ccSwitch.currentProviderCodex ?? null,
-      routes: routes.map((route) => ({
+      routes: visibleRoutes.map((route) => ({
         id: route.id,
         provider: route.provider,
         model: route.model,
@@ -14395,9 +15335,10 @@ var BrokerToolController = class {
     const targets = this.resolveTargets(args);
     if (targets.length === 0) return failure(`${close ? "close_agent" : "interrupt_agent"} requires a target`);
     const config = await this.requireConfig();
-    const backend = await this.ensureBackend(config);
+    const defaultBackend = await this.ensureBackend(config);
     const results = [];
     for (const target of targets) {
+      const backend = target.backend ?? defaultBackend;
       try {
         if (close) await backend.close(target.agent, signal);
         else await backend.interrupt(target.agent, signal);
@@ -14426,6 +15367,7 @@ var BrokerToolController = class {
       cwd: input.workspace,
       scope: `${this.options.scope}:${input.name}`,
       access: input.access,
+      ...input.access === "workspace-write" && this.writeAuthorization ? { writeAuthorization: this.writeAuthorization } : {},
       signal: input.signal
     });
     const record = {
@@ -14435,11 +15377,13 @@ var BrokerToolController = class {
       route: input.resolved.route,
       routeFingerprint: subagentRouteFingerprint(input.resolved.route),
       access: input.access,
+      backend: input.resolved.backend,
       workspace: input.workspace,
       scope: this.options.scope,
       task: input.task,
       updatedAt: Date.now(),
-      idempotencyKeys: []
+      idempotencyKeys: [],
+      queuedMessages: []
     };
     this.workers.set(workerKey(input.name), record);
     this.rebuildAliases();
@@ -14463,14 +15407,15 @@ var BrokerToolController = class {
     const [routes, ccSwitch, routeMap] = await Promise.all([
       backend.listRoutes(signal),
       readCcSwitchState(this.env),
-      loadBrokerRouteMap(this.env)
+      config.routeMode === "manual" ? loadBrokerRouteMap(this.env) : Promise.resolve({ path: "", config: void 0 })
     ]);
-    if (routeMap.error) throw new Error(routeMap.error);
+    if ("error" in routeMap && routeMap.error) throw new Error(routeMap.error);
+    const visibleRoutes = mergeRuntimeRoutes(routes, this.currentRuntime?.route);
     const selection = selectSubagentRoute({
       config,
       ccSwitch,
       routeMap: routeMap.config,
-      routes,
+      routes: visibleRoutes,
       requestedRoute,
       access: access3
     });
@@ -14485,7 +15430,7 @@ var BrokerToolController = class {
         `Broker route ${selection.route.id} is unavailable` + (selection.route.missingEnvironment.length ? `; missing environment names: ${selection.route.missingEnvironment.join(", ")}` : "")
       );
     }
-    return { backend, route: selection.route, routes };
+    return { backend, route: selection.route, routes: visibleRoutes };
   }
   async ensureBackend(config) {
     if (!config.enabled || config.mode === "off" || config.mode === "fork") {
@@ -14495,12 +15440,16 @@ var BrokerToolController = class {
       );
     }
     const key = backendConfigKey(config);
+    const runtime = await this.options.runtimeResolver?.();
+    this.currentRuntime = runtime;
+    const runtimeKey = runtime?.fingerprint ?? "broker-config";
     if (this.options.routeResolver && this.backend) return this.backend;
-    if (this.backend && this.backendConfigKey === key) return this.backend;
+    const combinedKey = `${key}:${runtimeKey}`;
+    if (this.backend && this.backendConfigKey === combinedKey) return this.backend;
     if (this.backend) await this.backend.closeBackend?.().catch(() => {
     });
-    this.backend = this.options.backendFactory ? this.options.backendFactory(config, this.env) : new MixAgentsBrokerBackend(config, this.env);
-    this.backendConfigKey = key;
+    this.backend = this.options.backendFactory ? this.options.backendFactory(config, this.env) : new MixAgentsBrokerBackend(config, this.env, runtime);
+    this.backendConfigKey = combinedKey;
     return this.backend;
   }
   async requireConfig() {
@@ -14590,7 +15539,7 @@ var BrokerToolController = class {
     if (previous) clearTimeout(previous);
     const timer = setTimeout(() => {
       if (record.agent.status !== "running" && record.agent.status !== "starting") return;
-      void this.backend?.interrupt(record.agent, AbortSignal.timeout(3e4)).catch(() => {
+      void (record.backend ?? this.backend)?.interrupt(record.agent, AbortSignal.timeout(3e4)).catch(() => {
       });
       record.agent.status = "timeout";
       record.error = `worker timed out after ${config.workerTimeoutMs}ms`;
@@ -14606,7 +15555,7 @@ var BrokerToolController = class {
     if (timer) clearTimeout(timer);
     this.workerTimers.delete(record.logicalPath);
     const config = await this.requireConfig();
-    const backend = await this.ensureBackend(config);
+    const backend = record.backend ?? await this.ensureBackend(config);
     await backend.interrupt(record.agent, AbortSignal.timeout(3e4)).catch(() => {
     });
     await backend.close(record.agent, AbortSignal.timeout(3e4)).catch(() => {
@@ -14651,7 +15600,8 @@ var BrokerToolController = class {
       if (!worker?.logicalName || !worker.logicalPath || !worker.agent?.agentId || !worker.route?.id || !worker.workspace) continue;
       this.workers.set(workerKey(worker.logicalName), {
         ...worker,
-        idempotencyKeys: Array.isArray(worker.idempotencyKeys) ? worker.idempotencyKeys : []
+        idempotencyKeys: Array.isArray(worker.idempotencyKeys) ? worker.idempotencyKeys : [],
+        queuedMessages: Array.isArray(worker.queuedMessages) ? worker.queuedMessages.filter((message) => typeof message === "string") : []
       });
     }
     for (const [key, value] of Object.entries(parsed.completedCalls ?? {})) {
@@ -14664,7 +15614,7 @@ var BrokerToolController = class {
   async persist() {
     const body = {
       version: 1,
-      workers: [...this.workers.values()],
+      workers: [...this.workers.values()].map(({ backend: _backend, ...worker }) => worker),
       completedCalls: Object.fromEntries(this.completedCalls)
     };
     const snapshot = `${JSON.stringify(body, null, 2)}
@@ -14728,7 +15678,7 @@ function brokerToolSpecs(namespace = DEFAULT_BROKER_TOOL_NAMESPACE) {
       {
         type: "function",
         name: "send_message",
-        description: "Queue-only send. Returns explicit unsupported when the backend cannot prove queue-only semantics.",
+        description: "Queue plaintext locally without waking the worker; the next followup_task delivers it.",
         inputSchema: {
           type: "object",
           properties: { ...target.properties, message: { type: "string" } },
@@ -14845,12 +15795,12 @@ function parseAccess(value) {
 }
 async function canonicalWorkspace(requested, fallback) {
   const value = requested ?? fallback;
-  if (!isAbsolute4(value)) throw new Error("workspace must be an absolute path");
-  const canonical = await realpath4(value).catch(() => void 0);
+  if (!isAbsolute5(value)) throw new Error("workspace must be an absolute path");
+  const canonical = await realpath5(value).catch(() => void 0);
   if (!canonical) throw new Error(`workspace does not exist: ${value}`);
   const info = await lstat2(canonical);
   if (!info.isDirectory()) throw new Error("workspace must be a directory");
-  if (canonical === parse(canonical).root) throw new Error("workspace cannot be a filesystem root");
+  if (canonical === parse2(canonical).root) throw new Error("workspace cannot be a filesystem root");
   return canonical;
 }
 async function assertWriteAuthorization(authorization, task, workspace) {
@@ -14870,7 +15820,7 @@ async function assertWriteAuthorization(authorization, task, workspace) {
     "write_authorization.task",
     MAX_TASK_BYTES
   );
-  const canonical = await realpath4(authorizedWorkspace).catch(() => void 0);
+  const canonical = await realpath5(authorizedWorkspace).catch(() => void 0);
   if (canonical !== workspace || authorizedTask !== task) {
     throw new SubagentUnavailableError(
       "write-not-authorized",
@@ -14902,7 +15852,7 @@ function numberValue2(value, minimum, maximum) {
   return value;
 }
 function backendConfigKey(config) {
-  return createHash5("sha256").update(JSON.stringify(config.mixagents ?? {})).digest("hex");
+  return createHash6("sha256").update(JSON.stringify(config.mixagents ?? {})).digest("hex");
 }
 function safeError(error) {
   return truncate2(redactSecrets(error instanceof Error ? error.message : String(error)), 8e3);
@@ -14916,7 +15866,7 @@ function success(text2) {
 function failure(text2) {
   return { success: false, text: text2 };
 }
-function isRecord4(value) {
+function isRecord5(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 function neverAbortSignal() {
@@ -14924,26 +15874,26 @@ function neverAbortSignal() {
 }
 function readStateFile(path) {
   try {
-    return readFileSync6(path, "utf8");
+    return readFileSync7(path, "utf8");
   } catch {
     return void 0;
   }
 }
 
 // src/integrations/project-rsi.ts
-import { createHash as createHash6 } from "crypto";
-import { lstat as lstat3, mkdtemp, readFile as readFile16, readdir as readdir5, realpath as realpath5, rm as rm13, stat as stat6, writeFile as writeFile9, mkdir as mkdir17 } from "fs/promises";
-import { homedir as homedir9, tmpdir as tmpdir4 } from "os";
-import { dirname as dirname18, isAbsolute as isAbsolute5, join as join27, parse as parse2, relative as relative2, resolve as resolve4 } from "path";
-var CONFIG_RELATIVE_PATH = join27(".project-rsi", "config.json");
-var EVIDENCE_RELATIVE_PATH = join27(".agent", "rsi");
+import { createHash as createHash7 } from "crypto";
+import { lstat as lstat3, mkdtemp, readFile as readFile17, readdir as readdir5, realpath as realpath6, rm as rm13, stat as stat6, writeFile as writeFile9, mkdir as mkdir18 } from "fs/promises";
+import { homedir as homedir11, tmpdir as tmpdir4 } from "os";
+import { dirname as dirname18, isAbsolute as isAbsolute6, join as join29, parse as parse3, relative as relative2, resolve as resolve5 } from "path";
+var CONFIG_RELATIVE_PATH = join29(".project-rsi", "config.json");
+var EVIDENCE_RELATIVE_PATH = join29(".agent", "rsi");
 var MAX_CONFIG_BYTES = 256 * 1024;
 var MAX_MANIFEST_BYTES = 2 * 1024 * 1024;
 async function discoverProjectRsi(cwd, configuredRoot) {
   if (configuredRoot) {
     const root = await canonicalSafeProjectRoot(configuredRoot);
     if (!root) return void 0;
-    const configPath = join27(root, CONFIG_RELATIVE_PATH);
+    const configPath = join29(root, CONFIG_RELATIVE_PATH);
     try {
       return await readProject(root, configPath);
     } catch (error) {
@@ -14951,9 +15901,9 @@ async function discoverProjectRsi(cwd, configuredRoot) {
       throw error;
     }
   }
-  let current = resolve4(cwd);
+  let current = resolve5(cwd);
   for (; ; ) {
-    const configPath = join27(current, CONFIG_RELATIVE_PATH);
+    const configPath = join29(current, CONFIG_RELATIVE_PATH);
     const exists2 = await stat6(configPath).then((info) => info.isFile()).catch(() => false);
     if (!exists2) {
       const parent2 = dirname18(current);
@@ -15015,7 +15965,7 @@ async function projectRsiStatus(config, cwd) {
   const validatorPath = resolveValidatorPath(project, config);
   const validatorState = !validatorPath ? "missing" : !validatorPath.includes("/") ? "unknown" : await isRegularFile(validatorPath) ? "available" : "missing";
   const runnerCommand = config.runnerCommand ?? project.config.runner?.command ?? project.config.runner?.path;
-  const runnerState = !runnerCommand ? "missing" : !runnerCommand.includes("/") ? "unknown" : await isRegularFile(resolve4(project.root, runnerCommand)) ? "available" : "missing";
+  const runnerState = !runnerCommand ? "missing" : !runnerCommand.includes("/") ? "unknown" : await isRegularFile(resolve5(project.root, runnerCommand)) ? "available" : "missing";
   const latest = await latestRsiRun(project);
   return {
     ...base,
@@ -15077,13 +16027,13 @@ async function writeRsiReviewEvidence(runDir, review) {
     access: review.access,
     agentId: review.agentId,
     verdict: redactSecrets(review.verdict).slice(0, 80),
-    responseHash: createHash6("sha256").update(safeResponse).digest("hex"),
+    responseHash: createHash7("sha256").update(safeResponse).digest("hex"),
     response: safeResponse.slice(0, 16e3),
     startedAt: review.startedAt,
     completedAt: review.completedAt
   };
-  const path = join27(runDir, "review.json");
-  await mkdir17(runDir, { recursive: true, mode: 448 });
+  const path = join29(runDir, "review.json");
+  await mkdir18(runDir, { recursive: true, mode: 448 });
   await writeFile9(path, `${JSON.stringify(body, null, 2)}
 `, { mode: 384 });
   return path;
@@ -15134,8 +16084,8 @@ async function runUpstreamRsi(project, task, config, context, signal) {
     };
   }
   if (signal?.aborted) throw abortError3();
-  const tempDir = await mkdtemp(join27(tmpdir4(), "arg-bridge-rsi-run-"));
-  const requestPath = join27(tempDir, "request.json");
+  const tempDir = await mkdtemp(join29(tmpdir4(), "arg-bridge-rsi-run-"));
+  const requestPath = join29(tempDir, "request.json");
   await writeFile9(requestPath, `${JSON.stringify({
     version: 1,
     task: redactSecrets(task).slice(0, 16e3),
@@ -15189,7 +16139,7 @@ async function readProject(root, configPath) {
   if (!safeRoot) throw new Error(`\u4E0D\u5B89\u5168\u7684 Project RSI \u6839\u76EE\u5F55\uFF1A${root}`);
   let parsed;
   try {
-    parsed = JSON.parse(await readFile16(configPath, "utf8"));
+    parsed = JSON.parse(await readFile17(configPath, "utf8"));
   } catch (error) {
     throw new Error(`\u65E0\u6CD5\u89E3\u6790 Project RSI \u914D\u7F6E ${configPath}: ${safeError2(error)}`);
   }
@@ -15198,13 +16148,13 @@ async function readProject(root, configPath) {
   }
   const config = parsed;
   if (config.projectRoot) {
-    const declared = resolve4(safeRoot, config.projectRoot);
-    const canonicalDeclared = await realpath5(declared).catch(() => void 0);
+    const declared = resolve5(safeRoot, config.projectRoot);
+    const canonicalDeclared = await realpath6(declared).catch(() => void 0);
     if (canonicalDeclared !== safeRoot) {
       throw new Error("Project RSI \u914D\u7F6E\u4E2D\u7684 projectRoot \u4E0E\u53D1\u73B0\u76EE\u5F55\u4E0D\u4E00\u81F4");
     }
   }
-  const evidence = typeof config.runsDir === "string" && config.runsDir.trim() ? resolve4(safeRoot, config.runsDir) : join27(safeRoot, EVIDENCE_RELATIVE_PATH, "runs");
+  const evidence = typeof config.runsDir === "string" && config.runsDir.trim() ? resolve5(safeRoot, config.runsDir) : join29(safeRoot, EVIDENCE_RELATIVE_PATH, "runs");
   if (!isWithin(safeRoot, evidence)) throw new Error("Project RSI runsDir \u8D85\u51FA\u9879\u76EE\u6839\u76EE\u5F55");
   return {
     root: safeRoot,
@@ -15215,13 +16165,13 @@ async function readProject(root, configPath) {
 }
 async function canonicalSafeProjectRoot(input) {
   if (!input.trim()) return void 0;
-  const candidate = resolve4(input);
-  if (!isAbsolute5(candidate) || candidate === parse2(candidate).root) return void 0;
-  const canonical = await realpath5(candidate).catch(() => void 0);
+  const candidate = resolve5(input);
+  if (!isAbsolute6(candidate) || candidate === parse3(candidate).root) return void 0;
+  const canonical = await realpath6(candidate).catch(() => void 0);
   if (!canonical) return void 0;
-  const home = resolve4(homedir9());
-  if (canonical === home || canonical === parse2(canonical).root) return void 0;
-  if (dirname18(canonical) === parse2(canonical).root) return void 0;
+  const home = resolve5(homedir11());
+  if (canonical === home || canonical === parse3(canonical).root) return void 0;
+  if (dirname18(canonical) === parse3(canonical).root) return void 0;
   const info = await lstat3(canonical);
   return info.isDirectory() && !info.isSymbolicLink() ? canonical : void 0;
 }
@@ -15236,13 +16186,13 @@ async function listRuns(project) {
   const runs = [];
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
-    const dir = join27(project.evidenceDir, entry.name);
-    const manifestPath = join27(dir, "manifest.json");
+    const dir = join29(project.evidenceDir, entry.name);
+    const manifestPath = join29(dir, "manifest.json");
     const info = await stat6(manifestPath).catch(() => void 0);
     if (!info?.isFile() || info.size > MAX_MANIFEST_BYTES) continue;
     let manifest;
     try {
-      manifest = JSON.parse(await readFile16(manifestPath, "utf8"));
+      manifest = JSON.parse(await readFile17(manifestPath, "utf8"));
     } catch {
       continue;
     }
@@ -15251,12 +16201,12 @@ async function listRuns(project) {
     const manifestRunId = typeof raw.runId === "string" ? raw.runId.trim() : "";
     if (manifestRunId !== entry.name) continue;
     const declaredRoot = typeof raw.projectRoot === "string" ? raw.projectRoot.trim() : typeof raw.project === "object" && raw.project && !Array.isArray(raw.project) ? raw.project.root : void 0;
-    const canonicalDeclared = typeof declaredRoot === "string" && declaredRoot.trim() ? await realpath5(resolve4(project.root, declaredRoot.trim())).catch(() => void 0) : void 0;
+    const canonicalDeclared = typeof declaredRoot === "string" && declaredRoot.trim() ? await realpath6(resolve5(project.root, declaredRoot.trim())).catch(() => void 0) : void 0;
     if (canonicalDeclared !== project.root) {
       continue;
     }
-    const rawManifest = await readFile16(manifestPath, "utf8");
-    const manifestHash = createHash6("sha256").update(rawManifest).digest("hex");
+    const rawManifest = await readFile17(manifestPath, "utf8");
+    const manifestHash = createHash7("sha256").update(rawManifest).digest("hex");
     const receipt = await readValidatorReceipt(dir, entry.name, manifestHash);
     const task = isRecordValue(raw.task);
     const turnContext = isRecordValue(raw.turn);
@@ -15282,11 +16232,11 @@ async function listRuns(project) {
 }
 async function readValidatorReceipt(runDir, runId, manifestHash) {
   for (const name of ["validator.json", "receipt.json"]) {
-    const path = join27(runDir, name);
+    const path = join29(runDir, name);
     const info = await stat6(path).catch(() => void 0);
     if (!info?.isFile()) continue;
     try {
-      const parsed = JSON.parse(await readFile16(path, "utf8"));
+      const parsed = JSON.parse(await readFile17(path, "utf8"));
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
         return { path, passed: false, mtimeMs: info.mtimeMs, reason: "validator receipt \u4E0D\u662F\u5BF9\u8C61" };
       }
@@ -15311,14 +16261,14 @@ async function readValidatorReceipt(runDir, runId, manifestHash) {
       return { path, passed: false, reason: safeError2(error) };
     }
   }
-  return { path: join27(runDir, "validator.json"), passed: false, reason: "\u7F3A\u5C11 validator receipt" };
+  return { path: join29(runDir, "validator.json"), passed: false, reason: "\u7F3A\u5C11 validator receipt" };
 }
 function resolveValidatorPath(project, config) {
   const configured = config.validatorCommand ?? project.config.validator?.path ?? project.config.validator?.command;
   if (configured) {
-    return configured.includes("/") ? resolve4(project.root, configured) : configured;
+    return configured.includes("/") ? resolve5(project.root, configured) : configured;
   }
-  const conventional = join27(project.root, ".project-rsi", "project_rsi.py");
+  const conventional = join29(project.root, ".project-rsi", "project_rsi.py");
   return conventional;
 }
 function runMatchesTurn(run, turn) {
@@ -15352,7 +16302,7 @@ async function isRegularFile(path) {
 }
 function isWithin(root, candidate) {
   const rel = relative2(root, candidate);
-  return rel === "" || !rel.startsWith("..") && !isAbsolute5(rel);
+  return rel === "" || !rel.startsWith("..") && !isAbsolute6(rel);
 }
 function safeError2(error) {
   return redactSecrets(error instanceof Error ? error.message : String(error));
@@ -15790,8 +16740,8 @@ ${p4.command ?? JSON.stringify(p4.changes ?? {})}`,
     for (const event of this.deferredInteractions.splice(0)) {
       if (event.type === "interactive" && event.interaction && this.pending.has(event.interaction.id)) emit2(event);
     }
-    let completion = new Promise((resolve8) => {
-      this.complete = resolve8;
+    let completion = new Promise((resolve9) => {
+      this.complete = resolve9;
     });
     const abort = () => {
       void this.interrupt().catch((error) => this.disconnected(error));
@@ -15808,8 +16758,8 @@ ${p4.command ?? JSON.stringify(p4.changes ?? {})}`,
         if (this.turnId || this.goalActive) {
           await completion;
           if (signal.aborted) return;
-          completion = new Promise((resolve8) => {
-            this.complete = resolve8;
+          completion = new Promise((resolve9) => {
+            this.complete = resolve9;
           });
         }
         this.phase = "submitted";
@@ -15946,8 +16896,8 @@ ${options.prompt}` : options.prompt }];
     const key = String(id);
     let timer;
     try {
-      await new Promise((resolve8, reject4) => {
-        this.acknowledgements.set(key, { resolve: resolve8, reject: reject4 });
+      await new Promise((resolve9, reject4) => {
+        this.acknowledgements.set(key, { resolve: resolve9, reject: reject4 });
         timer = setTimeout(() => reject4(new Error("\u5BA1\u6279\u56DE\u590D\u5C1A\u672A\u83B7\u5F97\u670D\u52A1\u7AEF\u786E\u8BA4\uFF1B\u4E0D\u4F1A\u81EA\u52A8\u91CD\u53D1")), 1e4);
         this.rpc.respond(id, result);
       });
@@ -16080,7 +17030,7 @@ ${options.prompt}` : options.prompt }];
 
 // src/agent/structured/claude.ts
 import { randomUUID as randomUUID2 } from "crypto";
-import { readFile as readFile17 } from "fs/promises";
+import { readFile as readFile18 } from "fs/promises";
 import { extname as extname2 } from "path";
 var ClaudeStructuredSession = class _ClaudeStructuredSession {
   constructor(id, options, query) {
@@ -16096,10 +17046,10 @@ var ClaudeStructuredSession = class _ClaudeStructuredSession {
       canUseTool: async (tool, input, context) => {
         const id2 = context.toolUseID;
         if (tool === "AskUserQuestion" && Array.isArray(input.questions)) return this.askQuestions(id2, input, context.signal);
-        return new Promise((resolve8) => {
+        return new Promise((resolve9) => {
           const cancel3 = () => {
             this.pending.delete(id2);
-            resolve8({ behavior: "deny", message: "\u64CD\u4F5C\u5DF2\u53D6\u6D88" });
+            resolve9({ behavior: "deny", message: "\u64CD\u4F5C\u5DF2\u53D6\u6D88" });
           };
           if (context.signal.aborted) {
             cancel3();
@@ -16108,7 +17058,7 @@ var ClaudeStructuredSession = class _ClaudeStructuredSession {
           context.signal.addEventListener("abort", cancel3, { once: true });
           this.pending.set(id2, { values: /* @__PURE__ */ new Set(["allow", "deny"]), answer: async (value) => {
             context.signal.removeEventListener("abort", cancel3);
-            resolve8(value === "allow" ? { behavior: "allow", updatedInput: input } : { behavior: "deny", message: "\u7528\u6237\u62D2\u7EDD\u6B64\u64CD\u4F5C" });
+            resolve9(value === "allow" ? { behavior: "allow", updatedInput: input } : { behavior: "deny", message: "\u7528\u6237\u62D2\u7EDD\u6B64\u64CD\u4F5C" });
             return [];
           } });
           this.phase = "picker";
@@ -16226,8 +17176,8 @@ ${JSON.stringify(input, null, 2)}`,
     this.streamingMessages.clear();
     this.streamingThinking.clear();
     emit2({ type: "system", sessionId: this.id, cwd: options.cwd });
-    const done = new Promise((resolve8) => {
-      this.complete = resolve8;
+    const done = new Promise((resolve9) => {
+      this.complete = resolve9;
     });
     const abort = () => {
       void this.interrupt().catch((error) => {
@@ -16246,7 +17196,7 @@ ${JSON.stringify(input, null, 2)}`,
       for (const path of options.images ?? []) {
         const mime = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif" }[extname2(path).toLowerCase()];
         if (!mime) throw new Error("Unsupported image format");
-        content.push({ type: "image", source: { type: "base64", media_type: mime, data: await readFile17(path, "base64") } });
+        content.push({ type: "image", source: { type: "base64", media_type: mime, data: await readFile18(path, "base64") } });
       }
       if (signal.aborted) return;
       this.phase = "busy";
@@ -16339,12 +17289,12 @@ ${JSON.stringify(input, null, 2)}`,
   askQuestions(id, input, signal) {
     const questions = input.questions;
     if (!questions.length) return Promise.resolve({ behavior: "deny", message: "\u6CA1\u6709\u53EF\u56DE\u7B54\u7684\u95EE\u9898" });
-    return new Promise((resolve8) => {
+    return new Promise((resolve9) => {
       const ids = questions.map((_, index) => `${id}.q${index}`);
       const answers = {};
       const cancel3 = () => {
         for (const key of ids) this.pending.delete(key);
-        resolve8({ behavior: "deny", message: "\u95EE\u9898\u5DF2\u53D6\u6D88" });
+        resolve9({ behavior: "deny", message: "\u95EE\u9898\u5DF2\u53D6\u6D88" });
       };
       if (signal.aborted) {
         cancel3();
@@ -16358,7 +17308,7 @@ ${JSON.stringify(input, null, 2)}`,
           answers[question.question] = options[Number(value) - 1]?.label ?? value;
           if (Object.keys(answers).length === questions.length) {
             signal.removeEventListener("abort", cancel3);
-            resolve8({ behavior: "allow", updatedInput: { ...input, answers } });
+            resolve9({ behavior: "allow", updatedInput: { ...input, answers } });
           }
           return [];
         } });
@@ -16393,9 +17343,9 @@ ${JSON.stringify(input, null, 2)}`,
 };
 
 // src/agent/structured/view.ts
-import { createHash as createHash7 } from "crypto";
-import { mkdir as mkdir18, appendFile, lstat as lstat4, chmod as chmod7 } from "fs/promises";
-import { join as join28 } from "path";
+import { createHash as createHash8 } from "crypto";
+import { mkdir as mkdir19, appendFile, lstat as lstat4, chmod as chmod8 } from "fs/promises";
+import { join as join30 } from "path";
 var quote = (value) => `'${value.replace(/'/g, `'\\''`)}'`;
 var StructuredView = class {
   constructor(directory, key) {
@@ -16412,12 +17362,12 @@ var StructuredView = class {
   async start(native, cwd) {
     if (native) this.nativeSpec = native;
     if (cwd) this.nativeCwd = cwd;
-    await mkdir18(this.directory, { recursive: true, mode: 448 });
+    await mkdir19(this.directory, { recursive: true, mode: 448 });
     const info = await lstat4(this.directory);
     if (info.isSymbolicLink() || !info.isDirectory() || process.getuid && info.uid !== process.getuid()) throw new Error("Unsafe terminal view directory");
-    await chmod7(this.directory, 448);
-    const name = `argbridge-api-${createHash7("sha256").update(this.key).digest("hex").slice(0, 16)}`;
-    this.logPath = join28(this.directory, `${name}.log`);
+    await chmod8(this.directory, 448);
+    const name = `argbridge-api-${createHash8("sha256").update(this.key).digest("hex").slice(0, 16)}`;
+    this.logPath = join30(this.directory, `${name}.log`);
     await appendFile(this.logPath, "", { mode: 384 });
     if (!native) {
       await appendFile(
@@ -16427,7 +17377,7 @@ var StructuredView = class {
       );
     }
     if (process.platform === "win32" || spawnProcessSync("tmux", ["-V"], { stdio: "ignore" }).status !== 0) return;
-    const socket = join28(this.directory, "view.sock");
+    const socket = join30(this.directory, "view.sock");
     if (Buffer.byteLength(socket) > 100) return;
     const exists2 = spawnProcessSync("tmux", ["-S", socket, "has-session", "-t", name], { stdio: "ignore" });
     if (exists2.status === 0 && native) {
@@ -16457,7 +17407,7 @@ var StructuredView = class {
     if (options.native) this.nativeSpec = options.native;
     if (artifactEnv && Object.keys(artifactEnv).length > 0) {
       const socket = this.statusValue.terminal?.socketPath;
-      const name = `argbridge-api-${createHash7("sha256").update(this.key).digest("hex").slice(0, 16)}`;
+      const name = `argbridge-api-${createHash8("sha256").update(this.key).digest("hex").slice(0, 16)}`;
       if (socket) {
         for (const [key, value] of Object.entries(artifactEnv)) {
           if (value === void 0) continue;
@@ -16530,7 +17480,7 @@ ${event.output}
 
 // src/agent/structured/tmux-discovery.ts
 import { basename as basename6, resolve as resolvePath } from "path";
-import { readFileSync as readFileSync7, readlinkSync as readlinkSync2 } from "fs";
+import { readFileSync as readFileSync8, readlinkSync as readlinkSync2 } from "fs";
 function listStructuredTmuxPanes(socket) {
   return listTmuxAgentPanes(socket).flatMap((pane) => {
     const processArgs = [
@@ -16602,13 +17552,13 @@ function processEnvironmentForPidTree(rootPid) {
   let fallback = {};
   for (const pid of ids) {
     try {
-      const raw = readFileSync7(`/proc/${pid}/environ`, "utf8");
+      const raw = readFileSync8(`/proc/${pid}/environ`, "utf8");
       const env = Object.fromEntries(raw.split("\0").flatMap((item) => {
         const index = item.indexOf("=");
         return index > 0 ? [[item.slice(0, index), item.slice(index + 1)]] : [];
       }));
       if (!Object.keys(fallback).length) fallback = env;
-      const argv = readFileSync7(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
+      const argv = readFileSync8(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
       if (argv.slice(0, 2).some((arg) => basename6(arg) === "codex")) return env;
     } catch {
     }
@@ -16639,7 +17589,7 @@ function processArgvTree(rootPid) {
   return [...ids].flatMap((pid) => {
     if (process.platform === "linux") {
       try {
-        const argv = readFileSync7(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
+        const argv = readFileSync8(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
         if (argv.length) return [argv];
       } catch {
       }
@@ -16664,7 +17614,7 @@ function processArgvForPane(pane) {
     let tmuxMatch = false;
     let cwdMatch = false;
     try {
-      const env = readFileSync7(`/proc/${pid}/environ`, "utf8");
+      const env = readFileSync8(`/proc/${pid}/environ`, "utf8");
       const values = /* @__PURE__ */ new Map();
       for (const item of env.split("\0")) {
         const equals = item.indexOf("=");
@@ -16805,11 +17755,11 @@ async function resolveAppServerSocketPath(candidate) {
   if (!candidate.startsWith("/") || candidate.includes("\0")) {
     throw new Error("App Server endpoint \u4E0D\u5B89\u5168");
   }
-  const requested = resolve5(candidate);
-  const resolvedPath = await realpath6(requested);
+  const requested = resolve6(candidate);
+  const resolvedPath = await realpath7(requested);
   await assertOwnedParents(resolvedPath);
   if (requested !== resolvedPath) {
-    const requestedParent = await realpath6(join29(requested, ".."));
+    const requestedParent = await realpath7(join31(requested, ".."));
     await assertOwnedParents(requestedParent);
   }
   const info = await stat7(resolvedPath);
@@ -16820,15 +17770,15 @@ async function resolveAppServerSocketPath(candidate) {
   return resolvedPath;
 }
 async function assertOwnedParents(target) {
-  let current = join29(target, "..");
+  let current = join31(target, "..");
   for (let level = 0; level < MAX_SOCKET_PARENT_LEVELS; level += 1) {
-    const directory = resolve5(current);
+    const directory = resolve6(current);
     if (directory === "/") return;
     if (trustedSocketParents.has(directory)) return;
     const info = await lstat5(directory);
     if (!isSafeSocketParent(info)) throw new Error("App Server socket \u4E0D\u5B89\u5168");
     trustedSocketParents.add(directory);
-    current = join29(directory, "..");
+    current = join31(directory, "..");
   }
   throw new Error("App Server socket \u4E0D\u5B89\u5168");
 }
@@ -16844,10 +17794,10 @@ var StructuredAdapter = class {
     this.options = options;
     this.id = options.kind;
     this.displayName = options.kind === "codex" ? "Codex App Server" : "Claude Agent SDK";
-    this.bindingsFile = join29(options.profileDir, "structured", "tmux-bindings.json");
-    this.candidatesFile = join29(options.profileDir, "structured", "tmux-candidates.json");
-    this.sidesFile = join29(options.profileDir, "structured", "subagent-sides.json");
-    this.brokerThreadsFile = join29(options.profileDir, "structured", "broker-threads.json");
+    this.bindingsFile = join31(options.profileDir, "structured", "tmux-bindings.json");
+    this.candidatesFile = join31(options.profileDir, "structured", "tmux-candidates.json");
+    this.sidesFile = join31(options.profileDir, "structured", "subagent-sides.json");
+    this.brokerThreadsFile = join31(options.profileDir, "structured", "broker-threads.json");
     this.loadBindings();
     this.loadCandidates();
     this.loadMixagentsSides();
@@ -17038,7 +17988,7 @@ var StructuredAdapter = class {
   }
   loadBindings() {
     try {
-      const parsed = JSON.parse(readFileSync8(this.bindingsFile, "utf8"));
+      const parsed = JSON.parse(readFileSync9(this.bindingsFile, "utf8"));
       if (parsed.version !== 1) return;
       for (const scope of parsed.disabled ?? []) if (typeof scope === "string") this.autoDiscoveryDisabled.add(scope);
       for (const [scope, binding] of Object.entries(parsed.bindings ?? {})) {
@@ -17049,7 +17999,7 @@ var StructuredAdapter = class {
   }
   loadCandidates() {
     try {
-      const parsed = JSON.parse(readFileSync8(this.candidatesFile, "utf8"));
+      const parsed = JSON.parse(readFileSync9(this.candidatesFile, "utf8"));
       if (parsed.version !== 1) return;
       for (const [key, candidate] of Object.entries(parsed.candidates ?? {})) {
         if (candidate?.threadId && candidate.cwd && candidate.target?.socketPath && candidate.target?.sessionName) this.candidates.set(key, candidate);
@@ -17058,12 +18008,12 @@ var StructuredAdapter = class {
     }
   }
   async saveCandidates() {
-    await mkdir19(join29(this.options.profileDir, "structured"), { recursive: true, mode: 448 });
+    await mkdir20(join31(this.options.profileDir, "structured"), { recursive: true, mode: 448 });
     await writeFileAtomic(this.candidatesFile, JSON.stringify({ version: 1, candidates: Object.fromEntries(this.candidates) }, null, 2) + "\n", { mode: 384 });
   }
   loadMixagentsSides() {
     try {
-      const parsed = JSON.parse(readFileSync8(this.sidesFile, "utf8"));
+      const parsed = JSON.parse(readFileSync9(this.sidesFile, "utf8"));
       if (parsed.version !== 1) return;
       for (const [key, side] of Object.entries(parsed.sides ?? {})) {
         if (!side?.agent?.agentId || !side.route?.id || !side.cwd || !side.scope) continue;
@@ -17080,7 +18030,7 @@ var StructuredAdapter = class {
     }
   }
   async saveMixagentsSides() {
-    await mkdir19(join29(this.options.profileDir, "structured"), { recursive: true, mode: 448 });
+    await mkdir20(join31(this.options.profileDir, "structured"), { recursive: true, mode: 448 });
     const sides = Object.fromEntries(
       [...this.mixagentsSides.entries()].map(([key, side]) => [
         key,
@@ -17120,7 +18070,7 @@ var StructuredAdapter = class {
   }
   loadBrokerThreads() {
     try {
-      const parsed = JSON.parse(readFileSync8(this.brokerThreadsFile, "utf8"));
+      const parsed = JSON.parse(readFileSync9(this.brokerThreadsFile, "utf8"));
       if (parsed.version !== 1) return;
       for (const [threadId, value] of Object.entries(parsed.threads ?? {})) {
         if (!threadId || value?.version !== BROKER_TOOL_VERSION || !value.namespace) continue;
@@ -17134,7 +18084,7 @@ var StructuredAdapter = class {
     }
   }
   async saveBrokerThreads() {
-    await mkdir19(join29(this.options.profileDir, "structured"), { recursive: true, mode: 448 });
+    await mkdir20(join31(this.options.profileDir, "structured"), { recursive: true, mode: 448 });
     await writeFileAtomic(
       this.brokerThreadsFile,
       `${JSON.stringify({ version: 1, threads: Object.fromEntries(this.brokerThreads) }, null, 2)}
@@ -17159,15 +18109,37 @@ var StructuredAdapter = class {
       threadId,
       cwd,
       scope,
-      stateFile: join29(
+      stateFile: join31(
         this.options.profileDir,
         "structured",
-        `broker-workers-${createHash8("sha256").update(threadId).digest("hex").slice(0, 24)}.json`
+        `broker-workers-${createHash9("sha256").update(threadId).digest("hex").slice(0, 24)}.json`
       ),
       env: this.options.env ?? process.env,
       namespace,
-      getConfig: () => this.currentSubagentsConfig()
+      getConfig: () => this.currentSubagentsConfig(),
+      runtimeResolver: async () => {
+        const config = await this.currentSubagentsConfig();
+        return this.autoBrokerRuntime(config, cwd);
+      }
     });
+  }
+  async autoBrokerRuntime(config, cwd) {
+    if (!config.enabled || config.routeMode !== "follow-cc-switch" || config.mode !== "auto" && config.mode !== "broker") return void 0;
+    const generated = await materializeCcSwitchBrokerRuntime({
+      env: this.options.env ?? process.env,
+      ...this.options.codexHome ? { codexHome: this.options.codexHome } : {},
+      ...this.runtimeIdentity?.ccSwitchProviderId ? { parentProviderId: this.runtimeIdentity.ccSwitchProviderId } : {},
+      ...config.ccSwitchProviderId ? { providerId: config.ccSwitchProviderId } : {},
+      cwd,
+      codexBin: this.options.binary,
+      stateDir: join31(this.options.profileDir, "structured")
+    });
+    return {
+      brokerConfigPath: generated.brokerConfigPath,
+      credentials: generated.credentials,
+      fingerprint: generated.fingerprint,
+      route: generated.route
+    };
   }
   async reloadProfileConfig() {
     if (!this.options.configFile || !this.options.profile) return void 0;
@@ -17179,11 +18151,16 @@ var StructuredAdapter = class {
     if (!profile2) throw new Error(`profile \u4E0D\u5B58\u5728\uFF1A${this.options.profile}`);
     return profile2;
   }
-  async mixagentsBackendFor(_cwd, state) {
+  async mixagentsBackendFor(cwd, state) {
     if (state.backend) return state.backend;
     const config = await this.currentSubagentsConfig();
     if (!config.enabled || config.mode === "off" || config.mode === "fork") return void 0;
-    const backend = new MixAgentsBrokerBackend(config, this.options.env ?? process.env);
+    const runtime = await this.autoBrokerRuntime(config, cwd);
+    const backend = new MixAgentsBrokerBackend(
+      config,
+      this.options.env ?? process.env,
+      runtime
+    );
     state.backend = backend;
     return backend;
   }
@@ -17388,7 +18365,7 @@ var StructuredAdapter = class {
     }
     const config = await this.currentRsiConfig();
     if (config.mode === "off") return { ok: true };
-    const taskHash = createHash8("sha256").update(input.prompt).digest("hex");
+    const taskHash = createHash9("sha256").update(input.prompt).digest("hex");
     const turnContext = {
       turnStartedAt: input.turnStartedAt,
       threadId: input.threadId,
@@ -17481,6 +18458,10 @@ var StructuredAdapter = class {
         subagents: reviewerConfig,
         env: this.options.env ?? process.env,
         cwd: projectRoot,
+        stateDir: join31(this.options.profileDir, "structured"),
+        codexBin: this.options.binary,
+        ...this.options.codexHome ? { codexHome: this.options.codexHome } : {},
+        ...this.runtimeIdentity?.ccSwitchProviderId ? { parentProviderId: this.runtimeIdentity.ccSwitchProviderId } : {},
         signal
       });
     } catch (error) {
@@ -17492,7 +18473,7 @@ var StructuredAdapter = class {
     if (resolved.kind !== "mixagents" || !resolved.backend || !resolved.route) {
       return { ok: false, reason: "\u6CA1\u6709\u53EF\u7528\u7684 MixAgents read route" };
     }
-    const manifest = await readFile18(join29(runDir, "manifest.json"), "utf8").catch(() => "{}");
+    const manifest = await readFile19(join31(runDir, "manifest.json"), "utf8").catch(() => "{}");
     const startedAt = Date.now();
     const task = [
       "Perform one bounded read-only Project RSI review.",
@@ -17601,7 +18582,7 @@ ${truncateSnapshot(redactDiagnosticText(redactSecrets(manifest)), 8e3)}
       rounds.push({
         round,
         findings: truncateSnapshot(redactSecrets(reason), 8e3),
-        promptHash: createHash8("sha256").update(repairPrompt).digest("hex"),
+        promptHash: createHash9("sha256").update(repairPrompt).digest("hex"),
         startedAt: new Date(startedAt).toISOString(),
         completedAt: new Date(completedAt).toISOString()
       });
@@ -17633,7 +18614,7 @@ ${truncateSnapshot(redactDiagnosticText(redactSecrets(manifest)), 8e3)}
   }
   async writeRsiRepairEvidence(runDir, rounds, finalFailure) {
     await writeFileAtomic(
-      join29(runDir, "repair-loop.json"),
+      join31(runDir, "repair-loop.json"),
       `${JSON.stringify({
         version: 1,
         rounds,
@@ -17646,7 +18627,7 @@ ${truncateSnapshot(redactDiagnosticText(redactSecrets(manifest)), 8e3)}
     );
   }
   async saveBindings() {
-    await mkdir19(join29(this.options.profileDir, "structured"), { recursive: true, mode: 448 });
+    await mkdir20(join31(this.options.profileDir, "structured"), { recursive: true, mode: 448 });
     await writeFileAtomic(this.bindingsFile, JSON.stringify({ version: 1, bindings: Object.fromEntries(this.bindings), disabled: [...this.autoDiscoveryDisabled] }, null, 2) + "\n", { mode: 384 });
   }
   async bindTmuxPane(scope, selector) {
@@ -17721,7 +18702,7 @@ ${truncateSnapshot(redactDiagnosticText(redactSecrets(manifest)), 8e3)}
       for (let attempt = 0; attempt < 50; attempt += 1) {
         current = listStructuredTmuxPanes(target.socketPath).find((pane) => pane.paneId === paneId && pane.structured?.threadId === target.structured.threadId && pane.structured.endpoint === endpoint);
         if (current) break;
-        await new Promise((resolve8) => setTimeout(resolve8, 200));
+        await new Promise((resolve9) => setTimeout(resolve9, 200));
       }
       if (!current?.structured?.endpoint) throw new Error("structured pane \u542F\u52A8\u8D85\u65F6\uFF0C\u8BF7\u68C0\u67E5\u65B0 pane \u8F93\u51FA");
       const binding = { target: current, endpoint, threadId: target.structured.threadId, cwd: current.paneCurrentPath, updatedAt: Date.now() };
@@ -17770,7 +18751,7 @@ ${truncateSnapshot(redactDiagnosticText(redactSecrets(manifest)), 8e3)}
             }
           }
         }
-        await new Promise((resolve8) => setTimeout(resolve8, 500));
+        await new Promise((resolve9) => setTimeout(resolve9, 500));
       }
       if (observer !== rpc) observer.close();
       throw new Error(`RPC thread/resume timed out; old thread state is still unconfirmed after ${Math.round(LEGACY_RESUME_RECONCILE_MS / 1e3)}s; no pane was created`);
@@ -17972,6 +18953,10 @@ ${truncateSnapshot(redactDiagnosticText(redactSecrets(manifest)), 8e3)}
             subagents,
             env: this.options.env ?? process.env,
             cwd: options.cwd,
+            stateDir: join31(this.options.profileDir, "structured"),
+            codexBin: this.options.binary,
+            ...this.options.codexHome ? { codexHome: this.options.codexHome } : {},
+            ...this.runtimeIdentity?.ccSwitchProviderId ? { parentProviderId: this.runtimeIdentity.ccSwitchProviderId } : {},
             signal: abort.signal,
             ...btw.route ? { requestedRoute: btw.route } : {}
           });
@@ -18130,15 +19115,15 @@ ${prompt}
   }
   makeView(scope) {
     const key = `${this.options.profileDir}\0${scope}`;
-    const directory = join29(tmpdir5(), `ab-view-${process.getuid?.() ?? "user"}-${createHash8("sha256").update(key).digest("hex").slice(0, 12)}`);
+    const directory = join31(tmpdir5(), `ab-view-${process.getuid?.() ?? "user"}-${createHash9("sha256").update(key).digest("hex").slice(0, 12)}`);
     return new StructuredView(directory, key);
   }
   stateFile(scope, cwd) {
-    return join29(this.options.profileDir, "structured", `${createHash8("sha256").update(scope).update("\0").update(cwd).digest("hex")}.json`);
+    return join31(this.options.profileDir, "structured", `${createHash9("sha256").update(scope).update("\0").update(cwd).digest("hex")}.json`);
   }
   async saved(scope, cwd) {
     try {
-      const value = JSON.parse(await readFile18(this.stateFile(scope, cwd), "utf8"));
+      const value = JSON.parse(await readFile19(this.stateFile(scope, cwd), "utf8"));
       return value.scope === scope && value.cwd === cwd && value.kind === this.id && typeof value.id === "string" ? value : void 0;
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
@@ -18177,7 +19162,7 @@ ${prompt}
         await this.saveBindings();
       }
     }
-    if (binding && resolve5(binding.cwd) !== resolve5(options.cwd)) throw new Error(`tmux pane workspace (${binding.cwd}) \u4E0E\u5F53\u524D workspace (${options.cwd}) \u4E0D\u4E00\u81F4`);
+    if (binding && resolve6(binding.cwd) !== resolve6(options.cwd)) throw new Error(`tmux pane workspace (${binding.cwd}) \u4E0E\u5F53\u524D workspace (${options.cwd}) \u4E0D\u4E00\u81F4`);
     if (found && found.main instanceof CodexStructuredSession && !found.main.isAlive()) {
       log.warn("agent", "structured-session-dead", {
         scope,
@@ -18222,11 +19207,11 @@ ${prompt}
   }
   async createSession(scope, options, bound2) {
     const cwd = options.cwd;
-    const directory = join29(this.options.profileDir, "structured");
+    const directory = join31(this.options.profileDir, "structured");
     const stateFile = this.stateFile(scope, cwd);
     let saved;
     try {
-      saved = JSON.parse(await readFile18(stateFile, "utf8"));
+      saved = JSON.parse(await readFile19(stateFile, "utf8"));
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
     }
@@ -18503,16 +19488,16 @@ ${prompt}
     return {
       credentials: fingerprintCredentialEnv(this.credentialResolution.env),
       networkMode: this.providerIsThirdParty ? "inherit:third-party-direct" : this.options.network?.mode ?? "inherit",
-      configStamp: home ? fileStamp(join29(home, "config.toml")) : void 0,
-      authStamp: home ? fileStamp(join29(home, "auth.json")) : void 0
+      configStamp: home ? fileStamp(join31(home, "config.toml")) : void 0,
+      authStamp: home ? fileStamp(join31(home, "auth.json")) : void 0
     };
   }
 };
 
 // src/agent/structured/preferred.ts
-import { readFileSync as readFileSync9 } from "fs";
-import { join as join30 } from "path";
-import { mkdir as mkdir20 } from "fs/promises";
+import { readFileSync as readFileSync10 } from "fs";
+import { join as join32 } from "path";
+import { mkdir as mkdir21 } from "fs/promises";
 var PreferredStructuredAdapter = class {
   constructor(structured, live, directory) {
     this.structured = structured;
@@ -18520,13 +19505,13 @@ var PreferredStructuredAdapter = class {
     this.directory = directory;
     this.id = structured.id;
     this.displayName = `${structured.displayName} (live fallback)`;
-    this.file = join30(directory, "preferred-panes.json");
+    this.file = join32(directory, "preferred-panes.json");
     try {
-      const data = JSON.parse(readFileSync9(this.file, "utf8"));
+      const data = JSON.parse(readFileSync10(this.file, "utf8"));
       if (data.version === 1) for (const [scope, target] of Object.entries(data.targets ?? {})) this.targets.set(scope, target);
     } catch {
       try {
-        const old = JSON.parse(readFileSync9(join30(directory, "structured", "tmux-bindings.json"), "utf8"));
+        const old = JSON.parse(readFileSync10(join32(directory, "structured", "tmux-bindings.json"), "utf8"));
         if (old.version === 1) for (const [scope, binding] of Object.entries(old.bindings ?? {})) {
           const target = binding.target;
           if (target?.paneId) this.targets.set(scope, target);
@@ -18587,7 +19572,7 @@ var PreferredStructuredAdapter = class {
   targets = /* @__PURE__ */ new Map();
   file;
   async save() {
-    await mkdir20(this.directory, { recursive: true, mode: 448 });
+    await mkdir21(this.directory, { recursive: true, mode: 448 });
     await writeFileAtomic(this.file, JSON.stringify({ version: 1, targets: Object.fromEntries(this.targets) }), { mode: 384 });
   }
   current(scope) {
@@ -18695,9 +19680,9 @@ var PreferredStructuredAdapter = class {
 
 // src/bot/channel.ts
 import { createLarkChannel } from "@larksuite/channel";
-import { createHash as createHash14 } from "crypto";
-import { homedir as homedir12 } from "os";
-import { dirname as dirname22, join as join34 } from "path";
+import { createHash as createHash15 } from "crypto";
+import { homedir as homedir14 } from "os";
+import { dirname as dirname22, join as join36 } from "path";
 
 // src/agent/bridge-system-prompt.ts
 var BRIDGE_SYSTEM_PROMPT = `# arg-bridge \u8FD0\u884C\u7EA6\u5B9A
@@ -18893,7 +19878,7 @@ function codexCapability(profile2) {
 }
 
 // src/bridge-agent/router.ts
-import { createHash as createHash9 } from "crypto";
+import { createHash as createHash10 } from "crypto";
 var OpenAiCompatibleBridgeClassifier = class {
   endpoint;
   model;
@@ -18986,7 +19971,7 @@ function looksLikeTerminalPicker(text2) {
   return isStructuredLiveInteraction(text2);
 }
 function sha256(value) {
-  return createHash9("sha256").update(value).digest("hex");
+  return createHash10("sha256").update(value).digest("hex");
 }
 
 // src/agent/models.ts
@@ -19093,9 +20078,9 @@ function safeJsonStringify(value) {
 
 // src/commands/index.ts
 import { randomUUID as randomUUID4 } from "crypto";
-import { lstat as lstat6, readFile as readFile19, realpath as realpath7 } from "fs/promises";
-import { homedir as homedir11 } from "os";
-import { basename as basename7, dirname as dirname19, isAbsolute as isAbsolute6, relative as relative3, sep } from "path";
+import { lstat as lstat6, readFile as readFile20, realpath as realpath8 } from "fs/promises";
+import { homedir as homedir13 } from "os";
+import { basename as basename7, dirname as dirname19, isAbsolute as isAbsolute7, relative as relative3, sep } from "path";
 
 // src/card/account-cards.ts
 function maskAppId(id) {
@@ -19130,12 +20115,12 @@ function accountCurrentCard(info) {
   };
 }
 function accountFormCard(opts = {}) {
-  const { initialTenant = "feishu", prefillAppId, errorMessage: errorMessage8 } = opts;
+  const { initialTenant = "feishu", prefillAppId, errorMessage: errorMessage9 } = opts;
   const bodyElements = [];
-  if (errorMessage8) {
+  if (errorMessage9) {
     bodyElements.push({
       tag: "markdown",
-      content: `\u274C **\u6821\u9A8C\u5931\u8D25**\uFF1A${errorMessage8}`
+      content: `\u274C **\u6821\u9A8C\u5931\u8D25**\uFF1A${errorMessage9}`
     });
   }
   bodyElements.push({
@@ -19978,7 +20963,7 @@ function escapeCode(s) {
 }
 
 // src/policy/fingerprint.ts
-import { createHash as createHash10 } from "crypto";
+import { createHash as createHash11 } from "crypto";
 
 // src/session/jcs.ts
 function canonicalizeJcs(value) {
@@ -20041,7 +21026,7 @@ function attachmentPolicyConfigDigest(input) {
   });
 }
 function digestCanonical(value) {
-  return createHash10("sha256").update(canonicalizeJcs(value)).digest().subarray(0, 16).toString("base64url");
+  return createHash11("sha256").update(canonicalizeJcs(value)).digest().subarray(0, 16).toString("base64url");
 }
 
 // src/policy/access.ts
@@ -21079,8 +22064,8 @@ function finalizeIfRunning(state) {
 // src/session/history.ts
 import { createReadStream } from "fs";
 import { readdir as readdir6, stat as stat8 } from "fs/promises";
-import { homedir as homedir10 } from "os";
-import { join as join31 } from "path";
+import { homedir as homedir12 } from "os";
+import { join as join33 } from "path";
 import { createInterface as createInterface6 } from "readline";
 
 // src/session/preview.ts
@@ -21119,7 +22104,7 @@ function encodeCwd(cwd) {
   return cwd.replace(/[^A-Za-z0-9]/g, "-");
 }
 function claudeProjectDir(cwd) {
-  return join31(homedir10(), ".claude", "projects", encodeCwd(cwd));
+  return join33(homedir12(), ".claude", "projects", encodeCwd(cwd));
 }
 async function listRecentSessions(cwd, limit = 5) {
   const dir = claudeProjectDir(cwd);
@@ -21133,7 +22118,7 @@ async function listRecentSessions(cwd, limit = 5) {
   const jsonls = files.filter((f) => f.endsWith(".jsonl"));
   const withStats = await Promise.all(
     jsonls.map(async (f) => {
-      const path = join31(dir, f);
+      const path = join33(dir, f);
       try {
         const st = await stat8(path);
         return { file: f, path, mtime: st.mtimeMs };
@@ -21204,7 +22189,7 @@ function formatRelTime(mtime) {
 
 // src/session/codex-history.ts
 import { createInterface as createInterface7 } from "readline";
-import { join as join32 } from "path";
+import { join as join34 } from "path";
 var CodexHistoryError = class extends Error {
   code;
   constructor(code, message, options) {
@@ -21226,7 +22211,7 @@ async function listCodexThreadHistory(options) {
   const timeoutMs = options.timeoutMs ?? DEFAULT_HISTORY_TIMEOUT_MS;
   const stderrChunks = [];
   let settled = false;
-  const result = await new Promise((resolve8, reject4) => {
+  const result = await new Promise((resolve9, reject4) => {
     const rl = createInterface7({ input: child.stdout, crlfDelay: Infinity });
     let timer;
     const fail = (err) => {
@@ -21283,7 +22268,7 @@ async function listCodexThreadHistory(options) {
         cleanup({ kill: true });
         return;
       }
-      resolve8(parsed.entries);
+      resolve9(parsed.entries);
       cleanup({ kill: true });
     });
     child.once("exit", (code) => {
@@ -21319,7 +22304,7 @@ function spawnCodexAppServer(options) {
   if (options.codexHome) {
     envOverrides.CODEX_HOME = options.codexHome;
   } else if (options.inheritCodexHome === false) {
-    envOverrides.CODEX_HOME = join32(options.profileStateDir, "codex-home");
+    envOverrides.CODEX_HOME = join34(options.profileStateDir, "codex-home");
   }
   return spawnProcess(options.binary, ["app-server", "--listen", "stdio://"], {
     env: mergeProcessEnv(process.env, envOverrides),
@@ -21389,14 +22374,14 @@ function normalizeThread(input) {
 }
 async function waitForChildExit(child, timeoutMs) {
   if (child.exitCode !== null || child.signalCode !== null) return;
-  await new Promise((resolve8) => {
+  await new Promise((resolve9) => {
     const timer = setTimeout(() => {
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
-      resolve8();
+      resolve9();
     }, timeoutMs);
     child.once("exit", () => {
       clearTimeout(timer);
-      resolve8();
+      resolve9();
     });
   });
 }
@@ -21645,12 +22630,12 @@ function isMessageAuditReject(err) {
   return /not pass the audit/i.test(message);
 }
 function expandTilde(p4) {
-  if (p4 === "~") return homedir11();
-  if (p4.startsWith("~/")) return `${homedir11()}${p4.slice(1)}`;
+  if (p4 === "~") return homedir13();
+  if (p4.startsWith("~/")) return `${homedir13()}${p4.slice(1)}`;
   return p4;
 }
 function isAbsoluteOrTilde(p4) {
-  return isAbsolute6(p4) || p4 === "~" || p4.startsWith("~/");
+  return isAbsolute7(p4) || p4 === "~" || p4.startsWith("~/");
 }
 async function handleSendFile(args, ctx) {
   const input = args.trim();
@@ -21674,7 +22659,7 @@ async function handleSendFile(args, ctx) {
     await reply(ctx, "\u53EA\u80FD\u53D1\u9001\u666E\u901A\u6587\u4EF6\u3002");
     return;
   }
-  const resolvedPath = await realpath7(requestedPath).catch(() => void 0);
+  const resolvedPath = await realpath8(requestedPath).catch(() => void 0);
   if (!resolvedPath) {
     await reply(ctx, "\u6587\u4EF6\u4E0D\u5B58\u5728\u6216\u4E0D\u53EF\u8BBF\u95EE\u3002");
     return;
@@ -21717,7 +22702,7 @@ async function resolveSendFileRoots(ctx) {
     commandProfilePaths(ctx).mediaDir,
     ...ctx.controls.profileConfig.outbound.allowedFileDirs.map(expandTilde)
   ].filter((path) => Boolean(path));
-  const roots = await Promise.all(candidates.map((path) => realpath7(path).catch(() => void 0)));
+  const roots = await Promise.all(candidates.map((path) => realpath8(path).catch(() => void 0)));
   return [...new Set(roots.filter((path) => Boolean(path)))];
 }
 function sendFileFailureMessage(err) {
@@ -21729,7 +22714,7 @@ function sendFileFailureMessage(err) {
 }
 function isPathWithinRoot(path, root) {
   const pathRelative = relative3(root, path);
-  return pathRelative === "" || pathRelative !== ".." && !pathRelative.startsWith(`..${sep}`) && !isAbsolute6(pathRelative);
+  return pathRelative === "" || pathRelative !== ".." && !pathRelative.startsWith(`..${sep}`) && !isAbsolute7(pathRelative);
 }
 function formatByteLimit(bytes) {
   if (bytes >= 1024 * 1024) return `${Math.floor(bytes / (1024 * 1024))} MiB`;
@@ -22129,7 +23114,7 @@ function runtimeAccessStatus(profileConfig) {
 async function larkCliStatus(ctx) {
   const appPaths2 = commandProfilePaths(ctx);
   try {
-    const raw = JSON.parse(await readFile19(appPaths2.larkCliTargetConfigFile, "utf8"));
+    const raw = JSON.parse(await readFile20(appPaths2.larkCliTargetConfigFile, "utf8"));
     const app = raw.apps?.find(
       (candidate) => candidate.appId === ctx.controls.profileConfig.accounts.app.id && candidate.brand === ctx.controls.profileConfig.accounts.app.tenant
     );
@@ -22320,8 +23305,8 @@ async function boundedStopSideDiagnostic(operation) {
   try {
     const diagnostics = await Promise.race([
       operation.catch(() => void 0),
-      new Promise((resolve8) => {
-        timer = setTimeout(() => resolve8(void 0), 1500);
+      new Promise((resolve9) => {
+        timer = setTimeout(() => resolve9(void 0), 1500);
       })
     ]);
     return diagnostics?.sideConversation === true;
@@ -22523,9 +23508,9 @@ ${fence}`;
 }
 function parseTmuxSocketArgument(parts) {
   if (parts.length === 0) return "";
-  if (parts.length === 1) return isAbsolute6(parts[0]) ? parts[0] : null;
+  if (parts.length === 1) return isAbsolute7(parts[0]) ? parts[0] : null;
   if (parts.length === 2 && parts[0] === "-L") return parts[1];
-  if (parts.length === 2 && parts[0] === "-S") return isAbsolute6(parts[1]) ? parts[1] : null;
+  if (parts.length === 2 && parts[0] === "-S") return isAbsolute7(parts[1]) ? parts[1] : null;
   return null;
 }
 function formatTmuxList(panes, profile2 = "codex") {
@@ -23123,9 +24108,9 @@ async function submitAccount(ctx) {
       );
       forgetManagedCard(formMsgId);
     };
-    const finishFailure = async (errorMessage8) => {
+    const finishFailure = async (errorMessage9) => {
       await waitForSettle();
-      await updateManagedCard(channel, formMsgId, accountFailureCard(errorMessage8)).catch((err) => console.warn("[account] mark old form failed:", err));
+      await updateManagedCard(channel, formMsgId, accountFailureCard(errorMessage9)).catch((err) => console.warn("[account] mark old form failed:", err));
       forgetManagedCard(formMsgId);
       const retry = accountFormCard({
         initialTenant: tenant,
@@ -24188,8 +25173,8 @@ async function acknowledgeLiveInput(deps, payload, scope, threadId, mode) {
   try {
     const result = await Promise.race([
       operation,
-      new Promise((resolve8) => {
-        timer = setTimeout(() => resolve8(pending), 200);
+      new Promise((resolve9) => {
+        timer = setTimeout(() => resolve9(pending), 200);
       })
     ]);
     if (result !== pending) return result;
@@ -24270,7 +25255,7 @@ async function forwardLiveInput(deps, payload, scope, threadId, mode) {
     try {
       const diagnostics = await Promise.race([
         deps.liveDiagnostics(scope),
-        new Promise((resolve8) => setTimeout(() => resolve8(void 0), 2e3))
+        new Promise((resolve9) => setTimeout(() => resolve9(void 0), 2e3))
       ]);
       if (!diagnostics) {
         log.info("cardAction", "live-input-diagnostics-timeout", { scope });
@@ -24626,7 +25611,7 @@ function signatureMatches(actual, expected) {
 }
 
 // src/card/callback-store.ts
-import { readFile as readFile20 } from "fs/promises";
+import { readFile as readFile21 } from "fs/promises";
 var CallbackNonceStore = class {
   path;
   nonces = /* @__PURE__ */ new Map();
@@ -24636,7 +25621,7 @@ var CallbackNonceStore = class {
   }
   async load() {
     try {
-      const raw = JSON.parse(await readFile20(this.path, "utf8"));
+      const raw = JSON.parse(await readFile21(this.path, "utf8"));
       if (!raw || typeof raw !== "object") return;
       this.nonces.clear();
       for (const [nonce, state] of Object.entries(raw)) {
@@ -25184,10 +26169,10 @@ function footerLine(status) {
 }
 
 // src/media/cache.ts
-import { createHash as createHash11 } from "crypto";
+import { createHash as createHash12 } from "crypto";
 import { createReadStream as createReadStream2 } from "fs";
-import { mkdir as mkdir21, readdir as readdir7, rename as rename4, rm as rm14, stat as stat9 } from "fs/promises";
-import { join as join33 } from "path";
+import { mkdir as mkdir22, readdir as readdir7, rename as rename4, rm as rm14, stat as stat9 } from "fs/promises";
+import { join as join35 } from "path";
 
 // src/media/attachment.ts
 var DEFAULT_POLICY = {
@@ -25293,7 +26278,7 @@ var MediaCache = class {
   }
   async resolve(items, options = {}) {
     if (items.length === 0) return [];
-    await mkdir21(this.rootDir, { recursive: true });
+    await mkdir22(this.rootDir, { recursive: true });
     const candidates = [];
     for (const item of items) {
       try {
@@ -25323,7 +26308,7 @@ var MediaCache = class {
       return null;
     }
     const kind = r.type;
-    const tmpPath = join33(
+    const tmpPath = join35(
       this.rootDir,
       `.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`
     );
@@ -25337,7 +26322,7 @@ var MediaCache = class {
     const hash = await hashFile(tmpPath);
     const mime = contentType ?? defaultMime(kind);
     const ext = safeExtensionForMime(mime);
-    const absPath = join33(this.rootDir, `${hash}.${ext}`);
+    const absPath = join35(this.rootDir, `${hash}.${ext}`);
     try {
       await stat9(absPath);
       await rm14(tmpPath, { force: true });
@@ -25400,7 +26385,7 @@ async function listFiles(root) {
   const out = [];
   const entries = await readdir7(root, { withFileTypes: true }).catch(() => []);
   for (const entry of entries) {
-    const full = join33(root, entry.name);
+    const full = join35(root, entry.name);
     if (entry.isDirectory()) {
       out.push(...await listFiles(full));
     } else if (entry.isFile()) {
@@ -25410,7 +26395,7 @@ async function listFiles(root) {
   return out;
 }
 async function hashFile(path) {
-  const hash = createHash11("sha256");
+  const hash = createHash12("sha256");
   for await (const chunk of createReadStream2(path)) {
     hash.update(chunk);
   }
@@ -25620,7 +26605,7 @@ var ActiveRuns = class {
     if (!this.sideHandles.has(chatId)) return true;
     const waiters = this.sideReleaseWaiters.get(chatId) ?? /* @__PURE__ */ new Set();
     this.sideReleaseWaiters.set(chatId, waiters);
-    return new Promise((resolve8) => {
+    return new Promise((resolve9) => {
       let settled = false;
       let timer;
       const onRelease = () => {
@@ -25629,7 +26614,7 @@ var ActiveRuns = class {
         if (timer) clearTimeout(timer);
         waiters.delete(onRelease);
         if (waiters.size === 0) this.sideReleaseWaiters.delete(chatId);
-        resolve8(!this.sideHandles.has(chatId));
+        resolve9(!this.sideHandles.has(chatId));
       };
       timer = setTimeout(onRelease, Math.max(0, timeoutMs));
       waiters.add(onRelease);
@@ -25765,7 +26750,7 @@ var ActiveRuns = class {
   notifySideReleased(chatId) {
     const waiters = this.sideReleaseWaiters.get(chatId);
     if (!waiters) return;
-    for (const resolve8 of [...waiters]) resolve8();
+    for (const resolve9 of [...waiters]) resolve9();
   }
   durableStopKey(chatId, target) {
     return `${target}:${chatId}`;
@@ -25799,7 +26784,7 @@ var ProcessPool = class {
     }
     log.info("pool", "wait", { active: this.active, cap: this.cap(), waiting: this.waiters.length + 1 });
     reportMetric("pool_waiting", this.waiters.length + 1);
-    await new Promise((resolve8) => this.waiters.push(resolve8));
+    await new Promise((resolve9) => this.waiters.push(resolve9));
     this.active++;
     log.info("pool", "acquired", { active: this.active, cap: this.cap() });
     reportMetric("pool_active", this.active);
@@ -26157,11 +27142,11 @@ var EventFanout = class {
               release();
               return { done: true, value: void 0 };
             }
-            await new Promise((resolve8) => {
+            await new Promise((resolve9) => {
               waiter = () => {
                 if (waiter) this.waiters.delete(waiter);
                 waiter = void 0;
-                resolve8();
+                resolve9();
               };
               this.waiters.add(waiter);
             });
@@ -26273,7 +27258,7 @@ var ChatModeCache = class {
 
 // src/bot/comments.ts
 import { randomUUID as randomUUID6 } from "crypto";
-import { mkdir as mkdir22 } from "fs/promises";
+import { mkdir as mkdir23 } from "fs/promises";
 import { dirname as dirname20 } from "path";
 
 // src/bot/run-flow.ts
@@ -26410,9 +27395,9 @@ function recordRunSessionEvent(input) {
 }
 
 // src/bot/comment-resource.ts
-import { createHash as createHash12 } from "crypto";
+import { createHash as createHash13 } from "crypto";
 function commentTokenDigest(token) {
-  return createHash12("sha256").update(token).digest("hex").slice(0, 16);
+  return createHash13("sha256").update(token).digest("hex").slice(0, 16);
 }
 function commentDocumentScopeId(fileToken) {
   return `comment-doc:${commentTokenDigest(fileToken)}`;
@@ -26854,7 +27839,7 @@ async function resolveCommentWorkingDirectory(configuredCwd, defaultCwd, managed
 }
 async function resolveManagedCommentWorkingDirectory(managedFallbackCwd, fallbackFrom, fallbackReason, failures) {
   try {
-    await mkdir22(managedFallbackCwd, { recursive: true, mode: 448 });
+    await mkdir23(managedFallbackCwd, { recursive: true, mode: 448 });
   } catch (err) {
     return {
       ok: false,
@@ -26933,8 +27918,8 @@ async function nextCommentEvent(iterator, expiresAt) {
   try {
     return await Promise.race([
       iterator.next(),
-      new Promise((resolve8) => {
-        timer = setTimeout(() => resolve8("expired"), delayMs);
+      new Promise((resolve9) => {
+        timer = setTimeout(() => resolve9("expired"), delayMs);
       })
     ]);
   } finally {
@@ -27442,10 +28427,10 @@ async function removeReaction(channel, messageId, reactionId) {
 }
 
 // src/bot/artifact-broker.ts
-import { createHash as createHash13, randomBytes as randomBytes5 } from "crypto";
-import { lstat as lstat7, mkdir as mkdir23, readFile as readFile21, realpath as realpath8, rm as rm15 } from "fs/promises";
+import { createHash as createHash14, randomBytes as randomBytes5 } from "crypto";
+import { lstat as lstat7, mkdir as mkdir24, readFile as readFile22, realpath as realpath9, rm as rm15 } from "fs/promises";
 import { createServer } from "net";
-import { basename as basename8, dirname as dirname21, isAbsolute as isAbsolute7, relative as relative4, resolve as resolve6, sep as sep2 } from "path";
+import { basename as basename8, dirname as dirname21, isAbsolute as isAbsolute8, relative as relative4, resolve as resolve7, sep as sep2 } from "path";
 var ArtifactBroker = class {
   constructor(socketPath, channel, allowLocalFileRoot, persistentStatePath) {
     this.channel = channel;
@@ -27464,19 +28449,19 @@ var ArtifactBroker = class {
   async start() {
     await this.loadPersistentGrants();
     if (process.platform !== "win32") {
-      await mkdir23(dirname21(this.socketPath), { recursive: true });
+      await mkdir24(dirname21(this.socketPath), { recursive: true });
       await rm15(this.socketPath, { force: true }).catch(() => {
       });
     }
     this.server = createServer((socket) => {
       void this.handle(socket);
     });
-    await new Promise((resolve8, reject4) => {
+    await new Promise((resolve9, reject4) => {
       const server = this.server;
       server.once("error", reject4);
       server.listen(this.socketPath, () => {
         server.off("error", reject4);
-        resolve8();
+        resolve9();
       });
     });
   }
@@ -27532,7 +28517,7 @@ var ArtifactBroker = class {
     const server = this.server;
     this.server = void 0;
     if (server) {
-      await new Promise((resolve8) => server.close(() => resolve8()));
+      await new Promise((resolve9) => server.close(() => resolve9()));
     }
     if (process.platform !== "win32") await rm15(this.socketPath, { force: true }).catch(() => {
     });
@@ -27574,20 +28559,20 @@ var ArtifactBroker = class {
     if (typeof request.path !== "string" || !request.path.trim()) {
       throw new Error("\u8BF7\u63D0\u4F9B\u8981\u53D1\u9001\u7684\u6587\u4EF6\u8DEF\u5F84");
     }
-    if (isAbsolute7(request.path)) throw new Error("\u6587\u4EF6\u8DEF\u5F84\u5FC5\u987B\u76F8\u5BF9\u5F53\u524D\u5DE5\u4F5C\u76EE\u5F55");
+    if (isAbsolute8(request.path)) throw new Error("\u6587\u4EF6\u8DEF\u5F84\u5FC5\u987B\u76F8\u5BF9\u5F53\u524D\u5DE5\u4F5C\u76EE\u5F55");
     if (request.path.split(/[\\/]+/u).some((part) => part === "..")) {
       throw new Error("\u6587\u4EF6\u8DEF\u5F84\u4E0D\u80FD\u5305\u542B ..");
     }
     if (grant.allowedRoots.length === 0) {
       throw new Error("\u5F53\u524D\u4EFB\u52A1\u5C1A\u672A\u6388\u6743\u6587\u4EF6\u76EE\u5F55\uFF1B\u8BF7\u5728\u5F53\u524D\u4EFB\u52A1\u4E2D\u91CD\u65B0\u8BF7\u6C42\u53D1\u9001");
     }
-    const requested = resolve6(grant.allowedRoots[0], request.path);
+    const requested = resolve7(grant.allowedRoots[0], request.path);
     const entry = await lstat7(requested).catch(() => void 0);
     if (!entry) throw new Error("\u6587\u4EF6\u4E0D\u5B58\u5728\u6216\u4E0D\u53EF\u8BBF\u95EE");
     if (entry.isSymbolicLink()) throw new Error("\u4E0D\u5141\u8BB8\u53D1\u9001\u7B26\u53F7\u94FE\u63A5");
     if (!entry.isFile()) throw new Error("\u53EA\u80FD\u53D1\u9001\u666E\u901A\u6587\u4EF6");
     if (entry.size > grant.maxFileBytes) throw new Error(`\u6587\u4EF6\u8D85\u8FC7\u53D1\u9001\u4E0A\u9650\uFF08${grant.maxFileBytes} B\uFF09`);
-    const resolved = await realpath8(requested);
+    const resolved = await realpath9(requested);
     const root = await findCanonicalAllowedRoot(resolved, grant.allowedRoots);
     if (!root) throw new Error("\u6587\u4EF6\u4E0D\u5728\u5F53\u524D\u4EFB\u52A1\u5141\u8BB8\u7684\u76EE\u5F55\u5185");
     if (!await this.allowLocalFileRoot(root)) throw new Error("bridge \u672A\u5141\u8BB8\u8BE5\u6587\u4EF6\u76EE\u5F55");
@@ -27614,7 +28599,7 @@ var ArtifactBroker = class {
   async loadPersistentGrants() {
     if (!this.persistentStatePath) return;
     try {
-      const raw = JSON.parse(await readFile21(this.persistentStatePath, "utf8"));
+      const raw = JSON.parse(await readFile22(this.persistentStatePath, "utf8"));
       if (raw.version !== 1 || !Array.isArray(raw.grants)) return;
       for (const item of raw.grants) {
         if (!isPersistentGrant(item)) continue;
@@ -27650,16 +28635,16 @@ var ArtifactBroker = class {
 };
 function isPathWithinRoot2(path, root) {
   const pathRelative = relative4(root, path);
-  return pathRelative === "" || pathRelative !== ".." && !pathRelative.startsWith(`..${sep2}`) && !isAbsolute7(pathRelative);
+  return pathRelative === "" || pathRelative !== ".." && !pathRelative.startsWith(`..${sep2}`) && !isAbsolute8(pathRelative);
 }
 function artifactBrokerSocketPath(socketPath) {
   if (process.platform !== "win32") return socketPath;
-  const digest = createHash13("sha256").update(resolve6(socketPath)).digest("hex").slice(0, 32);
+  const digest = createHash14("sha256").update(resolve7(socketPath)).digest("hex").slice(0, 32);
   return `\\\\.\\pipe\\arg-bridge-artifact-${digest}`;
 }
 async function findCanonicalAllowedRoot(path, roots) {
   for (const root of roots) {
-    const canonicalRoot = await realpath8(root).catch(() => void 0);
+    const canonicalRoot = await realpath9(root).catch(() => void 0);
     if (canonicalRoot && isPathWithinRoot2(path, canonicalRoot)) return root;
   }
   return void 0;
@@ -27667,7 +28652,7 @@ async function findCanonicalAllowedRoot(path, roots) {
 function isPersistentGrant(value) {
   if (!value || typeof value !== "object") return false;
   const grant = value;
-  return grant.persistent === true && typeof grant.token === "string" && /^[A-Za-z0-9_-]{16,200}$/u.test(grant.token) && typeof grant.scope === "string" && grant.scope.length > 0 && typeof grant.chatId === "string" && grant.chatId.length > 0 && typeof grant.replyTo === "string" && grant.replyTo.length > 0 && Array.isArray(grant.allowedRoots) && grant.allowedRoots.every((root) => typeof root === "string" && isAbsolute7(root)) && typeof grant.maxFileBytes === "number" && Number.isSafeInteger(grant.maxFileBytes) && grant.maxFileBytes > 0;
+  return grant.persistent === true && typeof grant.token === "string" && /^[A-Za-z0-9_-]{16,200}$/u.test(grant.token) && typeof grant.scope === "string" && grant.scope.length > 0 && typeof grant.chatId === "string" && grant.chatId.length > 0 && typeof grant.replyTo === "string" && grant.replyTo.length > 0 && Array.isArray(grant.allowedRoots) && grant.allowedRoots.every((root) => typeof root === "string" && isAbsolute8(root)) && typeof grant.maxFileBytes === "number" && Number.isSafeInteger(grant.maxFileBytes) && grant.maxFileBytes > 0;
 }
 function normalizeCaption(value) {
   if (value === void 0) return void 0;
@@ -27679,7 +28664,7 @@ function normalizeCaption(value) {
 }
 
 // src/bot/inbound-message-ledger.ts
-import { readFile as readFile22 } from "fs/promises";
+import { readFile as readFile23 } from "fs/promises";
 var FILE_VERSION2 = 1;
 var DEFAULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1e3;
 var DEFAULT_MAX_ENTRIES = 5e4;
@@ -27695,7 +28680,7 @@ var InboundMessageLedger = class {
   async load() {
     if (!this.path) return;
     try {
-      const raw = JSON.parse(await readFile22(this.path, "utf8"));
+      const raw = JSON.parse(await readFile23(this.path, "utf8"));
       if (raw.version !== FILE_VERSION2 || !raw.entries || typeof raw.entries !== "object") return;
       for (const [messageId, acceptedAt] of Object.entries(raw.entries)) {
         if (typeof acceptedAt === "number" && Number.isFinite(acceptedAt) && messageId) {
@@ -28239,8 +29224,8 @@ function stringifyArgs(args) {
   }).join(" ");
 }
 function expandHomeDirectory(path) {
-  if (path === "~") return homedir12();
-  return path.startsWith("~/") ? join34(homedir12(), path.slice(2)) : path;
+  if (path === "~") return homedir14();
+  return path.startsWith("~/") ? join36(homedir14(), path.slice(2)) : path;
 }
 async function startChannel(deps) {
   const { cfg, agent, sessions, sessionCatalog, workspaces, controls } = deps;
@@ -28250,10 +29235,10 @@ async function startChannel(deps) {
   const pool = new ProcessPool(() => getMaxConcurrentRuns(controls.cfg));
   const executor = new RunExecutor({ agent, pool, activeRuns });
   const appSecret = await resolveAppSecret(cfg, deps.appPaths);
-  const callbackNonceStore = deps.appPaths?.mediaDir ? new CallbackNonceStore(join34(dirname22(deps.appPaths.mediaDir), "callback-nonces.json")) : void 0;
+  const callbackNonceStore = deps.appPaths?.mediaDir ? new CallbackNonceStore(join36(dirname22(deps.appPaths.mediaDir), "callback-nonces.json")) : void 0;
   await callbackNonceStore?.load();
   const inboundMessages = new InboundMessageLedger(
-    deps.appPaths?.mediaDir ? join34(dirname22(deps.appPaths.mediaDir), "inbound-message-ledger.json") : void 0
+    deps.appPaths?.mediaDir ? join36(dirname22(deps.appPaths.mediaDir), "inbound-message-ledger.json") : void 0
   );
   await inboundMessages.load();
   const callbackAuth = callbackNonceStore ? new CallbackAuth({
@@ -28344,10 +29329,10 @@ async function startChannel(deps) {
   const media = new MediaCache(channel, deps.appPaths?.mediaDir);
   const artifactStateDir = deps.appPaths?.mediaDir ? dirname22(deps.appPaths.mediaDir) : void 0;
   const artifactBroker = new ArtifactBroker(
-    join34(artifactStateDir ?? join34(process.cwd(), ".arg-bridge-media"), "artifact-broker.sock"),
+    join36(artifactStateDir ?? join36(process.cwd(), ".arg-bridge-media"), "artifact-broker.sock"),
     channel,
     allowLocalFileRoot,
-    artifactStateDir ? join34(artifactStateDir, "artifact-grants.json") : void 0
+    artifactStateDir ? join36(artifactStateDir, "artifact-grants.json") : void 0
   );
   await artifactBroker.start();
   if (agent.tmux?.restoreArtifactDelivery) {
@@ -29304,8 +30289,8 @@ async function withBoundedSideDiagnostic(operation, timeoutMs) {
   try {
     return await Promise.race([
       operation.catch(() => void 0),
-      new Promise((resolve8) => {
-        timer = setTimeout(() => resolve8(void 0), timeoutMs);
+      new Promise((resolve9) => {
+        timer = setTimeout(() => resolve9(void 0), timeoutMs);
       })
     ]);
   } finally {
@@ -30119,16 +31104,16 @@ ${delta}`.slice(-64e3);
       let segmentTextReadyFlag = true;
       const armSegmentTextWait = () => {
         segmentTextReadyFlag = false;
-        segmentTextReady = new Promise((resolve8) => {
-          resolveSegmentText = resolve8;
+        segmentTextReady = new Promise((resolve9) => {
+          resolveSegmentText = resolve9;
         });
       };
       const signalSegmentText = (state) => {
         if (resolveSegmentText && runStateTextCursor(prepareStateForReply(state)) !== segmentBaseText) {
-          const resolve8 = resolveSegmentText;
+          const resolve9 = resolveSegmentText;
           resolveSegmentText = void 0;
           segmentTextReadyFlag = true;
-          resolve8();
+          resolve9();
         }
       };
       const stateForSegment = (state) => projectRunStateFromCursor(prepareStateForReply(state), segmentBaseText);
@@ -30314,16 +31299,16 @@ ${delta}`.slice(-64e3);
       let segmentTextReadyFlag = true;
       const armSegmentTextWait = () => {
         segmentTextReadyFlag = false;
-        segmentTextReady = new Promise((resolve8) => {
-          resolveSegmentText = resolve8;
+        segmentTextReady = new Promise((resolve9) => {
+          resolveSegmentText = resolve9;
         });
       };
       const signalSegmentText = (state) => {
         if (resolveSegmentText && runStateTextCursor(prepareStateForReply(state)) !== segmentBaseText) {
-          const resolve8 = resolveSegmentText;
+          const resolve9 = resolveSegmentText;
           resolveSegmentText = void 0;
           segmentTextReadyFlag = true;
-          resolve8();
+          resolve9();
         }
       };
       const stateForSegment = (state) => projectRunStateFromCursor(prepareStateForReply(state), segmentBaseText);
@@ -30837,7 +31822,7 @@ async function processAgentStream(handle, events, scope, idleTimeoutMs, progress
     interrupted: handle.interrupted,
     sourceChars: finalSourceText.length,
     sourceBytes: Buffer.byteLength(finalSourceText, "utf8"),
-    sourceSha256: createHash14("sha256").update(finalSourceText).digest("hex"),
+    sourceSha256: createHash15("sha256").update(finalSourceText).digest("hex"),
     renderedMarkdownBytes: Buffer.byteLength(finalMarkdown, "utf8"),
     renderedCardBytes: Buffer.byteLength(finalCard, "utf8")
   });
@@ -30900,8 +31885,8 @@ async function runRollingReplyStream(input) {
     segment += 1;
     let producerStarted = false;
     let rolloverTimer;
-    const rollover = new Promise((resolve8) => {
-      rolloverTimer = setTimeout(resolve8, rolloverMs);
+    const rollover = new Promise((resolve9) => {
+      rolloverTimer = setTimeout(resolve9, rolloverMs);
     });
     const segmentDone = Promise.race([
       renderResult.then(() => void 0),
@@ -31008,7 +31993,7 @@ function scheduleWorkingReactionCleanup(channel, messageId, reactionPromise) {
   })();
 }
 function delay2(ms) {
-  return new Promise((resolve8) => setTimeout(resolve8, ms));
+  return new Promise((resolve9) => setTimeout(resolve9, ms));
 }
 function buildPrompt(batch, attachments, quotes = [], topicContext = []) {
   const first = batch[0];
@@ -31115,7 +32100,7 @@ function detectLiveInteraction(text2, allowBareConfirmation = false, autoConfirm
     // A prefix signature made two long menus look identical whenever they
     // shared their title and early choices. Hash the complete current surface
     // so repeated redraws dedupe, while every genuinely nested menu is sent.
-    signature: createHash14("sha256").update(prompt).update("\0").update(buttons.map((button2) => button2.input).join("|")).digest("hex"),
+    signature: createHash15("sha256").update(prompt).update("\0").update(buttons.map((button2) => button2.input).join("|")).digest("hex"),
     prompt: displayPrompt.slice(0, isCodexModelPickerPrompt(prompt) ? 4e3 : 1200),
     buttons
   };
@@ -31484,8 +32469,8 @@ async function ensureDeliveredTail(input) {
   });
   log.info("outbound", "delivery-integrity", {
     scope: input.scope,
-    sourceSha256: createHash14("sha256").update(input.source).digest("hex"),
-    deliveredSha256: createHash14("sha256").update(input.delivered).digest("hex"),
+    sourceSha256: createHash15("sha256").update(input.source).digest("hex"),
+    deliveredSha256: createHash15("sha256").update(input.delivered).digest("hex"),
     sourceBytes: Buffer.byteLength(input.source, "utf8"),
     deliveredBytes: Buffer.byteLength(input.delivered, "utf8"),
     tailCovered: covered
@@ -31621,7 +32606,7 @@ function isDefined(value) {
 }
 
 // src/session/store.ts
-import { readFile as readFile23 } from "fs/promises";
+import { readFile as readFile24 } from "fs/promises";
 var SessionStore = class {
   data = {};
   saving = Promise.resolve();
@@ -31631,7 +32616,7 @@ var SessionStore = class {
   }
   async load() {
     try {
-      const text2 = await readFile23(this.path, "utf8");
+      const text2 = await readFile24(this.path, "utf8");
       const raw = JSON.parse(text2);
       this.data = {};
       for (const [chatId, entry] of Object.entries(raw)) {
@@ -31796,7 +32781,7 @@ function isPersistedLiveInteraction(value) {
 
 // src/session/catalog.ts
 import { randomUUID as randomUUID7 } from "crypto";
-import { open as open4, readFile as readFile24, rename as rename5, mkdir as mkdir24 } from "fs/promises";
+import { open as open4, readFile as readFile25, rename as rename5, mkdir as mkdir25 } from "fs/promises";
 import { dirname as dirname23 } from "path";
 var DEFAULT_MAX_ARCHIVED_AGE_MS = 90 * 24 * 60 * 60 * 1e3;
 var DEFAULT_MAX_ENTRIES_PER_SCOPE = 20;
@@ -31819,7 +32804,7 @@ var SessionCatalog = class {
   }
   async load() {
     try {
-      const raw = JSON.parse(await readFile24(this.path, "utf8"));
+      const raw = JSON.parse(await readFile25(this.path, "utf8"));
       if (!Array.isArray(raw)) {
         this.data.clear();
         return;
@@ -31919,7 +32904,7 @@ var SessionCatalog = class {
     });
   }
   async persist() {
-    await mkdir24(dirname23(this.path), { recursive: true });
+    await mkdir25(dirname23(this.path), { recursive: true });
     const tmp = `${this.path}.${process.pid}.${Date.now()}.${randomUUID7()}.tmp`;
     const payload = `${JSON.stringify(this.entries(), null, 2)}
 `;
@@ -31981,7 +32966,7 @@ function assertAgentIdentity(input) {
 }
 
 // src/workspace/store.ts
-import { readFile as readFile25 } from "fs/promises";
+import { readFile as readFile26 } from "fs/promises";
 var WorkspaceStore = class {
   data = { chats: {}, named: {} };
   saving = Promise.resolve();
@@ -31991,7 +32976,7 @@ var WorkspaceStore = class {
   }
   async load() {
     try {
-      const text2 = await readFile25(this.path, "utf8");
+      const text2 = await readFile26(this.path, "utf8");
       const parsed = JSON.parse(text2);
       this.data = {
         chats: parsed.chats ?? {},
@@ -32442,7 +33427,7 @@ async function resolveConflict(conflicts) {
     return false;
   }
   const rl = createInterface8({ input: process.stdin, output: process.stdout });
-  const ask = (q) => new Promise((resolve8) => rl.question(q, resolve8));
+  const ask = (q) => new Promise((resolve9) => rl.question(q, resolve9));
   try {
     const verb = conflicts.length > 1 ? "\u5B83\u4EEC" : "\u90A3\u4E2A";
     const answer = (await ask(`\u7EE7\u7EED\u542F\u52A8\u4F1A\u5148\u5173\u6389${verb},\u662F\u5426\u7EE7\u7EED? [y/N]: `)).trim().toLowerCase();
@@ -32497,7 +33482,7 @@ async function confirmStopRuntimeLockProcess2(err) {
   const rl = createInterface8({ input: process.stdin, output: process.stdout });
   try {
     const answer = (await new Promise(
-      (resolve8) => rl.question("\u662F\u5426\u505C\u6B62\u65E7\u8FDB\u7A0B\u5E76\u91CD\u65B0\u542F\u52A8? [y/N]: ", resolve8)
+      (resolve9) => rl.question("\u662F\u5426\u505C\u6B62\u65E7\u8FDB\u7A0B\u5E76\u91CD\u65B0\u542F\u52A8? [y/N]: ", resolve9)
     )).trim().toLowerCase();
     return answer === "y" || answer === "yes";
   } finally {
@@ -32543,7 +33528,7 @@ async function runAgentSendFile(path, caption) {
   if (!artifact) {
     throw new Error("\u5F53\u524D\u8FDB\u7A0B\u6CA1\u6709 bridge \u6587\u4EF6\u53D1\u9001\u80FD\u529B\uFF1B\u8BF7\u4ECE bridge agent \u4EFB\u52A1\u5185\u8C03\u7528\uFF0C\u6216\u5728\u6258\u7BA1 tmux session \u4E2D\u91CD\u542F bridge \u540E\u91CD\u8BD5");
   }
-  const response = await new Promise((resolve8, reject4) => {
+  const response = await new Promise((resolve9, reject4) => {
     const socket = connect2(artifact.socketPath);
     let data = "";
     socket.setEncoding("utf8");
@@ -32553,7 +33538,7 @@ async function runAgentSendFile(path, caption) {
       data += chunk;
       if (!data.includes("\n")) return;
       try {
-        resolve8(JSON.parse(data.slice(0, data.indexOf("\n"))));
+        resolve9(JSON.parse(data.slice(0, data.indexOf("\n"))));
       } catch (err) {
         reject4(err);
       }
@@ -32583,11 +33568,11 @@ function readTmuxSessionEnvironment(name, env) {
 }
 
 // src/cli/commands/native.ts
-import { readFile as readFile26, lstat as lstat8 } from "fs/promises";
-import { join as join35 } from "path";
+import { readFile as readFile27, lstat as lstat8 } from "fs/promises";
+import { join as join37 } from "path";
 async function runNative(thread, opts) {
   const rootPaths = resolveAppPaths();
-  const root = JSON.parse(await readFile26(rootPaths.configFile, "utf8"));
+  const root = JSON.parse(await readFile27(rootPaths.configFile, "utf8"));
   const profileName = opts.profile ?? root.activeProfile;
   const paths2 = resolveAppPaths({ profile: profileName });
   if (!root.profiles?.[profileName]) throw new Error(`Unknown profile: ${profileName}`);
@@ -32630,9 +33615,9 @@ async function runNative(thread, opts) {
   }
   const existing = thread ? listStructuredTmuxPanes().filter((pane) => pane.structured.threadId === thread && pane.structured.endpoint) : [];
   const candidates = new Set(existing.map((pane) => pane.structured.endpoint));
-  for (const file of [join35(paths2.profileDir, "structured", "tmux-bindings.json"), join35(paths2.profileDir, "preferred-panes.json")]) {
+  for (const file of [join37(paths2.profileDir, "structured", "tmux-bindings.json"), join37(paths2.profileDir, "preferred-panes.json")]) {
     try {
-      const stored = JSON.parse(await readFile26(file, "utf8"));
+      const stored = JSON.parse(await readFile27(file, "utf8"));
       for (const entry of Object.values(stored.bindings ?? stored.targets ?? {})) {
         const identity = entry.structured ?? entry;
         if (identity.threadId === thread && identity.endpoint) candidates.add(identity.endpoint);
@@ -32671,8 +33656,8 @@ async function runNative(thread, opts) {
     fingerprint: {
       credentials: fingerprintCredentialEnv(credential.env),
       networkMode: thirdParty ? "inherit:third-party-direct" : config.network?.mode ?? "inherit",
-      configStamp: env.CODEX_HOME ? fileStamp(join35(env.CODEX_HOME, "config.toml")) : void 0,
-      authStamp: env.CODEX_HOME ? fileStamp(join35(env.CODEX_HOME, "auth.json")) : void 0
+      configStamp: env.CODEX_HOME ? fileStamp(join37(env.CODEX_HOME, "config.toml")) : void 0,
+      authStamp: env.CODEX_HOME ? fileStamp(join37(env.CODEX_HOME, "auth.json")) : void 0
     },
     ...runtimeIdentity ? { runtimeIdentity } : {}
   });
@@ -32699,11 +33684,11 @@ async function waitChild(child) {
   };
   process.on("SIGINT", handle);
   try {
-    await new Promise((resolve8, reject4) => {
+    await new Promise((resolve9, reject4) => {
       child.once("error", reject4);
       child.once("exit", (code) => {
         process.exitCode = code ?? 0;
-        resolve8();
+        resolve9();
       });
     });
   } finally {
@@ -32712,22 +33697,39 @@ async function waitChild(child) {
 }
 
 // src/cli/commands/settings.ts
-import { realpath as realpath9 } from "fs/promises";
-import { homedir as homedir14 } from "os";
-import { dirname as dirname24, parse as parse3, resolve as resolve7 } from "path";
+import { realpath as realpath10 } from "fs/promises";
+import { homedir as homedir16 } from "os";
+import { dirname as dirname25, join as join39, parse as parse4, resolve as resolve8 } from "path";
 import * as p3 from "@clack/prompts";
 
 // src/agent/subagents/diagnostics.ts
-import { homedir as homedir13 } from "os";
-import { basename as basename9, join as join36 } from "path";
+import { homedir as homedir15 } from "os";
+import { basename as basename9, dirname as dirname24, join as join38 } from "path";
+import { readFile as readFile28 } from "fs/promises";
 async function collectSubagentDiagnostics(input) {
   const env = input.env ?? process.env;
   const signal = input.signal ?? new AbortController().signal;
-  const [ccSwitch, routeMapState] = await Promise.all([
+  const [ccSwitch, routeMapState, catalog, providerResolution, structuredRuntime] = await Promise.all([
     readCcSwitchState(env),
-    loadBrokerRouteMap(env)
+    loadBrokerRouteMap(env),
+    readCcSwitchProviderCatalog(env).catch(() => void 0),
+    resolveCurrentCcSwitchCodexProvider({
+      env,
+      ...input.codexHome ? { codexHome: input.codexHome } : {},
+      ...input.parentProviderId ? { parentProviderId: input.parentProviderId } : {},
+      ...input.config.ccSwitchProviderId ? { providerId: input.config.ccSwitchProviderId } : {}
+    }).then((result) => ({ result })).catch((error) => ({ error })),
+    inspectStructuredRuntime(input.stateDir, input.config.toolNamespace)
   ]);
-  const currentProviderName = ccSwitch.providers.find(
+  const configuredForNewThreads = input.config.modelTools && input.config.nativeToolPolicy === "shadow" && input.config.enabled && (input.config.mode === "auto" || input.config.mode === "broker");
+  const marker = structuredRuntime.brokerThreadMarkers.find(
+    (item) => item.namespace === input.config.toolNamespace
+  );
+  const providerList = catalog?.providers.length ? catalog.providers : ccSwitch.providers;
+  const currentProviderCodex = catalog?.currentProviderId ?? providerList.find((provider) => provider.current)?.id ?? ccSwitch.currentProviderCodex ?? null;
+  const currentProviderName = providerList.find(
+    (provider) => provider.id === currentProviderCodex || provider.current
+  )?.name ?? ccSwitch.providers.find(
     (provider) => provider.id === ccSwitch.currentProviderCodex || provider.current
   )?.name ?? null;
   const base = {
@@ -32738,8 +33740,11 @@ async function collectSubagentDiagnostics(input) {
       configured: input.config.modelTools,
       namespace: input.config.toolNamespace,
       nativeToolPolicy: input.config.nativeToolPolicy,
-      brokerWired: input.config.modelTools && input.config.nativeToolPolicy === "shadow" && input.config.enabled && (input.config.mode === "auto" || input.config.mode === "broker"),
-      ...!input.config.modelTools ? { degradedReason: "modelTools=false; native collaboration remains visible" } : input.config.nativeToolPolicy !== "shadow" ? { degradedReason: "nativeToolPolicy=preserve; native collaboration may bypass Broker" } : {}
+      configuredForNewThreads,
+      // A marker alone is not proof that the current thread can execute a
+      // worker. The live route preflight below must also succeed.
+      brokerWired: false,
+      ...!input.config.modelTools ? { degradedReason: "modelTools=false; native collaboration remains visible" } : input.config.nativeToolPolicy !== "shadow" ? { degradedReason: "nativeToolPolicy=preserve; native collaboration may bypass Broker" } : !configuredForNewThreads ? { degradedReason: `subagents.mode=${input.config.mode}` } : !marker ? { degradedReason: "configured for new threads, but no broker-thread marker exists in this profile" } : structuredRuntime.liveIdentifiedAppServerHosts === 0 ? { degradedReason: "broker-thread marker exists, but no live identified App Server host is bound to this profile" } : input.config.routeMode === "follow-cc-switch" && !("result" in providerResolution) ? { degradedReason: "cc-switch provider/runtime preflight failed; Broker tools are not bound" } : {}
     },
     limits: {
       maxConcurrentWorkers: input.config.maxConcurrentWorkers,
@@ -32749,19 +33754,24 @@ async function collectSubagentDiagnostics(input) {
     launchConfigured: Boolean(resolveMixAgentsLaunchConfig(input.config, env)),
     toolContract: "unknown",
     mcpStart: "not-configured",
-    credentials: describeCredentialState(input.config, env),
+    credentials: describeCredentialState(
+      input.config,
+      env,
+      "result" in providerResolution ? providerResolution.result.summary : void 0
+    ),
     routeGeneration: "not-tested",
     mcp: {
       status: !input.config.enabled || input.config.mode === "off" ? "disabled" : "not-configured"
     },
     ccSwitch: {
-      currentProviderCodex: ccSwitch.currentProviderCodex ?? null,
+      currentProviderCodex,
       currentProviderName,
-      providers: ccSwitch.providers.map((provider) => ({
+      providers: providerList.map((provider) => ({
         id: provider.id,
         name: provider.name,
-        current: provider.current
+        current: provider.current || provider.id === currentProviderCodex
       })),
+      ..."result" in providerResolution ? { provider: providerResolution.result.summary } : {},
       settingsPath: ccSwitch.settingsPath,
       ...ccSwitch.error ? { error: redactSecrets(ccSwitch.error) } : {}
     },
@@ -32770,11 +33780,19 @@ async function collectSubagentDiagnostics(input) {
       loaded: Boolean(routeMapState.config),
       ...routeMapState.error ? { error: redactSecrets(routeMapState.error) } : {}
     },
-    brokerConfigPath: env.MIXAGENTS_BROKER_CONFIG?.trim() || join36(env.XDG_CONFIG_HOME?.trim() || join36(homedir13(), ".config"), "mixagents", "broker.json"),
+    brokerConfigPath: env.MIXAGENTS_BROKER_CONFIG?.trim() || join38(env.XDG_CONFIG_HOME?.trim() || join38(homedir15(), ".config"), "mixagents", "broker.json"),
     selectedRoute: { id: null },
     selectedWriteRoute: { id: null },
     readRoutes: [],
     writeRoutes: [],
+    runtime: {
+      profileScopedStateDir: input.stateDir ?? null,
+      brokerThreadMarkers: structuredRuntime.brokerThreadMarkers,
+      appServerHosts: structuredRuntime.appServerHosts,
+      liveAppServerHosts: structuredRuntime.liveAppServerHosts,
+      namespaceBound: Boolean(marker),
+      liveIdentifiedAppServerHosts: structuredRuntime.liveIdentifiedAppServerHosts
+    },
     nextCommands: [
       "arg-bridge doctor --json",
       "arg-bridge restart --profile <profile>",
@@ -32786,42 +33804,113 @@ async function collectSubagentDiagnostics(input) {
     return base;
   }
   const launch = resolveMixAgentsLaunchConfig(input.config, env);
-  if (!launch) return base;
-  const backend = new MixAgentsBrokerBackend(input.config, env);
+  if (!launch) {
+    return {
+      ...base,
+      modelTools: {
+        ...base.modelTools,
+        degradedReason: "MixAgents MCP launch is not configured or discoverable"
+      }
+    };
+  }
+  let brokerRuntime;
+  if (input.config.routeMode === "follow-cc-switch") {
+    if ("error" in providerResolution) {
+      return {
+        ...base,
+        launchCommand: basename9(launch.command),
+        mcpStart: "not-configured",
+        mcp: {
+          status: "unavailable",
+          error: redactSecrets(errorMessage8(providerResolution.error))
+        },
+        credentials: describeCredentialState(input.config, env)
+      };
+    }
+    if (!input.stateDir) {
+      return {
+        ...base,
+        launchCommand: basename9(launch.command),
+        mcpStart: "not-configured",
+        mcp: {
+          status: "unavailable",
+          error: "profile-scoped structured state directory is unavailable"
+        }
+      };
+    }
+    try {
+      const generated = await materializeCcSwitchBrokerRuntime({
+        env,
+        ...input.codexHome ? { codexHome: input.codexHome } : {},
+        ...input.parentProviderId ? { parentProviderId: input.parentProviderId } : {},
+        ...input.config.ccSwitchProviderId ? { providerId: input.config.ccSwitchProviderId } : {},
+        cwd: input.cwd,
+        codexBin: input.codexBin ?? env.CODEX_BINARY?.trim() ?? "codex",
+        stateDir: input.stateDir
+      });
+      brokerRuntime = {
+        brokerConfigPath: generated.brokerConfigPath,
+        credentials: generated.credentials,
+        fingerprint: generated.fingerprint,
+        route: generated.route
+      };
+    } catch (error) {
+      return {
+        ...base,
+        launchCommand: basename9(launch.command),
+        mcpStart: "not-configured",
+        mcp: {
+          status: "unavailable",
+          error: redactSecrets(errorMessage8(error))
+        }
+      };
+    }
+  }
+  const backend = new MixAgentsBrokerBackend(input.config, env, brokerRuntime);
   try {
     const routes = await backend.listRoutes(signal);
+    const visibleRoutes = mergeRuntimeRoutes(routes, brokerRuntime?.route);
     const selection = selectSubagentRoute({
       config: input.config,
       ccSwitch,
       routeMap: routeMapState.config,
-      routes,
+      routes: visibleRoutes,
       requestedRoute: input.requestedRoute
     });
     const writeSelection = selectSubagentRoute({
       config: input.config,
       ccSwitch,
       routeMap: routeMapState.config,
-      routes,
+      routes: visibleRoutes,
       access: "workspace-write"
     });
     return {
       ...base,
+      ...brokerRuntime ? { brokerConfigPath: brokerRuntime.brokerConfigPath } : {},
       launchCommand: basename9(launch.command),
       ...backend.serverVersion ? { packageVersion: backend.serverVersion } : {},
       toolContract: "compatible",
       mcpStart: "started",
       mcp: { status: "available" },
+      modelTools: {
+        ...base.modelTools,
+        brokerWired: configuredForNewThreads && Boolean(marker) && structuredRuntime.liveIdentifiedAppServerHosts > 0 && Boolean(selection.route)
+      },
       selectedRoute: {
         id: selection.route?.id ?? null,
-        ...input.requestedRoute ? { source: "explicit" } : selection.route ? { source: routeSelectionSource(input.config, ccSwitch, routeMapState.config) } : {},
+        ...input.requestedRoute ? { source: "explicit" } : selection.route ? {
+          source: selection.route.source === "cc-switch" ? "cc-switch" : routeSelectionSource(input.config, ccSwitch, routeMapState.config)
+        } : {},
         ...selection.error ? { error: redactSecrets(selection.error) } : {}
       },
       selectedWriteRoute: {
         id: writeSelection.route?.id ?? null,
-        ...writeSelection.route ? { source: routeSelectionSource(input.config, ccSwitch, routeMapState.config, "workspace-write") } : {},
+        ...writeSelection.route ? {
+          source: writeSelection.route.source === "cc-switch" ? "cc-switch" : routeSelectionSource(input.config, ccSwitch, routeMapState.config, "workspace-write")
+        } : {},
         ...writeSelection.error ? { error: redactSecrets(writeSelection.error) } : {}
       },
-      readRoutes: routes.map((route) => ({
+      readRoutes: visibleRoutes.map((route) => ({
         id: route.id,
         provider: route.provider,
         model: route.model,
@@ -32833,7 +33922,7 @@ async function collectSubagentDiagnostics(input) {
         available: route.available,
         missingEnvironment: route.missingEnvironment
       })),
-      writeRoutes: routes.filter((route) => route.maxAccess === "workspace-write").map((route) => ({
+      writeRoutes: visibleRoutes.filter((route) => route.maxAccess === "workspace-write").map((route) => ({
         id: route.id,
         provider: route.provider,
         model: route.model,
@@ -32852,6 +33941,10 @@ async function collectSubagentDiagnostics(input) {
       mcp: {
         status: "unavailable",
         error: redactSecrets(error instanceof Error ? error.message : String(error))
+      },
+      modelTools: {
+        ...base.modelTools,
+        degradedReason: redactSecrets(error instanceof Error ? error.message : String(error))
       }
     };
   } finally {
@@ -32859,7 +33952,17 @@ async function collectSubagentDiagnostics(input) {
     });
   }
 }
-function describeCredentialState(config, env) {
+function describeCredentialState(config, env, provider) {
+  if (config.routeMode === "follow-cc-switch" && provider) {
+    return {
+      mode: "cc-switch-auto",
+      status: provider.credential.status,
+      providerReference: provider.id,
+      missingEnvironment: provider.credential.status === "present" ? [] : [...provider.envKey ? [provider.envKey] : [], ...Object.values(provider.envHttpHeaders)],
+      ...provider.credential.sourcePath ? { sourcePath: provider.credential.sourcePath } : {},
+      ...provider.credential.fingerprint ? { fingerprint: provider.credential.fingerprint } : {}
+    };
+  }
   const mixagents = config.mixagents;
   const mode = mixagents?.credentialMode ?? "inherit-env";
   const providerReference = mixagents?.credentialProvider ?? null;
@@ -32882,11 +33985,53 @@ function describeCredentialState(config, env) {
 }
 function routeSelectionSource(config, ccSwitch, map, access3 = "read-only") {
   if (config.routeMode === "manual") return "manual";
-  const mapped = access3 === "workspace-write" ? map?.providers[ccSwitch.currentProviderCodex ?? ""]?.writeRoute : map?.providers[ccSwitch.currentProviderCodex ?? ""]?.readRoute;
-  if (ccSwitch.currentProviderCodex && mapped) {
+  const mapped = access3 === "workspace-write" ? map?.providers[config.ccSwitchProviderId ?? ccSwitch.currentProviderCodex ?? ""]?.writeRoute : map?.providers[config.ccSwitchProviderId ?? ccSwitch.currentProviderCodex ?? ""]?.readRoute;
+  if ((config.ccSwitchProviderId ?? ccSwitch.currentProviderCodex) && mapped) {
     return "cc-switch";
   }
   return "default";
+}
+async function inspectStructuredRuntime(stateDir, _namespace) {
+  if (!stateDir) {
+    return {
+      brokerThreadMarkers: [],
+      appServerHosts: 0,
+      liveAppServerHosts: 0,
+      liveIdentifiedAppServerHosts: 0
+    };
+  }
+  let markers = [];
+  try {
+    const parsed = JSON.parse(await readFile28(join38(stateDir, "broker-threads.json"), "utf8"));
+    if (isRecord6(parsed) && parsed.version === 1 && isRecord6(parsed.threads)) {
+      markers = Object.entries(parsed.threads).flatMap(([threadId, value]) => {
+        if (!isRecord6(value)) return [];
+        const namespace = stringValue5(value.namespace);
+        const version = typeof value.version === "number" ? value.version : 0;
+        const createdAt = typeof value.createdAt === "number" ? value.createdAt : 0;
+        return namespace ? [{ threadId, namespace, version, createdAt }] : [];
+      });
+    }
+  } catch {
+  }
+  const hosts = await readHostRegistry(dirname24(stateDir));
+  return {
+    brokerThreadMarkers: markers,
+    appServerHosts: hosts.length,
+    liveAppServerHosts: hosts.filter((host) => processAlive(host.pid)).length,
+    liveIdentifiedAppServerHosts: hosts.filter(
+      (host) => processAlive(host.pid) && Boolean(host.runtimeIdentity)
+    ).length
+  };
+}
+function errorMessage8(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+function isRecord6(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+function stringValue5(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : void 0;
 }
 
 // src/cli/commands/settings.ts
@@ -32927,7 +34072,7 @@ async function runSettings(options = {}) {
     "cc-switch \u4E2D\u7684 Codex \u8D26\u53F7\uFF1A",
     providerSummary,
     "",
-    "\u8FD9\u91CC\u53EA\u8BFB\u53D6\u8D26\u53F7 ID\u3001\u540D\u79F0\u548C\u8FD0\u884C\u72B6\u6001\uFF1B\u4E0D\u4F1A\u8BFB\u53D6\u3001\u663E\u793A\u6216\u5BFC\u51FA API Key\u3002\u4E3B\u5BF9\u8BDD provider \u4ECD\u7531 cc-switch \u51B3\u5B9A\u3002"
+    "\u8FD9\u91CC\u53EA\u663E\u793A\u8D26\u53F7 ID\u3001\u540D\u79F0\u548C\u8FD0\u884C\u72B6\u6001\uFF1BAPI Key \u4E0D\u4F1A\u663E\u793A\u6216\u5199\u5165\u914D\u7F6E\u3002\u5B50\u4EE3\u7406\u6D3E\u53D1\u65F6\u7531 cc-switch resolver \u5728\u5185\u5B58\u4E2D\u8BFB\u53D6\uFF0C\u5E76\u53EA\u4F20\u7ED9 MixAgents \u5B50\u8FDB\u7A0B\u3002\u4E3B\u5BF9\u8BDD provider \u4ECD\u7531 cc-switch \u51B3\u5B9A\u3002"
   ].join("\n"), "\u6B65\u9AA4 1 / 5 \xB7 \u81EA\u52A8\u8BFB\u53D6\u4E3B\u5BF9\u8BDD\u914D\u7F6E");
   const selectedMode = await p3.select({
     message: "\u5B50\u4EE3\u7406\u5728 Broker \u4E0D\u53EF\u7528\u65F6\u600E\u4E48\u529E\uFF1F",
@@ -32963,71 +34108,48 @@ async function runSettings(options = {}) {
   }
   let routeMode = currentSubagents.routeMode;
   let readRoute = currentSubagents.readRoute;
-  let selectedCcProvider = diagnostics.ccSwitch.currentProviderCodex ?? ccProviders[0]?.id ?? null;
+  let selectedCcProvider = currentSubagents.ccSwitchProviderId;
   let selectedReadRoute = readRoute;
   const routeMapState = await loadBrokerRouteMap(settingsEnv);
   if (routeMapState.error) throw new Error(routeMapState.error);
   if ((selectedMode === "auto" || selectedMode === "broker") && ccProviders.length > 0) {
     p3.note([
-      "\u5B50\u4EE3\u7406\u53EF\u4EE5\u4F7F\u7528\u4E0E\u4E3B\u5BF9\u8BDD\u4E0D\u540C\u7684 provider\u3002\u4E0B\u9762\u5148\u9009 cc-switch \u8D26\u53F7\uFF0C\u518D\u9009\u8BE5\u8D26\u53F7\u5BF9\u5E94\u7684 MixAgents \u7EBF\u8DEF\u3002",
-      "\u9009\u62E9\u5907\u7528\u8D26\u53F7\u53EA\u4F1A\u4FDD\u5B58\u6620\u5C04\uFF1B\u4E3B\u5BF9\u8BDD\u4E0D\u4F1A\u56E0\u6B64\u5207\u6362\uFF0C\u7B49\u4F60\u5728 cc-switch \u771F\u6B63\u5207\u6362\u8D26\u53F7\u65F6\u624D\u751F\u6548\u3002",
-      availableReadRoutes.length === 0 ? "\u5F53\u524D\u6CA1\u6709\u53EF\u7528\u7EBF\u8DEF\u3002\u8BF7\u5148\u914D\u7F6E MixAgents broker.json \u6216\u8865\u9F50\u7EBF\u8DEF\u51ED\u636E\u3002" : `\u53D1\u73B0 ${availableReadRoutes.length} \u6761\u53EF\u7528\u53EA\u8BFB\u7EBF\u8DEF\u3002`,
-      ...unavailableRoutes.length ? [`\u4E0D\u53EF\u7528\u7EBF\u8DEF\uFF1A${unavailableRoutes.map(
+      "Bridge \u4F1A\u81EA\u52A8\u8BFB\u53D6\u8FD9\u91CC\u9009\u4E2D\u7684 cc-switch Codex provider\uFF0C\u5E76\u751F\u6210 Broker route\u3001\u6A21\u578B\u548C\u51ED\u636E\u3002",
+      "\u9ED8\u8BA4\u201C\u8DDF\u968F\u5F53\u524D provider\u201D\uFF1A\u4EE5\u540E\u5728 cc-switch \u5207\u6362 provider \u540E\uFF0C\u4E0B\u4E00\u6761\u5B50\u4EE3\u7406\u4EFB\u52A1\u81EA\u52A8\u4F7F\u7528\u65B0 provider\uFF0C\u65E0\u9700\u6539 Key \u6216\u624B\u5199 route\u3002",
+      "\u5982\u679C\u9009\u62E9\u56FA\u5B9A provider\uFF0C\u5B50\u4EE3\u7406\u59CB\u7EC8\u4F7F\u7528\u8BE5 provider\uFF1B\u4E3B\u5BF9\u8BDD\u4ECD\u7531 cc-switch \u5F53\u524D provider \u63A7\u5236\u3002",
+      availableReadRoutes.length === 0 ? "\u5F53\u524D provider \u7684 Broker route \u4F1A\u5728\u9996\u6B21\u6D3E\u53D1\u65F6\u81EA\u52A8\u751F\u6210\uFF1Bdoctor \u4F1A\u663E\u793A\u771F\u5B9E\u53EF\u7528\u6027\u3002" : `\u5F53\u524D\u5DF2\u89E3\u6790 ${availableReadRoutes.length} \u6761\u53EF\u7528\u53EA\u8BFB route\u3002`,
+      ...unavailableRoutes.length ? [`\u5F53\u524D\u4E0D\u53EF\u7528 route\uFF1A${unavailableRoutes.map(
         (route) => `${route.id}(${route.missingEnvironment.join(",") || "unavailable"})`
       ).join("\u3001")}`] : []
-    ].join("\n"), "\u6B65\u9AA4 2 / 5 \xB7 \u9009\u62E9\u5B50\u4EE3\u7406\u8D26\u53F7");
+    ].join("\n"), "\u6B65\u9AA4 2 / 5 \xB7 \u9009\u62E9\u5B50\u4EE3\u7406 provider");
+    const followCurrent = "__follow_current__";
     const providerChoice = await p3.select({
-      message: "\u628A\u5B50\u4EE3\u7406\u7EBF\u8DEF\u7ED1\u5B9A\u5230\u54EA\u4E2A cc-switch \u8D26\u53F7\uFF1F",
-      initialValue: selectedCcProvider && ccProviders.some((provider) => provider.id === selectedCcProvider) ? selectedCcProvider : ccProviders[0].id,
-      options: ccProviders.map((provider) => ({
-        value: provider.id,
-        label: `${provider.name} (${provider.id})`,
-        hint: provider.current ? "\u5F53\u524D\u4E3B\u5BF9\u8BDD\u8D26\u53F7" : "\u5907\u7528\u8D26\u53F7\uFF1B\u5207\u6362\u8FC7\u53BB\u540E\u751F\u6548"
-      }))
-    });
-    assertPrompt(providerChoice);
-    selectedCcProvider = providerChoice;
-    const mappedRoute = routeMapState.config?.providers[selectedCcProvider]?.readRoute;
-    const routeOptions = availableReadRoutes.map((route) => ({
-      value: route.id,
-      label: `${route.provider} / ${route.model}`,
-      hint: `${route.id} \xB7 \u9ED8\u8BA4\u53EA\u8BFB`
-    }));
-    if (routeOptions.length > 0) {
-      const initialRoute = readRoute && routeOptions.some((route) => route.value === readRoute) ? readRoute : mappedRoute && routeOptions.some((route) => route.value === mappedRoute) ? mappedRoute : diagnostics.selectedRoute.id && routeOptions.some((route) => route.value === diagnostics.selectedRoute.id) ? diagnostics.selectedRoute.id : routeOptions[0].value;
-      const routeChoice = await p3.select({
-        message: "\u8FD9\u4E2A\u8D26\u53F7\u4F7F\u7528\u54EA\u6761\u5B50\u4EE3\u7406\u7EBF\u8DEF\uFF1F",
-        initialValue: initialRoute,
-        options: routeOptions
-      });
-      assertPrompt(routeChoice);
-      selectedReadRoute = routeChoice;
-    }
-    const strategy = await p3.select({
-      message: "\u4EE5\u540E\u5728 cc-switch \u5207\u6362\u4E3B\u8D26\u53F7\u65F6\uFF0C\u5B50\u4EE3\u7406\u7EBF\u8DEF\u600E\u4E48\u5904\u7406\uFF1F",
-      initialValue: currentSubagents.routeMode === "manual" ? "manual" : "follow",
+      message: "\u5B50\u4EE3\u7406\u7528\u54EA\u4E2A cc-switch Codex provider\uFF1F",
+      initialValue: selectedCcProvider && ccProviders.some((provider) => provider.id === selectedCcProvider) ? selectedCcProvider : followCurrent,
       options: [
         {
-          value: "follow",
-          label: "\u81EA\u52A8\u4F7F\u7528\u8BE5\u8D26\u53F7\u7ED1\u5B9A\u7684\u7EBF\u8DEF\uFF08\u63A8\u8350\uFF09",
-          hint: "\u540C\u4E00\u4E2A cc-switch \u8D26\u53F7\u59CB\u7EC8\u4F7F\u7528\u4E0A\u9762\u9009\u5B9A\u7684\u7EBF\u8DEF"
+          value: followCurrent,
+          label: "\u8DDF\u968F\u5F53\u524D provider\uFF08\u63A8\u8350\uFF09",
+          hint: `\u73B0\u5728\u4F7F\u7528 ${diagnostics.ccSwitch.currentProviderName ?? "(unknown)"}\uFF0C\u4EE5\u540E\u968F cc-switch \u5207\u6362\u81EA\u52A8\u66F4\u65B0`
         },
-        {
-          value: "manual",
-          label: "\u59CB\u7EC8\u56FA\u5B9A\u8FD9\u4E00\u6761\u7EBF\u8DEF",
-          hint: "\u4E0D\u7BA1\u4E3B\u5BF9\u8BDD\u8D26\u53F7\u600E\u4E48\u5207\u6362\uFF0C\u5B50\u4EE3\u7406\u90FD\u7528\u8FD9\u6761\u7EBF\u8DEF"
-        }
+        ...ccProviders.map((provider) => ({
+          value: provider.id,
+          label: `${provider.name} (${provider.id})`,
+          hint: provider.current ? "\u5F53\u524D\u4E3B\u5BF9\u8BDD provider\uFF1B\u4E5F\u53EF\u56FA\u5B9A\u4F7F\u7528" : "\u56FA\u5B9A\u4F7F\u7528\u8FD9\u4E2A provider"
+        }))
       ]
     });
-    assertPrompt(strategy);
-    routeMode = strategy === "follow" ? "follow-cc-switch" : "manual";
-    readRoute = strategy === "manual" ? selectedReadRoute : null;
+    assertPrompt(providerChoice);
+    selectedCcProvider = providerChoice === followCurrent ? null : providerChoice;
+    routeMode = "follow-cc-switch";
+    selectedReadRoute = null;
+    readRoute = null;
   }
   const currentCredential = currentMcpCredentials(rawProfile);
   let credentialMode = currentCredential.mode;
   let credentialEnvKeys = currentCredential.credentialEnvKeys.join(", ");
   let credentialProvider = currentCredential.credentialProvider ?? "";
-  if (selectedMode === "auto" || selectedMode === "broker") {
+  if ((selectedMode === "auto" || selectedMode === "broker") && routeMode === "manual") {
     p3.note([
       "Bridge \u4E0D\u4F1A\u8BFB\u53D6\u3001\u6253\u5370\u6216\u4FDD\u5B58 API Key\u3002",
       `\u5F53\u524D\u542F\u52A8\u73AF\u5883\u4E2D\u7684 MIXAGENTS_BROKER_CREDENTIALS_JSON\uFF1A${settingsEnv.MIXAGENTS_BROKER_CREDENTIALS_JSON?.trim() ? "PRESENT" : "MISSING"}`,
@@ -33075,6 +34197,14 @@ async function runSettings(options = {}) {
       );
     }
     credentialProvider = credentialMode === "mixagents-managed" ? selectedCcProvider ?? diagnostics.ccSwitch.currentProviderCodex ?? "" : "";
+  } else if (selectedMode === "auto" || selectedMode === "broker") {
+    p3.note([
+      "Bridge \u4F1A\u4ECE\u5F53\u524D cc-switch provider \u81EA\u52A8\u8BFB\u53D6\u6A21\u578B\u3001Base URL \u548C Key \u5B57\u6BB5\uFF0C\u5E76\u4EC5\u628A\u5B83\u4EEC\u4F20\u7ED9 MixAgents \u5B50\u8FDB\u7A0B\u3002",
+      "Key \u4E0D\u4F1A\u5199\u5165 profile\u3001broker-routes.json\u3001worker mapping\u3001\u65E5\u5FD7\u6216 doctor JSON\uFF1B\u4F60\u4E0D\u9700\u8981\u624B\u5DE5\u8BBE\u7F6E MIXAGENTS_BROKER_CREDENTIALS_JSON\u3002"
+    ].join("\n"), "\u6B65\u9AA4 3 / 5 \xB7 \u81EA\u52A8\u51ED\u636E");
+    credentialMode = "inherit-env";
+    credentialEnvKeys = "";
+    credentialProvider = "";
   }
   p3.note([
     "Project RSI \u662F\u201C\u9879\u76EE\u5B8C\u6210\u8BC1\u636E\u6821\u9A8C\u201D\uFF1A\u53EA\u6709\u9879\u76EE\u5DF2\u7ECF\u521B\u5EFA .project-rsi/config.json \u65F6\u624D\u542F\u7528\u3002",
@@ -33263,8 +34393,8 @@ async function runSettings(options = {}) {
     };
   }
   const modeText = selectedMode === "auto" ? "\u81EA\u52A8\uFF1A\u4F18\u5148 MixAgents\uFF0C\u5931\u8D25\u65F6\u6309\u8BBE\u7F6E\u51B3\u5B9A" : selectedMode === "broker" ? "\u53EA\u5141\u8BB8 MixAgents" : selectedMode === "fork" ? "\u53EA\u7528\u672C\u5730 Codex fork" : "\u5173\u95ED\u5B50\u4EE3\u7406";
-  const routeText = selectedMode === "auto" || selectedMode === "broker" ? routeMode === "follow-cc-switch" ? `\u8D26\u53F7 ${selectedCcProvider ?? "(none)"} \u81EA\u52A8\u7ED1\u5B9A\u7EBF\u8DEF ${selectedReadRoute ?? "(none)"}` : `\u56FA\u5B9A\u7EBF\u8DEF ${selectedReadRoute ?? readRoute ?? "(none)"}` : "(\u4E0D\u9002\u7528)";
-  const credentialText = credentialMode === "inherit-env" ? `\u542F\u52A8\u73AF\u5883\u53D8\u91CF ${credentialEnvKeys || "(\u672A\u914D\u7F6E)"}` : "MixAgents managed\uFF08\u5F53\u524D\u7248\u672C\u672A\u9A8C\u8BC1\uFF09";
+  const routeText = selectedMode === "auto" || selectedMode === "broker" ? routeMode === "follow-cc-switch" ? selectedCcProvider ? `\u56FA\u5B9A provider=${selectedCcProvider}\uFF0Croute \u81EA\u52A8\u751F\u6210` : "\u8DDF\u968F cc-switch \u5F53\u524D provider\uFF0Croute \u81EA\u52A8\u751F\u6210" : `\u56FA\u5B9A\u7EBF\u8DEF ${selectedReadRoute ?? readRoute ?? "(none)"}` : "(\u4E0D\u9002\u7528)";
+  const credentialText = routeMode === "follow-cc-switch" ? "cc-switch \u81EA\u52A8\u89E3\u6790 provider Key\uFF08\u4E0D\u663E\u793A\u3001\u4E0D\u5199\u5165\u914D\u7F6E\uFF09" : credentialMode === "inherit-env" ? `\u542F\u52A8\u73AF\u5883\u53D8\u91CF ${credentialEnvKeys || "(\u672A\u914D\u7F6E)"}` : "MixAgents managed\uFF08\u5F53\u524D\u7248\u672C\u672A\u9A8C\u8BC1\uFF09";
   p3.note([
     `\u4E3B\u5BF9\u8BDD\uFF1A${diagnostics.ccSwitch.currentProviderName ?? "(unknown)"}\uFF08\u4FDD\u6301\u4E0D\u53D8\uFF09`,
     `\u5B50\u4EE3\u7406\uFF1A${modeText}`,
@@ -33312,6 +34442,7 @@ async function runSettings(options = {}) {
         enabled: selectedMode !== "off",
         mode: selectedMode,
         routeMode,
+        ccSwitchProviderId: routeMode === "follow-cc-switch" ? selectedCcProvider : currentSubagents.ccSwitchProviderId ?? null,
         readRoute,
         writeRoute: routeMode === "manual" ? writeRoute : null,
         modelTools,
@@ -33350,7 +34481,7 @@ async function loadSettingsSnapshot(options = {}) {
   const profileName = options.profile ?? root.activeProfile;
   const profile2 = root.profiles[profileName];
   if (!profile2) throw new Error(`profile \u4E0D\u5B58\u5728\uFF1A${profileName}`);
-  const cwd = resolve7(options.cwd ?? profile2.workspaces.default ?? process.cwd());
+  const cwd = resolve8(options.cwd ?? profile2.workspaces.default ?? process.cwd());
   const subagentConfig = profile2.subagents ?? DEFAULT_SUBAGENT_CONFIG;
   const rsiConfig = profile2.rsi ?? DEFAULT_RSI_CONFIG;
   const codexHome = profile2.codex?.codexHome ?? (profile2.codex?.inheritCodexHome === false ? `${paths2.profileDir}/codex-home` : defaultCodexHome());
@@ -33358,7 +34489,10 @@ async function loadSettingsSnapshot(options = {}) {
     collectSubagentDiagnostics({
       config: subagentConfig,
       cwd,
-      env
+      env,
+      stateDir: join39(paths2.profileDir, "structured"),
+      codexHome,
+      codexBin: profile2.codex?.binaryPath ?? "codex"
     }),
     projectRsiStatus(rsiConfig, cwd),
     profile2.agentKind === "codex" ? resolveCodexActiveConfigIdentity(codexHome) : Promise.resolve(void 0),
@@ -33452,7 +34586,7 @@ function formatSnapshot(snapshot) {
     ).join(" | ") : "(none)"}`,
     `main running with legacy/unknown identity=${snapshot.mainProvider.runningUnknown}`,
     `provider switch=${snapshot.mainProvider.pendingSwitch}; safe point=${snapshot.mainProvider.safeSwitchPoint}`,
-    `MixAgents mode=${snapshot.subagents.config.mode} routeMode=${snapshot.subagents.config.routeMode} MCP=${diagnostics.mcp.status} version=${diagnostics.packageVersion ?? "(unknown)"}`,
+    `MixAgents mode=${snapshot.subagents.config.mode} routeMode=${snapshot.subagents.config.routeMode} provider=${snapshot.subagents.config.ccSwitchProviderId ?? "(follow-current)"} MCP=${diagnostics.mcp.status} version=${diagnostics.packageVersion ?? "(unknown)"}`,
     `Broker tools=${diagnostics.modelTools.brokerWired ? "wired" : "degraded"} namespace=${diagnostics.modelTools.namespace} native=${diagnostics.modelTools.nativeToolPolicy} maxWorkers=${diagnostics.limits.maxConcurrentWorkers} workerTimeoutMs=${diagnostics.limits.workerTimeoutMs} writeWorkers=${diagnostics.limits.allowWriteWorkers}`,
     `Broker tools degraded=${diagnostics.modelTools.degradedReason ?? "(none)"}`,
     `credential mode=${diagnostics.credentials.mode} status=${diagnostics.credentials.status} providerRef=${diagnostics.credentials.providerReference ?? "(none)"}`,
@@ -33504,9 +34638,9 @@ function boundedNumberInput(value, minimum, maximum, label) {
 }
 async function validatedRsiRoot(input) {
   if (!input || input.includes("\0")) throw new Error("Project RSI root \u65E0\u6548");
-  const candidate = await realpath9(resolve7(input)).catch(() => void 0);
+  const candidate = await realpath10(resolve8(input)).catch(() => void 0);
   if (!candidate) throw new Error(`Project RSI root \u4E0D\u5B58\u5728\uFF1A${input}`);
-  if (candidate === parse3(candidate).root || candidate === resolve7(homedir14()) || dirname24(candidate) === parse3(candidate).root) {
+  if (candidate === parse4(candidate).root || candidate === resolve8(homedir16()) || dirname25(candidate) === parse4(candidate).root) {
     throw new Error("Project RSI root \u4E0D\u80FD\u662F /\u3001home \u6216\u5BBD\u6CDB\u7236\u76EE\u5F55");
   }
   const project = await discoverProjectRsi(candidate, candidate);
@@ -33547,7 +34681,8 @@ function providerSwitchState(running, configuredCcSwitchProviderId, configured, 
 }
 
 // src/cli/commands/doctor.ts
-import { createHash as createHash15 } from "crypto";
+import { createHash as createHash16 } from "crypto";
+import { join as join40 } from "path";
 async function runDoctor(options = {}) {
   const report = await loadDoctorReport(options);
   if (options.json || !process.stdout.isTTY) {
@@ -33570,6 +34705,7 @@ async function loadDoctorReport(options = {}) {
   const snapshot = await loadSettingsSnapshot(options);
   const diagnostics = snapshot.subagents.diagnostics;
   const explicitBroker = snapshot.subagents.config.mode === "broker";
+  const brokerToolsDisabled = !snapshot.subagents.config.enabled || snapshot.subagents.config.mode === "off" || snapshot.subagents.config.mode === "fork";
   const checks = [];
   checks.push({
     id: "profile",
@@ -33578,13 +34714,25 @@ async function loadDoctorReport(options = {}) {
   });
   checks.push({
     id: "broker-model-tools",
-    status: diagnostics.modelTools.brokerWired ? "pass" : explicitBroker || diagnostics.modelTools.configured ? "fail" : "warn",
-    message: diagnostics.modelTools.brokerWired ? `Broker dynamic tools configured; namespace=${diagnostics.modelTools.namespace}; native=${diagnostics.modelTools.nativeToolPolicy}` : diagnostics.modelTools.degradedReason ?? "Broker model tools are not wired"
+    status: brokerToolsDisabled ? "pass" : diagnostics.modelTools.brokerWired ? "pass" : "fail",
+    message: brokerToolsDisabled ? `Broker dynamic tools disabled by subagents.mode=${snapshot.subagents.config.mode}` : diagnostics.modelTools.brokerWired ? `Broker dynamic tools configured; namespace=${diagnostics.modelTools.namespace}; native=${diagnostics.modelTools.nativeToolPolicy}` : diagnostics.modelTools.degradedReason ?? "configured Broker tools are not bound to any current App Server thread"
   });
   checks.push({
     id: "native-collaboration",
-    status: diagnostics.modelTools.brokerWired ? "pass" : "warn",
-    message: diagnostics.modelTools.brokerWired ? "Bridge-managed new threads disable native collaboration tools; old unmarked threads fail closed" : "native collaboration is preserved and may bypass Broker; encrypted agent_message failures remain possible"
+    status: brokerToolsDisabled || diagnostics.modelTools.brokerWired ? "pass" : "warn",
+    message: brokerToolsDisabled ? `Bridge Broker orchestration disabled by subagents.mode=${snapshot.subagents.config.mode}` : diagnostics.modelTools.brokerWired ? "Bridge-managed new threads disable native collaboration tools; old unmarked threads fail closed" : "native collaboration is preserved and may bypass Broker; encrypted agent_message failures remain possible"
+  });
+  const providerDetails = diagnostics.ccSwitch.provider;
+  checks.push({
+    id: "cc-switch-provider",
+    status: providerDetails ? providerDetails.credential.status === "present" ? "pass" : providerDetails.credential.status === "oauth-only" ? "fail" : explicitBroker ? "fail" : "warn" : snapshot.subagents.config.routeMode === "follow-cc-switch" ? brokerToolsDisabled ? "pass" : "fail" : diagnostics.mcp.status === "available" ? "pass" : "warn",
+    message: providerDetails ? `id=${providerDetails.id} name=${providerDetails.name} model=${providerDetails.model} codexProvider=${providerDetails.codexProviderId} host=${providerDetails.baseUrlHost ?? "unknown"} wire=${providerDetails.wireApi} key=${providerDetails.credential.status} keyPath=${providerDetails.credential.sourcePath ?? "(none)"} keyFingerprint=${providerDetails.credential.fingerprint ?? "(none)"}` : "cc-switch provider \u5B8C\u6574\u914D\u7F6E\u5C1A\u672A\u89E3\u6790"
+  });
+  const markerMatch = diagnostics.runtime.namespaceBound && diagnostics.runtime.liveIdentifiedAppServerHosts > 0 ? "bound" : diagnostics.runtime.namespaceBound ? "stale-hosts" : diagnostics.runtime.appServerHosts > 0 ? "not-bound" : "no-marker";
+  checks.push({
+    id: "runtime-binding",
+    status: brokerToolsDisabled || markerMatch === "bound" ? "pass" : "fail",
+    message: `markers=${diagnostics.runtime.brokerThreadMarkers.length} namespaceBound=${diagnostics.runtime.namespaceBound} hosts=${diagnostics.runtime.appServerHosts} liveHosts=${diagnostics.runtime.liveAppServerHosts} liveIdentifiedHosts=${diagnostics.runtime.liveIdentifiedAppServerHosts} state=${diagnostics.runtime.profileScopedStateDir ?? "(none)"} match=${markerMatch}`
   });
   checks.push({
     id: "main-provider",
@@ -33626,8 +34774,8 @@ async function loadDoctorReport(options = {}) {
   }
   checks.push({
     id: "credential-delegation",
-    status: diagnostics.credentials.status === "present" ? "pass" : diagnostics.credentials.status === "delegated-unverified" ? "warn" : diagnostics.credentials.mode === "mixagents-managed" ? "fail" : "warn",
-    message: diagnostics.credentials.mode === "mixagents-managed" ? `MixAgents managed\uFF1Bbridge \u53EA\u4F20 providerRef=${diagnostics.credentials.providerReference ?? "(missing)"}` : `inherit-env\uFF1Bpresent/missing only: ${diagnostics.credentials.missingEnvironment.join(",") || "none missing"}`
+    status: diagnostics.credentials.status === "present" ? "pass" : diagnostics.credentials.status === "delegated-unverified" ? "warn" : diagnostics.credentials.mode === "mixagents-managed" ? "fail" : snapshot.subagents.config.routeMode === "follow-cc-switch" ? "fail" : "warn",
+    message: diagnostics.credentials.mode === "mixagents-managed" ? `MixAgents managed\uFF1Bbridge \u53EA\u4F20 providerRef=${diagnostics.credentials.providerReference ?? "(missing)"}` : diagnostics.credentials.mode === "cc-switch-auto" ? `cc-switch auto\uFF1Bprovider=${diagnostics.credentials.providerReference ?? "(unknown)"} source=${diagnostics.credentials.sourcePath ?? "(unknown)"} fingerprint=${diagnostics.credentials.fingerprint ?? "(none)"} missing=${diagnostics.credentials.missingEnvironment.join(",") || "none"}` : `inherit-env\uFF1Bpresent/missing only: ${diagnostics.credentials.missingEnvironment.join(",") || "none missing"}`
   });
   checks.push({
     id: "rsi-feedback-loop",
@@ -33641,8 +34789,8 @@ async function loadDoctorReport(options = {}) {
   });
   checks.push({
     id: "route-generation",
-    status: "warn",
-    message: "doctor \u4E0D\u4F1A\u4EA7\u751F\u4ED8\u8D39\u8BF7\u6C42\uFF1B\u771F\u5B9E\u751F\u6210\u9700\u663E\u5F0F\u8FD0\u884C `arg-bridge doctor --probe-route <id>`"
+    status: diagnostics.selectedRoute.id ? "pass" : "warn",
+    message: diagnostics.selectedRoute.id ? "route \u5DF2\u5728\u79BB\u7EBF\u9636\u6BB5\u89E3\u6790\uFF1Bdoctor \u4E0D\u4F1A\u4EA7\u751F\u4ED8\u8D39\u8BF7\u6C42\uFF0C\u771F\u5B9E\u751F\u6210\u9700\u663E\u5F0F probe" : "route \u5C1A\u672A\u89E3\u6790\uFF1Bdoctor \u4E0D\u4F1A\u4EA7\u751F\u4ED8\u8D39\u8BF7\u6C42\uFF0C\u771F\u5B9E\u751F\u6210\u9700\u663E\u5F0F `doctor --probe-route <id>`"
   });
   if (diagnostics.routeMap.error) {
     checks.push({
@@ -33653,14 +34801,14 @@ async function loadDoctorReport(options = {}) {
   } else {
     checks.push({
       id: "broker-routes",
-      status: diagnostics.routeMap.loaded ? "pass" : "warn",
-      message: diagnostics.routeMap.loaded ? `route map loaded: ${diagnostics.routeMap.path}` : `route map \u5C1A\u672A\u521B\u5EFA\uFF1A${diagnostics.routeMap.path}`
+      status: diagnostics.routeMap.loaded || snapshot.subagents.config.routeMode === "follow-cc-switch" ? "pass" : "warn",
+      message: diagnostics.routeMap.loaded ? `route map loaded: ${diagnostics.routeMap.path}` : snapshot.subagents.config.routeMode === "follow-cc-switch" ? "auto \u6A21\u5F0F\u4F7F\u7528 cc-switch \u81EA\u52A8\u751F\u6210 route\uFF1Bbroker-routes.json \u4E0D\u9700\u8981\u624B\u5DE5\u521B\u5EFA" : `route map \u5C1A\u672A\u521B\u5EFA\uFF1A${diagnostics.routeMap.path}`
     });
   }
   checks.push({
     id: "read-route",
-    status: diagnostics.selectedRoute.id ? "pass" : explicitBroker || snapshot.subagents.config.routeMode === "manual" ? "fail" : "warn",
-    message: diagnostics.selectedRoute.id ? `selected=${diagnostics.selectedRoute.id} source=${diagnostics.selectedRoute.source ?? "unknown"}` : diagnostics.selectedRoute.error ?? "\u6CA1\u6709\u9009\u4E2D read route\uFF1Bauto \u6A21\u5F0F\u53EF\u964D\u7EA7 fork"
+    status: diagnostics.selectedRoute.id ? "pass" : brokerToolsDisabled ? "pass" : explicitBroker || snapshot.subagents.config.routeMode === "manual" || snapshot.subagents.config.routeMode === "follow-cc-switch" ? "fail" : "warn",
+    message: diagnostics.selectedRoute.id ? `selected=${diagnostics.selectedRoute.id} source=${diagnostics.selectedRoute.source ?? "unknown"}` : diagnostics.selectedRoute.error ?? "\u6CA1\u6709\u9009\u4E2D read route\uFF1B\u8BF7\u68C0\u67E5\u5F53\u524D cc-switch provider \u7684 Broker \u914D\u7F6E\u548C\u51ED\u636E"
   });
   const unavailableRead = diagnostics.readRoutes.filter((route) => !route.available);
   for (const route of unavailableRead) {
@@ -33704,6 +34852,7 @@ async function loadDoctorReport(options = {}) {
     status: hasFail ? "error" : hasWarn ? "degraded" : "ok",
     profile: snapshot.profile,
     ccSwitchProvider: snapshot.ccSwitch.currentProviderCodex,
+    ccSwitchProviderDetails: diagnostics.ccSwitch.provider ?? null,
     mainProvider: snapshot.mainProvider,
     mixagents: {
       configuredMode: snapshot.subagents.config.mode,
@@ -33732,11 +34881,16 @@ async function loadDoctorReport(options = {}) {
       brokerShadowConfigured: diagnostics.modelTools.configured && diagnostics.modelTools.nativeToolPolicy === "shadow",
       nativeBypassPossible: !diagnostics.modelTools.brokerWired,
       trustedBrokerInterceptionHook: "not-installed-or-unverified",
-      hookCanBlockOrRewrite: true,
+      hookCanBlockOrRewrite: diagnostics.modelTools.brokerWired,
       hookCanReplaceTool: false,
       brokerDynamicToolsAvailableOnNewThreads: diagnostics.modelTools.brokerWired,
       existingThreadsWithoutMarker: "fail-closed",
       directCodexTuiCoverage: "requires-trusted-hook"
+    },
+    runtimeBinding: {
+      ...diagnostics.runtime,
+      configuredForNewThreads: diagnostics.modelTools.configuredForNewThreads,
+      match: markerMatch
     },
     workerRuntime: {
       startupVerification: "not-run-by-default",
@@ -33786,6 +34940,9 @@ async function probeSubagentRoute(options, requestedRoute) {
       },
       env,
       cwd: options.cwd ?? profile2.workspaces.default ?? process.cwd(),
+      stateDir: join40(paths2.profileDir, "structured"),
+      codexBin: profile2.codex?.binaryPath ?? "codex",
+      ...profile2.codex?.codexHome ? { codexHome: profile2.codex.codexHome } : profile2.codex?.inheritCodexHome === false ? { codexHome: join40(paths2.profileDir, "codex-home") } : {},
       requestedRoute,
       signal: controller.signal
     });
@@ -33813,7 +34970,7 @@ async function probeSubagentRoute(options, requestedRoute) {
         provider: resolved.route.provider,
         model: resolved.route.model,
         access: "read-only",
-        ...result.text ? { outputHash: createHash15("sha256").update(result.text).digest("hex") } : {},
+        ...result.text ? { outputHash: createHash16("sha256").update(result.text).digest("hex") } : {},
         note: "explicit-paid-request; no fallback or replay"
       };
     } finally {
@@ -33845,16 +35002,16 @@ function classifyProbeError(message, aborted) {
 }
 
 // src/cli/commands/migrate-local-poc.ts
-import { createHash as createHash16 } from "crypto";
+import { createHash as createHash17 } from "crypto";
 import {
   copyFile as copyFile3,
   lstat as lstat9,
-  mkdir as mkdir25,
-  readFile as readFile27,
+  mkdir as mkdir26,
+  readFile as readFile29,
   readdir as readdir8,
   writeFile as writeFile10
 } from "fs/promises";
-import { basename as basename10, dirname as dirname25, join as join37 } from "path";
+import { basename as basename10, dirname as dirname26, join as join41 } from "path";
 import { fileURLToPath as fileURLToPath2 } from "url";
 var POC_MARKERS = [
   "ARG_BRIDGE_LOCAL_POC_MANAGED",
@@ -33903,11 +35060,11 @@ async function migrateLocalPoc(options = {}) {
     rollback: []
   };
   for (const relative5 of ["dist/cli.js", "dist/broker-side.js"]) {
-    const path = join37(packageDir, relative5);
-    const body = await readFile27(path, "utf8").catch(() => void 0);
+    const path = join41(packageDir, relative5);
+    const body = await readFile29(path, "utf8").catch(() => void 0);
     if (body === void 0) continue;
     const marker = POC_MARKERS.some((item) => body.includes(item));
-    const sha2562 = createHash16("sha256").update(body).digest("hex");
+    const sha2562 = createHash17("sha256").update(body).digest("hex");
     const expectedHash = packageVersion ? KNOWN_CLEAN_HASHES[packageVersion]?.[relative5] : void 0;
     const unknownOneVersionSevenFile = packageVersion === "1.6.7" && !expectedHash;
     const unknownModifiedKnownVersion = Boolean(expectedHash && expectedHash !== sha2562);
@@ -33947,7 +35104,7 @@ async function migrateLocalPoc(options = {}) {
       action: "restore-backup"
     });
   }
-  const sideMapPath = join37(paths2.profileDir, "structured", "subagent-sides.json");
+  const sideMapPath = join41(paths2.profileDir, "structured", "subagent-sides.json");
   let sideMap = await migrateSideMap(sideMapPath, false, timestamp);
   if (sideMap) {
     report.sideMap = sideMap;
@@ -33978,8 +35135,8 @@ async function migrateLocalPoc(options = {}) {
     }
   }
   if (apply && report.conflicts.length === 0 && changes) {
-    const markerFile = join37(paths2.profileDir, ".arg-bridge", "migrations", "local-poc-v1.json");
-    await mkdir25(dirname25(markerFile), { recursive: true, mode: 448 });
+    const markerFile = join41(paths2.profileDir, ".arg-bridge", "migrations", "local-poc-v1.json");
+    await mkdir26(dirname26(markerFile), { recursive: true, mode: 448 });
     await writeFile10(markerFile, `${JSON.stringify({
       version: 1,
       appliedAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -33993,7 +35150,7 @@ async function migrateLocalPoc(options = {}) {
   return report;
 }
 async function migrateSideMap(path, apply, timestamp) {
-  const raw = await readFile27(path, "utf8").catch(() => void 0);
+  const raw = await readFile29(path, "utf8").catch(() => void 0);
   if (raw === void 0) return void 0;
   let parsed;
   try {
@@ -34059,7 +35216,7 @@ function normalizeSideMap(input) {
   };
 }
 async function findOriginalBackup(path) {
-  const names = await readdir8(dirname25(path)).catch(() => []);
+  const names = await readdir8(dirname26(path)).catch(() => []);
   const stem = basename10(path);
   const candidates = names.filter(
     (name) => [
@@ -34068,13 +35225,13 @@ async function findOriginalBackup(path) {
       `${stem}.arg-bridge-original`,
       `${stem}.bak`
     ].includes(name)
-  ).map((name) => join37(dirname25(path), name));
+  ).map((name) => join41(dirname26(path), name));
   return candidates.length === 1 ? candidates[0] : void 0;
 }
 async function locatePackageDir() {
-  let current = dirname25(fileURLToPath2(import.meta.url));
+  let current = dirname26(fileURLToPath2(import.meta.url));
   for (; ; ) {
-    const packageFile = await readFile27(join37(current, "package.json"), "utf8").catch(() => void 0);
+    const packageFile = await readFile29(join41(current, "package.json"), "utf8").catch(() => void 0);
     if (packageFile) {
       try {
         const parsed = JSON.parse(packageFile);
@@ -34082,14 +35239,14 @@ async function locatePackageDir() {
       } catch {
       }
     }
-    const parent = dirname25(current);
+    const parent = dirname26(current);
     if (parent === current) throw new Error("\u65E0\u6CD5\u5B9A\u4F4D\u5DF2\u5B89\u88C5\u7684 arg-bridge package");
     current = parent;
   }
 }
 async function readPackageVersion(packageDir) {
   try {
-    const parsed = JSON.parse(await readFile27(join37(packageDir, "package.json"), "utf8"));
+    const parsed = JSON.parse(await readFile29(join41(packageDir, "package.json"), "utf8"));
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) && typeof parsed.version === "string" ? parsed.version : void 0;
   } catch {
     return void 0;

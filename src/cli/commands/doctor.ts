@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { join } from 'node:path';
 import { DEFAULT_SUBAGENT_CONFIG } from '../../config/profile-schema';
 import { resolveAppPaths } from '../../config/app-paths';
 import { loadRootConfig } from '../../config/profile-store';
@@ -20,6 +21,8 @@ export interface DoctorReport {
   status: 'ok' | 'degraded' | 'error';
   profile: string;
   ccSwitchProvider: string | null;
+  ccSwitchProviderDetails:
+    NonNullable<SettingsSnapshot['subagents']['diagnostics']['ccSwitch']['provider']> | null;
   mainProvider: SettingsSnapshot['mainProvider'];
   mixagents: {
     configuredMode: string;
@@ -58,6 +61,10 @@ export interface DoctorReport {
     brokerDynamicToolsAvailableOnNewThreads: boolean;
     existingThreadsWithoutMarker: 'fail-closed';
     directCodexTuiCoverage: 'requires-trusted-hook';
+  };
+  runtimeBinding: SettingsSnapshot['subagents']['diagnostics']['runtime'] & {
+    configuredForNewThreads: boolean;
+    match: 'bound' | 'not-bound' | 'stale-hosts' | 'no-marker';
   };
   workerRuntime: {
     startupVerification: 'not-run-by-default';
@@ -109,6 +116,10 @@ export async function loadDoctorReport(options: DoctorOptionsWithProbe = {}): Pr
   const snapshot = await loadSettingsSnapshot(options);
   const diagnostics = snapshot.subagents.diagnostics;
   const explicitBroker = snapshot.subagents.config.mode === 'broker';
+  const brokerToolsDisabled =
+    !snapshot.subagents.config.enabled ||
+    snapshot.subagents.config.mode === 'off' ||
+    snapshot.subagents.config.mode === 'fork';
   const checks: DoctorReport['checks'] = [];
   checks.push({
     id: 'profile',
@@ -117,21 +128,72 @@ export async function loadDoctorReport(options: DoctorOptionsWithProbe = {}): Pr
   });
   checks.push({
     id: 'broker-model-tools',
-    status: diagnostics.modelTools.brokerWired
+    status: brokerToolsDisabled
       ? 'pass'
-      : explicitBroker || diagnostics.modelTools.configured
-        ? 'fail'
-        : 'warn',
-    message: diagnostics.modelTools.brokerWired
+      : diagnostics.modelTools.brokerWired
+        ? 'pass'
+        : 'fail',
+    message: brokerToolsDisabled
+      ? `Broker dynamic tools disabled by subagents.mode=${snapshot.subagents.config.mode}`
+      : diagnostics.modelTools.brokerWired
       ? `Broker dynamic tools configured; namespace=${diagnostics.modelTools.namespace}; native=${diagnostics.modelTools.nativeToolPolicy}`
-      : diagnostics.modelTools.degradedReason ?? 'Broker model tools are not wired',
+      : diagnostics.modelTools.degradedReason ??
+        'configured Broker tools are not bound to any current App Server thread',
   });
   checks.push({
     id: 'native-collaboration',
-    status: diagnostics.modelTools.brokerWired ? 'pass' : 'warn',
-    message: diagnostics.modelTools.brokerWired
-      ? 'Bridge-managed new threads disable native collaboration tools; old unmarked threads fail closed'
-      : 'native collaboration is preserved and may bypass Broker; encrypted agent_message failures remain possible',
+    status: brokerToolsDisabled || diagnostics.modelTools.brokerWired ? 'pass' : 'warn',
+    message: brokerToolsDisabled
+      ? `Bridge Broker orchestration disabled by subagents.mode=${snapshot.subagents.config.mode}`
+      : diagnostics.modelTools.brokerWired
+        ? 'Bridge-managed new threads disable native collaboration tools; old unmarked threads fail closed'
+        : 'native collaboration is preserved and may bypass Broker; encrypted agent_message failures remain possible',
+  });
+  const providerDetails = diagnostics.ccSwitch.provider;
+  checks.push({
+    id: 'cc-switch-provider',
+    status: providerDetails
+      ? providerDetails.credential.status === 'present'
+        ? 'pass'
+        : providerDetails.credential.status === 'oauth-only'
+          ? 'fail'
+          : explicitBroker
+            ? 'fail'
+            : 'warn'
+      : snapshot.subagents.config.routeMode === 'follow-cc-switch'
+        ? brokerToolsDisabled ? 'pass' : 'fail'
+        : diagnostics.mcp.status === 'available'
+          ? 'pass'
+          : 'warn',
+    message: providerDetails
+      ? `id=${providerDetails.id} name=${providerDetails.name} model=${providerDetails.model}` +
+        ` codexProvider=${providerDetails.codexProviderId}` +
+        ` host=${providerDetails.baseUrlHost ?? 'unknown'}` +
+        ` wire=${providerDetails.wireApi}` +
+        ` key=${providerDetails.credential.status}` +
+        ` keyPath=${providerDetails.credential.sourcePath ?? '(none)'}` +
+        ` keyFingerprint=${providerDetails.credential.fingerprint ?? '(none)'}`
+      : 'cc-switch provider 完整配置尚未解析',
+  });
+  const markerMatch: DoctorReport['runtimeBinding']['match'] =
+    diagnostics.runtime.namespaceBound &&
+      diagnostics.runtime.liveIdentifiedAppServerHosts > 0
+      ? 'bound'
+      : diagnostics.runtime.namespaceBound
+        ? 'stale-hosts'
+        : diagnostics.runtime.appServerHosts > 0
+          ? 'not-bound'
+          : 'no-marker';
+  checks.push({
+    id: 'runtime-binding',
+    status: brokerToolsDisabled || markerMatch === 'bound' ? 'pass' : 'fail',
+    message: `markers=${diagnostics.runtime.brokerThreadMarkers.length}` +
+      ` namespaceBound=${diagnostics.runtime.namespaceBound}` +
+      ` hosts=${diagnostics.runtime.appServerHosts}` +
+      ` liveHosts=${diagnostics.runtime.liveAppServerHosts}` +
+      ` liveIdentifiedHosts=${diagnostics.runtime.liveIdentifiedAppServerHosts}` +
+      ` state=${diagnostics.runtime.profileScopedStateDir ?? '(none)'}` +
+      ` match=${markerMatch}`,
   });
   checks.push({
     id: 'main-provider',
@@ -187,14 +249,21 @@ export async function loadDoctorReport(options: DoctorOptionsWithProbe = {}): Pr
       ? 'pass'
       : diagnostics.credentials.status === 'delegated-unverified'
         ? 'warn'
-      : diagnostics.credentials.mode === 'mixagents-managed'
-        ? 'fail'
-        : 'warn',
+        : diagnostics.credentials.mode === 'mixagents-managed'
+          ? 'fail'
+          : snapshot.subagents.config.routeMode === 'follow-cc-switch'
+            ? 'fail'
+            : 'warn',
     message: diagnostics.credentials.mode === 'mixagents-managed'
       ? `MixAgents managed；bridge 只传 providerRef=${diagnostics.credentials.providerReference ?? '(missing)'}`
-      : `inherit-env；present/missing only: ${
-          diagnostics.credentials.missingEnvironment.join(',') || 'none missing'
-        }`,
+      : diagnostics.credentials.mode === 'cc-switch-auto'
+        ? `cc-switch auto；provider=${diagnostics.credentials.providerReference ?? '(unknown)'}` +
+          ` source=${diagnostics.credentials.sourcePath ?? '(unknown)'}` +
+          ` fingerprint=${diagnostics.credentials.fingerprint ?? '(none)'}` +
+          ` missing=${diagnostics.credentials.missingEnvironment.join(',') || 'none'}`
+        : `inherit-env；present/missing only: ${
+            diagnostics.credentials.missingEnvironment.join(',') || 'none missing'
+          }`,
   });
   checks.push({
     id: 'rsi-feedback-loop',
@@ -216,8 +285,10 @@ export async function loadDoctorReport(options: DoctorOptionsWithProbe = {}): Pr
   });
   checks.push({
     id: 'route-generation',
-    status: 'warn',
-    message: 'doctor 不会产生付费请求；真实生成需显式运行 `arg-bridge doctor --probe-route <id>`',
+    status: diagnostics.selectedRoute.id ? 'pass' : 'warn',
+    message: diagnostics.selectedRoute.id
+      ? 'route 已在离线阶段解析；doctor 不会产生付费请求，真实生成需显式 probe'
+      : 'route 尚未解析；doctor 不会产生付费请求，真实生成需显式 `doctor --probe-route <id>`',
   });
   if (diagnostics.routeMap.error) {
     checks.push({
@@ -228,22 +299,32 @@ export async function loadDoctorReport(options: DoctorOptionsWithProbe = {}): Pr
   } else {
     checks.push({
       id: 'broker-routes',
-      status: diagnostics.routeMap.loaded ? 'pass' : 'warn',
+      status: diagnostics.routeMap.loaded ||
+        snapshot.subagents.config.routeMode === 'follow-cc-switch'
+        ? 'pass'
+        : 'warn',
       message: diagnostics.routeMap.loaded
         ? `route map loaded: ${diagnostics.routeMap.path}`
-        : `route map 尚未创建：${diagnostics.routeMap.path}`,
+        : snapshot.subagents.config.routeMode === 'follow-cc-switch'
+          ? 'auto 模式使用 cc-switch 自动生成 route；broker-routes.json 不需要手工创建'
+          : `route map 尚未创建：${diagnostics.routeMap.path}`,
     });
   }
   checks.push({
     id: 'read-route',
     status: diagnostics.selectedRoute.id
       ? 'pass'
-      : explicitBroker || snapshot.subagents.config.routeMode === 'manual'
+      : brokerToolsDisabled
+        ? 'pass'
+      : explicitBroker ||
+          snapshot.subagents.config.routeMode === 'manual' ||
+          snapshot.subagents.config.routeMode === 'follow-cc-switch'
         ? 'fail'
         : 'warn',
     message: diagnostics.selectedRoute.id
       ? `selected=${diagnostics.selectedRoute.id} source=${diagnostics.selectedRoute.source ?? 'unknown'}`
-      : diagnostics.selectedRoute.error ?? '没有选中 read route；auto 模式可降级 fork',
+      : diagnostics.selectedRoute.error ??
+        '没有选中 read route；请检查当前 cc-switch provider 的 Broker 配置和凭据',
   });
   const unavailableRead = diagnostics.readRoutes.filter(route => !route.available);
   for (const route of unavailableRead) {
@@ -309,6 +390,7 @@ export async function loadDoctorReport(options: DoctorOptionsWithProbe = {}): Pr
     status: hasFail ? 'error' : hasWarn ? 'degraded' : 'ok',
     profile: snapshot.profile,
     ccSwitchProvider: snapshot.ccSwitch.currentProviderCodex,
+    ccSwitchProviderDetails: diagnostics.ccSwitch.provider ?? null,
     mainProvider: snapshot.mainProvider,
     mixagents: {
       configuredMode: snapshot.subagents.config.mode,
@@ -339,11 +421,16 @@ export async function loadDoctorReport(options: DoctorOptionsWithProbe = {}): Pr
         diagnostics.modelTools.nativeToolPolicy === 'shadow',
       nativeBypassPossible: !diagnostics.modelTools.brokerWired,
       trustedBrokerInterceptionHook: 'not-installed-or-unverified',
-      hookCanBlockOrRewrite: true,
+      hookCanBlockOrRewrite: diagnostics.modelTools.brokerWired,
       hookCanReplaceTool: false,
       brokerDynamicToolsAvailableOnNewThreads: diagnostics.modelTools.brokerWired,
       existingThreadsWithoutMarker: 'fail-closed',
       directCodexTuiCoverage: 'requires-trusted-hook',
+    },
+    runtimeBinding: {
+      ...diagnostics.runtime,
+      configuredForNewThreads: diagnostics.modelTools.configuredForNewThreads,
+      match: markerMatch,
     },
     workerRuntime: {
       startupVerification: 'not-run-by-default',
@@ -397,6 +484,13 @@ async function probeSubagentRoute(
       },
       env,
       cwd: options.cwd ?? profile.workspaces.default ?? process.cwd(),
+      stateDir: join(paths.profileDir, 'structured'),
+      codexBin: profile.codex?.binaryPath ?? 'codex',
+      ...(profile.codex?.codexHome
+        ? { codexHome: profile.codex.codexHome }
+        : profile.codex?.inheritCodexHome === false
+          ? { codexHome: join(paths.profileDir, 'codex-home') }
+          : {}),
       requestedRoute,
       signal: controller.signal,
     });

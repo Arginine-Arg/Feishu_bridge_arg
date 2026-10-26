@@ -1,6 +1,7 @@
 # MixAgents subagents, model tools and `cc-switch` routing
 
-Version 1.8.0 makes MixAgents available through two separate paths:
+Version 1.8.1 makes MixAgents available through two separate paths and adds
+automatic cc-switch provider discovery for workers:
 
 1. the explicit `/btw` side conversation;
 2. Bridge-owned dynamic tools that the parent Codex model can call without a
@@ -59,9 +60,9 @@ The `arg_bridge` namespace exposes:
   available, route, provider, model, access and status;
 - `list_routes`: show non-secret route availability;
 - `interrupt_agent` and `close_agent`;
-- `send_message`: queue-only semantics. The current MixAgents MCP `send`
-  surface does not prove queue-only behavior, so this tool fails explicitly
-  instead of being treated as `followup_task`.
+- `send_message`: queue-only semantics implemented in Bridge. It stores
+  plaintext locally without waking the worker; the next `followup_task` sends
+  the queued text and the new task together as one ordinary MixAgents input.
 
 `spawn_agent` and `followup_task` send their task as ordinary MixAgents input.
 They never create a native Codex child thread. The logical path is stable for
@@ -136,6 +137,7 @@ configured in `arg-bridge settings`, in the profile, with
     "enabled": true,
     "mode": "auto",
     "routeMode": "follow-cc-switch",
+    "ccSwitchProviderId": null,
     "readRoute": null,
     "writeRoute": null,
     "modelTools": true,
@@ -146,12 +148,9 @@ configured in `arg-bridge settings`, in the profile, with
     "allowWriteWorkers": false,
     "includeProgressSnapshot": true,
     "reuse": "scope-cwd",
-    "allowForkFallback": true,
+    "allowForkFallback": false,
     "mixagents": {
-      "mcpCommand": "mixagents-broker",
-      "mcpArgs": ["mcp"],
-      "credentialMode": "mixagents-managed",
-      "credentialProvider": "opaque-provider-reference"
+      "mcpCommand": "mixagents-broker"
     }
   }
 }
@@ -159,14 +158,37 @@ configured in `arg-bridge settings`, in the profile, with
 
 `mode`:
 
-- `auto`: try MixAgents; if it cannot start, the protocol is incompatible, or
-  no usable route exists, report the reason and use Codex fork when
-  `allowForkFallback` is true.
+- `auto`: try the automatically resolved cc-switch route first. Use Codex fork
+  only for an official provider when `allowForkFallback` is true. A third-party
+  provider never falls back to native Codex child tools.
 - `broker`: require MixAgents. Never fall back silently.
 - `fork`: use the legacy compatibility backend.
 - `off`: disable `/btw` without affecting the main conversation.
 
 Explicit `/btw --route <id>` and manual route mode never fall back.
+
+## Automatic cc-switch provider resolution
+
+`routeMode: "follow-cc-switch"` is the default and needs no
+`broker-routes.json` file. On every worker operation, Bridge reads the current
+cc-switch provider from SQLite (`~/.cc-switch/cc-switch.db`, with a legacy
+`settings.json` fallback), parses `settings_config.config` TOML, and resolves:
+
+- cc-switch provider ID and display name;
+- Codex-internal provider ID and model;
+- base URL, `wire_api`, context/reasoning settings and provider headers;
+- the known credential field and its value in memory only.
+
+It materializes a profile-scoped Broker config under
+`<profile>/structured/cc-switch/broker-<config-hash>.json` and passes the
+credential to the MixAgents child as `MIXAGENTS_BROKER_CREDENTIALS_JSON`. The
+value is never written to the Broker config, profile, route map, worker mapping,
+logs, doctor JSON, or argv.
+
+When `ccSwitchProviderId` is `null`, the next operation follows cc-switch. When
+it is set to a provider ID, workers use that provider while the main
+conversation continues to follow cc-switch. A provider switch changes the route
+fingerprint; an old worker is closed and recreated, never silently reused.
 
 ## Three different provider identifiers
 
@@ -178,7 +200,9 @@ Do not conflate these values:
    `$CODEX_HOME/config.toml`.
 3. MixAgents Broker route ID.
 
-The route map is keyed by the **cc-switch provider ID**:
+The generated route is keyed by the **cc-switch provider ID** and includes the
+config fingerprint in its route ID. A legacy route map is optional and is
+acceptable only for an explicitly selected manual route:
 
 ```json
 {
@@ -194,16 +218,18 @@ The route map is keyed by the **cc-switch provider ID**:
 }
 ```
 
-The file lives at `~/.config/arg-bridge/broker-routes.json` (or below
-`XDG_CONFIG_HOME`). It contains no base URL, token, or credential material.
+The legacy file lives at `~/.config/arg-bridge/broker-routes.json` (or below
+`XDG_CONFIG_HOME`). It contains IDs only and is not created by the default
+follow-cc-switch flow.
 
 Selection order for each `/btw` or model-visible worker call:
 
 1. explicit `/btw --route <id>`;
 2. manual `subagents.readRoute` (or `writeRoute` for a write worker);
-3. cc-switch provider-ID read-route mapping;
-4. `defaultReadRoute` (or the corresponding write fields);
-5. auto-only fork fallback, with a visible notice.
+3. automatically generated route for the selected/current cc-switch provider;
+4. legacy cc-switch provider-ID mapping;
+5. `defaultReadRoute` (or the corresponding write fields);
+6. official-provider-only fork fallback, with a visible notice.
 
 All values are re-read for every worker call and every settings/doctor
 invocation.
@@ -211,14 +237,18 @@ No route decision is cached until process restart.
 
 ## Credential ownership
 
-For Broker execution, arg-bridge never reads, logs, exports, or places a
-provider key in argv. It also never runs
+For automatic Broker execution, arg-bridge reads the selected cc-switch
+`settings_config` in memory, logs only the field path and a one-way fingerprint,
+and places the key only in the MixAgents child environment. It never exports
+the key to the interactive shell, logs, doctor JSON, worker mapping, route map,
+prompt or argv. It also never runs
 `cc-switch -a codex provider current`, which can print secrets. The pre-existing
-Codex main-provider credential resolver is separate and is not reused as a
-Broker credential source.
+Codex main-provider credential resolver remains separate.
 
-Two credential modes exist:
+Three credential modes exist:
 
+- `cc-switch-auto`: the default follow mode described above. No environment
+  variable or credential prompt is required.
 - `inherit-env`: the MixAgents MCP server receives an already-injected parent
   environment. arg-bridge checks only the declared variable names and reports
   `PRESENT`/`MISSING` by name.
@@ -233,7 +263,7 @@ The cross-repository dependency is therefore explicit:
 
 - MixAgents must publish a stable helper/protocol that accepts an opaque
   provider reference and resolves the active `cc-switch` credential without
-  returning it to the controller.
+  returning it to the controller; this is only an advanced fallback.
 - The helper must expose a compatibility/version marker that a future
   arg-bridge probe can verify.
 
@@ -245,7 +275,7 @@ authorization and is not currently offered by the `/btw` UX.
 
 First `/btw <text>`:
 
-1. Reload the latest profile, `cc-switch` metadata, route map, and Broker routes.
+1. Reload the latest profile, cc-switch provider/credentials, and Broker routes.
 2. Build a bounded progress snapshot containing thread ID, cwd, goal, last user
    request, last assistant output, and last tool status.
 3. Redact secrets and cap the snapshot at 2400 characters.
@@ -330,10 +360,9 @@ arg-bridge doctor --profile codex --json --probe-route review-read
 1. read and display the active cc-switch account, all safe provider IDs/names,
    the active Codex model and current runtime status;
 2. choose whether unavailable Broker execution may use local Codex fork;
-3. choose a cc-switch account, a Broker route for that account, and whether the
-   mapping follows cc-switch or is fixed;
-4. choose who supplies Broker credentials; the normal choice is an environment
-   variable already injected by the Bridge launcher;
+3. choose **follow current provider** or one fixed cc-switch provider; no route
+   ID or credential entry is required;
+4. Bridge shows that it will resolve the provider key automatically;
 5. decide whether Project RSI should check initialized projects, then confirm a
    plain-language summary.
 
@@ -341,24 +370,21 @@ Advanced concurrency, native-tool shadowing, write workers, custom MCP command,
 progress snapshot and RSI repair-round settings are hidden behind an explicit
 `advanced` prompt.
 
-When follow mode is selected, settings writes only the safe mapping:
+When follow mode is selected, settings writes only the provider preference:
 
 ```json
 {
-  "providers": {
-    "cc-switch-provider-id": { "readRoute": "broker-route-id" }
-  }
+  "ccSwitchProviderId": null
 }
 ```
 
 It does not switch the active main provider.
 
-For the public MixAgents 0.1.1 package, credentials are supplied as the
-`MIXAGENTS_BROKER_CREDENTIALS_JSON` environment object from the Bridge launcher
-or secret manager. The settings panel records only the variable name and checks
-presence; it never reads or displays the value. `mixagents-managed` remains an
-explicitly unverified integration point because the current public package does
-not resolve cc-switch secrets itself.
+For public MixAgents 0.1.1, Bridge supplies the automatically resolved
+credential object directly to the MCP child. Manual
+`MIXAGENTS_BROKER_CREDENTIALS_JSON` remains an advanced fallback; it is not
+needed for follow mode. The settings panel never reads, displays or writes the
+value. `mixagents-managed` remains an explicitly unverified integration point.
 
 Settings and plain doctor are non-paid, non-mutating diagnostics. They:
 

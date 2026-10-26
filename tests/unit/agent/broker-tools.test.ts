@@ -343,6 +343,10 @@ describe('Bridge Broker dynamic tools', () => {
     expect(backend.spawns[0]).toMatchObject({
       access: 'workspace-write',
       task: 'change a file',
+      writeAuthorization: {
+        workspace: root,
+        task: 'change a file',
+      },
     });
     await tool.close();
   });
@@ -362,7 +366,7 @@ describe('Bridge Broker dynamic tools', () => {
     await tool.close();
   });
 
-  it('deduplicates idempotent spawn and rejects uncertain send_message semantics', async () => {
+  it('deduplicates idempotent calls and queues send_message text for the next followup', async () => {
     const { backend, tool } = await controller();
     const args = {
       name: 'reviewer',
@@ -390,8 +394,20 @@ describe('Bridge Broker dynamic tools', () => {
       logical_name: 'reviewer',
       message: 'queue only',
     });
-    expect(send.success).toBe(false);
-    expect(send.text).toContain('queue-only');
+    expect(send).toMatchObject({ success: true });
+    expect(JSON.parse(send.text)).toMatchObject({
+      status: 'queued',
+      queued_messages: 1,
+    });
+    expect(backend.sends).toHaveLength(1);
+
+    const queuedFollowup = await tool.call('followup_task', {
+      logical_name: 'reviewer',
+      task: 'wake and answer',
+    });
+    expect(queuedFollowup).toMatchObject({ success: true });
+    expect(backend.sends).toHaveLength(2);
+    expect(backend.sends.at(-1)?.message).toBe('queue only\n\nwake and answer');
     await tool.close();
   });
 
@@ -436,6 +452,27 @@ describe('Bridge Broker dynamic tools', () => {
       agent_id: 'agent-1',
       thread_id: 'worker-thread-1',
     });
+    await second.tool.close();
+  });
+
+  it('persists send_message queues across a Bridge restart and clears them after delivery', async () => {
+    const first = await controller();
+    await first.tool.call('spawn_agent', { name: 'reviewer', task: 'first' });
+    expect((await first.tool.call('send_message', {
+      logical_name: 'reviewer',
+      message: 'queued before restart',
+    })).success).toBe(true);
+    await first.tool.close();
+
+    const second = await controller({ workspace: first.root, stateFile: first.stateFile });
+    const followup = await second.tool.call('followup_task', {
+      logical_name: 'reviewer',
+      task: 'wake after restart',
+    });
+    expect(followup.success).toBe(true);
+    expect(second.backend.sends.at(-1)?.message).toBe('queued before restart\n\nwake after restart');
+    const persisted = JSON.parse(await readFile(second.stateFile, 'utf8'));
+    expect(persisted.workers[0].queuedMessages).toEqual([]);
     await second.tool.close();
   });
 

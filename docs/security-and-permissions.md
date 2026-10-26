@@ -10,10 +10,12 @@
 
 ## Broker credentials
 
-For Broker execution, arg-bridge does not read, print, log, export, or
-synthesize provider secrets. The existing Codex main-provider credential
-resolver remains scoped to Codex. Broker diagnostics report names and states
-only:
+For automatic Broker execution, arg-bridge reads the selected cc-switch
+`settings_config` only in memory, puts the key only in the MixAgents child
+environment, and reports only names/state plus a one-way fingerprint. It does
+not print, log, export, synthesize, or put the key in argv. The existing Codex
+main-provider credential resolver remains scoped to Codex. Broker diagnostics
+report names and states only:
 
 ```text
 PRESENT
@@ -28,7 +30,9 @@ MIXAGENTS_CREDENTIAL_PROVIDER=<provider-ref>
 MIXAGENTS_CREDENTIAL_SOURCE=cc-switch
 ```
 
-MixAgents or its trusted helper owns credential lookup. Inline credentials in
+For the default auto mode, Bridge resolves the selected cc-switch entry and
+passes the credential only to the MCP child. In the optional managed mode,
+MixAgents or its trusted helper owns that lookup. Inline credentials in
 MixAgents argv are rejected during profile normalization. Credential files must
 be mode `0600` and their directories `0700`.
 
@@ -68,8 +72,8 @@ cc-switch -a codex provider list
 - Persistent worker mappings contain logical path, Broker agent ID, optional
   worker thread ID, route fingerprint, provider/model IDs, access and workspace.
   They contain no API key or credential JSON.
-- `send_message` remains unsupported until MixAgents proves queue-only
-  semantics; it is never silently treated as trigger-turn.
+- `send_message` is Bridge-local queue-only. It never wakes the worker; the next
+  `followup_task` delivers the queued plaintext and new task together.
 - Result text is redacted and bounded before persistence/display.
 - Rate/cost/concurrency are limited by `maxConcurrentWorkers`,
   `workerTimeoutMs`, and the parent turn/abort signals.
@@ -112,8 +116,8 @@ Broker `agentId` is never treated as a Codex thread ID.
 
 ## Provider switch
 
-- `cc-switch` current ID, Codex internal provider ID, and Broker route ID are
-  displayed separately.
+- `cc-switch` current ID, Codex internal provider ID, and generated/legacy Broker
+  route ID are displayed separately.
 - Idle Codex threads are rebound to current provider/model.
 - Active threads keep their running provider until the safe boundary.
 - The App Server fingerprint is not used to kill a host with active clients;

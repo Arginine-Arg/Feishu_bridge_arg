@@ -1,13 +1,22 @@
 import { homedir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
+import { readFile } from 'node:fs/promises';
 import type { SubagentConfig } from '../../config/profile-schema';
 import {
   loadBrokerRouteMap,
   type BrokerRouteMap,
 } from '../../integrations/broker-routes';
 import { readCcSwitchState, type CcSwitchState } from '../../integrations/cc-switch';
+import {
+  materializeCcSwitchBrokerRuntime,
+  readCcSwitchProviderCatalog,
+  resolveCurrentCcSwitchCodexProvider,
+  type CcSwitchProviderSummary,
+} from '../../integrations/cc-switch-provider';
+import { processAlive, readHostRegistry } from '../structured/host-registry';
 import { redactSecrets } from './mcp-client';
 import {
+  mergeRuntimeRoutes,
   MixAgentsBrokerBackend,
   resolveMixAgentsLaunchConfig,
 } from './mixagents';
@@ -26,6 +35,7 @@ export interface SubagentDiagnostics {
     namespace: string;
     nativeToolPolicy: SubagentConfig['nativeToolPolicy'];
     brokerWired: boolean;
+    configuredForNewThreads: boolean;
     degradedReason?: string;
   };
   limits: {
@@ -39,10 +49,12 @@ export interface SubagentDiagnostics {
   toolContract: 'compatible' | 'incompatible' | 'unknown';
   mcpStart: 'not-configured' | 'started' | 'failed';
   credentials: {
-    mode: 'inherit-env' | 'mixagents-managed';
-    status: 'present' | 'missing' | 'delegated-unverified' | 'not-declared';
+    mode: 'inherit-env' | 'mixagents-managed' | 'cc-switch-auto';
+    status: 'present' | 'missing' | 'oauth-only' | 'delegated-unverified' | 'not-declared';
     providerReference: string | null;
     missingEnvironment: string[];
+    sourcePath?: string;
+    fingerprint?: string;
   };
   routeGeneration: 'not-tested';
   mcp: {
@@ -53,6 +65,7 @@ export interface SubagentDiagnostics {
     currentProviderCodex: string | null;
     currentProviderName: string | null;
     providers: Array<{ id: string; name: string; current: boolean }>;
+    provider?: CcSwitchProviderSummary;
     settingsPath: string;
     error?: string;
   };
@@ -92,6 +105,19 @@ export interface SubagentDiagnostics {
     available: boolean;
     notice: string;
   }>;
+  runtime: {
+    profileScopedStateDir: string | null;
+    brokerThreadMarkers: Array<{
+      threadId: string;
+      namespace: string;
+      version: number;
+      createdAt: number;
+    }>;
+    appServerHosts: number;
+    liveAppServerHosts: number;
+    namespaceBound: boolean;
+    liveIdentifiedAppServerHosts: number;
+  };
   nextCommands: string[];
 }
 
@@ -101,14 +127,48 @@ export async function collectSubagentDiagnostics(input: {
   cwd: string;
   requestedRoute?: string;
   signal?: AbortSignal;
+  stateDir?: string;
+  codexHome?: string;
+  codexBin?: string;
+  parentProviderId?: string;
 }): Promise<SubagentDiagnostics> {
   const env = input.env ?? process.env;
   const signal = input.signal ?? new AbortController().signal;
-  const [ccSwitch, routeMapState] = await Promise.all([
+  const [ccSwitch, routeMapState, catalog, providerResolution, structuredRuntime] = await Promise.all([
     readCcSwitchState(env),
     loadBrokerRouteMap(env),
+    readCcSwitchProviderCatalog(env)
+      .catch(() => undefined),
+    resolveCurrentCcSwitchCodexProvider({
+      env,
+      ...(input.codexHome ? { codexHome: input.codexHome } : {}),
+      ...(input.parentProviderId ? { parentProviderId: input.parentProviderId } : {}),
+      ...(input.config.ccSwitchProviderId
+        ? { providerId: input.config.ccSwitchProviderId }
+        : {}),
+    })
+      .then(result => ({ result }))
+      .catch(error => ({ error })),
+    inspectStructuredRuntime(input.stateDir, input.config.toolNamespace),
   ]);
-  const currentProviderName = ccSwitch.providers.find(provider =>
+  const configuredForNewThreads =
+    input.config.modelTools &&
+    input.config.nativeToolPolicy === 'shadow' &&
+    input.config.enabled &&
+    (input.config.mode === 'auto' || input.config.mode === 'broker');
+  const marker = structuredRuntime.brokerThreadMarkers.find(item =>
+    item.namespace === input.config.toolNamespace
+  );
+  const providerList = catalog?.providers.length
+    ? catalog.providers
+    : ccSwitch.providers;
+  const currentProviderCodex = catalog?.currentProviderId ??
+    providerList.find(provider => provider.current)?.id ??
+    ccSwitch.currentProviderCodex ??
+    null;
+  const currentProviderName = providerList.find(provider =>
+    provider.id === currentProviderCodex || provider.current
+  )?.name ?? ccSwitch.providers.find(provider =>
     provider.id === ccSwitch.currentProviderCodex || provider.current
   )?.name ?? null;
   const base: SubagentDiagnostics = {
@@ -119,15 +179,23 @@ export async function collectSubagentDiagnostics(input: {
       configured: input.config.modelTools,
       namespace: input.config.toolNamespace,
       nativeToolPolicy: input.config.nativeToolPolicy,
-      brokerWired:
-        input.config.modelTools &&
-        input.config.nativeToolPolicy === 'shadow' &&
-        input.config.enabled &&
-        (input.config.mode === 'auto' || input.config.mode === 'broker'),
+      configuredForNewThreads,
+      // A marker alone is not proof that the current thread can execute a
+      // worker. The live route preflight below must also succeed.
+      brokerWired: false,
       ...(!input.config.modelTools
         ? { degradedReason: 'modelTools=false; native collaboration remains visible' }
         : input.config.nativeToolPolicy !== 'shadow'
           ? { degradedReason: 'nativeToolPolicy=preserve; native collaboration may bypass Broker' }
+          : !configuredForNewThreads
+            ? { degradedReason: `subagents.mode=${input.config.mode}` }
+            : !marker
+              ? { degradedReason: 'configured for new threads, but no broker-thread marker exists in this profile' }
+              : structuredRuntime.liveIdentifiedAppServerHosts === 0
+                ? { degradedReason: 'broker-thread marker exists, but no live identified App Server host is bound to this profile' }
+                : input.config.routeMode === 'follow-cc-switch' &&
+                    !('result' in providerResolution)
+                  ? { degradedReason: 'cc-switch provider/runtime preflight failed; Broker tools are not bound' }
           : {}),
     },
     limits: {
@@ -138,7 +206,11 @@ export async function collectSubagentDiagnostics(input: {
     launchConfigured: Boolean(resolveMixAgentsLaunchConfig(input.config, env)),
     toolContract: 'unknown',
     mcpStart: 'not-configured',
-    credentials: describeCredentialState(input.config, env),
+    credentials: describeCredentialState(
+      input.config,
+      env,
+      'result' in providerResolution ? providerResolution.result.summary : undefined,
+    ),
     routeGeneration: 'not-tested',
     mcp: {
       status: !input.config.enabled || input.config.mode === 'off'
@@ -146,13 +218,16 @@ export async function collectSubagentDiagnostics(input: {
         : 'not-configured',
     },
     ccSwitch: {
-      currentProviderCodex: ccSwitch.currentProviderCodex ?? null,
+      currentProviderCodex,
       currentProviderName,
-      providers: ccSwitch.providers.map(provider => ({
+      providers: providerList.map(provider => ({
         id: provider.id,
         name: provider.name,
-        current: provider.current,
+        current: provider.current || provider.id === currentProviderCodex,
       })),
+      ...('result' in providerResolution
+        ? { provider: providerResolution.result.summary }
+        : {}),
       settingsPath: ccSwitch.settingsPath,
       ...(ccSwitch.error ? { error: redactSecrets(ccSwitch.error) } : {}),
     },
@@ -167,6 +242,14 @@ export async function collectSubagentDiagnostics(input: {
     selectedWriteRoute: { id: null },
     readRoutes: [],
     writeRoutes: [],
+    runtime: {
+      profileScopedStateDir: input.stateDir ?? null,
+      brokerThreadMarkers: structuredRuntime.brokerThreadMarkers,
+      appServerHosts: structuredRuntime.appServerHosts,
+      liveAppServerHosts: structuredRuntime.liveAppServerHosts,
+      namespaceBound: Boolean(marker),
+      liveIdentifiedAppServerHosts: structuredRuntime.liveIdentifiedAppServerHosts,
+    },
     nextCommands: [
       'arg-bridge doctor --json',
       'arg-bridge restart --profile <profile>',
@@ -178,48 +261,133 @@ export async function collectSubagentDiagnostics(input: {
     return base;
   }
   const launch = resolveMixAgentsLaunchConfig(input.config, env);
-  if (!launch) return base;
-  const backend = new MixAgentsBrokerBackend(input.config, env);
+  if (!launch) {
+    return {
+      ...base,
+      modelTools: {
+        ...base.modelTools,
+        degradedReason: 'MixAgents MCP launch is not configured or discoverable',
+      },
+    };
+  }
+  let brokerRuntime: {
+    brokerConfigPath: string;
+    credentials: Record<string, string>;
+    fingerprint: string;
+    route?: SubagentRoute;
+  } | undefined;
+  if (input.config.routeMode === 'follow-cc-switch') {
+    if ('error' in providerResolution) {
+      return {
+        ...base,
+        launchCommand: basename(launch.command),
+        mcpStart: 'not-configured',
+        mcp: {
+          status: 'unavailable',
+          error: redactSecrets(errorMessage(providerResolution.error)),
+        },
+        credentials: describeCredentialState(input.config, env),
+      };
+    }
+    if (!input.stateDir) {
+      return {
+        ...base,
+        launchCommand: basename(launch.command),
+        mcpStart: 'not-configured',
+        mcp: {
+          status: 'unavailable',
+          error: 'profile-scoped structured state directory is unavailable',
+        },
+      };
+    }
+    try {
+      const generated = await materializeCcSwitchBrokerRuntime({
+        env,
+        ...(input.codexHome ? { codexHome: input.codexHome } : {}),
+        ...(input.parentProviderId ? { parentProviderId: input.parentProviderId } : {}),
+        ...(input.config.ccSwitchProviderId
+          ? { providerId: input.config.ccSwitchProviderId }
+          : {}),
+        cwd: input.cwd,
+        codexBin: input.codexBin ?? env.CODEX_BINARY?.trim() ?? 'codex',
+        stateDir: input.stateDir,
+      });
+      brokerRuntime = {
+        brokerConfigPath: generated.brokerConfigPath,
+        credentials: generated.credentials,
+        fingerprint: generated.fingerprint,
+        route: generated.route,
+      };
+    } catch (error) {
+      return {
+        ...base,
+        launchCommand: basename(launch.command),
+        mcpStart: 'not-configured',
+        mcp: {
+          status: 'unavailable',
+          error: redactSecrets(errorMessage(error)),
+        },
+      };
+    }
+  }
+  const backend = new MixAgentsBrokerBackend(input.config, env, brokerRuntime);
   try {
     const routes = await backend.listRoutes(signal);
+    const visibleRoutes = mergeRuntimeRoutes(routes, brokerRuntime?.route);
     const selection = selectSubagentRoute({
       config: input.config,
       ccSwitch,
       routeMap: routeMapState.config,
-      routes,
+      routes: visibleRoutes,
       requestedRoute: input.requestedRoute,
     });
     const writeSelection = selectSubagentRoute({
       config: input.config,
       ccSwitch,
       routeMap: routeMapState.config,
-      routes,
+      routes: visibleRoutes,
       access: 'workspace-write',
     });
     return {
       ...base,
+      ...(brokerRuntime ? { brokerConfigPath: brokerRuntime.brokerConfigPath } : {}),
       launchCommand: basename(launch.command),
       ...(backend.serverVersion ? { packageVersion: backend.serverVersion } : {}),
       toolContract: 'compatible',
       mcpStart: 'started',
       mcp: { status: 'available' },
+      modelTools: {
+        ...base.modelTools,
+        brokerWired: configuredForNewThreads &&
+          Boolean(marker) &&
+          structuredRuntime.liveIdentifiedAppServerHosts > 0 &&
+          Boolean(selection.route),
+      },
       selectedRoute: {
         id: selection.route?.id ?? null,
         ...(input.requestedRoute
           ? { source: 'explicit' as const }
           : selection.route
-            ? { source: routeSelectionSource(input.config, ccSwitch, routeMapState.config) }
+            ? {
+                source: selection.route.source === 'cc-switch'
+                  ? 'cc-switch' as const
+                  : routeSelectionSource(input.config, ccSwitch, routeMapState.config),
+              }
             : {}),
         ...(selection.error ? { error: redactSecrets(selection.error) } : {}),
       },
       selectedWriteRoute: {
         id: writeSelection.route?.id ?? null,
         ...(writeSelection.route
-          ? { source: routeSelectionSource(input.config, ccSwitch, routeMapState.config, 'workspace-write') }
+          ? {
+              source: writeSelection.route.source === 'cc-switch'
+                ? 'cc-switch' as const
+                : routeSelectionSource(input.config, ccSwitch, routeMapState.config, 'workspace-write'),
+            }
           : {}),
         ...(writeSelection.error ? { error: redactSecrets(writeSelection.error) } : {}),
       },
-      readRoutes: routes.map(route => ({
+      readRoutes: visibleRoutes.map(route => ({
         id: route.id,
         provider: route.provider,
         model: route.model,
@@ -231,7 +399,7 @@ export async function collectSubagentDiagnostics(input: {
         available: route.available,
         missingEnvironment: route.missingEnvironment,
       })),
-      writeRoutes: routes
+      writeRoutes: visibleRoutes
         .filter(route => route.maxAccess === 'workspace-write')
         .map(route => ({
           id: route.id,
@@ -262,6 +430,10 @@ export async function collectSubagentDiagnostics(input: {
         status: 'unavailable',
         error: redactSecrets(error instanceof Error ? error.message : String(error)),
       },
+      modelTools: {
+        ...base.modelTools,
+        degradedReason: redactSecrets(error instanceof Error ? error.message : String(error)),
+      },
     };
   } finally {
     await backend.closeBackend?.().catch(() => {});
@@ -271,7 +443,24 @@ export async function collectSubagentDiagnostics(input: {
 function describeCredentialState(
   config: SubagentConfig,
   env: NodeJS.ProcessEnv,
+  provider?: CcSwitchProviderSummary,
 ): SubagentDiagnostics['credentials'] {
+  if (config.routeMode === 'follow-cc-switch' && provider) {
+    return {
+      mode: 'cc-switch-auto',
+      status: provider.credential.status,
+      providerReference: provider.id,
+      missingEnvironment: provider.credential.status === 'present'
+        ? []
+        : [...(provider.envKey ? [provider.envKey] : []), ...Object.values(provider.envHttpHeaders)],
+      ...(provider.credential.sourcePath
+        ? { sourcePath: provider.credential.sourcePath }
+        : {}),
+      ...(provider.credential.fingerprint
+        ? { fingerprint: provider.credential.fingerprint }
+        : {}),
+    };
+  }
   const mixagents = config.mixagents;
   const mode = mixagents?.credentialMode ?? 'inherit-env';
   const providerReference = mixagents?.credentialProvider ?? null;
@@ -305,10 +494,67 @@ function routeSelectionSource(
 ): 'manual' | 'cc-switch' | 'default' {
   if (config.routeMode === 'manual') return 'manual';
   const mapped = access === 'workspace-write'
-    ? map?.providers[ccSwitch.currentProviderCodex ?? '']?.writeRoute
-    : map?.providers[ccSwitch.currentProviderCodex ?? '']?.readRoute;
-  if (ccSwitch.currentProviderCodex && mapped) {
+    ? map?.providers[config.ccSwitchProviderId ?? ccSwitch.currentProviderCodex ?? '']?.writeRoute
+    : map?.providers[config.ccSwitchProviderId ?? ccSwitch.currentProviderCodex ?? '']?.readRoute;
+  if ((config.ccSwitchProviderId ?? ccSwitch.currentProviderCodex) && mapped) {
     return 'cc-switch';
   }
   return 'default';
+}
+
+async function inspectStructuredRuntime(
+  stateDir: string | undefined,
+  _namespace: string,
+): Promise<{
+  brokerThreadMarkers: SubagentDiagnostics['runtime']['brokerThreadMarkers'];
+  appServerHosts: number;
+  liveAppServerHosts: number;
+  liveIdentifiedAppServerHosts: number;
+}> {
+  if (!stateDir) {
+    return {
+      brokerThreadMarkers: [],
+      appServerHosts: 0,
+      liveAppServerHosts: 0,
+      liveIdentifiedAppServerHosts: 0,
+    };
+  }
+  let markers: SubagentDiagnostics['runtime']['brokerThreadMarkers'] = [];
+  try {
+    const parsed: unknown = JSON.parse(await readFile(join(stateDir, 'broker-threads.json'), 'utf8'));
+    if (isRecord(parsed) && parsed.version === 1 && isRecord(parsed.threads)) {
+      markers = Object.entries(parsed.threads).flatMap(([threadId, value]) => {
+        if (!isRecord(value)) return [];
+        const namespace = stringValue(value.namespace);
+        const version = typeof value.version === 'number' ? value.version : 0;
+        const createdAt = typeof value.createdAt === 'number' ? value.createdAt : 0;
+        return namespace
+          ? [{ threadId, namespace, version, createdAt }]
+          : [];
+      });
+    }
+  } catch {
+    // No marker file means no runtime binding, not a configuration reset.
+  }
+  const hosts = await readHostRegistry(dirname(stateDir));
+  return {
+    brokerThreadMarkers: markers,
+    appServerHosts: hosts.length,
+    liveAppServerHosts: hosts.filter(host => processAlive(host.pid)).length,
+    liveIdentifiedAppServerHosts: hosts.filter(host =>
+      processAlive(host.pid) && Boolean(host.runtimeIdentity)
+    ).length,
+  };
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
 }

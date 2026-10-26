@@ -4,7 +4,7 @@
 
 [English README](./README.md)
 
-`1.8.0` 为 Bridge-managed Codex 会话增加模型可见的跨 provider Broker 编排。Codex 0.164 App Server dynamic tools 暴露 `arg_bridge.spawn_agent`、`followup_task`、`wait_agent`、`list_agents`、route、interrupt 与 close，不再要求用户先输入 `/btw`；新 Bridge thread 会遮蔽 native MultiAgentV2 工具，worker 收到普通明文 MixAgents 输入，而不是 `agent_message.encrypted_content`。read/write route、并发限制、worker mapping、结果 mailbox 和 Project RSI 有界修复循环都可在 `arg-bridge settings` 中配置。`1.7.2` 是前一个跨平台校验收尾版本。
+`1.8.1` 让 Broker worker 自动读取 cc-switch 当前 Codex provider 的模型、endpoint、wire API 和凭据，并生成 profile 私有 MixAgents route；不再需要手写 `broker-routes.json` 或 `MIXAGENTS_BROKER_CREDENTIALS_JSON`。同时加入持久化 queue-only `send_message`、第三方 provider fail-closed、真实三轮 provider E2E 和更严格的 runtime binding 诊断。`1.8.0` 引入了模型可见的 `arg_bridge` dynamic tools 与 native MultiAgentV2 遮蔽。
 
 `1.6.7` 引入 provider-aware Codex resume；`1.7.0` 在 idle turn 边界应用当前 provider/model，即使旧 provider 仍存在也会安全切换；已有活跃 turn 时绝不中途换 provider。
 
@@ -60,7 +60,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.8.0
+sh /tmp/install-arg-bridge.sh --version 1.8.1
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.8.0"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.8.1"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.8.0`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.8.1`。
 
 ### 4. Node 或 npm 全局目录错误
 
@@ -254,11 +254,11 @@ arg-bridge profile export <name> --include-secrets --yes
 
 ### MixAgents 模型工具、`/btw`、`cc-switch`、MCP 与 Project RSI
 
-MixAgents 是可选依赖。`/btw` 在 `auto` 下仍可显式降级到 fork，但父模型的自动 Broker 工具不会把 native Codex child 冒充成 worker。新建 Bridge-managed Codex thread 会携带 `arg_bridge` dynamic-tool namespace，并设置 `features.multi_agent_v2.disable_native_tools=true`。0.164.0 的真实链路证据见 [structured Broker smoke](./docs/smoke-structured-broker-e2e-0.164.0.json)。
+MixAgents 是可选依赖。默认 `follow-cc-switch` 会从当前 cc-switch provider 自动生成 Broker route、模型、Base URL 和凭据；不需要手写 `broker-routes.json`，也不需要手工设置 `MIXAGENTS_BROKER_CREDENTIALS_JSON`。第三方 provider 不允许 native fork/collaboration fallback；官方 provider 仍可按显式设置降级。父模型的自动 Broker 工具不会把 native Codex child 冒充成 worker。新建 Bridge-managed Codex thread 会携带 `arg_bridge` dynamic-tool namespace，并设置 `features.multi_agent_v2.disable_native_tools=true`。0.164.0 的真实链路证据见 [structured Broker smoke](./docs/smoke-structured-broker-e2e-0.164.0.json)。
 
 公开 npm 包 `mixagents-broker` 是 optional dependency，Bridge 通过稳定的 package entry 自动解析，不扫描 plugin cache；显式 MCP command/profile 配置仍优先。
 
-自动派工工具包括 `spawn_agent`、`followup_task`、`wait_agent`、`list_agents`、`list_routes`、`interrupt_agent`、`close_agent` 和显式 queue-only 的 `send_message`。当前 MixAgents MCP 无法证明 `send` 的 queue-only 语义，因此 `send_message` 会明确报 unsupported，而不会静默变成 trigger-turn。worker 默认 read-only；workspace-write 还必须启用写路由，并提供精确的逐任务/workspace 授权。
+自动派工工具包括 `spawn_agent`、`followup_task`、`wait_agent`、`list_agents`、`list_routes`、`interrupt_agent`、`close_agent` 和 queue-only 的 `send_message`。`send_message` 先在 Bridge 本地排队，下一条 `followup_task` 才会把队列正文和新任务作为普通明文输入唤醒 worker。worker 默认 read-only；workspace-write 还必须启用写路由，并提供精确的逐任务/workspace 授权。
 
 需要授权写 worker 时，用户用 `arg-bridge-write --workspace /canonical/path --task <完整任务>` 发起该 turn。Bridge 会在父模型看到任务前消费该指令，并在模型可控的工具参数之外绑定授权。
 
@@ -271,7 +271,7 @@ codex plugin marketplace add Utopia-V/mixagents
 codex plugin add mixagents-broker@mixagents
 ```
 
-`arg-bridge settings` 现在会自动读取安全的 `cc-switch` 账号元数据和可用 Broker 线路，再用五步向导说明：当前主对话、子代理是否允许降级、选择哪个账号与线路、Key 由哪里提供、是否启用项目证据校验。并发、native 工具遮蔽、写权限和自定义 MCP 等参数收在“高级设置”里。跟随模式只写 provider-ID 到 route-ID 的安全映射，不会切换主 provider。`arg-bridge doctor --json` 只读且不会产生付费请求；只有显式 `--probe-route <id>` 会发起一次 read-only 生成 probe，失败后不重试、不降级。
+`arg-bridge settings` 现在会用五步向导说明：当前主对话、是否允许降级、子代理跟随当前 provider 还是固定某个 cc-switch provider、Key 自动由 cc-switch 解析、是否启用项目证据校验。用户不需要填写 route ID 或 Key；并发、native 工具遮蔽、写权限和自定义 MCP 等参数收在“高级设置”里。默认不创建 `broker-routes.json`，也不会切换主 provider。
 
 三类 provider 标识必须分开：
 
@@ -279,9 +279,9 @@ codex plugin add mixagents-broker@mixagents
 2. Codex `config.toml` 内部 `model_provider` 与 model；
 3. MixAgents Broker route ID。
 
-Broker 映射只使用第 1 类 ID，不使用显示名或 Codex 内部名。provider 切换只在下一个 idle turn 或 profile 重启时生效，正在执行的请求不会中途换供应商。旧 thread 的历史 provider 仍存在时，也会在 idle 边界切到当前配置；活跃 thread 保持原运行 provider，等安全后再切。
+自动生成的 Broker route 使用第 1 类 ID，并附带配置 fingerprint；不使用显示名或 Codex 内部名。provider 切换只在下一个 idle turn 或 profile 重启时生效，正在执行的请求不会中途换供应商。旧 thread 的历史 provider 仍存在时，也会在 idle 边界切到当前配置；活跃 thread 保持原运行 provider，等安全后再切。
 
-可选映射文件为 `~/.config/arg-bridge/broker-routes.json`，其中只保存 ID：
+旧版或显式 manual 模式才需要可选映射文件 `~/.config/arg-bridge/broker-routes.json`，其中只保存 ID：
 
 ```json
 {
@@ -318,7 +318,7 @@ Project RSI 与 MixAgents、历史 Task RSI 是三个不同层次。Bridge 只�
 | `/sendfile <绝对路径>` | 仅管理员：直接回复发送当前工作目录、bridge 媒体缓存或显式允许目录内的普通文件，不调用 agent |
 | `/config` | 调整展示偏好、访问控制和 lark-cli 身份策略 |
 | `/model` | 选择模型；Codex 直接使用 CLI 原生模型/reasoning 选项，并把结果同步到当前 profile。`/codex model` 等价于 `/codex /model`。 |
-| `/btw [--route <id>] [<内容>]` | 开启或复用独立 read-only side agent。配置 MixAgents 后使用 Broker agent（不是 Codex fork），每次调用重新解析 route；否则 `auto` 明确提示并降级 Codex fork。`/btw out` 只关闭 side。飞书内 `/codex /btw ...` 等价。 |
+| `/btw [--route <id>] [<内容>]` | 开启或复用独立 read-only side agent。使用 Broker agent（不是 Codex fork），每次调用从当前 cc-switch provider 重新解析 route；第三方 provider 失败时 fail closed，官方 provider 才可按设置降级。`/btw out` 只关闭 side。飞书内 `/codex /btw ...` 等价。 |
 | `/session [status\|live\|turn]` | 查看终端执行状态。tmux/live 为默认模式；`turn` 仅作为兼容回退 |
 | `/tmux list [socket]` | 仅管理员：列出本机所有存活的 Codex/Claude tmux pane，包含工作目录、agent 类型、已识别 thread、共享 App Server endpoint 和 attach 命令。可选 `-S <绝对 socket 路径>` 或 `-L <名称>` 只扫描一个 tmux server；普通 shell 不会列出 |
 | `/tmux bind <编号\|pane id\|socket::pane id>` | 仅管理员：把当前 chat/topic scope 绑定到列表中的 pane。带有共享 Codex endpoint 的 pane 走 structured 转发，普通 Codex/Claude pane 回退到 live 转发。编号只在最近一次 `/tmux list` 结果内有效 |
