@@ -17,6 +17,7 @@ import {
   createRootConfig,
   saveRootConfig,
 } from '../../../src/config/profile-store';
+import { parseProviderTable } from '../../../src/integrations/cc-switch';
 
 const fixture = fileURLToPath(new URL('../../fixtures/fake-mixagents-mcp.mjs', import.meta.url));
 const temporary: string[] = [];
@@ -69,7 +70,7 @@ async function setup(options: { mcp: boolean }) {
   await writeFile(join(xdg, 'arg-bridge', 'broker-routes.json'), JSON.stringify({
     version: 1,
     providers: {
-      'provider-a': { readRoute: 'read-a' },
+      'provider-a': { readRoute: 'read-a', writeRoute: 'write-b' },
       'provider-b': { readRoute: 'write-b' },
     },
   }), { mode: 0o600 });
@@ -77,6 +78,16 @@ async function setup(options: { mcp: boolean }) {
 }
 
 describe('arg-bridge settings and doctor', () => {
+  it('parses both cc-switch table border styles without reading API URL cells', () => {
+    expect(parseProviderTable([
+      '│   ┆ default        ┆ lixin           ┆ https://example.invalid/v1 │',
+      '│ ✓ ┆ codex-official ┆ OpenAI Official ┆ N/A                       │',
+    ].join('\n'))).toEqual([
+      { id: 'default', name: 'lixin', current: false },
+      { id: 'codex-official', name: 'OpenAI Official', current: true },
+    ]);
+  });
+
   it('never invokes the secret-printing cc-switch provider current command', async () => {
     const source = await import('node:fs/promises')
       .then(fs => fs.readFile(join(process.cwd(), 'src', 'integrations', 'cc-switch.ts'), 'utf8'));
@@ -93,6 +104,7 @@ describe('arg-bridge settings and doctor', () => {
     expect(first.ccSwitch.currentProviderCodex).toBe('provider-a');
     expect(first.subagents.diagnostics.mcp.status).toBe('available');
     expect(first.subagents.diagnostics.selectedRoute.id).toBe('read-a');
+    expect(first.subagents.diagnostics.selectedWriteRoute.id).toBe('write-b');
     expect(first.subagents.diagnostics.readRoutes).toEqual(expect.arrayContaining([
       expect.objectContaining({
         id: 'read-a',
@@ -130,7 +142,7 @@ describe('arg-bridge settings and doctor', () => {
       json: true,
     });
     expect(report.status).toBe('error');
-    expect(report.mixagents.mcpStatus).toBe('not-configured');
+    expect(['not-configured', 'unavailable']).toContain(report.mixagents.mcpStatus);
     expect(report.checks).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: 'mixagents-mcp', status: 'fail' }),
     ]));

@@ -11,8 +11,8 @@ const real = process.env.ARG_BRIDGE_REAL_MIXAGENTS_MCP === '1' ? it : it.skip;
 real('creates and completes a real MixAgents App Server worker through the official MCP server', async () => {
   const server = process.env.ARG_BRIDGE_MIXAGENTS_SERVER;
   const fakeCodexSource = process.env.ARG_BRIDGE_FAKE_CODEX_FIXTURE;
-  if (!server || !fakeCodexSource) {
-    throw new Error('ARG_BRIDGE_MIXAGENTS_SERVER and ARG_BRIDGE_FAKE_CODEX_FIXTURE are required');
+  if (!fakeCodexSource) {
+    throw new Error('ARG_BRIDGE_FAKE_CODEX_FIXTURE is required');
   }
   const root = await mkdtemp(join(tmpdir(), 'arg-bridge-real-mixagents-'));
   try {
@@ -66,12 +66,22 @@ real('creates and completes a real MixAgents App Server worker through the offic
       routeMode: 'manual',
       readRoute: 'fake-read',
       writeRoute: null,
+      modelTools: true,
+      nativeToolPolicy: 'shadow',
+      toolNamespace: 'arg_bridge',
+      maxConcurrentWorkers: 4,
+      workerTimeoutMs: 15 * 60_000,
+      allowWriteWorkers: false,
       includeProgressSnapshot: false,
       reuse: 'scope-cwd',
       allowForkFallback: false,
       mixagents: {
-        mcpCommand: process.execPath,
-        mcpArgs: [server],
+        ...(server
+          ? {
+              mcpCommand: process.execPath,
+              mcpArgs: [server],
+            }
+          : {}),
         credentialEnvKeys: ['MIXAGENTS_BROKER_CREDENTIALS_JSON'],
       },
     };

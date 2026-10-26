@@ -4,6 +4,7 @@ import { interactionEvent, textEvent, type StructuredSession } from './contracts
 import { RpcClient, type Wire } from './rpc';
 import { SIDE_BOUNDARY_PROMPT, SIDE_DEVELOPER_INSTRUCTIONS } from './side-boundary';
 import { codexTurnPermissionOverrides } from './permissions';
+import type { BrokerToolHost, WriteAuthorization } from '../subagents/broker-tools';
 
 const toolItems = new Set(['commandExecution', 'fileChange', 'mcpToolCall', 'collabAgentToolCall', 'webSearch', 'imageGeneration', 'dynamicToolCall']);
 
@@ -26,8 +27,14 @@ export class CodexStructuredSession implements StructuredSession {
   private acknowledgements = new Map<string, { resolve(): void; reject(error: Error): void }>();
   private deferredInteractions: AgentEvent[] = [];
   private usageTotal?: { inputTokens: number; outputTokens: number; cachedInputTokens: number };
+  private readonly toolAbort = new AbortController();
   private readonly listener: (message: Wire) => void;
-  constructor(readonly id: string, readonly endpoint: string, private readonly rpc: RpcClient) {
+  constructor(
+    readonly id: string,
+    readonly endpoint: string,
+    private readonly rpc: RpcClient,
+    private readonly brokerTools?: BrokerToolHost,
+  ) {
     this.listener = message => this.receive(message);
     rpc.on('message', this.listener);
     rpc.on('disconnected', this.disconnected);
@@ -80,6 +87,8 @@ export class CodexStructuredSession implements StructuredSession {
           this.interaction(interactionEvent({ id, prompt: `${question.question}\n也可用 /answer ${id} 正文 自由回答。`,
             choices: options.map((option, i) => ({ label: option.label, value: String(i + 1) })) }));
         }
+      } else if (message.method === 'item/tool/call') {
+        void this.handleDynamicToolCall(message.id, p);
       } else {
         this.rpc.rejectRequest(message.id, 'Unsupported control request');
         this.emit?.(textEvent(`未实现的 Codex 控制请求：${message.method}\n`));
@@ -153,6 +162,30 @@ export class CodexStructuredSession implements StructuredSession {
       }
     }
   }
+  private async handleDynamicToolCall(id: string | number, params: Wire): Promise<void> {
+    const expectedNamespace = this.brokerTools?.specs[0]?.name;
+    let result: { success: boolean; text: string };
+    if (!this.brokerTools || !expectedNamespace) {
+      result = { success: false, text: 'Bridge Broker tools are not configured for this thread.' };
+    } else if (params.namespace && params.namespace !== expectedNamespace) {
+      result = {
+        success: false,
+        text: `Unknown dynamic tool namespace: ${String(params.namespace)}; expected ${expectedNamespace}.`,
+      };
+    } else {
+      const tool = typeof params.tool === 'string' ? params.tool : '';
+      result = await this.brokerTools.call(tool, params.arguments, this.toolAbort.signal);
+    }
+    try {
+      this.rpc.respond(id, {
+        contentItems: [{ type: 'inputText', text: result.text }],
+        success: result.success,
+      });
+    } catch {
+      // The App Server channel closed while the worker request was running.
+      // Results remain in the persisted worker mailbox for a later reconnect.
+    }
+  }
   async submit(options: AgentRunOptions, emit: (event: AgentEvent) => void, signal: AbortSignal): Promise<void> {
     if (this.emit) throw new Error('Structured thread already has an active relay');
     if (signal.aborted) return;
@@ -196,6 +229,9 @@ export class CodexStructuredSession implements StructuredSession {
       }
       await completion;
     } finally { signal.removeEventListener('abort', abort); this.emit = undefined; this.complete = undefined; }
+  }
+  setBrokerWriteAuthorization(authorization: WriteAuthorization | undefined): void {
+    this.brokerTools?.setWriteAuthorization?.(authorization);
   }
   async command(input: string): Promise<AgentEvent[]> {
     const [name, ...args] = input.trim().split(/\s+/);
@@ -398,9 +434,11 @@ export class CodexStructuredSession implements StructuredSession {
     await this.close();
   }
   async close(): Promise<void> {
+    this.toolAbort.abort();
     this.rpc.off('message', this.listener); this.rpc.off('disconnected', this.disconnected);
     for (const waiter of this.acknowledgements.values()) waiter.reject(new Error('Session closed'));
     this.acknowledgements.clear(); this.pending.clear(); this.menus.clear(); this.finish();
+    await this.brokerTools?.close().catch(() => {});
   }
   disconnect(): void { this.rpc.close(); }
 }

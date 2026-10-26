@@ -6,7 +6,8 @@ import { writeFileAtomic } from '../platform/atomic-write';
 export interface BrokerRouteMap {
   version: 1;
   defaultReadRoute?: string;
-  providers: Record<string, { readRoute?: string }>;
+  defaultWriteRoute?: string;
+  providers: Record<string, { readRoute?: string; writeRoute?: string }>;
 }
 
 export interface BrokerRouteMapState {
@@ -49,11 +50,17 @@ export function parseBrokerRouteMap(input: unknown): BrokerRouteMap {
   const raw = input as Record<string, unknown>;
   if (raw.version !== 1) throw new Error('version must be 1');
   for (const key of Object.keys(raw)) {
-    if (key !== 'version' && key !== 'defaultReadRoute' && key !== 'providers') {
+    if (
+      key !== 'version' &&
+      key !== 'defaultReadRoute' &&
+      key !== 'defaultWriteRoute' &&
+      key !== 'providers'
+    ) {
       throw new Error(`unsupported field: ${key}`);
     }
   }
   const defaultReadRoute = routeId(raw.defaultReadRoute, 'defaultReadRoute');
+  const defaultWriteRoute = routeId(raw.defaultWriteRoute, 'defaultWriteRoute');
   if (raw.providers !== undefined && (typeof raw.providers !== 'object' || raw.providers === null || Array.isArray(raw.providers))) {
     throw new Error('providers must be an object');
   }
@@ -65,13 +72,21 @@ export function parseBrokerRouteMap(input: unknown): BrokerRouteMap {
     }
     const entry = value as Record<string, unknown>;
     for (const key of Object.keys(entry)) {
-      if (key !== 'readRoute') throw new Error(`providers.${provider}.${key} is not allowed`);
+      if (key !== 'readRoute' && key !== 'writeRoute') {
+        throw new Error(`providers.${provider}.${key} is not allowed`);
+      }
     }
-    providers[provider] = { readRoute: routeId(entry.readRoute, `providers.${provider}.readRoute`) };
+    const readRoute = routeId(entry.readRoute, `providers.${provider}.readRoute`);
+    const writeRoute = routeId(entry.writeRoute, `providers.${provider}.writeRoute`);
+    providers[provider] = {
+      ...(readRoute ? { readRoute } : {}),
+      ...(writeRoute ? { writeRoute } : {}),
+    };
   }
   return {
     version: 1,
     ...(defaultReadRoute ? { defaultReadRoute } : {}),
+    ...(defaultWriteRoute ? { defaultWriteRoute } : {}),
     providers,
   };
 }
@@ -91,12 +106,21 @@ export async function saveBrokerRouteMap(
 export function resolveRouteForProvider(
   map: BrokerRouteMap | undefined,
   providerCode: string | undefined,
+  access: 'read-only' | 'workspace-write' = 'read-only',
 ): { routeId?: string; source?: 'cc-switch' | 'default' } {
   if (!map) return {};
-  if (providerCode && map.providers[providerCode]?.readRoute) {
-    return { routeId: map.providers[providerCode]!.readRoute, source: 'cc-switch' };
+  const providerRoute = providerCode
+    ? access === 'workspace-write'
+      ? map.providers[providerCode]?.writeRoute
+      : map.providers[providerCode]?.readRoute
+    : undefined;
+  if (providerRoute) {
+    return { routeId: providerRoute, source: 'cc-switch' };
   }
-  if (map.defaultReadRoute) return { routeId: map.defaultReadRoute, source: 'default' };
+  const defaultRoute = access === 'workspace-write'
+    ? map.defaultWriteRoute
+    : map.defaultReadRoute;
+  if (defaultRoute) return { routeId: defaultRoute, source: 'default' };
   return {};
 }
 

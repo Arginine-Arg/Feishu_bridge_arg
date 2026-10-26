@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "codexVersion": "0.164.0",
+  "path": [
+    "StructuredAdapter",
+    "Codex App Server thread/start dynamicTools",
+    "item/tool/call arg_bridge.spawn_agent",
+    "MixAgents MCP spawn_agent",
+    "ordinary plaintext worker task",
+    "arg_bridge.wait_agent function_call_output",
+    "parent final assistant message"
+  ],
+  "providerRequests": 5,
+  "nativeCollaborationHidden": true,
+  "brokerCalls": [
+    "routes",
+    "spawn_agent",
+    "wait_agent"
+  ],
+  "workerTask": "PLAINTEXT_ADAPTER_WORKER_TASK",
+  "workerResult": "result:PLAINTEXT_ADAPTER_WORKER_TASK",
+  "parentFinal": "ADAPTER_PARENT_FINAL_OK",
+  "resumeFinal": "ADAPTER_RESUME_OK",
+  "persistedWorkerVisibleAfterRestart": true,
+  "secrets": "none; all provider credentials were trace-only local values"
+}

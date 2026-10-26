@@ -22,6 +22,11 @@ import {
 } from '../../config/profile-store';
 import { discoverProjectRsi, projectRsiStatus } from '../../integrations/project-rsi';
 import {
+  loadBrokerRouteMap,
+  saveBrokerRouteMap,
+  type BrokerRouteMap,
+} from '../../integrations/broker-routes';
+import {
   resolveCodexActiveConfigIdentity,
   type CodexActiveConfigIdentity,
 } from '../../agent/codex/provider';
@@ -76,7 +81,6 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
     return;
   }
   p.intro(`arg-bridge settings · profile=${snapshot.profile}`);
-  p.note(formatSnapshot(snapshot), '当前状态');
   const settingsEnv = options.env ?? process.env;
   const paths = resolveAppPaths({
     rootDir: settingsEnv.LARK_CHANNEL_HOME,
@@ -85,164 +89,448 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
   const rawRoot = await loadRootConfig(paths.configFile);
   const rawProfile = rawRoot?.profiles[snapshot.profile];
   if (!rawRoot || !rawProfile) throw new Error(`profile 不存在：${snapshot.profile}`);
+  const diagnostics = snapshot.subagents.diagnostics;
+  const currentSubagents = snapshot.subagents.config;
+  const currentRsi = snapshot.rsi.config;
+  const ccProviders = diagnostics.ccSwitch.providers.length > 0
+    ? diagnostics.ccSwitch.providers
+    : diagnostics.ccSwitch.currentProviderCodex
+      ? [{
+          id: diagnostics.ccSwitch.currentProviderCodex,
+          name: diagnostics.ccSwitch.currentProviderName
+            ?? diagnostics.ccSwitch.currentProviderCodex,
+          current: true,
+        }]
+      : [];
+  const providerSummary = ccProviders.length > 0
+    ? ccProviders.map(provider =>
+        `${provider.current ? '●' : '○'} ${provider.name} (${provider.id})`
+      ).join('\n')
+    : '(cc-switch 未返回可用账号)';
+  const availableReadRoutes = diagnostics.readRoutes.filter(route => route.available);
+  const availableWriteRoutes = diagnostics.writeRoutes.filter(route => route.available);
+  const unavailableRoutes = diagnostics.readRoutes.filter(route => !route.available);
+
+  p.note([
+    `主对话账号：${diagnostics.ccSwitch.currentProviderName ?? '(unknown)'}` +
+      ` [${diagnostics.ccSwitch.currentProviderCodex ?? '(unknown)'}]`,
+    `Codex 模型：${snapshot.mainProvider.configuredModel ?? '(config default)'}`,
+    '',
+    'cc-switch 中的 Codex 账号：',
+    providerSummary,
+    '',
+    '这里只读取账号 ID、名称和运行状态；不会读取、显示或导出 API Key。' +
+      '主对话 provider 仍由 cc-switch 决定。',
+  ].join('\n'), '步骤 1 / 5 · 自动读取主对话配置');
+
   const selectedMode = await p.select<SubagentMode>({
-    message: '子代理 /btw 模式',
-    initialValue: snapshot.subagents.config.mode,
+    message: '子代理在 Broker 不可用时怎么办？',
+    initialValue: currentSubagents.mode,
     options: [
-      { value: 'auto', label: 'auto', hint: '优先 MixAgents；不可用时按设置 fork' },
-      { value: 'broker', label: 'broker', hint: '必须使用 MixAgents，失败时明确报错' },
-      { value: 'fork', label: 'fork', hint: '沿用 Codex thread/fork，兼容降级' },
-      { value: 'off', label: 'off', hint: '禁用 /btw 子代理' },
+      {
+        value: 'auto',
+        label: '自动（推荐）',
+        hint: '优先使用 MixAgents；不可用时按下方设置决定是否用本地 Codex fork',
+      },
+      {
+        value: 'broker',
+        label: '只允许 MixAgents',
+        hint: '不会静默降级；配置或 Key 不完整时明确报错',
+      },
+      {
+        value: 'fork',
+        label: '只用本地 Codex fork',
+        hint: '不跨 provider，沿用当前 Codex 模型',
+      },
+      { value: 'off', label: '关闭子代理', hint: '主对话不受影响' },
     ],
   });
   assertPrompt(selectedMode);
-  const routeMode = await p.select<SubagentRouteMode>({
-    message: 'MixAgents read route 选择方式',
-    initialValue: snapshot.subagents.config.routeMode,
-    options: [
-      { value: 'follow-cc-switch', label: 'follow-cc-switch', hint: '每次 /btw 重新读取 cc-switch' },
-      { value: 'manual', label: 'manual', hint: '固定使用一个 Broker route' },
-    ],
-  });
-  assertPrompt(routeMode);
-  let readRoute = snapshot.subagents.config.readRoute;
-  if (routeMode === 'manual') {
-    const routeOptions = snapshot.subagents.diagnostics.readRoutes
-      .filter(route => route.available)
-      .map(route => ({
-        value: route.id,
-        label: `${route.id} · ${route.provider}/${route.model}`,
-        hint: route.maxAccess,
-      }));
-    if (routeOptions.length === 0) {
-      const entered = await p.text({
-        message: '没有发现可用 route。输入 route id（留空保持当前值）',
-        initialValue: readRoute ?? '',
-        placeholder: 'route-id',
-      });
-      assertPrompt(entered);
-      readRoute = entered.trim() || null;
-    } else {
-      const selected = await p.select<string>({
-        message: '固定 read route',
-        initialValue: readRoute && routeOptions.some(route => route.value === readRoute)
-          ? readRoute
-          : routeOptions[0]!.value,
+  let allowForkFallback = currentSubagents.allowForkFallback;
+  if (selectedMode === 'auto') {
+    const fallback = await p.confirm({
+      message: 'MixAgents 暂时不可用时，是否改用本地 Codex fork？',
+      initialValue: allowForkFallback,
+    });
+    assertPrompt(fallback);
+    allowForkFallback = fallback;
+  }
+  let routeMode: SubagentRouteMode = currentSubagents.routeMode;
+  let readRoute = currentSubagents.readRoute;
+  let selectedCcProvider = diagnostics.ccSwitch.currentProviderCodex
+    ?? ccProviders[0]?.id
+    ?? null;
+  let selectedReadRoute = readRoute;
+  const routeMapState = await loadBrokerRouteMap(settingsEnv);
+  if (routeMapState.error) throw new Error(routeMapState.error);
+
+  if (
+    (selectedMode === 'auto' || selectedMode === 'broker') &&
+    ccProviders.length > 0
+  ) {
+    p.note([
+      '子代理可以使用与主对话不同的 provider。下面先选 cc-switch 账号，再选该账号对应的 MixAgents 线路。',
+      '选择备用账号只会保存映射；主对话不会因此切换，等你在 cc-switch 真正切换账号时才生效。',
+      availableReadRoutes.length === 0
+        ? '当前没有可用线路。请先配置 MixAgents broker.json 或补齐线路凭据。'
+        : `发现 ${availableReadRoutes.length} 条可用只读线路。`,
+      ...(unavailableRoutes.length
+        ? [`不可用线路：${unavailableRoutes.map(route =>
+            `${route.id}(${route.missingEnvironment.join(',') || 'unavailable'})`
+          ).join('、')}`]
+        : []),
+    ].join('\n'), '步骤 2 / 5 · 选择子代理账号');
+    const providerChoice = await p.select<string>({
+      message: '把子代理线路绑定到哪个 cc-switch 账号？',
+      initialValue: selectedCcProvider && ccProviders.some(provider => provider.id === selectedCcProvider)
+        ? selectedCcProvider
+        : ccProviders[0]!.id,
+      options: ccProviders.map(provider => ({
+        value: provider.id,
+        label: `${provider.name} (${provider.id})`,
+        hint: provider.current ? '当前主对话账号' : '备用账号；切换过去后生效',
+      })),
+    });
+    assertPrompt(providerChoice);
+    selectedCcProvider = providerChoice;
+
+    const mappedRoute = routeMapState.config?.providers[selectedCcProvider]?.readRoute;
+    const routeOptions = availableReadRoutes.map(route => ({
+      value: route.id,
+      label: `${route.provider} / ${route.model}`,
+      hint: `${route.id} · 默认只读`,
+    }));
+    if (routeOptions.length > 0) {
+      const initialRoute = readRoute && routeOptions.some(route => route.value === readRoute)
+        ? readRoute
+        : mappedRoute && routeOptions.some(route => route.value === mappedRoute)
+          ? mappedRoute
+          : diagnostics.selectedRoute.id && routeOptions.some(route => route.value === diagnostics.selectedRoute.id)
+            ? diagnostics.selectedRoute.id
+            : routeOptions[0]!.value;
+      const routeChoice = await p.select<string>({
+        message: '这个账号使用哪条子代理线路？',
+        initialValue: initialRoute,
         options: routeOptions,
       });
-      assertPrompt(selected);
-      readRoute = selected;
+      assertPrompt(routeChoice);
+      selectedReadRoute = routeChoice;
     }
-  }
-  const allowForkFallback = await p.confirm({
-    message: 'auto 模式下，MixAgents 不可用时允许降级到 Codex fork？',
-    initialValue: snapshot.subagents.config.allowForkFallback,
-  });
-  assertPrompt(allowForkFallback);
-  const includeProgressSnapshot = await p.confirm({
-    message: '/btw 是否携带最多 2400 字符、已脱敏的主任务进度快照？',
-    initialValue: snapshot.subagents.config.includeProgressSnapshot,
-  });
-  assertPrompt(includeProgressSnapshot);
 
-  const currentMcp = rawProfile.subagents?.mixagents;
-  const mcpCommand = await p.text({
-    message: 'MixAgents MCP executable（留空保持当前值；不得把 token 写入参数）',
-    initialValue: currentMcp?.mcpCommand ?? '',
-    placeholder: 'mixagents-broker',
-  });
-  assertPrompt(mcpCommand);
-  const mcpArgsText = await p.text({
-    message: '替换 MCP 参数 JSON 数组（留空保持现值且不回显；输入 [] 清空）',
-    initialValue: '',
-    placeholder: '留空保持',
-  });
-  assertPrompt(mcpArgsText);
-  const mcpArgs = mcpArgsText.trim()
-    ? parseStringArray(mcpArgsText, 'MCP 参数')
-    : (currentMcp?.mcpArgs ?? []);
-  const credentialMode = await p.select<'inherit-env' | 'mixagents-managed'>({
-    message: 'Broker 凭据由谁解析？',
-    initialValue: currentMcp?.credentialMode ?? 'inherit-env',
-    options: [
-      {
-        value: 'mixagents-managed',
-        label: 'MixAgents managed',
-        hint: 'Bridge 只传 provider 引用；由 MixAgents/可信 helper 读取 cc-switch 凭据',
-      },
-      {
-        value: 'inherit-env',
-        label: 'inherit-env',
-        hint: 'MCP 服务从已安全注入的父进程环境读取；Bridge 只检查变量名',
-      },
-    ],
-  });
-  assertPrompt(credentialMode);
-  const credentialProvider = await p.text({
-    message: 'managed 模式的 opaque provider 引用（inherit-env 可留空）',
-    initialValue: currentMcp?.credentialProvider
-      ?? snapshot.ccSwitch.currentProviderCodex
-      ?? '',
-    placeholder: 'cc-switch-provider-id',
-  });
-  assertPrompt(credentialProvider);
-  if (
-    credentialProvider.trim() &&
-    !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(credentialProvider.trim())
-  ) {
-    throw new Error('credential provider 必须是 opaque ID，不得包含 URL、空白或凭据材料');
+    const strategy = await p.select<'follow' | 'manual'>({
+      message: '以后在 cc-switch 切换主账号时，子代理线路怎么处理？',
+      initialValue: currentSubagents.routeMode === 'manual' ? 'manual' : 'follow',
+      options: [
+        {
+          value: 'follow',
+          label: '自动使用该账号绑定的线路（推荐）',
+          hint: '同一个 cc-switch 账号始终使用上面选定的线路',
+        },
+        {
+          value: 'manual',
+          label: '始终固定这一条线路',
+          hint: '不管主对话账号怎么切换，子代理都用这条线路',
+        },
+      ],
+    });
+    assertPrompt(strategy);
+    routeMode = strategy === 'follow' ? 'follow-cc-switch' : 'manual';
+    readRoute = strategy === 'manual' ? selectedReadRoute : null;
   }
-  const credentialEnvKeys = await p.text({
-    message: 'MCP 所需环境变量名，逗号分隔（只保存名称）',
-    initialValue: (currentMcp?.credentialEnvKeys ?? []).join(', '),
-    placeholder: 'MIXAGENTS_BROKER_CREDENTIALS_JSON',
-  });
-  assertPrompt(credentialEnvKeys);
 
+  const currentCredential = currentMcpCredentials(rawProfile);
+  let credentialMode = currentCredential.mode;
+  let credentialEnvKeys = currentCredential.credentialEnvKeys.join(', ');
+  let credentialProvider = currentCredential.credentialProvider ?? '';
+  if (selectedMode === 'auto' || selectedMode === 'broker') {
+    p.note([
+      'Bridge 不会读取、打印或保存 API Key。',
+      `当前启动环境中的 MIXAGENTS_BROKER_CREDENTIALS_JSON：${
+        settingsEnv.MIXAGENTS_BROKER_CREDENTIALS_JSON?.trim() ? 'PRESENT' : 'MISSING'
+      }`,
+      '',
+      '推荐方式：由启动 Bridge 的环境/secret manager 提供：',
+      '  MIXAGENTS_BROKER_CREDENTIALS_JSON',
+      '这个变量内部是“环境变量名 → Key”的 JSON；Bridge 只检查变量是否存在，并把环境交给 MixAgents 子进程。',
+      '',
+      'MixAgents 当前公开版本 0.1.1 尚未实现直接读取 cc-switch Key；“MixAgents managed” 仅保留为未验证接口。',
+    ].join('\n'), '步骤 3 / 5 · 子代理 Key 由谁提供');
+    const selectedCredentialMode = await p.select<'inherit-env' | 'mixagents-managed'>({
+      message: '子代理 Key 从哪里来？',
+      initialValue: credentialMode === 'mixagents-managed' ? 'inherit-env' : credentialMode,
+      options: [
+        {
+          value: 'inherit-env',
+          label: '启动环境已提供（推荐）',
+          hint: '只保存环境变量名；不会把 Key 写进 arg-bridge 配置',
+        },
+        {
+          value: 'mixagents-managed',
+          label: '由 MixAgents 管理（未验证）',
+          hint: '需要 MixAgents/受信 helper 自行解析 cc-switch；当前 0.1.1 不具备该能力',
+        },
+      ],
+    });
+    assertPrompt(selectedCredentialMode);
+    credentialMode = selectedCredentialMode;
+    if (credentialMode === 'inherit-env') {
+      const envKeysInput = await p.text({
+        message: 'Bridge 启动环境中的 Key 容器变量名（只填名称）',
+        initialValue: credentialEnvKeys || 'MIXAGENTS_BROKER_CREDENTIALS_JSON',
+        placeholder: 'MIXAGENTS_BROKER_CREDENTIALS_JSON',
+      });
+      assertPrompt(envKeysInput);
+      credentialEnvKeys = envKeysInput;
+    } else {
+      credentialEnvKeys = '';
+    }
+    const missingCredentialNames = credentialEnvKeys
+      .split(',')
+      .map(value => value.trim())
+      .filter(Boolean)
+      .filter(name => !settingsEnv[name]?.trim());
+    if (missingCredentialNames.length > 0) {
+      p.note(
+        `当前进程缺少这些环境变量：${missingCredentialNames.join(', ')}。` +
+          '设置仍可保存，但在启动 Bridge 的环境补齐之前，相关子代理线路会显示不可用。',
+        '凭据状态提醒',
+      );
+    }
+    credentialProvider = credentialMode === 'mixagents-managed'
+      ? (selectedCcProvider ?? diagnostics.ccSwitch.currentProviderCodex ?? '')
+      : '';
+  }
+
+  p.note([
+    'Project RSI 是“项目完成证据校验”：只有项目已经创建 .project-rsi/config.json 时才启用。',
+    '普通问答不会触发；产生文件修改或高影响结论时，才要求项目自己的 runner/validator 生成新证据。',
+    'Bridge 不会自动初始化项目、伪造 receipt 或降低项目校验标准。',
+  ].join('\n'), '步骤 4 / 5 · 项目完成证据校验');
   const rsiMode = await p.select<RsiConfig['mode']>({
-    message: 'Project RSI 完成门禁',
-    initialValue: snapshot.rsi.config.mode,
+    message: '产生文件修改时要不要做项目证据校验？',
+    initialValue: currentRsi.mode,
     options: [
-      { value: 'auto', label: 'auto', hint: '持久修改/高影响结论必须有 fresh receipt' },
-      { value: 'off', label: 'off', hint: '关闭 bridge 侧门禁；项目 hook 不受影响' },
+      {
+        value: 'auto',
+        label: '自动（推荐）',
+        hint: '项目已初始化时启用；普通问答不触发',
+      },
+      {
+        value: 'off',
+        label: '关闭',
+        hint: '不使用 Bridge 的 Project RSI 完成门禁',
+      },
     ],
   });
   assertPrompt(rsiMode);
-  const projectRootText = await p.text({
-    message: 'Project RSI 项目 canonical root（留空自动向上发现；不会自动 init）',
-    initialValue: snapshot.rsi.config.projectRoot ?? '',
-    placeholder: '/absolute/project/root',
-  });
+  const projectRootText = rsiMode === 'auto'
+    ? await p.text({
+        message: '项目根目录（通常留空，自动从当前工作区向上查找）',
+        initialValue: currentRsi.projectRoot ?? '',
+        placeholder: '留空即可',
+      })
+    : '';
   assertPrompt(projectRootText);
   const projectRoot = projectRootText.trim()
     ? await validatedRsiRoot(projectRootText.trim())
     : null;
-  const reviewerRouteMode = await p.select<SubagentRouteMode>({
-    message: 'RSI reviewer route 选择方式',
-    initialValue: snapshot.rsi.config.reviewerRouteMode,
-    options: [
-      { value: 'follow-cc-switch', label: 'follow-cc-switch' },
-      { value: 'manual', label: 'manual' },
-    ],
-  });
-  assertPrompt(reviewerRouteMode);
-  let reviewerRoute = snapshot.rsi.config.reviewerRoute;
-  if (reviewerRouteMode === 'manual' && snapshot.subagents.diagnostics.readRoutes.length > 0) {
-    const selected = await p.select<string>({
-      message: 'RSI reviewer read route',
-      initialValue: reviewerRoute ?? snapshot.subagents.diagnostics.readRoutes[0]!.id,
-      options: snapshot.subagents.diagnostics.readRoutes.map(route => ({
-        value: route.id,
-        label: `${route.id} · ${route.provider}/${route.model}`,
-        hint: route.available ? 'read-only' : 'unavailable',
-      })),
+  let reviewerRouteMode: SubagentRouteMode = currentRsi.reviewerRouteMode;
+  let reviewerRoute = currentRsi.reviewerRoute;
+  if (rsiMode === 'auto') {
+    const reviewerStrategy = await p.select<'follow' | 'manual'>({
+      message: 'RSI 证据由哪个子代理复核？',
+      initialValue: currentRsi.reviewerRouteMode === 'manual' ? 'manual' : 'follow',
+      options: [
+        {
+          value: 'follow',
+          label: '跟随当前子代理线路（推荐）',
+          hint: '与 /btw、自动派工使用同一 cc-switch 映射',
+        },
+        {
+          value: 'manual',
+          label: '固定一条复核线路',
+          hint: '适合专门使用一个审阅模型',
+        },
+      ],
     });
-    assertPrompt(selected);
-    reviewerRoute = selected;
+    assertPrompt(reviewerStrategy);
+    reviewerRouteMode = reviewerStrategy === 'follow' ? 'follow-cc-switch' : 'manual';
+    reviewerRoute = reviewerStrategy === 'follow' ? null : reviewerRoute;
+    if (reviewerStrategy === 'manual' && availableReadRoutes.length > 0) {
+      const selected = await p.select<string>({
+        message: '选择固定复核线路',
+        initialValue: reviewerRoute && availableReadRoutes.some(route => route.id === reviewerRoute)
+          ? reviewerRoute
+          : selectedReadRoute && availableReadRoutes.some(route => route.id === selectedReadRoute)
+            ? selectedReadRoute
+            : availableReadRoutes[0]!.id,
+        options: availableReadRoutes.map(route => ({
+          value: route.id,
+          label: `${route.provider} / ${route.model}`,
+          hint: route.id,
+        })),
+      });
+      assertPrompt(selected);
+      reviewerRoute = selected;
+    }
   }
 
+  let writeRoute = currentSubagents.writeRoute;
+  let allowWriteWorkers = currentSubagents.allowWriteWorkers;
+  let modelTools = currentSubagents.modelTools;
+  let nativeToolPolicy = currentSubagents.nativeToolPolicy;
+  let maxConcurrentWorkers = currentSubagents.maxConcurrentWorkers;
+  let workerTimeoutMs = currentSubagents.workerTimeoutMs;
+  let includeProgressSnapshot = currentSubagents.includeProgressSnapshot;
+  let maxRepairRounds = currentRsi.maxRepairRounds;
+  const currentMcp = rawProfile.subagents?.mixagents;
+  let mcpCommand = currentMcp?.mcpCommand ?? '';
+  let mcpArgs = currentMcp?.mcpArgs ?? [];
+  const advanced = await p.confirm({
+    message: '是否展开高级参数？（并发、写权限、自定义 MCP、修复轮次）',
+    initialValue: false,
+  });
+  assertPrompt(advanced);
+  if (advanced) {
+    const snapshotConfirm = await p.confirm({
+      message: '/btw 是否附带已脱敏的主任务进度摘要？',
+      initialValue: includeProgressSnapshot,
+    });
+    assertPrompt(snapshotConfirm);
+    includeProgressSnapshot = snapshotConfirm;
+    const toolsConfirm = await p.confirm({
+      message: '允许父 Codex 模型自动调用 Broker 子代理工具？',
+      initialValue: modelTools,
+    });
+    assertPrompt(toolsConfirm);
+    modelTools = toolsConfirm;
+    const nativeChoice = await p.select<SubagentConfig['nativeToolPolicy']>({
+      message: 'Codex 自带的子代理工具怎么处理？',
+      initialValue: nativeToolPolicy,
+      options: [
+        {
+          value: 'shadow',
+          label: '隐藏 native 工具（推荐）',
+          hint: '只走 Broker，避免第三方 provider 收到加密子任务后无法读取',
+        },
+        {
+          value: 'preserve',
+          label: '保留 native 工具',
+          hint: '可能绕过 Broker；doctor 会标记风险',
+        },
+      ],
+    });
+    assertPrompt(nativeChoice);
+    nativeToolPolicy = nativeChoice;
+    const concurrencyText = await p.text({
+      message: '最多同时运行几个子代理？（1-32）',
+      initialValue: String(maxConcurrentWorkers),
+    });
+    assertPrompt(concurrencyText);
+    maxConcurrentWorkers = boundedIntegerInput(concurrencyText, 1, 32, '最大并发子代理数');
+    const timeoutText = await p.text({
+      message: '单个子代理最长运行时间（分钟）',
+      initialValue: String(workerTimeoutMs / 60_000),
+    });
+    assertPrompt(timeoutText);
+    workerTimeoutMs = Math.round(
+      boundedNumberInput(timeoutText, 0.5, 1440, '子代理超时分钟数') * 60_000,
+    );
+    const writeWorkers = await p.confirm({
+      message: '允许模型创建可写文件的子代理？（仍需用户逐任务授权）',
+      initialValue: allowWriteWorkers,
+    });
+    assertPrompt(writeWorkers);
+    allowWriteWorkers = writeWorkers;
+    if (availableWriteRoutes.length > 0) {
+      const noneValue = '__none__';
+      const selected = await p.select<string>({
+        message: '可写子代理使用哪条线路？',
+        initialValue: writeRoute && availableWriteRoutes.some(route => route.id === writeRoute)
+          ? writeRoute
+          : noneValue,
+        options: [
+          { value: noneValue, label: '不配置可写线路', hint: '只允许只读子代理' },
+          ...availableWriteRoutes.map(route => ({
+            value: route.id,
+            label: `${route.provider} / ${route.model}`,
+            hint: `${route.id} · 需要逐任务授权`,
+          })),
+        ],
+      });
+      assertPrompt(selected);
+      writeRoute = selected === noneValue ? null : selected;
+    }
+    const repairText = await p.text({
+      message: 'RSI 校验失败后，最多自动修复几轮？（0-10）',
+      initialValue: String(maxRepairRounds),
+    });
+    assertPrompt(repairText);
+    maxRepairRounds = boundedIntegerInput(repairText, 0, 10, 'RSI 最大修复轮次');
+    const command = await p.text({
+      message: '自定义 MixAgents MCP 命令（通常留空，自动使用 npm 包）',
+      initialValue: mcpCommand,
+      placeholder: '留空自动发现',
+    });
+    assertPrompt(command);
+    mcpCommand = command.trim();
+    const argsText = await p.text({
+      message: '自定义 MCP 参数 JSON 数组（留空保持现值）',
+      initialValue: '',
+      placeholder: '例如 ["dist/server.js"]',
+    });
+    assertPrompt(argsText);
+    if (argsText.trim()) mcpArgs = parseStringArray(argsText, 'MCP 参数');
+  }
+
+  let nextRouteMap: BrokerRouteMap | undefined;
+  if (
+    (selectedMode === 'auto' || selectedMode === 'broker') &&
+    routeMode === 'follow-cc-switch' &&
+    selectedCcProvider &&
+    selectedReadRoute
+  ) {
+    const baseMap: BrokerRouteMap = routeMapState.config ?? { version: 1, providers: {} };
+    const existing = baseMap.providers[selectedCcProvider] ?? {};
+    nextRouteMap = {
+      ...baseMap,
+      providers: {
+        ...baseMap.providers,
+        [selectedCcProvider]: {
+          ...existing,
+          readRoute: selectedReadRoute,
+          ...(allowWriteWorkers && writeRoute ? { writeRoute } : {}),
+        },
+      },
+    };
+  }
+
+  const modeText = selectedMode === 'auto'
+    ? '自动：优先 MixAgents，失败时按设置决定'
+    : selectedMode === 'broker'
+      ? '只允许 MixAgents'
+      : selectedMode === 'fork'
+        ? '只用本地 Codex fork'
+        : '关闭子代理';
+  const routeText = selectedMode === 'auto' || selectedMode === 'broker'
+    ? routeMode === 'follow-cc-switch'
+      ? `账号 ${selectedCcProvider ?? '(none)'} 自动绑定线路 ${selectedReadRoute ?? '(none)'}`
+      : `固定线路 ${selectedReadRoute ?? readRoute ?? '(none)'}`
+    : '(不适用)';
+  const credentialText = credentialMode === 'inherit-env'
+    ? `启动环境变量 ${credentialEnvKeys || '(未配置)'}`
+    : 'MixAgents managed（当前版本未验证）';
+  p.note([
+    `主对话：${diagnostics.ccSwitch.currentProviderName ?? '(unknown)'}（保持不变）`,
+    `子代理：${modeText}`,
+    `子代理线路：${routeText}`,
+    `Key：${credentialText}`,
+    `项目证据校验：${rsiMode === 'off' ? '关闭' : '自动（只对已初始化项目）'}`,
+    advanced ? '高级参数：已展开编辑' : '高级参数：保持原值',
+  ].join('\n'), '步骤 5 / 5 · 保存前确认');
+
   const save = await p.confirm({
-    message: '保存到当前 profile？下一条 /btw 会立即使用新设置，无需重建旧会话。',
+    message: '按以上设置保存？',
     initialValue: true,
   });
   assertPrompt(save);
@@ -259,18 +547,26 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
       .split(',')
       .map(value => value.trim())
       .filter(Boolean);
-    const nextMcp = (mcpCommand.trim() || currentMcp?.mcpCommand)
+    if (nextRouteMap) await saveBrokerRouteMap(nextRouteMap, settingsEnv);
+    const {
+      mcpCommand: _previousMcpCommand,
+      credentialMode: _previousCredentialMode,
+      credentialProvider: _previousCredentialProvider,
+      credentialEnvKeys: _previousCredentialEnvKeys,
+      ...mcpBase
+    } = currentMcp ?? {};
+    const nextMcp = (selectedMode === 'auto' || selectedMode === 'broker' || currentMcp)
       ? {
-          ...currentMcp,
-          mcpCommand: mcpCommand.trim() || currentMcp!.mcpCommand!,
-          ...(mcpArgs.length > 0 ? { mcpArgs } : { mcpArgs: undefined }),
+          ...mcpBase,
+          ...(mcpCommand.trim() ? { mcpCommand: mcpCommand.trim() } : {}),
+          ...(mcpArgs.length > 0 ? { mcpArgs } : {}),
           credentialMode,
           ...(credentialProvider.trim()
             ? { credentialProvider: credentialProvider.trim() }
-            : { credentialProvider: undefined }),
+            : {}),
           ...(normalizedKeys.length > 0
             ? { credentialEnvKeys: normalizedKeys }
-            : { credentialEnvKeys: undefined }),
+            : {}),
         }
       : undefined;
     root.profiles[snapshot.profile] = {
@@ -282,6 +578,12 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
         mode: selectedMode,
         routeMode,
         readRoute,
+        writeRoute: routeMode === 'manual' ? writeRoute : null,
+        modelTools,
+        nativeToolPolicy,
+        maxConcurrentWorkers,
+        workerTimeoutMs,
+        allowWriteWorkers,
         allowForkFallback,
         includeProgressSnapshot,
         ...(nextMcp ? { mixagents: nextMcp } : {}),
@@ -293,11 +595,14 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
         projectRoot,
         reviewerRouteMode,
         reviewerRoute,
+        maxRepairRounds,
       },
     };
     await saveRootConfig(root, paths.configFile);
   });
-  p.outro('已保存。下一条 /btw 会重新解析 cc-switch、Broker routes 和本设置。');
+  p.outro(
+    '已保存。下一条 /btw 会重新解析路由；Broker dynamic tools/native shadow 从新 thread 生效，旧 thread 不会静默绕过。',
+  );
 }
 
 export async function loadSettingsSnapshot(
@@ -406,6 +711,23 @@ export function formatSettings(snapshot: SettingsSnapshot): string {
   return formatSnapshot(snapshot);
 }
 
+function currentMcpCredentials(profile: { subagents?: SubagentConfig }): {
+  mode: 'inherit-env' | 'mixagents-managed';
+  credentialEnvKeys: string[];
+  credentialProvider?: string;
+} {
+  const mixagents = profile.subagents?.mixagents;
+  return {
+    mode: mixagents?.credentialMode === 'mixagents-managed'
+      ? 'mixagents-managed'
+      : 'inherit-env',
+    credentialEnvKeys: mixagents?.credentialEnvKeys ?? [],
+    ...(mixagents?.credentialProvider
+      ? { credentialProvider: mixagents.credentialProvider }
+      : {}),
+  };
+}
+
 function formatSnapshot(snapshot: SettingsSnapshot): string {
   const diagnostics = snapshot.subagents.diagnostics;
   const provider = snapshot.ccSwitch.currentProviderCodex ?? '(unknown)';
@@ -427,6 +749,11 @@ function formatSnapshot(snapshot: SettingsSnapshot): string {
     `profile=${snapshot.profile} agentKind=${snapshot.agentKind}`,
     `workspace=${snapshot.workspace}`,
     `cc-switch provider=${provider} name=${snapshot.ccSwitch.currentProviderName ?? '(unknown)'}`,
+    `cc-switch accounts=${diagnostics.ccSwitch.providers.length > 0
+      ? diagnostics.ccSwitch.providers.map(item =>
+          `${item.current ? '*' : '-'}${item.id}:${item.name}`
+        ).join(' | ')
+      : '(none reported)'}`,
     `main configured: ccSwitch=${snapshot.mainProvider.configuredCcSwitchProviderId ?? '(unknown)'}` +
       ` codexProvider=${snapshot.mainProvider.configuredCodexProviderId ?? '(unknown)'}` +
       ` model=${snapshot.mainProvider.configuredModel ?? '(config-default)'}`,
@@ -439,10 +766,19 @@ function formatSnapshot(snapshot: SettingsSnapshot): string {
     `provider switch=${snapshot.mainProvider.pendingSwitch}; safe point=${snapshot.mainProvider.safeSwitchPoint}`,
     `MixAgents mode=${snapshot.subagents.config.mode} routeMode=${snapshot.subagents.config.routeMode}` +
       ` MCP=${diagnostics.mcp.status} version=${diagnostics.packageVersion ?? '(unknown)'}`,
+    `Broker tools=${diagnostics.modelTools.brokerWired ? 'wired' : 'degraded'}` +
+      ` namespace=${diagnostics.modelTools.namespace}` +
+      ` native=${diagnostics.modelTools.nativeToolPolicy}` +
+      ` maxWorkers=${diagnostics.limits.maxConcurrentWorkers}` +
+      ` workerTimeoutMs=${diagnostics.limits.workerTimeoutMs}` +
+      ` writeWorkers=${diagnostics.limits.allowWriteWorkers}`,
+    `Broker tools degraded=${diagnostics.modelTools.degradedReason ?? '(none)'}`,
     `credential mode=${diagnostics.credentials.mode} status=${diagnostics.credentials.status}` +
       ` providerRef=${diagnostics.credentials.providerReference ?? '(none)'}`,
     `selected route=${diagnostics.selectedRoute.id ?? '(none)'}` +
       (diagnostics.selectedRoute.error ? ` error=${diagnostics.selectedRoute.error}` : ''),
+    `selected write route=${diagnostics.selectedWriteRoute.id ?? '(none)'}` +
+      (diagnostics.selectedWriteRoute.error ? ` error=${diagnostics.selectedWriteRoute.error}` : ''),
     `route config=${diagnostics.routeMap.path}`,
     `MixAgents broker config=${diagnostics.brokerConfigPath}`,
     'read routes:',
@@ -454,6 +790,8 @@ function formatSnapshot(snapshot: SettingsSnapshot): string {
       ` runner=${snapshot.rsi.status.runner} validator=${snapshot.rsi.status.validator}`,
     `RSI latest run=${snapshot.rsi.status.latestRun?.runId ?? '(none)'}` +
       ` validated=${snapshot.rsi.status.latestRun?.validated ?? false}`,
+    `RSI feedback loop maxRounds=${snapshot.rsi.config.maxRepairRounds}` +
+      ` timeoutMs=${snapshot.rsi.config.repairTimeoutMs}`,
     `RSI gate: bridge=${snapshot.rsi.status.bridgeGate}` +
       ` nativeTerminal=${snapshot.rsi.status.nativeTerminalGate}` +
       ` historicalTaskRsi=${snapshot.rsi.status.historicalTaskRsi}`,
@@ -475,6 +813,32 @@ function parseStringArray(value: string, label: string): string[] {
   }
   if (parsed.some(item => /(?:sk-|token|secret|api[_-]?key)[=:]\s*\S+/iu.test(item))) {
     throw new Error(`${label}疑似包含凭据；请改用环境变量名，不要把 key 写入参数`);
+  }
+  return parsed;
+}
+
+function boundedIntegerInput(
+  value: string,
+  minimum: number,
+  maximum: number,
+  label: string,
+): number {
+  const parsed = Number(value.trim());
+  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
+    throw new Error(`${label}必须是 ${minimum}-${maximum} 的整数`);
+  }
+  return parsed;
+}
+
+function boundedNumberInput(
+  value: string,
+  minimum: number,
+  maximum: number,
+  label: string,
+): number {
+  const parsed = Number(value.trim());
+  if (!Number.isFinite(parsed) || parsed < minimum || parsed > maximum) {
+    throw new Error(`${label}必须是 ${minimum}-${maximum} 的数字`);
   }
   return parsed;
 }

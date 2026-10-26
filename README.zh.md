@@ -4,7 +4,7 @@
 
 [English README](./README.md)
 
-`1.7.2` 完成 v1.7.0 功能发布后的跨平台校验收尾：macOS socket symlink/客户端探测、Windows 路径 fixture 和 Unix-only 测试作用域。`1.7.0` 新增可选 MixAgents Broker `/btw`、`cc-switch` read route 动态解析、`arg-bridge settings`、`arg-bridge doctor --json`、Project RSI 证据门禁和 `migrate-local-poc`。主 provider 始终只由 `cc-switch` 控制；Bridge 不导出、打印或记录 provider key。`/btw` 严格只读，每次调用重新读取路由，route 配置身份变化时会明确结束旧 agent 并创建新 agent。
+`1.8.0` 为 Bridge-managed Codex 会话增加模型可见的跨 provider Broker 编排。Codex 0.164 App Server dynamic tools 暴露 `arg_bridge.spawn_agent`、`followup_task`、`wait_agent`、`list_agents`、route、interrupt 与 close，不再要求用户先输入 `/btw`；新 Bridge thread 会遮蔽 native MultiAgentV2 工具，worker 收到普通明文 MixAgents 输入，而不是 `agent_message.encrypted_content`。read/write route、并发限制、worker mapping、结果 mailbox 和 Project RSI 有界修复循环都可在 `arg-bridge settings` 中配置。`1.7.2` 是前一个跨平台校验收尾版本。
 
 `1.6.7` 引入 provider-aware Codex resume；`1.7.0` 在 idle turn 边界应用当前 provider/model，即使旧 provider 仍存在也会安全切换；已有活跃 turn 时绝不中途换 provider。
 
@@ -60,7 +60,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.7.2
+sh /tmp/install-arg-bridge.sh --version 1.8.0
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.7.2"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.8.0"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.7.2`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.8.0`。
 
 ### 4. Node 或 npm 全局目录错误
 
@@ -252,9 +252,17 @@ arg-bridge profile export <name> --include-secrets --yes
 
 如果某个 profile 被建成了错误的 agent 类型，先 `stop` 或 `unregister --profile <name>` 清理对应后台服务，再 `profile remove <name>`，然后用正确的 `--agent` 重新创建。
 
-### MixAgents `/btw`、`cc-switch`、MCP 与 Project RSI
+### MixAgents 模型工具、`/btw`、`cc-switch`、MCP 与 Project RSI
 
-MixAgents 是可选依赖。未安装时，`auto` 会明确提示并保留 Codex fork 降级；显式 `broker` 会直接给出可操作的安装/配置错误。正式集成面是带版本检查的 MixAgents STDIO MCP 六工具协议，不读取或硬编码 `$CODEX_HOME/plugins/cache/...`。
+MixAgents 是可选依赖。`/btw` 在 `auto` 下仍可显式降级到 fork，但父模型的自动 Broker 工具不会把 native Codex child 冒充成 worker。新建 Bridge-managed Codex thread 会携带 `arg_bridge` dynamic-tool namespace，并设置 `features.multi_agent_v2.disable_native_tools=true`。0.164.0 的真实链路证据见 [structured Broker smoke](./docs/smoke-structured-broker-e2e-0.164.0.json)。
+
+公开 npm 包 `mixagents-broker` 是 optional dependency，Bridge 通过稳定的 package entry 自动解析，不扫描 plugin cache；显式 MCP command/profile 配置仍优先。
+
+自动派工工具包括 `spawn_agent`、`followup_task`、`wait_agent`、`list_agents`、`list_routes`、`interrupt_agent`、`close_agent` 和显式 queue-only 的 `send_message`。当前 MixAgents MCP 无法证明 `send` 的 queue-only 语义，因此 `send_message` 会明确报 unsupported，而不会静默变成 trigger-turn。worker 默认 read-only；workspace-write 还必须启用写路由，并提供精确的逐任务/workspace 授权。
+
+需要授权写 worker 时，用户用 `arg-bridge-write --workspace /canonical/path --task <完整任务>` 发起该 turn。Bridge 会在父模型看到任务前消费该指令，并在模型可控的工具参数之外绑定授权。
+
+旧 1.7.x thread 没有持久化 dynamic-tool marker，升级后会 fail closed，不会 resume 到 encrypted child-message 行为；请新建 Bridge-managed 会话。直接 `codex` TUI 仍不在拦截路径内：hook 可以阻断或改写工具，但不能把它替换成 Broker 调用并合成结果，因此直接 TUI 需要未来的 trusted plugin/hook。
 
 官方安装提示：
 
@@ -263,7 +271,7 @@ codex plugin marketplace add Utopia-V/mixagents
 codex plugin add mixagents-broker@mixagents
 ```
 
-`arg-bridge settings` 使用现有配置锁编辑当前 profile，显示 `cc-switch` 当前 provider、Codex 配置值与运行值、read/write Broker routes、可用性、缺失环境变量**名称**、凭据委托方式、RSI reviewer route 和初始化状态。`arg-bridge doctor --json` 只读且不会产生付费请求；只有显式 `--probe-route <id>` 会发起一次 read-only 生成 probe，失败后不重试、不降级。
+`arg-bridge settings` 现在会自动读取安全的 `cc-switch` 账号元数据和可用 Broker 线路，再用五步向导说明：当前主对话、子代理是否允许降级、选择哪个账号与线路、Key 由哪里提供、是否启用项目证据校验。并发、native 工具遮蔽、写权限和自定义 MCP 等参数收在“高级设置”里。跟随模式只写 provider-ID 到 route-ID 的安全映射，不会切换主 provider。`arg-bridge doctor --json` 只读且不会产生付费请求；只有显式 `--probe-route <id>` 会发起一次 read-only 生成 probe，失败后不重试、不降级。
 
 三类 provider 标识必须分开：
 
@@ -279,15 +287,19 @@ Broker 映射只使用第 1 类 ID，不使用显示名或 Codex 内部名。pro
 {
   "version": 1,
   "defaultReadRoute": "review-read",
+  "defaultWriteRoute": "coding-write",
   "providers": {
-    "cc-switch-provider-id": { "readRoute": "review-read" }
+    "cc-switch-provider-id": {
+      "readRoute": "review-read",
+      "writeRoute": "coding-write"
+    }
   }
 }
 ```
 
-通过 `arg-bridge settings --profile codex` 配置 MCP 可执行文件、参数、凭据模式和 provider 引用。Bridge 不读取 provider key。`credentialMode: "mixagents-managed"` 时，Bridge 只向 MCP 子进程传 `MIXAGENTS_CREDENTIAL_PROVIDER=<opaque-ref>`；由 MixAgents 或其受信任 helper 解析 `cc-switch` 凭据。在 helper 通过兼容 probe 前，doctor 会明确显示 `delegated-unverified`。
+通过 `arg-bridge settings --profile codex` 配置 MCP、read/write route、dynamic-tool 暴露、native shadow 策略、并发 worker 上限、超时、写 worker 授权、RSI 修复轮次和凭据委托。`arg-bridge doctor --json` 会分别报告 Broker 工具接线、native 绕过风险、写路由状态、worker probe 状态，以及直接 TUI 是否仍需要 trusted hook。
 
-Project RSI 与 MixAgents、历史 Task RSI 是三个不同层次。Bridge 只发现已经初始化的 `.project-rsi/config.json`，不会在 `/`、`$HOME` 或宽泛父目录自动 init。Bridge turn 一旦产生持久修改或高影响结论，必须找到绑定当前项目/thread/task 的 fresh 上游 validator receipt，否则不会发送普通成功完成卡片。reviewer 是证据而不是授权。直接 `codex` 等原生 TUI 不在 Bridge 门禁范围内，除非项目安装并验证了可信 Codex hook；settings/doctor 会如实显示该边界。
+Project RSI 与 MixAgents、历史 Task RSI 是三个不同层次。Bridge 只发现已经初始化的 `.project-rsi/config.json`，不会在 `/`、`$HOME` 或宽泛父目录自动 init。实质性 Bridge turn 必须获得 fresh 上游 validator receipt 和 reviewer evidence。validator failure findings 会回传给同一父 thread，在 `maxRepairRounds` 与超时限制内修复，然后重新运行上游 runner/validator。Bridge 不会伪造 receipt、降低门槛或自动批准 proposal。直接 `codex` 等原生 TUI 不在门禁范围内，除非安装并验证 trusted hook。
 
 详见 [MixAgents 子代理](./docs/mixagents-subagents.md)、[Project RSI](./docs/project-rsi.md)、[凭据与权限安全](./docs/security-and-permissions.md)和[本地 PoC 迁移](./docs/migration-local-poc.md)。
 

@@ -3,15 +3,22 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
-import { MixAgentsBrokerBackend } from '../../../src/agent/subagents/mixagents';
+import {
+  MixAgentsBrokerBackend,
+  resolveMixAgentsLaunchConfig,
+} from '../../../src/agent/subagents/mixagents';
 import { resolveSubagents } from '../../../src/agent/subagents/registry';
 import {
   SubagentUnavailableError,
 } from '../../../src/agent/subagents/types';
-import type { SubagentConfig } from '../../../src/config/profile-schema';
+import {
+  DEFAULT_SUBAGENT_CONFIG,
+  type SubagentConfig,
+} from '../../../src/config/profile-schema';
 
 const fixture = fileURLToPath(new URL('../../fixtures/fake-mixagents-mcp.mjs', import.meta.url));
 const temporary: string[] = [];
+const optionalBrokerRuntime = Number(process.versions.node.split('.')[0]) >= 22 ? it : it.skip;
 
 afterEach(async () => {
   await Promise.all(temporary.splice(0).map(path => rm(path, { recursive: true, force: true })));
@@ -33,6 +40,12 @@ async function setup() {
     routeMode: 'follow-cc-switch',
     readRoute: null,
     writeRoute: null,
+    modelTools: true,
+    nativeToolPolicy: 'shadow',
+    toolNamespace: 'arg_bridge',
+    maxConcurrentWorkers: 4,
+    workerTimeoutMs: 15 * 60_000,
+    allowWriteWorkers: false,
     includeProgressSnapshot: true,
     reuse: 'scope-cwd',
     allowForkFallback: false,
@@ -46,6 +59,18 @@ async function setup() {
 }
 
 describe('MixAgentsBrokerBackend', () => {
+  optionalBrokerRuntime('auto-discovers the optional published mixagents-broker MCP entry', () => {
+    const launch = resolveMixAgentsLaunchConfig({
+      ...DEFAULT_SUBAGENT_CONFIG,
+      mixagents: undefined,
+    }, { ...process.env });
+    expect(launch).toMatchObject({
+      command: process.execPath,
+    });
+    expect(launch?.args[0]).toContain('mixagents-broker');
+    expect(launch?.args[0]?.endsWith('/dist/server.js')).toBe(true);
+  });
+
   it('lists routes, spawns a read-only agent, reuses it, and interrupts it', async () => {
     const { root, statePath, env, config } = await setup();
     const backend = new MixAgentsBrokerBackend(config, env);
@@ -236,6 +261,12 @@ describe('subagent route resolution', () => {
       routeMode: 'follow-cc-switch',
       readRoute: null,
       writeRoute: null,
+      modelTools: true,
+      nativeToolPolicy: 'shadow',
+      toolNamespace: 'arg_bridge',
+      maxConcurrentWorkers: 4,
+      workerTimeoutMs: 15 * 60_000,
+      allowWriteWorkers: false,
       includeProgressSnapshot: true,
       reuse: 'scope-cwd',
       allowForkFallback: true,

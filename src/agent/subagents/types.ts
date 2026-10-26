@@ -8,7 +8,8 @@ export type SideAgentStatus =
   | 'failed'
   | 'interrupted'
   | 'not_found'
-  | 'timeout';
+  | 'timeout'
+  | 'closed';
 
 export interface SubagentRoute {
   id: string;
@@ -40,6 +41,8 @@ export interface SideAgent {
   backendId: string;
   status: SideAgentStatus;
   createdAt: number;
+  /** Optional native execution thread exposed by a Broker backend. */
+  threadId?: string;
 }
 
 export interface SideAgentResult {
@@ -69,7 +72,7 @@ export interface SubagentBackend {
   readonly id: 'mixagents' | 'codex-fork';
   listRoutes(signal: AbortSignal): Promise<SubagentRoute[]>;
   createOrReuse(input: SideAgentInput): Promise<SideAgent>;
-  wait(agent: SideAgent, signal: AbortSignal): Promise<SideAgentResult>;
+  wait(agent: SideAgent, signal: AbortSignal, timeoutMs?: number): Promise<SideAgentResult>;
   send(agent: SideAgent, message: string, signal: AbortSignal): Promise<SideAgentResult>;
   interrupt(agent: SideAgent, signal: AbortSignal): Promise<void>;
   close(agent: SideAgent, signal: AbortSignal): Promise<void>;

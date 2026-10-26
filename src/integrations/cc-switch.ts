@@ -118,8 +118,8 @@ async function listProviders(
 export function parseProviderTable(output: string): CcSwitchProvider[] {
   const providers: CcSwitchProvider[] = [];
   for (const line of output.split('\n')) {
-    if (!line.includes('│')) continue;
-    const cells = line.split('│').map(cell => cell.trim());
+    if (!/[│┆]/u.test(line)) continue;
+    const cells = line.split(/[│┆]/u).map(cell => cell.trim());
     if (cells.length < 4) continue;
     const marker = cells[1] ?? '';
     const id = cells[2] ?? '';

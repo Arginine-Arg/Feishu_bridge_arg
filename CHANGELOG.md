@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.8.0
+
+- Added Bridge-owned App Server dynamic tools for model-initiated cross-provider
+  subagents: spawn, followup, wait, list, routes, interrupt and close.
+- New Bridge-managed Codex threads enable MultiAgentV2 host-tool mode and hide
+  native collaboration, preventing task text from entering unsupported
+  `agent_message.encrypted_content` paths.
+- Worker tasks now use ordinary plaintext MixAgents MCP input, with persistent
+  logical-path/agent/thread mappings, route fingerprint checks, concurrency
+  limits, timeouts, cancellation, idempotency and result mailboxes.
+- Added the public `mixagents-broker` npm package as an optional dependency and
+  resolve its stable package entry without scanning Codex plugin caches.
+- Wired read and write Broker routes independently. Workspace-write remains
+  opt-in and requires exact per-task/per-workspace authorization.
+- Added bounded Project RSI validator-findings repair rounds with fresh-run
+  revalidation and auditable `repair-loop.json` evidence.
+- Expanded settings and doctor output with native-shadow status, bypass risk,
+  write-route wiring, worker-probe status, direct-TUI hook limitations and RSI
+  feedback-loop configuration.
+- Replaced the settings field dump with a guided five-step flow that reads
+  cc-switch account metadata, presents Broker routes as provider/model choices,
+  explains credential ownership without exposing values, and hides advanced
+  controls behind an explicit prompt.
+- Added Codex 0.164.0 protocol, process and full StructuredAdapter-to-fake-MCP
+  end-to-end traces.
+
 ## 1.7.2
 
 - Completed macOS canonical-path handling for App Server sockets. Where

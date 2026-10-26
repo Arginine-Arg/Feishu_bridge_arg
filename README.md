@@ -4,7 +4,7 @@ A lightweight bot that bridges Feishu / Lark messenger with your local Claude Co
 
 [中文 README](./README.zh.md)
 
-Version 1.7.2 completes cross-platform validation after the v1.7.0 feature release: macOS socket symlink/client detection, Windows path fixtures, and Unix-only test scoping. Version 1.7.0 adds an optional MixAgents Broker backend for `/btw`, dynamic `cc-switch` read-route selection, `arg-bridge settings`, `arg-bridge doctor --json`, Project RSI evidence gates, and `migrate-local-poc`. The main provider remains controlled only by `cc-switch`; Bridge never exports or prints provider secrets. `/btw` is read-only, re-reads routing on every use, and replaces an old side agent when route/config identity changes.
+Version 1.8.0 adds model-visible, cross-provider Broker orchestration to Bridge-managed Codex sessions. Codex 0.164 App Server dynamic tools expose `arg_bridge.spawn_agent`, `followup_task`, `wait_agent`, `list_agents`, route, interrupt and close operations without requiring `/btw`; native MultiAgentV2 tools are shadowed for new Bridge threads, and task text reaches workers as ordinary MixAgents input rather than `agent_message.encrypted_content`. Read/write routes, concurrency limits, persisted worker mappings, result mailboxes and Project RSI bounded repair loops are configurable through `arg-bridge settings`. Version 1.7.2 completed the preceding cross-platform validation release.
 
 Version 1.6.7 introduced provider-aware Codex resume. Version 1.7.0 applies the current provider/model at an idle resume boundary, including when the old provider still exists, while never switching a thread that has an active turn.
 
@@ -60,7 +60,7 @@ Install a pinned release or use a writable custom npm prefix when required:
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.7.2
+sh /tmp/install-arg-bridge.sh --version 1.8.0
 # Example for a machine without permission to write npm's configured global prefix:
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ Release tarballs are preferred. If a Git install is required, keep both compatib
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.7.2"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.8.0"
 ```
 
-`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.7.2`.
+`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.8.0`.
 
 ### 4. Node or npm global-prefix errors
 
@@ -252,9 +252,17 @@ arg-bridge profile export <name> --include-secrets --yes
 
 If a profile was created with the wrong agent kind, stop or unregister any matching background service first, then run `profile remove <name>` and recreate it with the intended `--agent`.
 
-### MixAgents `/btw`, `cc-switch`, MCP and Project RSI
+### MixAgents model tools, `/btw`, `cc-switch`, MCP and Project RSI
 
-MixAgents is optional. Without it, `auto` mode keeps the legacy Codex fork fallback and reports the downgrade; explicit `broker` mode fails with an actionable install/configuration error. The production integration surface is the versioned MixAgents STDIO MCP contract (`routes`, `spawn_agent`, `send`, `wait_agent`, `interrupt_agent`, `list_agents`), not a plugin-cache path.
+MixAgents is optional. `/btw` supports the legacy fork fallback in `auto` mode, but the parent model's automatic Broker tools never pretend a native Codex child is a worker. New Bridge-managed Codex threads receive the requested `arg_bridge` dynamic-tool namespace and set `features.multi_agent_v2.disable_native_tools=true`. The exact 0.164.0 trace is recorded in [the structured Broker smoke](./docs/smoke-structured-broker-e2e-0.164.0.json).
+
+The public `mixagents-broker` npm package is an optional dependency and is resolved through its stable package entry, not a plugin-cache path. Explicit MCP command/profile overrides still take priority.
+
+Automatic delegation uses `spawn_agent`, `followup_task`, `wait_agent`, `list_agents`, `list_routes`, `interrupt_agent`, `close_agent`, and an explicit queue-only `send_message` surface. The current MixAgents MCP does not prove queue-only `send` semantics, so `send_message` fails clearly instead of silently becoming trigger-turn. Workers default to read-only; write workers additionally require an enabled write route and exact per-task/per-workspace authorization.
+
+For an authorized write worker, the user starts the turn with `arg-bridge-write --workspace /canonical/path --task <exact task>`. Bridge consumes that directive before the parent model turn and binds the authorization outside model-controlled tool arguments.
+
+Old 1.7.x threads have no persisted dynamic-tool marker and fail closed instead of resuming into encrypted child-message behavior. Start a new Bridge-managed conversation after upgrading. Direct `codex` TUI sessions remain outside this interception; hooks may block or rewrite a tool but cannot replace it with a Broker call and synthesize a result, so a direct TUI integration requires a future trusted plugin/hook.
 
 Official installation hint:
 
@@ -263,7 +271,7 @@ codex plugin marketplace add Utopia-V/mixagents
 codex plugin add mixagents-broker@mixagents
 ```
 
-`arg-bridge settings` edits the current profile through the existing config lock. It shows the active `cc-switch` provider, configured versus running Codex provider IDs, read/write Broker routes, availability, missing environment-variable **names**, credential delegation mode, reviewer route, and Project RSI initialization. `arg-bridge doctor --json` is read-only and must not spend money. Only an explicit `--probe-route <id>` sends one read-only generation probe and never retries or falls back.
+`arg-bridge settings` now auto-reads safe `cc-switch` account metadata and the available Broker routes, then guides the user through main-account context, subagent route mapping, credential source, Project RSI, and a plain-language confirmation. Technical concurrency/native-tool/write-worker controls are behind an explicit advanced prompt. Follow-mode route mappings are written as provider-ID to route-ID metadata without changing the main provider. `arg-bridge doctor --json` is read-only and must not spend money. Only an explicit `--probe-route <id>` sends one read-only generation probe and never retries or falls back.
 
 Configured and running providers are intentionally separate:
 
@@ -279,15 +287,19 @@ The optional route map lives at `~/.config/arg-bridge/broker-routes.json` and co
 {
   "version": 1,
   "defaultReadRoute": "review-read",
+  "defaultWriteRoute": "coding-write",
   "providers": {
-    "cc-switch-provider-id": { "readRoute": "review-read" }
+    "cc-switch-provider-id": {
+      "readRoute": "review-read",
+      "writeRoute": "coding-write"
+    }
   }
 }
 ```
 
-Run `arg-bridge settings --profile codex` to configure the MixAgents MCP executable, MCP arguments, credential mode/provider reference, route mode, and RSI paths. Bridge never reads a provider key. With `credentialMode: "mixagents-managed"`, it only passes `MIXAGENTS_CREDENTIAL_PROVIDER=<opaque-ref>` to the MCP child; the MixAgents side or a trusted helper must resolve the `cc-switch` credential. Until that helper advertises and passes the compatibility probe, doctor reports `delegated-unverified`.
+Run `arg-bridge settings --profile codex` to configure the MCP executable, read/write routes, dynamic-tool exposure, native shadow policy, concurrent-worker limit, timeout, write-worker authorization, RSI repair rounds and credential delegation. Bridge never reads a provider key. `arg-bridge doctor --json` separately reports Broker-tool wiring, native-bypass risk, write-route status, worker-probe status and whether a trusted hook is still required for direct TUI.
 
-Project RSI is separate from MixAgents and from historical Task RSI evidence. Bridge discovers only an already initialized `.project-rsi/config.json`; it never initializes `/`, `$HOME`, or a broad parent automatically. A bridge turn that writes files or records a high-impact conclusion cannot complete with a normal success card unless a run for that project/thread/task has a fresh upstream validator receipt. Reviewer output is evidence, not authorization. Direct `codex` and other native TUIs remain outside this Bridge gate unless the project installs and verifies a trusted Codex hook; `settings` reports that boundary instead of claiming full native coverage.
+Project RSI is separate from MixAgents and from historical Task RSI evidence. Bridge discovers only an already initialized `.project-rsi/config.json`; it never initializes `/`, `$HOME`, or a broad parent automatically. A substantive Bridge turn must obtain a fresh upstream validator receipt and reviewer evidence. Validator findings can be returned to the same parent thread for a bounded repair loop (`maxRepairRounds`, timeout), then the upstream runner/validator is rerun. The Bridge never fabricates receipts, lowers thresholds or approves proposals. Direct `codex` and other native TUIs remain outside this gate unless the project installs and verifies a trusted hook.
 
 See [MixAgents subagents](./docs/mixagents-subagents.md), [Project RSI](./docs/project-rsi.md), [credential and permission security](./docs/security-and-permissions.md), and [local PoC migration](./docs/migration-local-poc.md).
 

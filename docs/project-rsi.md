@@ -35,7 +35,9 @@ and validator entries:
     "validatorCommand": ".project-rsi/project_rsi.py",
     "validatorArgs": [],
     "reviewerRouteMode": "follow-cc-switch",
-    "reviewerRoute": null
+    "reviewerRoute": null,
+    "maxRepairRounds": 2,
+    "repairTimeoutMs": 600000
   }
 }
 ```
@@ -93,6 +95,33 @@ When the gate fails, the Bridge emits an error instead of a normal completion
 event. It never fabricates a receipt, edits a validator threshold, removes a
 test, or approves a proposal automatically.
 
+## Bounded repair loop
+
+For Bridge-managed Codex turns, validator/reviewer failure is returned to the
+parent as normal user input inside the same thread:
+
+```text
+turn -> validator/reviewer -> findings -> parent repair
+     -> fresh upstream run/receipt -> validator/reviewer -> completion
+```
+
+The loop is bounded by:
+
+- `rsi.maxRepairRounds` (default `2`, maximum `10`);
+- `rsi.repairTimeoutMs` (default ten minutes);
+- the existing turn AbortSignal;
+- the upstream runner/validator limits.
+
+Each repair round records a prompt hash, bounded redacted findings and timing in
+`<runDir>/repair-loop.json`. Reviewer identity remains in `review.json`.
+When the maximum is reached, the Bridge emits a failure rather than sending a
+normal success completion card.
+
+A stale run, wrong run ID, wrong thread/task hash, stale receipt or reviewer
+unavailability cannot satisfy the gate. The repair prompt explicitly forbids
+fabricated receipts, weakened thresholds, test deletion and automatic proposal
+approval.
+
 ## Reviewer evidence
 
 After the validator gate passes, the configured read route gets one bounded,
@@ -112,8 +141,7 @@ files. Bridge records:
 }
 ```
 
-Review is evidence, not authority. A failed/unavailable reviewer is shown in the
-conversation and does not silently lower the upstream validator requirement.
-If writer and reviewer resolve to the same model, describe them as separate
-sessions, not independent-model review.
-
+Review is evidence, not authority. A failed or unavailable reviewer keeps the
+gate open and enters the bounded repair/failure path; it never turns into a
+silent pass. If writer and reviewer resolve to the same model, describe them as
+separate sessions, not independent-model review.

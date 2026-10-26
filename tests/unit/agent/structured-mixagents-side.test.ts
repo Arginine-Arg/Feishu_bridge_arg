@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -33,6 +34,12 @@ const subagents: SubagentConfig = {
   routeMode: 'manual',
   readRoute: 'route-a',
   writeRoute: null,
+  modelTools: true,
+  nativeToolPolicy: 'shadow',
+  toolNamespace: 'arg_bridge',
+  maxConcurrentWorkers: 4,
+  workerTimeoutMs: 15 * 60_000,
+  allowWriteWorkers: false,
   includeProgressSnapshot: true,
   reuse: 'scope-cwd',
   allowForkFallback: false,
@@ -66,6 +73,7 @@ class FakeBackend implements SubagentBackend {
   readonly closes: string[] = [];
   sendNotFoundOnce = false;
   hangWaits = false;
+  waitResult?: SideAgentResult;
 
   constructor(private readonly route: () => SubagentRoute) {}
 
@@ -90,6 +98,7 @@ class FakeBackend implements SubagentBackend {
   }
 
   async wait(agent: SideAgent, signal: AbortSignal): Promise<SideAgentResult> {
+    if (this.waitResult) return this.waitResult;
     if (this.hangWaits) {
       await new Promise<void>((_resolve, reject) => {
         if (signal.aborted) return reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
@@ -151,6 +160,49 @@ function resolved(
 }
 
 describe('structured MixAgents /btw', () => {
+  it('binds a user-issued write directive outside the parent prompt and clears it', async () => {
+    const profileDir = await mkdtemp(join(tmpdir(), 'arg-bridge-write-auth-'));
+    const workspace = await mkdtemp(join(tmpdir(), 'arg-bridge-write-workspace-'));
+    const rpc = new EventEmitter() as EventEmitter & { request: ReturnType<typeof vi.fn> };
+    rpc.request = vi.fn(async () => ({}));
+    const main = new CodexStructuredSession(
+      'main-thread',
+      'unix:///tmp/write-auth.sock',
+      rpc as unknown as RpcClient,
+    );
+    const authorization = vi.spyOn(main, 'setBrokerWriteAuthorization');
+    const prompts: string[] = [];
+    vi.spyOn(main, 'submit').mockImplementation(async options => {
+      prompts.push(options.prompt);
+    });
+    const adapter = new StructuredAdapter({
+      kind: 'codex',
+      binary: 'not-spawned',
+      profileDir,
+    });
+    Reflect.get(adapter, 'sessions').set('scope', {
+      main,
+      cwd: workspace,
+      view: new StructuredView(profileDir, 'main'),
+    });
+    const events = await drain(adapter.run({
+      runId: 'write-auth',
+      scopeId: 'scope',
+      cwd: workspace,
+      prompt: `arg-bridge-write --workspace "${workspace}" --task Fix the parser`,
+    }));
+    expect(events.filter(event => event.type === 'error')).toEqual([]);
+    expect(prompts).toEqual(['Fix the parser']);
+    expect(authorization).toHaveBeenNthCalledWith(1, {
+      workspace,
+      task: 'Fix the parser',
+    });
+    expect(authorization).toHaveBeenLastCalledWith(undefined);
+    await main.close();
+    await rm(profileDir, { recursive: true, force: true });
+    await rm(workspace, { recursive: true, force: true });
+  });
+
   it('spawns read-only, reuses the same agent, and replaces it on route change', async () => {
     const profileDir = await mkdtemp(join(tmpdir(), 'arg-bridge-side-'));
     let activeRoute = routeA;
@@ -384,31 +436,24 @@ describe('structured MixAgents /btw', () => {
     await writeFile(join(projectRoot, '.project-rsi', 'config.json'), JSON.stringify({
       version: 1,
     }));
-    const main: StructuredSession & {
-      submitCalls: number;
-    } = {
-      id: 'main-thread',
-      submitCalls: 0,
-      async submit(_options, emit) {
-        this.submitCalls += 1;
-        emit({
-          type: 'tool_use',
-          id: 'tool-1',
-          name: 'fileChange',
-          input: { path: 'src/app.ts' },
-        });
-        emit({ type: 'done', terminationReason: 'normal' });
-      },
-      async command() { return []; },
-      async answer() {},
-      hasRequest() { return false; },
-      freeTextRequest() { return undefined; },
-      async interrupt() { return false; },
-      diagnostics() {
-        return { phase: 'idle', inputState: 'empty', retryCount: 0 };
-      },
-      async close() {},
-    };
+    const rpc = new EventEmitter() as EventEmitter & { request: ReturnType<typeof vi.fn> };
+    rpc.request = vi.fn(async () => ({}));
+    const main = new CodexStructuredSession(
+      'main-thread',
+      'unix:///tmp/rsi-main.sock',
+      rpc as unknown as RpcClient,
+    );
+    const submittedPrompts: string[] = [];
+    vi.spyOn(main, 'submit').mockImplementation(async (options, emit) => {
+      submittedPrompts.push(options.prompt);
+      emit({
+        type: 'tool_use',
+        id: `tool-${submittedPrompts.length}`,
+        name: 'fileChange',
+        input: { path: 'src/app.ts' },
+      });
+      emit({ type: 'done', terminationReason: 'normal' });
+    });
     const adapter = new StructuredAdapter({
       kind: 'codex',
       binary: 'not-spawned',
@@ -418,6 +463,8 @@ describe('structured MixAgents /btw', () => {
         projectRoot,
         reviewerRouteMode: 'follow-cc-switch',
         reviewerRoute: null,
+        maxRepairRounds: 2,
+        repairTimeoutMs: 10 * 60_000,
       },
     });
     Reflect.get(adapter, 'sessions').set('scope', {
@@ -432,12 +479,208 @@ describe('structured MixAgents /btw', () => {
       cwd: projectRoot,
       prompt: 'Modify the project and report completion',
     }));
-    expect(events.filter(event => event.type === 'tool_use')).toHaveLength(1);
+    expect(events.filter(event => event.type === 'tool_use')).toHaveLength(3);
+    expect(submittedPrompts).toHaveLength(3);
+    expect(submittedPrompts.slice(1)).toEqual([
+      expect.stringContaining('<validator-findings>'),
+      expect.stringContaining('<validator-findings>'),
+    ]);
     expect(events.filter(event => event.type === 'done')).toEqual([]);
     expect(events).toContainEqual(expect.objectContaining({
       type: 'error',
       message: expect.stringContaining('fresh validator receipt'),
     }));
+    await main.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it('feeds validator findings back, repairs in the same thread, and reruns the gate', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'arg-bridge-rsi-repair-'));
+    const projectRoot = join(root, 'project');
+    const profileDir = join(root, 'state');
+    await mkdir(join(projectRoot, '.project-rsi'), { recursive: true });
+    await mkdir(profileDir, { recursive: true });
+    await writeFile(join(projectRoot, '.project-rsi', 'config.json'), JSON.stringify({
+      version: 1,
+      validator: { path: '.project-rsi/project_rsi.py' },
+    }), { mode: 0o600 });
+    await writeFile(join(projectRoot, '.project-rsi', 'project_rsi.py'), '#!/usr/bin/env python3\n', {
+      mode: 0o700,
+    });
+    const rpc = new EventEmitter() as EventEmitter & { request: ReturnType<typeof vi.fn> };
+    rpc.request = vi.fn(async () => ({}));
+    const main = new CodexStructuredSession(
+      'main-thread',
+      'unix:///tmp/rsi-repair.sock',
+      rpc as unknown as RpcClient,
+    );
+    const submittedPrompts: string[] = [];
+    vi.spyOn(main, 'submit').mockImplementation(async (options, emit) => {
+      submittedPrompts.push(options.prompt);
+      emit({
+        type: 'tool_use',
+        id: `tool-${submittedPrompts.length}`,
+        name: 'fileChange',
+        input: { path: 'src/app.ts' },
+      });
+      if (submittedPrompts.length > 1) {
+        const runId = 'repair-run-001';
+        const runDir = join(projectRoot, '.agent', 'rsi', 'runs', runId);
+        await mkdir(runDir, { recursive: true });
+        const manifest = `${JSON.stringify({
+          runId,
+          projectRoot,
+          threadId: 'main-thread',
+          taskHash: createHash('sha256')
+            .update('Modify the project and report completion')
+            .digest('hex'),
+          outcome: 'success',
+        }, null, 2)}\n`;
+        await writeFile(join(runDir, 'manifest.json'), manifest, { mode: 0o600 });
+        await writeFile(join(runDir, 'validator.json'), JSON.stringify({
+          runId,
+          manifestSha256: createHash('sha256').update(manifest).digest('hex'),
+          passed: true,
+          exitCode: 0,
+        }), { mode: 0o600 });
+        const freshTime = new Date(Date.now() + 100);
+        await Promise.all([
+          utimes(join(runDir, 'manifest.json'), freshTime, freshTime),
+          utimes(join(runDir, 'validator.json'), freshTime, freshTime),
+        ]);
+      }
+      emit({ type: 'done', terminationReason: 'normal' });
+    });
+    const backend = new FakeBackend(() => routeA);
+    const resolver = vi.fn(async () => resolved(routeA, backend));
+    const adapter = new StructuredAdapter({
+      kind: 'codex',
+      binary: 'not-spawned',
+      profileDir,
+      subagents: { ...subagents, enabled: true, mode: 'broker' },
+      subagentResolver: resolver,
+      rsi: {
+        mode: 'auto',
+        projectRoot,
+        reviewerRouteMode: 'manual',
+        reviewerRoute: routeA.id,
+        maxRepairRounds: 2,
+        repairTimeoutMs: 10 * 60_000,
+      },
+    });
+    Reflect.get(adapter, 'sessions').set('scope', {
+      main,
+      cwd: projectRoot,
+      view: new StructuredView(profileDir, 'main'),
+    });
+    const events = await drain(adapter.run({
+      runId: 'rsi-repair',
+      scopeId: 'scope',
+      cwd: projectRoot,
+      prompt: 'Modify the project and report completion',
+    }));
+    expect(submittedPrompts).toHaveLength(2);
+    expect(submittedPrompts[1]).toContain('<validator-findings>');
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'done',
+      terminationReason: 'normal',
+    }));
+    expect(events.filter(event => event.type === 'error')).toEqual([]);
+    const evidence = JSON.parse(await readFile(
+      join(projectRoot, '.agent', 'rsi', 'runs', 'repair-run-001', 'repair-loop.json'),
+      'utf8',
+    ));
+    expect(evidence).toMatchObject({
+      finalVerdict: 'passed',
+      rounds: [expect.objectContaining({ round: 1 })],
+    });
+    expect(backend.spawns[0]).toMatchObject({ access: 'read-only' });
+    await main.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it('does not pass Project RSI when the reviewer is unavailable', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'arg-bridge-rsi-reviewer-'));
+    const projectRoot = join(root, 'project');
+    const profileDir = join(root, 'state');
+    await mkdir(join(projectRoot, '.project-rsi'), { recursive: true });
+    await mkdir(profileDir, { recursive: true });
+    await writeFile(join(projectRoot, '.project-rsi', 'config.json'), JSON.stringify({
+      version: 1,
+      validator: { path: '.project-rsi/project_rsi.py' },
+    }), { mode: 0o600 });
+    await writeFile(join(projectRoot, '.project-rsi', 'project_rsi.py'), '#!/usr/bin/env python3\n', {
+      mode: 0o700,
+    });
+    const rpc = new EventEmitter() as EventEmitter & { request: ReturnType<typeof vi.fn> };
+    rpc.request = vi.fn(async () => ({}));
+    const main = new CodexStructuredSession(
+      'main-thread',
+      'unix:///tmp/rsi-reviewer.sock',
+      rpc as unknown as RpcClient,
+    );
+    vi.spyOn(main, 'submit').mockImplementation(async (_options, emit) => {
+      emit({
+        type: 'tool_use',
+        id: 'tool-reviewer',
+        name: 'fileChange',
+        input: { path: 'src/app.ts' },
+      });
+      const runId = 'reviewer-run-001';
+      const runDir = join(projectRoot, '.agent', 'rsi', 'runs', runId);
+      await mkdir(runDir, { recursive: true });
+      const manifest = `${JSON.stringify({
+        runId,
+        projectRoot,
+        threadId: 'main-thread',
+        taskHash: createHash('sha256')
+          .update('Modify and require review')
+          .digest('hex'),
+        outcome: 'success',
+      }, null, 2)}\n`;
+      await writeFile(join(runDir, 'manifest.json'), manifest, { mode: 0o600 });
+      await writeFile(join(runDir, 'validator.json'), JSON.stringify({
+        runId,
+        manifestSha256: createHash('sha256').update(manifest).digest('hex'),
+        passed: true,
+        exitCode: 0,
+      }), { mode: 0o600 });
+      emit({ type: 'done', terminationReason: 'normal' });
+    });
+    const backend = new FakeBackend(() => routeA);
+    backend.waitResult = { status: 'failed', error: 'reviewer unavailable' };
+    const adapter = new StructuredAdapter({
+      kind: 'codex',
+      binary: 'not-spawned',
+      profileDir,
+      subagents: { ...subagents, enabled: true, mode: 'broker' },
+      subagentResolver: vi.fn(async () => resolved(routeA, backend)),
+      rsi: {
+        mode: 'auto',
+        projectRoot,
+        reviewerRouteMode: 'manual',
+        reviewerRoute: routeA.id,
+        maxRepairRounds: 0,
+        repairTimeoutMs: 10 * 60_000,
+      },
+    });
+    Reflect.get(adapter, 'sessions').set('scope', {
+      main,
+      cwd: projectRoot,
+      view: new StructuredView(profileDir, 'main'),
+    });
+    const events = await drain(adapter.run({
+      runId: 'rsi-reviewer-failure',
+      scopeId: 'scope',
+      cwd: projectRoot,
+      prompt: 'Modify and require review',
+    }));
+    expect(events.filter(event => event.type === 'done')).toEqual([]);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'error',
+      message: expect.stringContaining('reviewer'),
+    }));
+    await main.close();
     await rm(root, { recursive: true, force: true });
   });
 

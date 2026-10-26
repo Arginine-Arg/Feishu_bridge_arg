@@ -101,6 +101,17 @@ export interface SubagentConfig {
   routeMode: SubagentRouteMode;
   readRoute: string | null;
   writeRoute: string | null;
+  /**
+   * Expose Bridge-owned Broker tools to the parent model. The native
+   * MultiAgentV2 tools are shadowed when this is enabled.
+   */
+  modelTools: boolean;
+  nativeToolPolicy: 'shadow' | 'preserve';
+  toolNamespace: string;
+  maxConcurrentWorkers: number;
+  workerTimeoutMs: number;
+  /** Workspace-write workers additionally require per-task authorization. */
+  allowWriteWorkers: boolean;
   includeProgressSnapshot: boolean;
   reuse: 'scope-cwd';
   allowForkFallback: boolean;
@@ -112,6 +123,8 @@ export interface RsiConfig {
   projectRoot: string | null;
   reviewerRouteMode: SubagentRouteMode;
   reviewerRoute: string | null;
+  maxRepairRounds: number;
+  repairTimeoutMs: number;
   /** Optional explicit upstream runner entry; task text is passed by file. */
   runnerCommand?: string;
   runnerArgs?: string[];
@@ -401,6 +414,12 @@ export const DEFAULT_SUBAGENT_CONFIG: SubagentConfig = {
   routeMode: 'follow-cc-switch',
   readRoute: null,
   writeRoute: null,
+  modelTools: true,
+  nativeToolPolicy: 'shadow',
+  toolNamespace: 'arg_bridge',
+  maxConcurrentWorkers: 4,
+  workerTimeoutMs: 15 * 60_000,
+  allowWriteWorkers: false,
   includeProgressSnapshot: true,
   reuse: 'scope-cwd',
   allowForkFallback: true,
@@ -411,6 +430,8 @@ export const DEFAULT_RSI_CONFIG: RsiConfig = {
   projectRoot: null,
   reviewerRouteMode: 'follow-cc-switch',
   reviewerRoute: null,
+  maxRepairRounds: 2,
+  repairTimeoutMs: 10 * 60_000,
 };
 
 function normalizeSubagents(input: unknown): SubagentConfig {
@@ -464,6 +485,12 @@ function normalizeSubagents(input: unknown): SubagentConfig {
     routeMode,
     readRoute: nonEmptyString(raw.readRoute) ?? null,
     writeRoute: nonEmptyString(raw.writeRoute) ?? null,
+    modelTools: raw.modelTools !== false,
+    nativeToolPolicy: raw.nativeToolPolicy === 'preserve' ? 'preserve' : 'shadow',
+    toolNamespace: validToolNamespace(raw.toolNamespace) ?? DEFAULT_SUBAGENT_CONFIG.toolNamespace,
+    maxConcurrentWorkers: boundedInteger(raw.maxConcurrentWorkers, 1, 32, 4),
+    workerTimeoutMs: boundedInteger(raw.workerTimeoutMs, 30_000, 24 * 60 * 60_000, 15 * 60_000),
+    allowWriteWorkers: raw.allowWriteWorkers === true,
     includeProgressSnapshot: raw.includeProgressSnapshot !== false,
     reuse: 'scope-cwd',
     allowForkFallback: raw.allowForkFallback !== false,
@@ -488,6 +515,8 @@ function normalizeRsi(input: unknown): RsiConfig {
     projectRoot: nonEmptyString(raw.projectRoot) ?? null,
     reviewerRouteMode: raw.reviewerRouteMode === 'manual' ? 'manual' : 'follow-cc-switch',
     reviewerRoute: nonEmptyString(raw.reviewerRoute) ?? null,
+    maxRepairRounds: boundedInteger(raw.maxRepairRounds, 0, 10, 2),
+    repairTimeoutMs: boundedInteger(raw.repairTimeoutMs, 30_000, 60 * 60_000, 10 * 60_000),
     ...(runnerCommand
       ? { runnerCommand }
       : {}),
@@ -501,6 +530,17 @@ function normalizeRsi(input: unknown): RsiConfig {
       ? { validatorArgs }
       : {}),
   };
+}
+
+function validToolNamespace(value: unknown): string | undefined {
+  const text = nonEmptyString(value);
+  return text && /^[A-Za-z0-9_-]{1,64}$/u.test(text) ? text : undefined;
+}
+
+function boundedInteger(value: unknown, minimum: number, maximum: number, fallback: number): number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= minimum && value <= maximum
+    ? value
+    : fallback;
 }
 
 function normalizeComments(_input: unknown): CommentConfig {

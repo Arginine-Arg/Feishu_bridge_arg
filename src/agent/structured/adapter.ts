@@ -33,6 +33,13 @@ import {
 import { loadRootConfig } from '../../config/profile-store';
 import { resolveSubagents, type ResolvedSubagents } from '../subagents/registry';
 import { MixAgentsBrokerBackend } from '../subagents/mixagents';
+import {
+  BROKER_TOOL_VERSION,
+  BrokerToolController,
+  brokerCodexThreadConfig,
+  brokerToolSpecs,
+  type WriteAuthorization,
+} from '../subagents/broker-tools';
 import { redactSecrets } from '../subagents/mcp-client';
 import {
   SubagentAgentNotFoundError,
@@ -104,6 +111,37 @@ function parseBtwRequest(prompt: string): { body: string; route?: string } {
     body = body.slice(explicit[0].length).trim();
   }
   return { body, ...(route ? { route } : {}) };
+}
+
+export function parseWriteAuthorizationPrompt(prompt: string): {
+  prompt: string;
+  authorization?: WriteAuthorization;
+  error?: string;
+} {
+  const marker = /^\s*arg-bridge-write(?:\s|$)/iu;
+  if (!marker.test(prompt)) return { prompt };
+  const match = /^\s*arg-bridge-write\s+--workspace\s+(?:"([^"]+)"|(\S+))\s+--task\s+([\s\S]+)$/iu
+    .exec(prompt);
+  if (!match) {
+    return {
+      prompt,
+      error:
+        'workspace-write 授权格式无效。请使用：arg-bridge-write --workspace /abs/path --task <完整任务>',
+    };
+  }
+  const workspace = (match[1] ?? match[2] ?? '').trim();
+  const task = match[3]!.trim();
+  if (!workspace || !task) {
+    return {
+      prompt,
+      error:
+        'workspace-write 授权缺少 workspace 或 task。请使用：arg-bridge-write --workspace /abs/path --task <完整任务>',
+    };
+  }
+  return {
+    prompt: task,
+    authorization: { workspace, task },
+  };
 }
 
 function routeChangeReason(
@@ -291,6 +329,16 @@ interface PendingNativeView {
   sandbox?: CodexSandboxMode;
 }
 interface ScopeSession { main: StructuredSession; view: StructuredView; bound?: StructuredBinding; side?: CodexStructuredSession; sideOpening?: Promise<CodexStructuredSession>; sideExit?: Promise<void>; sideClosing?: boolean; sideView?: StructuredView; cwd: string; pendingNative?: PendingNativeView }
+interface SavedStructuredState {
+  id: string;
+  cwd?: string;
+  scope?: string;
+  kind?: string;
+  endpoint?: string;
+  view?: TmuxBindingStatus;
+  brokerToolsVersion?: number;
+  brokerToolNamespace?: string;
+}
 interface MixAgentsSideState {
   agent: SideAgent;
   backend?: SubagentBackend;
@@ -324,6 +372,12 @@ export class StructuredAdapter implements AgentAdapter {
   private readonly bindingsFile: string;
   private readonly candidatesFile: string;
   private readonly sidesFile: string;
+  private readonly brokerThreadsFile: string;
+  private readonly brokerThreads = new Map<string, {
+    version: number;
+    namespace: string;
+    createdAt: number;
+  }>();
   private candidates = new Map<string, StructuredCandidate>();
   private mixagentsSides = new Map<string, MixAgentsSideState>();
   private credentialResolution: CodexCredentialResolution = { env: {}, injected: false, missingToken: false };
@@ -335,9 +389,11 @@ export class StructuredAdapter implements AgentAdapter {
     this.bindingsFile = join(options.profileDir, 'structured', 'tmux-bindings.json');
     this.candidatesFile = join(options.profileDir, 'structured', 'tmux-candidates.json');
     this.sidesFile = join(options.profileDir, 'structured', 'subagent-sides.json');
+    this.brokerThreadsFile = join(options.profileDir, 'structured', 'broker-threads.json');
     this.loadBindings();
     this.loadCandidates();
     this.loadMixagentsSides();
+    this.loadBrokerThreads();
     this.tmux = {
       list: async (socket?: string) => this.listStructuredPanes(socket),
       bind: async (scope, selector) => this.bindTmuxPane(scope, selector),
@@ -568,6 +624,76 @@ export class StructuredAdapter implements AgentAdapter {
   private async currentRsiConfig(): Promise<RsiConfig> {
     const profile = await this.reloadProfileConfig();
     return profile?.rsi ?? this.options.rsi ?? DEFAULT_RSI_CONFIG;
+  }
+  private async brokerToolsEnabled(): Promise<{ enabled: boolean; config: SubagentConfig }> {
+    const config = await this.currentSubagentsConfig();
+    return {
+      enabled:
+        this.id === 'codex' &&
+        config.enabled &&
+        config.modelTools &&
+        (config.mode === 'auto' || config.mode === 'broker'),
+      config,
+    };
+  }
+  private loadBrokerThreads(): void {
+    try {
+      const parsed = JSON.parse(readFileSync(this.brokerThreadsFile, 'utf8')) as {
+        version?: number;
+        threads?: Record<string, { version?: number; namespace?: string; createdAt?: number }>;
+      };
+      if (parsed.version !== 1) return;
+      for (const [threadId, value] of Object.entries(parsed.threads ?? {})) {
+        if (!threadId || value?.version !== BROKER_TOOL_VERSION || !value.namespace) continue;
+        this.brokerThreads.set(threadId, {
+          version: value.version,
+          namespace: value.namespace,
+          createdAt: value.createdAt ?? Date.now(),
+        });
+      }
+    } catch {
+      // First run.
+    }
+  }
+  private async saveBrokerThreads(): Promise<void> {
+    await mkdir(join(this.options.profileDir, 'structured'), { recursive: true, mode: 0o700 });
+    await writeFileAtomic(
+      this.brokerThreadsFile,
+      `${JSON.stringify({ version: 1, threads: Object.fromEntries(this.brokerThreads) }, null, 2)}\n`,
+      { mode: 0o600 },
+    );
+  }
+  private hasBrokerTools(threadId: string, namespace: string): boolean {
+    const marker = this.brokerThreads.get(threadId);
+    return marker?.version === BROKER_TOOL_VERSION && marker.namespace === namespace;
+  }
+  private async markBrokerThread(threadId: string, namespace: string): Promise<void> {
+    this.brokerThreads.set(threadId, {
+      version: BROKER_TOOL_VERSION,
+      namespace,
+      createdAt: this.brokerThreads.get(threadId)?.createdAt ?? Date.now(),
+    });
+    await this.saveBrokerThreads();
+  }
+  private brokerController(
+    threadId: string,
+    scope: string,
+    cwd: string,
+    namespace: string,
+  ): BrokerToolController {
+    return new BrokerToolController({
+      threadId,
+      cwd,
+      scope,
+      stateFile: join(
+        this.options.profileDir,
+        'structured',
+        `broker-workers-${createHash('sha256').update(threadId).digest('hex').slice(0, 24)}.json`,
+      ),
+      env: this.options.env ?? process.env,
+      namespace,
+      getConfig: () => this.currentSubagentsConfig(),
+    });
   }
   private async reloadProfileConfig() {
     if (!this.options.configFile || !this.options.profile) return undefined;
@@ -806,11 +932,19 @@ export class StructuredAdapter implements AgentAdapter {
     highImpact: boolean;
     emit(event: AgentEvent): void;
     signal: AbortSignal;
-  }): Promise<void> {
-    if (!input.persistentChanges && !input.highImpact) return;
-    if (/^\/(?:btw|model|compact|stop|status|skills)(?:\s|$)/iu.test(input.prompt.trim())) return;
+  }): Promise<{
+    ok: boolean;
+    reason?: string;
+    runId?: string;
+    runDir?: string;
+    reviewPath?: string;
+  }> {
+    if (!input.persistentChanges && !input.highImpact) return { ok: true };
+    if (/^\/(?:btw|model|compact|stop|status|skills)(?:\s|$)/iu.test(input.prompt.trim())) {
+      return { ok: true };
+    }
     const config = await this.currentRsiConfig();
-    if (config.mode === 'off') return;
+    if (config.mode === 'off') return { ok: true };
     const taskHash = createHash('sha256').update(input.prompt).digest('hex');
     const turnContext = {
       turnStartedAt: input.turnStartedAt,
@@ -820,7 +954,7 @@ export class StructuredAdapter implements AgentAdapter {
     const project = await discoverProjectRsi(input.cwd, config.projectRoot);
     if (!project) {
       if (config.projectRoot) throw new Error(`Project RSI 根目录未初始化或不存在：${config.projectRoot}`);
-      return;
+      return { ok: true };
     }
     let result = await verifyFreshRsiRun(project, turnContext);
     if (!result.ok) {
@@ -828,7 +962,11 @@ export class StructuredAdapter implements AgentAdapter {
       if (latest && latest.manifestMtimeMs >= input.turnStartedAt && !latest.validatorPassed) {
         const validation = await runUpstreamValidator(project, latest, config, input.signal);
         if (!validation.ok) {
-          throw new Error(`Project RSI validator 未通过：${validation.reason}`);
+          return {
+            ok: false,
+            reason: `Project RSI validator 未通过：${validation.reason}`,
+            runDir: latest.dir,
+          };
         }
         result = await verifyFreshRsiRun(project, turnContext);
       } else {
@@ -841,17 +979,26 @@ export class StructuredAdapter implements AgentAdapter {
         );
         if (runner.attempted) {
           if (!runner.ok) {
-            throw new Error(`Project RSI runner 未成功：${runner.reason}`);
+            const latestAfterRunner = await latestRsiRun(project);
+            return {
+              ok: false,
+              reason: `Project RSI runner 未成功：${runner.reason}`,
+              ...(latestAfterRunner ? { runDir: latestAfterRunner.dir } : {}),
+            };
           }
           result = await verifyFreshRsiRun(project, turnContext);
         }
       }
     }
     if (!result.ok) {
-      throw new Error(
-        `${result.reason}。请通过项目上游 Project RSI runner 生成本轮 run、probe 和 validator receipt 后重试；` +
+      const latest = await latestRsiRun(project);
+      return {
+        ok: false,
+        reason:
+          `${result.reason}。请通过项目上游 Project RSI runner 生成本轮 run、probe 和 validator receipt 后重试；` +
           'bridge 不会伪造证据或降低 validator 门槛。',
-      );
+        ...(latest ? { runDir: latest.dir } : {}),
+      };
     }
     input.emit({
       type: 'system',
@@ -859,14 +1006,28 @@ export class StructuredAdapter implements AgentAdapter {
       ...(result.runId ? { threadId: result.runId } : {}),
     });
     input.emit(textEvent(`Project RSI gate：PASS（run=${result.runId}，validator receipt 已验证）\n`));
-    await this.runRsiReview(project.root, result.runDir!, input.signal, input.emit);
+    const review = await this.runRsiReview(project.root, result.runDir!, input.signal, input.emit);
+    if (!review.ok) {
+      return {
+        ok: false,
+        reason: `Project RSI reviewer 未通过：${review.reason}`,
+        runId: result.runId,
+        runDir: result.runDir!,
+      };
+    }
+    return {
+      ok: true,
+      runId: result.runId,
+      runDir: result.runDir!,
+      ...(review.path ? { reviewPath: review.path } : {}),
+    };
   }
   private async runRsiReview(
     projectRoot: string,
     runDir: string,
     signal: AbortSignal,
     emit: (event: AgentEvent) => void,
-  ): Promise<void> {
+  ): Promise<{ ok: true; path?: string } | { ok: false; reason: string }> {
     const rsi = await this.currentRsiConfig();
     const base = await this.currentSubagentsConfig();
     const reviewerConfig: SubagentConfig = {
@@ -886,12 +1047,13 @@ export class StructuredAdapter implements AgentAdapter {
         signal,
       });
     } catch (error) {
-      emit(textEvent(`Project RSI reviewer 未运行：${error instanceof Error ? error.message : String(error)}\n`));
-      return;
+      return {
+        ok: false,
+        reason: `reviewer 未运行：${error instanceof Error ? error.message : String(error)}`,
+      };
     }
     if (resolved.kind !== 'mixagents' || !resolved.backend || !resolved.route) {
-      emit(textEvent('Project RSI reviewer 未运行：没有可用的 MixAgents read route。\n'));
-      return;
+      return { ok: false, reason: '没有可用的 MixAgents read route' };
     }
     const manifest = await readFile(join(runDir, 'manifest.json'), 'utf8').catch(() => '{}');
     const startedAt = Date.now();
@@ -913,8 +1075,10 @@ export class StructuredAdapter implements AgentAdapter {
       try {
         const outcome = await resolved.backend.wait(agent, signal);
         if (outcome.status !== 'completed' || !outcome.text) {
-          emit(textEvent(`Project RSI reviewer ${outcome.status}：${outcome.error ?? '无输出'}\n`));
-          return;
+          return {
+            ok: false,
+            reason: `reviewer ${outcome.status}：${outcome.error ?? '无输出'}`,
+          };
         }
         const path = await writeRsiReviewEvidence(runDir, {
           route: resolved.route.id,
@@ -928,12 +1092,131 @@ export class StructuredAdapter implements AgentAdapter {
           completedAt: Date.now(),
         });
         emit(textEvent(`Project RSI reviewer：route=${resolved.route.id} access=read-only evidence=${path}\n`));
+        return { ok: true, path };
       } finally {
         await resolved.backend.close(agent, signal).catch(() => {});
       }
+    } catch (error) {
+      return {
+        ok: false,
+        reason: error instanceof Error ? error.message : String(error),
+      };
     } finally {
       await resolved.backend.closeBackend?.().catch(() => {});
     }
+  }
+  private async enforceRsiWithRepair(input: {
+    cwd: string;
+    prompt: string;
+    threadId: string;
+    turnStartedAt: number;
+    persistentChanges: boolean;
+    highImpact: boolean;
+    payload: AgentRunOptions;
+    target: CodexStructuredSession;
+    submitEmit(event: AgentEvent): void;
+    emit(event: AgentEvent): void;
+    signal: AbortSignal;
+  }): Promise<void> {
+    const config = await this.currentRsiConfig();
+    let attemptStartedAt = input.turnStartedAt;
+    let gate = await this.enforceRsiGate({
+      cwd: input.cwd,
+      prompt: input.prompt,
+      threadId: input.threadId,
+      turnStartedAt: attemptStartedAt,
+      persistentChanges: input.persistentChanges,
+      highImpact: input.highImpact,
+      emit: input.emit,
+      signal: input.signal,
+    });
+    const rounds: Array<Record<string, unknown>> = [];
+    for (let round = 1; !gate.ok && round <= config.maxRepairRounds; round += 1) {
+      if (input.signal.aborted) throw new Error('Project RSI repair loop aborted');
+      const startedAt = Date.now();
+      attemptStartedAt = startedAt;
+      const reason = gate.reason ?? 'Project RSI gate failed';
+      input.emit(textEvent(
+        `Project RSI repair round ${round}/${config.maxRepairRounds}：收到结构化 findings，` +
+          '父 agent 将在同一 thread 修复后重新生成 fresh run。\n',
+      ));
+      const repairPrompt = [
+        `Project RSI validator/reviewer did not pass (repair round ${round}/${config.maxRepairRounds}).`,
+        'Fix the underlying project evidence or implementation in this same task. Do not fabricate receipts, lower thresholds, delete tests, or approve proposals automatically.',
+        'After repairing, invoke the upstream Project RSI runner and validator so a new run is bound to this thread and task.',
+        '<validator-findings>',
+        truncateSnapshot(reason, 8_000),
+        '</validator-findings>',
+      ].join('\n');
+      const timeout = AbortSignal.timeout(config.repairTimeoutMs);
+      const repairSignal = AbortSignal.any([input.signal, timeout]);
+      const repairOptions: AgentRunOptions = {
+        ...input.payload,
+        prompt: repairPrompt,
+      };
+      try {
+        await input.target.submit(repairOptions, input.submitEmit, repairSignal);
+      } catch (error) {
+        if (timeout.aborted) {
+          gate = {
+            ok: false,
+            reason: `Project RSI repair round ${round} timed out after ${config.repairTimeoutMs}ms`,
+            ...(gate.runDir ? { runDir: gate.runDir } : {}),
+          };
+          break;
+        }
+        throw error;
+      }
+      const completedAt = Date.now();
+      rounds.push({
+        round,
+        findings: truncateSnapshot(redactSecrets(reason), 8_000),
+        promptHash: createHash('sha256').update(repairPrompt).digest('hex'),
+        startedAt: new Date(startedAt).toISOString(),
+        completedAt: new Date(completedAt).toISOString(),
+      });
+      if (gate.runDir) {
+        await this.writeRsiRepairEvidence(gate.runDir, rounds, undefined);
+      }
+      gate = await this.enforceRsiGate({
+        cwd: input.cwd,
+        prompt: input.prompt,
+        threadId: input.threadId,
+        turnStartedAt: attemptStartedAt,
+        persistentChanges: true,
+        highImpact: input.highImpact,
+        emit: input.emit,
+        signal: input.signal,
+      });
+    }
+    if (!gate.ok) {
+      if (gate.runDir) {
+        await this.writeRsiRepairEvidence(gate.runDir, rounds, gate.reason);
+      }
+      throw new Error(
+        `Project RSI gate 在 ${config.maxRepairRounds} 轮修复后仍未通过：${gate.reason ?? 'unknown reason'}`,
+      );
+    }
+    if (gate.runDir && rounds.length > 0) {
+      await this.writeRsiRepairEvidence(gate.runDir, rounds, undefined);
+    }
+  }
+  private async writeRsiRepairEvidence(
+    runDir: string,
+    rounds: Array<Record<string, unknown>>,
+    finalFailure?: string,
+  ): Promise<void> {
+    await writeFileAtomic(
+      join(runDir, 'repair-loop.json'),
+      `${JSON.stringify({
+        version: 1,
+        rounds,
+        finalVerdict: finalFailure ? 'failed' : 'passed',
+        ...(finalFailure ? { finalFailure: redactSecrets(finalFailure) } : {}),
+        updatedAt: new Date().toISOString(),
+      }, null, 2)}\n`,
+      { mode: 0o600 },
+    );
   }
   private async saveBindings(): Promise<void> {
     await mkdir(join(this.options.profileDir, 'structured'), { recursive: true, mode: 0o700 });
@@ -1161,6 +1444,11 @@ export class StructuredAdapter implements AgentAdapter {
   run(options: AgentRunOptions): AgentRun { return this.createRun(options, false); }
   runSide(options: AgentRunOptions): AgentRun { return this.createRun(options, true); }
   private createRun(options: AgentRunOptions, side: boolean): AgentRun {
+    const parsedWriteAuthorization = side
+      ? { prompt: options.prompt }
+      : parseWriteAuthorizationPrompt(options.prompt);
+    options = { ...options, prompt: parsedWriteAuthorization.prompt };
+    const writeAuthorization = parsedWriteAuthorization.authorization;
     const events = new AsyncEventQueue<AgentEvent>();
     const abort = new AbortController();
     let detached = false;
@@ -1168,6 +1456,7 @@ export class StructuredAdapter implements AgentAdapter {
     let persistentChanges = false;
     let highImpact = false;
     let mainFailed = false;
+    let authorizedMain: CodexStructuredSession | undefined;
     let bufferedDone: Extract<AgentEvent, { type: 'done' }> | undefined;
     let assistantOutput = '';
     const turnStartedAt = Date.now();
@@ -1197,6 +1486,7 @@ export class StructuredAdapter implements AgentAdapter {
     };
     void (async () => {
       try {
+        if (parsedWriteAuthorization.error) throw new Error(parsedWriteAuthorization.error);
         const scope = options.scopeId ?? options.cwd ?? '';
         const known = this.sessions.get(scope);
         if (side && options.liveInputMode === 'side-exit' && options.cwd) {
@@ -1213,6 +1503,16 @@ export class StructuredAdapter implements AgentAdapter {
         }
         const current = await this.session(options);
         if (abort.signal.aborted) return;
+        if (
+          writeAuthorization &&
+          current.main instanceof CodexStructuredSession
+        ) {
+          current.main.setBrokerWriteAuthorization(writeAuthorization);
+          authorizedMain = current.main;
+          emit(textEvent(
+            `workspace-write 授权已绑定当前任务：workspace=${writeAuthorization.workspace}\n`,
+          ));
+        }
         const activeMixagents = this.mixagentsSideForScope(scope);
         if (
           !side &&
@@ -1325,17 +1625,28 @@ export class StructuredAdapter implements AgentAdapter {
           this.sessions.delete(scope);
           const rebuilt = await this.session(options);
           if (!(rebuilt.main instanceof CodexStructuredSession)) throw error;
-          target = rebuilt.main;
+          const rebuiltMain = rebuilt.main;
+          target = rebuiltMain;
+          if (writeAuthorization) {
+            rebuiltMain.setBrokerWriteAuthorization(writeAuthorization);
+            authorizedMain = rebuiltMain;
+          }
           await target.submit(payload, submitEmit, abort.signal);
         }
         if (!side && target === current.main && !mainFailed) {
-          await this.enforceRsiGate({
+          if (!(current.main instanceof CodexStructuredSession)) {
+            throw new Error('Project RSI repair loop requires a Codex structured main session');
+          }
+          await this.enforceRsiWithRepair({
             cwd: options.cwd!,
             prompt: options.prompt,
             threadId: current.main.id,
             turnStartedAt,
             persistentChanges,
             highImpact,
+            payload,
+            target: current.main,
+            submitEmit,
             emit,
             signal: abort.signal,
           });
@@ -1371,7 +1682,16 @@ export class StructuredAdapter implements AgentAdapter {
           terminationReason: abort.signal.aborted ? 'interrupted' : 'failed',
         });
       }
-      finally { if (!terminal && !detached) emit({ type: 'done', terminationReason: abort.signal.aborted ? 'interrupted' : 'normal' }); events.close(); }
+      finally {
+        authorizedMain?.setBrokerWriteAuthorization(undefined);
+        if (!terminal && !detached) {
+          emit({
+            type: 'done',
+            terminationReason: abort.signal.aborted ? 'interrupted' : 'normal',
+          });
+        }
+        events.close();
+      }
     })();
     return { runId: options.runId, events,
       stop: async () => { abort.abort(); },
@@ -1386,7 +1706,7 @@ export class StructuredAdapter implements AgentAdapter {
   private stateFile(scope: string, cwd: string): string {
     return join(this.options.profileDir, 'structured', `${createHash('sha256').update(scope).update('\0').update(cwd).digest('hex')}.json`);
   }
-  private async saved(scope: string, cwd: string): Promise<{ id: string; endpoint?: string; view?: TmuxBindingStatus } | undefined> {
+  private async saved(scope: string, cwd: string): Promise<SavedStructuredState | undefined> {
     try {
       const value = JSON.parse(await readFile(this.stateFile(scope, cwd), 'utf8'));
       return value.scope === scope && value.cwd === cwd && value.kind === this.id && typeof value.id === 'string' ? value : undefined;
@@ -1478,7 +1798,7 @@ export class StructuredAdapter implements AgentAdapter {
     const cwd = options.cwd!;
     const directory = join(this.options.profileDir, 'structured');
     const stateFile = this.stateFile(scope, cwd);
-    let saved: { id: string; endpoint?: string; view?: TmuxBindingStatus } | undefined;
+    let saved: SavedStructuredState | undefined;
     try { saved = JSON.parse(await readFile(stateFile, 'utf8')); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     if (!saved && !bound && options.liveInputMode === 'control') throw new Error('没有可恢复的结构化会话；选择操作未启动新任务');
     let pendingNative: PendingNativeView | undefined;
@@ -1494,6 +1814,7 @@ export class StructuredAdapter implements AgentAdapter {
       if (this.options.codexHome) env.CODEX_HOME = this.options.codexHome;
       else if (process.env.CODEX_HOME) env.CODEX_HOME = process.env.CODEX_HOME;
       applyCodexCredentialEnv(this.credentialResolution, env);
+      const brokerState = await this.brokerToolsEnabled();
       if (!bound && !this.autoDiscoveryDisabled.has(scope) && saved?.view?.terminal) {
         const pane = activeStructuredTmuxPane(saved.view.terminal.socketPath, saved.view.terminal.target);
         if (pane?.structured?.endpoint) {
@@ -1503,6 +1824,15 @@ export class StructuredAdapter implements AgentAdapter {
         }
       }
       if (bound) {
+        if (
+          brokerState.enabled &&
+          !this.hasBrokerTools(bound.threadId, brokerState.config.toolNamespace)
+        ) {
+          throw new Error(
+            '该 tmux thread 没有 Bridge Broker dynamic tools，无法安全关闭 native collaboration。' +
+              '请先从 Bridge 启动新 thread；旧 thread 不能伪装成 Broker orchestration。',
+          );
+        }
         let rpc: RpcClient;
         let endpoint = bound.endpoint;
         let spawnedFresh = false;
@@ -1540,13 +1870,41 @@ export class StructuredAdapter implements AgentAdapter {
           if (!Array.isArray(loaded.data) || !loaded.data.includes(bound.threadId)) throw new Error('tmux 当前 resume 的 thread 不在对应 App Server 中');
           const resumed = await resumeCodexThread(
             rpc,
-            { threadId: bound.threadId, excludeTurns: true, cwd },
+            {
+              threadId: bound.threadId,
+              excludeTurns: true,
+              cwd,
+              ...(brokerState.enabled
+                ? { config: brokerCodexThreadConfig(brokerState.config) }
+                : {}),
+            },
             options.liveInputMode ? {} : codexThreadPermissionOverrides(options.sandbox ?? this.options.sandbox),
           );
           if (resumed.thread?.id !== bound.threadId) throw new Error('App Server 返回了不同的 thread');
-          const attached = new CodexStructuredSession(bound.threadId, endpoint, rpc);
+          const brokerTools = brokerState.enabled
+            ? this.brokerController(
+                bound.threadId,
+                scope,
+                cwd,
+                brokerState.config.toolNamespace,
+              )
+            : undefined;
+          const attached = new CodexStructuredSession(bound.threadId, endpoint, rpc, brokerTools);
           await attached.syncState();
-          await writeFileAtomic(stateFile, JSON.stringify({ id: bound.threadId, cwd, scope, kind: this.id, endpoint, bound: true }, null, 2));
+          await writeFileAtomic(stateFile, JSON.stringify({
+            id: bound.threadId,
+            cwd,
+            scope,
+            kind: this.id,
+            endpoint,
+            bound: true,
+            ...(brokerState.enabled
+              ? {
+                  brokerToolsVersion: BROKER_TOOL_VERSION,
+                  brokerToolNamespace: brokerState.config.toolNamespace,
+                }
+              : {}),
+          }, null, 2));
           if (spawnedFresh) {
             // Point the pane's native TUI at the replacement server; the old
             // `--remote` connection is dead and cannot restore itself.
@@ -1592,12 +1950,53 @@ export class StructuredAdapter implements AgentAdapter {
         fingerprint: this.codexHostFingerprint(env),
         ...(this.runtimeIdentity ? { runtimeIdentity: this.runtimeIdentity } : {}),
       }));
-      const restored = saved ? new CodexStructuredSession(saved.id, endpoint, rpc) : undefined;
+      const savedHasBrokerTools = saved
+        ? this.hasBrokerTools(saved.id, brokerState.config.toolNamespace)
+        : false;
+      if (brokerState.enabled && saved && !savedHasBrokerTools) {
+        rpc.close();
+        throw new Error(
+          '旧结构化 thread 没有持久化的 Bridge Broker dynamic tools；为避免 native spawn_agent ' +
+            '再次把任务写入 provider 无法读取的 encrypted_content，本次 resume 已拒绝。' +
+            '请在当前 workspace 新建会话；旧历史仍可只读查看。',
+        );
+      }
+      let restored: CodexStructuredSession | undefined;
       try {
+        let brokerDeveloperInstructions: string | undefined;
+        if (!saved && brokerState.enabled) {
+          const configRead = await rpc.request('config/read', { cwd });
+          const existing = configRead.config?.developer_instructions;
+          if (existing != null && typeof existing !== 'string') {
+            throw new Error('Cannot preserve native developer instructions');
+          }
+          brokerDeveloperInstructions = [
+            existing?.trim() ? existing : '',
+            BrokerToolController.instructions(brokerState.config.toolNamespace),
+          ].filter(Boolean).join('\n\n');
+        }
+        const brokerConfig = brokerState.enabled
+          ? brokerCodexThreadConfig(brokerState.config)
+          : undefined;
         const common = {
           cwd,
           ...(!saved && options.model ? { model: options.model } : {}),
-          ...(!saved && options.reasoningEffort ? { config: { model_reasoning_effort: options.reasoningEffort } } : {}),
+          ...((!saved && options.reasoningEffort) || brokerConfig
+            ? {
+                config: {
+                  ...(!saved && options.reasoningEffort
+                    ? { model_reasoning_effort: options.reasoningEffort }
+                    : {}),
+                  ...brokerConfig,
+                },
+              }
+            : {}),
+          ...(!saved && brokerState.enabled
+            ? { dynamicTools: brokerToolSpecs(brokerState.config.toolNamespace) }
+            : {}),
+          ...(brokerDeveloperInstructions
+            ? { developerInstructions: brokerDeveloperInstructions }
+            : {}),
         };
         // Match the terminal backend's profile policy. In particular, a
         // full-access profile must not silently downgrade structured runs
@@ -1605,12 +2004,37 @@ export class StructuredAdapter implements AgentAdapter {
         const overrides = readOnlyReconnect
           ? {}
           : codexThreadPermissionOverrides(options.sandbox ?? this.options.sandbox ?? 'read-only');
-        const result = saved
-          ? await resumeCodexThread(rpc, { ...common, threadId: saved.id, excludeTurns: true }, overrides)
-          : await rpc.request('thread/start', { ...common, ...overrides });
+        let result: Wire;
+        try {
+          result = saved
+            ? await resumeCodexThread(rpc, { ...common, threadId: saved.id, excludeTurns: true }, overrides)
+            : await rpc.request('thread/start', { ...common, ...overrides });
+        } catch (error) {
+          if (!saved && brokerState.enabled) {
+            throw new Error(
+              `Codex App Server 不支持 Bridge Broker dynamic tools/native shadowing；` +
+                `拒绝启动一个会静默绕过 Broker 的 thread：${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+          throw error;
+        }
         const id = result.thread?.id;
         if (typeof id !== 'string') throw new Error('Codex did not return a thread ID');
-        main = restored ?? new CodexStructuredSession(id, endpoint, rpc);
+        if (!saved && brokerState.enabled) {
+          await this.markBrokerThread(id, brokerState.config.toolNamespace);
+        }
+        const brokerTools = brokerState.enabled
+          ? this.brokerController(
+              id,
+              scope,
+              cwd,
+              brokerState.config.toolNamespace,
+            )
+          : undefined;
+        restored = saved && brokerState.enabled
+          ? new CodexStructuredSession(saved.id, endpoint, rpc, brokerTools)
+          : undefined;
+        main = restored ?? new CodexStructuredSession(id, endpoint, rpc, brokerTools);
         await (main as CodexStructuredSession).syncState();
         const nativeSpec = this.options.nativeView !== false ? {
           binary: this.options.binary,
@@ -1625,7 +2049,20 @@ export class StructuredAdapter implements AgentAdapter {
         // the pane to the native TUI.
         await view.start(saved ? nativeSpec : undefined, cwd);
         if (!saved && nativeSpec) pendingNative = nativeSpec;
-        await writeFileAtomic(stateFile, JSON.stringify({ id, cwd, scope, kind: this.id, endpoint, view: view.status() }));
+        await writeFileAtomic(stateFile, JSON.stringify({
+          id,
+          cwd,
+          scope,
+          kind: this.id,
+          endpoint,
+          view: view.status(),
+          ...(brokerState.enabled
+            ? {
+                brokerToolsVersion: BROKER_TOOL_VERSION,
+                brokerToolNamespace: brokerState.config.toolNamespace,
+              }
+            : {}),
+        }));
       } catch (error) { await restored?.close(); rpc.close(); throw error; }
     } else {
       const id = saved?.id ?? randomUUID();

@@ -56,6 +56,48 @@ cc-switch -a codex provider list
 - `workspaceRoots` must never contain `/`, `$HOME`, a disk root, or an
   unnecessarily broad parent.
 
+## Parent-model Broker tools
+
+- New Bridge-managed Codex threads set `disable_native_tools=true`; Broker
+  dynamic tools are the deterministic delegation surface.
+- Read-only model workers may use the parent workspace or one of its
+  subdirectories; tool arguments cannot expand reads to an unrelated path.
+- The dynamic tool call runs in Bridge, but worker credentials remain in the
+  MixAgents child. They are not copied into dynamic-tool arguments, worker
+  mapping, rollout output, doctor JSON or Feishu cards.
+- Persistent worker mappings contain logical path, Broker agent ID, optional
+  worker thread ID, route fingerprint, provider/model IDs, access and workspace.
+  They contain no API key or credential JSON.
+- `send_message` remains unsupported until MixAgents proves queue-only
+  semantics; it is never silently treated as trigger-turn.
+- Result text is redacted and bounded before persistence/display.
+- Rate/cost/concurrency are limited by `maxConcurrentWorkers`,
+  `workerTimeoutMs`, and the parent turn/abort signals.
+
+## Workspace-write workers
+
+`allowWriteWorkers=false` is the default. Enabling it does not grant broad
+write access:
+
+1. the profile must select a write-capable Broker route;
+2. the call must name a canonical, non-root workspace;
+3. the user must issue the parent-turn directive
+   `arg-bridge-write --workspace /canonical/path --task <exact task>`;
+4. the worker task must exactly equal the directive task;
+5. the route itself must still allow `workspace-write`.
+
+The directive is consumed outside the model prompt. A model cannot self-grant
+write access by forging fields inside `spawn_agent` or `followup_task`.
+`/btw` always remains read-only.
+
+## Native collaboration boundary
+
+On old threads without the persisted dynamic-tool marker, Bridge fails closed
+rather than claiming that native call interception exists. Codex hooks can
+block or rewrite a native call, but they cannot replace it with a Broker call
+and synthesize the result. Direct Codex TUI coverage therefore remains
+`requires-trusted-hook`; doctor does not report it as covered.
+
 ## Route identity
 
 The side-agent reuse key includes:

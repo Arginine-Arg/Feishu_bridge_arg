@@ -53,3 +53,21 @@ arg-bridge restart --profile codex
 The new release retains old profiles, thread state, and recognized side-agent
 state. Re-running apply after a successful migration is a no-op.
 
+## v1.8 Broker-tool migration
+
+v1.8 adds:
+
+```text
+structured/broker-threads.json
+structured/broker-workers-<thread-hash>.json
+```
+
+The first file records which threads were created with persisted dynamic tools.
+The second stores secret-free logical worker mappings. Existing 1.7.x threads
+do not have the marker and fail closed on resume because Bridge cannot inject
+dynamic tools into those already-created App Server threads. Start a new
+Bridge-managed conversation after upgrading.
+
+Do not copy a worker mapping to a different parent thread or replace a route
+fingerprint by hand. On rollback to v1.7.2, stop the profile first; v1.7.2
+ignores the new files. Keep them if you plan to reinstall v1.8.0.

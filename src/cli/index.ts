@@ -50,7 +50,7 @@ program.command('codex [thread]')
   .action(async (thread: string | undefined, opts: { profile?: string }) => runNative(thread, opts));
 
 program.command('settings')
-  .description('View or edit MixAgents /btw routing and Project RSI settings')
+  .description('Open the guided cc-switch/MixAgents/Project RSI settings flow')
   .option('--profile <name>', 'profile to inspect or edit (defaults to active profile)')
   .option('--json', 'print a machine-readable, secret-free snapshot without prompting')
   .action(async (opts: { profile?: string; json?: boolean }) => {

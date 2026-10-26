@@ -62,6 +62,12 @@ describe('profile schema', () => {
       routeMode: 'follow-cc-switch',
       readRoute: null,
       writeRoute: null,
+      modelTools: true,
+      nativeToolPolicy: 'shadow',
+      toolNamespace: 'arg_bridge',
+      maxConcurrentWorkers: 4,
+      workerTimeoutMs: 15 * 60_000,
+      allowWriteWorkers: false,
       includeProgressSnapshot: true,
       reuse: 'scope-cwd',
       allowForkFallback: true,
@@ -71,6 +77,8 @@ describe('profile schema', () => {
       projectRoot: null,
       reviewerRouteMode: 'follow-cc-switch',
       reviewerRoute: null,
+      maxRepairRounds: 2,
+      repairTimeoutMs: 10 * 60_000,
     });
   });
 

@@ -21,6 +21,18 @@ export interface SubagentDiagnostics {
   configuredMode: SubagentConfig['mode'];
   enabled: boolean;
   routeMode: SubagentConfig['routeMode'];
+  modelTools: {
+    configured: boolean;
+    namespace: string;
+    nativeToolPolicy: SubagentConfig['nativeToolPolicy'];
+    brokerWired: boolean;
+    degradedReason?: string;
+  };
+  limits: {
+    maxConcurrentWorkers: number;
+    workerTimeoutMs: number;
+    allowWriteWorkers: boolean;
+  };
   launchConfigured: boolean;
   launchCommand?: string;
   packageVersion?: string;
@@ -40,6 +52,7 @@ export interface SubagentDiagnostics {
   ccSwitch: {
     currentProviderCodex: string | null;
     currentProviderName: string | null;
+    providers: Array<{ id: string; name: string; current: boolean }>;
     settingsPath: string;
     error?: string;
   };
@@ -50,6 +63,11 @@ export interface SubagentDiagnostics {
   };
   brokerConfigPath: string;
   selectedRoute: {
+    id: string | null;
+    source?: 'explicit' | 'manual' | 'cc-switch' | 'default';
+    error?: string;
+  };
+  selectedWriteRoute: {
     id: string | null;
     source?: 'explicit' | 'manual' | 'cc-switch' | 'default';
     error?: string;
@@ -97,6 +115,26 @@ export async function collectSubagentDiagnostics(input: {
     configuredMode: input.config.mode,
     enabled: input.config.enabled,
     routeMode: input.config.routeMode,
+    modelTools: {
+      configured: input.config.modelTools,
+      namespace: input.config.toolNamespace,
+      nativeToolPolicy: input.config.nativeToolPolicy,
+      brokerWired:
+        input.config.modelTools &&
+        input.config.nativeToolPolicy === 'shadow' &&
+        input.config.enabled &&
+        (input.config.mode === 'auto' || input.config.mode === 'broker'),
+      ...(!input.config.modelTools
+        ? { degradedReason: 'modelTools=false; native collaboration remains visible' }
+        : input.config.nativeToolPolicy !== 'shadow'
+          ? { degradedReason: 'nativeToolPolicy=preserve; native collaboration may bypass Broker' }
+          : {}),
+    },
+    limits: {
+      maxConcurrentWorkers: input.config.maxConcurrentWorkers,
+      workerTimeoutMs: input.config.workerTimeoutMs,
+      allowWriteWorkers: input.config.allowWriteWorkers,
+    },
     launchConfigured: Boolean(resolveMixAgentsLaunchConfig(input.config, env)),
     toolContract: 'unknown',
     mcpStart: 'not-configured',
@@ -110,6 +148,11 @@ export async function collectSubagentDiagnostics(input: {
     ccSwitch: {
       currentProviderCodex: ccSwitch.currentProviderCodex ?? null,
       currentProviderName,
+      providers: ccSwitch.providers.map(provider => ({
+        id: provider.id,
+        name: provider.name,
+        current: provider.current,
+      })),
       settingsPath: ccSwitch.settingsPath,
       ...(ccSwitch.error ? { error: redactSecrets(ccSwitch.error) } : {}),
     },
@@ -121,6 +164,7 @@ export async function collectSubagentDiagnostics(input: {
     brokerConfigPath: env.MIXAGENTS_BROKER_CONFIG?.trim()
       || join(env.XDG_CONFIG_HOME?.trim() || join(homedir(), '.config'), 'mixagents', 'broker.json'),
     selectedRoute: { id: null },
+    selectedWriteRoute: { id: null },
     readRoutes: [],
     writeRoutes: [],
     nextCommands: [
@@ -145,6 +189,13 @@ export async function collectSubagentDiagnostics(input: {
       routes,
       requestedRoute: input.requestedRoute,
     });
+    const writeSelection = selectSubagentRoute({
+      config: input.config,
+      ccSwitch,
+      routeMap: routeMapState.config,
+      routes,
+      access: 'workspace-write',
+    });
     return {
       ...base,
       launchCommand: basename(launch.command),
@@ -160,6 +211,13 @@ export async function collectSubagentDiagnostics(input: {
             ? { source: routeSelectionSource(input.config, ccSwitch, routeMapState.config) }
             : {}),
         ...(selection.error ? { error: redactSecrets(selection.error) } : {}),
+      },
+      selectedWriteRoute: {
+        id: writeSelection.route?.id ?? null,
+        ...(writeSelection.route
+          ? { source: routeSelectionSource(input.config, ccSwitch, routeMapState.config, 'workspace-write') }
+          : {}),
+        ...(writeSelection.error ? { error: redactSecrets(writeSelection.error) } : {}),
       },
       readRoutes: routes.map(route => ({
         id: route.id,
@@ -243,9 +301,13 @@ function routeSelectionSource(
   config: SubagentConfig,
   ccSwitch: CcSwitchState,
   map: BrokerRouteMap | undefined,
+  access: 'read-only' | 'workspace-write' = 'read-only',
 ): 'manual' | 'cc-switch' | 'default' {
   if (config.routeMode === 'manual') return 'manual';
-  if (ccSwitch.currentProviderCodex && map?.providers[ccSwitch.currentProviderCodex]?.readRoute) {
+  const mapped = access === 'workspace-write'
+    ? map?.providers[ccSwitch.currentProviderCodex ?? '']?.writeRoute
+    : map?.providers[ccSwitch.currentProviderCodex ?? '']?.readRoute;
+  if (ccSwitch.currentProviderCodex && mapped) {
     return 'cc-switch';
   }
   return 'default';

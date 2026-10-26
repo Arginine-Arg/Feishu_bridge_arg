@@ -38,6 +38,7 @@ export interface DoctorReport {
     routeConfigPath: string;
     brokerConfigPath: string;
     selectedRoute: string | null;
+    selectedWriteRoute: string | null;
     readRoutes: Array<{
       id: string;
       provider: string;
@@ -45,6 +46,28 @@ export interface DoctorReport {
       available: boolean;
       missingEnvironment: string[];
     }>;
+    modelTools: SettingsSnapshot['subagents']['diagnostics']['modelTools'];
+    limits: SettingsSnapshot['subagents']['diagnostics']['limits'];
+  };
+  nativeCollaboration: {
+    brokerShadowConfigured: boolean;
+    nativeBypassPossible: boolean;
+    trustedBrokerInterceptionHook: 'not-installed-or-unverified';
+    hookCanBlockOrRewrite: boolean;
+    hookCanReplaceTool: false;
+    brokerDynamicToolsAvailableOnNewThreads: boolean;
+    existingThreadsWithoutMarker: 'fail-closed';
+    directCodexTuiCoverage: 'requires-trusted-hook';
+  };
+  workerRuntime: {
+    startupVerification: 'not-run-by-default';
+    command: string;
+  };
+  rsiFeedbackLoop: {
+    configured: boolean;
+    maxRepairRounds: number;
+    repairTimeoutMs: number;
+    reviewerRequired: true;
   };
   rsi: SettingsSnapshot['rsi']['status'];
   probe?: {
@@ -85,6 +108,7 @@ export async function runDoctor(options: DoctorOptionsWithProbe = {}): Promise<v
 export async function loadDoctorReport(options: DoctorOptionsWithProbe = {}): Promise<DoctorReport> {
   const snapshot = await loadSettingsSnapshot(options);
   const diagnostics = snapshot.subagents.diagnostics;
+  const explicitBroker = snapshot.subagents.config.mode === 'broker';
   const checks: DoctorReport['checks'] = [];
   checks.push({
     id: 'profile',
@@ -92,11 +116,40 @@ export async function loadDoctorReport(options: DoctorOptionsWithProbe = {}): Pr
     message: `profile=${snapshot.profile} agentKind=${snapshot.agentKind}`,
   });
   checks.push({
+    id: 'broker-model-tools',
+    status: diagnostics.modelTools.brokerWired
+      ? 'pass'
+      : explicitBroker || diagnostics.modelTools.configured
+        ? 'fail'
+        : 'warn',
+    message: diagnostics.modelTools.brokerWired
+      ? `Broker dynamic tools configured; namespace=${diagnostics.modelTools.namespace}; native=${diagnostics.modelTools.nativeToolPolicy}`
+      : diagnostics.modelTools.degradedReason ?? 'Broker model tools are not wired',
+  });
+  checks.push({
+    id: 'native-collaboration',
+    status: diagnostics.modelTools.brokerWired ? 'pass' : 'warn',
+    message: diagnostics.modelTools.brokerWired
+      ? 'Bridge-managed new threads disable native collaboration tools; old unmarked threads fail closed'
+      : 'native collaboration is preserved and may bypass Broker; encrypted agent_message failures remain possible',
+  });
+  checks.push({
     id: 'main-provider',
     status: snapshot.mainProvider.pendingSwitch === 'pending-next-turn' ? 'warn' : 'pass',
     message: `ccSwitch=${snapshot.mainProvider.configuredCcSwitchProviderId ?? 'unknown'} ` +
       `codexProvider=${snapshot.mainProvider.configuredCodexProviderId ?? 'unknown'} ` +
       `running=${snapshot.mainProvider.running.length} switch=${snapshot.mainProvider.pendingSwitch}`,
+  });
+  checks.push({
+    id: 'write-route',
+    status: diagnostics.selectedWriteRoute.id && diagnostics.limits.allowWriteWorkers
+      ? 'pass'
+      : 'warn',
+    message: diagnostics.selectedWriteRoute.id
+      ? `selected=${diagnostics.selectedWriteRoute.id} explicitTaskWorkspaceAuthorization=${diagnostics.limits.allowWriteWorkers}`
+      : diagnostics.limits.allowWriteWorkers
+        ? 'workspace-write workers enabled but no write route is wired'
+        : 'workspace-write workers disabled by default',
   });
   checks.push(diagnostics.ccSwitch.currentProviderCodex
     ? {
@@ -109,7 +162,6 @@ export async function loadDoctorReport(options: DoctorOptionsWithProbe = {}): Pr
         status: 'warn',
         message: `未识别当前 Codex provider；settings=${diagnostics.ccSwitch.settingsPath}`,
       });
-  const explicitBroker = snapshot.subagents.config.mode === 'broker';
   if (diagnostics.mcp.status === 'available') {
     checks.push({
       id: 'mixagents-mcp',
@@ -143,6 +195,24 @@ export async function loadDoctorReport(options: DoctorOptionsWithProbe = {}): Pr
       : `inherit-env；present/missing only: ${
           diagnostics.credentials.missingEnvironment.join(',') || 'none missing'
         }`,
+  });
+  checks.push({
+    id: 'rsi-feedback-loop',
+    status: snapshot.rsi.config.mode === 'off'
+      ? 'pass'
+      : snapshot.rsi.config.maxRepairRounds > 0
+        ? 'pass'
+        : 'warn',
+    message: snapshot.rsi.config.mode === 'off'
+      ? 'disabled'
+      : `maxRepairRounds=${snapshot.rsi.config.maxRepairRounds} timeoutMs=${snapshot.rsi.config.repairTimeoutMs}; reviewer is required for a pass`,
+  });
+  checks.push({
+    id: 'worker-startup',
+    status: 'warn',
+    message: options.probeRoute
+      ? 'explicit route probe covers worker startup; ordinary doctor remains non-paid'
+      : 'not-run-by-default; use explicit `doctor --probe-route <id>` or E2E test',
   });
   checks.push({
     id: 'route-generation',
@@ -252,6 +322,7 @@ export async function loadDoctorReport(options: DoctorOptionsWithProbe = {}): Pr
       routeConfigPath: diagnostics.routeMap.path,
       brokerConfigPath: diagnostics.brokerConfigPath,
       selectedRoute: diagnostics.selectedRoute.id,
+      selectedWriteRoute: diagnostics.selectedWriteRoute.id,
       readRoutes: diagnostics.readRoutes.map(route => ({
         id: route.id,
         provider: route.provider,
@@ -259,6 +330,30 @@ export async function loadDoctorReport(options: DoctorOptionsWithProbe = {}): Pr
         available: route.available,
         missingEnvironment: route.missingEnvironment,
       })),
+      modelTools: diagnostics.modelTools,
+      limits: diagnostics.limits,
+    },
+    nativeCollaboration: {
+      brokerShadowConfigured:
+        diagnostics.modelTools.configured &&
+        diagnostics.modelTools.nativeToolPolicy === 'shadow',
+      nativeBypassPossible: !diagnostics.modelTools.brokerWired,
+      trustedBrokerInterceptionHook: 'not-installed-or-unverified',
+      hookCanBlockOrRewrite: true,
+      hookCanReplaceTool: false,
+      brokerDynamicToolsAvailableOnNewThreads: diagnostics.modelTools.brokerWired,
+      existingThreadsWithoutMarker: 'fail-closed',
+      directCodexTuiCoverage: 'requires-trusted-hook',
+    },
+    workerRuntime: {
+      startupVerification: 'not-run-by-default',
+      command: `arg-bridge doctor --profile ${snapshot.profile} --json --probe-route <read-route>`,
+    },
+    rsiFeedbackLoop: {
+      configured: snapshot.rsi.config.mode !== 'off' && snapshot.rsi.config.maxRepairRounds > 0,
+      maxRepairRounds: snapshot.rsi.config.maxRepairRounds,
+      repairTimeoutMs: snapshot.rsi.config.repairTimeoutMs,
+      reviewerRequired: true,
     },
     rsi: snapshot.rsi.status,
     ...(probe ? { probe } : {}),

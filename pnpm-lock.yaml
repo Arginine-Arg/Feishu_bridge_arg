@@ -63,6 +63,10 @@ importers:
       vitest:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.19.17)
+    optionalDependencies:
+      mixagents-broker:
+        specifier: 0.1.1
+        version: 0.1.1
 
 packages:
 
@@ -1104,6 +1108,10 @@ packages:
   mime-types@3.0.2:
     resolution: {integrity: sha512-Lbgzdk0h4juoQ9fCKXW4by0UJqj+nOOrI9MJ1sSj4nI8aI2eo1qmvQEie4VD1glsS250n15LsWsYtCugiStS5A==}
     engines: {node: '>=18'}
+
+  mixagents-broker@0.1.1:
+    resolution: {integrity: sha512-V3krT19YUreSKHa1RkaiT65rDZJjjtEmHskuTeWWC4p0bH4RIc2LihXVL1xNY/FOajHodPjy5qaN7xxhHk8sWw==}
+    engines: {node: '>=22.19.0'}
 
   mlly@1.8.2:
     resolution: {integrity: sha512-d+ObxMQFmbt10sretNDytwt85VrbkhhUA/JBGm1MPaWJ65Cl4wOgLaB1NYvJSZ0Ef03MMEU/0xpPMXUIQ29UfA==}
@@ -2385,6 +2393,9 @@ snapshots:
   mime-types@3.0.2:
     dependencies:
       mime-db: 1.54.0
+
+  mixagents-broker@0.1.1:
+    optional: true
 
   mlly@1.8.2:
     dependencies:

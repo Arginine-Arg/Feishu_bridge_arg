@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.7.2",
+  version: "1.8.0",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -95,7 +95,10 @@ var package_default = {
     "channel",
     "bridge"
   ],
-  license: "MIT"
+  license: "MIT",
+  optionalDependencies: {
+    "mixagents-broker": "0.1.1"
+  }
 };
 
 // src/platform/spawn.ts
@@ -699,6 +702,12 @@ var DEFAULT_SUBAGENT_CONFIG = {
   routeMode: "follow-cc-switch",
   readRoute: null,
   writeRoute: null,
+  modelTools: true,
+  nativeToolPolicy: "shadow",
+  toolNamespace: "arg_bridge",
+  maxConcurrentWorkers: 4,
+  workerTimeoutMs: 15 * 6e4,
+  allowWriteWorkers: false,
   includeProgressSnapshot: true,
   reuse: "scope-cwd",
   allowForkFallback: true
@@ -707,7 +716,9 @@ var DEFAULT_RSI_CONFIG = {
   mode: "auto",
   projectRoot: null,
   reviewerRouteMode: "follow-cc-switch",
-  reviewerRoute: null
+  reviewerRoute: null,
+  maxRepairRounds: 2,
+  repairTimeoutMs: 10 * 6e4
 };
 function normalizeSubagents(input) {
   const raw = isRecord(input) ? input : {};
@@ -734,6 +745,12 @@ function normalizeSubagents(input) {
     routeMode,
     readRoute: nonEmptyString(raw.readRoute) ?? null,
     writeRoute: nonEmptyString(raw.writeRoute) ?? null,
+    modelTools: raw.modelTools !== false,
+    nativeToolPolicy: raw.nativeToolPolicy === "preserve" ? "preserve" : "shadow",
+    toolNamespace: validToolNamespace(raw.toolNamespace) ?? DEFAULT_SUBAGENT_CONFIG.toolNamespace,
+    maxConcurrentWorkers: boundedInteger(raw.maxConcurrentWorkers, 1, 32, 4),
+    workerTimeoutMs: boundedInteger(raw.workerTimeoutMs, 3e4, 24 * 60 * 6e4, 15 * 6e4),
+    allowWriteWorkers: raw.allowWriteWorkers === true,
     includeProgressSnapshot: raw.includeProgressSnapshot !== false,
     reuse: "scope-cwd",
     allowForkFallback: raw.allowForkFallback !== false,
@@ -754,11 +771,20 @@ function normalizeRsi(input) {
     projectRoot: nonEmptyString(raw.projectRoot) ?? null,
     reviewerRouteMode: raw.reviewerRouteMode === "manual" ? "manual" : "follow-cc-switch",
     reviewerRoute: nonEmptyString(raw.reviewerRoute) ?? null,
+    maxRepairRounds: boundedInteger(raw.maxRepairRounds, 0, 10, 2),
+    repairTimeoutMs: boundedInteger(raw.repairTimeoutMs, 3e4, 60 * 6e4, 10 * 6e4),
     ...runnerCommand ? { runnerCommand } : {},
     ...runnerArgs.length > 0 ? { runnerArgs } : {},
     ...validatorCommand ? { validatorCommand } : {},
     ...validatorArgs.length > 0 ? { validatorArgs } : {}
   };
+}
+function validToolNamespace(value) {
+  const text2 = nonEmptyString(value);
+  return text2 && /^[A-Za-z0-9_-]{1,64}$/u.test(text2) ? text2 : void 0;
+}
+function boundedInteger(value, minimum, maximum, fallback) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= minimum && value <= maximum ? value : fallback;
 }
 function normalizeComments(_input) {
   return {};
@@ -12843,9 +12869,9 @@ function artifactDeliveryEnv(artifact) {
 }
 
 // src/agent/structured/adapter.ts
-import { createHash as createHash7, randomUUID as randomUUID3 } from "crypto";
-import { readFile as readFile18, mkdir as mkdir19, lstat as lstat4, realpath as realpath5, stat as stat7 } from "fs/promises";
-import { readFileSync as readFileSync7 } from "fs";
+import { createHash as createHash8, randomUUID as randomUUID3 } from "crypto";
+import { readFile as readFile18, mkdir as mkdir19, lstat as lstat5, realpath as realpath6, stat as stat7 } from "fs/promises";
+import { readFileSync as readFileSync8 } from "fs";
 import { tmpdir as tmpdir5 } from "os";
 import { join as join29, resolve as resolve5 } from "path";
 
@@ -13055,15 +13081,15 @@ async function connectCodexHostInternal(options, attempt) {
       detached: true,
       stdio: ["ignore", logFile.fd, logFile.fd]
     });
-    let failure;
+    let failure2;
     child.once("error", (error) => {
-      failure = error;
+      failure2 = error;
     });
     child.unref();
     await logFile.close();
     const deadline = Date.now() + 2e4;
     let connected;
-    while (Date.now() < deadline && !failure) {
+    while (Date.now() < deadline && !failure2) {
       try {
         connected = await RpcClient.connect(url, { codexHome: options.env.CODEX_HOME });
         break;
@@ -13075,7 +13101,7 @@ async function connectCodexHostInternal(options, attempt) {
       child.kill("SIGTERM");
       const breaker = recordHostFailure(directory);
       const retryInMs = Math.max(0, breaker.nextAttemptAt - Date.now());
-      throw failure ?? new Error(
+      throw failure2 ?? new Error(
         `Codex App Server did not become ready (failure ${breaker.failures}); next attempt in ${Math.ceil(retryInMs / 1e3)}s; inspect ${join24(directory, "server.log")}`
       );
     }
@@ -13241,8 +13267,8 @@ async function listProviders(env, timeoutMs) {
 function parseProviderTable(output) {
   const providers = [];
   for (const line of output.split("\n")) {
-    if (!line.includes("\u2502")) continue;
-    const cells = line.split("\u2502").map((cell) => cell.trim());
+    if (!/[│┆]/u.test(line)) continue;
+    const cells = line.split(/[│┆]/u).map((cell) => cell.trim());
     if (cells.length < 4) continue;
     const marker = cells[1] ?? "";
     const id = cells[2] ?? "";
@@ -13287,11 +13313,12 @@ function parseBrokerRouteMap(input) {
   const raw = input;
   if (raw.version !== 1) throw new Error("version must be 1");
   for (const key of Object.keys(raw)) {
-    if (key !== "version" && key !== "defaultReadRoute" && key !== "providers") {
+    if (key !== "version" && key !== "defaultReadRoute" && key !== "defaultWriteRoute" && key !== "providers") {
       throw new Error(`unsupported field: ${key}`);
     }
   }
   const defaultReadRoute = routeId(raw.defaultReadRoute, "defaultReadRoute");
+  const defaultWriteRoute = routeId(raw.defaultWriteRoute, "defaultWriteRoute");
   if (raw.providers !== void 0 && (typeof raw.providers !== "object" || raw.providers === null || Array.isArray(raw.providers))) {
     throw new Error("providers must be an object");
   }
@@ -13303,22 +13330,42 @@ function parseBrokerRouteMap(input) {
     }
     const entry = value;
     for (const key of Object.keys(entry)) {
-      if (key !== "readRoute") throw new Error(`providers.${provider}.${key} is not allowed`);
+      if (key !== "readRoute" && key !== "writeRoute") {
+        throw new Error(`providers.${provider}.${key} is not allowed`);
+      }
     }
-    providers[provider] = { readRoute: routeId(entry.readRoute, `providers.${provider}.readRoute`) };
+    const readRoute = routeId(entry.readRoute, `providers.${provider}.readRoute`);
+    const writeRoute = routeId(entry.writeRoute, `providers.${provider}.writeRoute`);
+    providers[provider] = {
+      ...readRoute ? { readRoute } : {},
+      ...writeRoute ? { writeRoute } : {}
+    };
   }
   return {
     version: 1,
     ...defaultReadRoute ? { defaultReadRoute } : {},
+    ...defaultWriteRoute ? { defaultWriteRoute } : {},
     providers
   };
 }
-function resolveRouteForProvider(map, providerCode) {
+async function saveBrokerRouteMap(config, env = process.env) {
+  const path = brokerRoutesPath(env);
+  const checked = parseBrokerRouteMap(config);
+  await mkdir16(dirname17(path), { recursive: true, mode: 448 });
+  await writeFileAtomic(path, `${JSON.stringify(checked, null, 2)}
+`, { mode: 384 });
+  await chmod6(path, 384).catch(() => {
+  });
+  return path;
+}
+function resolveRouteForProvider(map, providerCode, access3 = "read-only") {
   if (!map) return {};
-  if (providerCode && map.providers[providerCode]?.readRoute) {
-    return { routeId: map.providers[providerCode].readRoute, source: "cc-switch" };
+  const providerRoute = providerCode ? access3 === "workspace-write" ? map.providers[providerCode]?.writeRoute : map.providers[providerCode]?.readRoute : void 0;
+  if (providerRoute) {
+    return { routeId: providerRoute, source: "cc-switch" };
   }
-  if (map.defaultReadRoute) return { routeId: map.defaultReadRoute, source: "default" };
+  const defaultRoute = access3 === "workspace-write" ? map.defaultWriteRoute : map.defaultReadRoute;
+  if (defaultRoute) return { routeId: defaultRoute, source: "default" };
   return {};
 }
 function routeId(value, label) {
@@ -13331,6 +13378,9 @@ function routeId(value, label) {
 function errorMessage4(error) {
   return error instanceof Error ? error.message : String(error);
 }
+
+// src/agent/subagents/mixagents.ts
+import { createRequire } from "module";
 
 // src/agent/subagents/mcp-client.ts
 import { createInterface as createInterface5 } from "readline";
@@ -13567,6 +13617,7 @@ var REQUIRED_TOOLS = [
 ];
 var WAIT_REQUEST_MS = 12e4;
 var DEFAULT_TOTAL_WAIT_MS = 15 * 6e4;
+var require2 = createRequire(import.meta.url);
 var MixAgentsBrokerBackend = class {
   constructor(config, env = process.env) {
     this.config = config;
@@ -13795,6 +13846,14 @@ function resolveMixAgentsLaunchConfig(config, env = process.env) {
       args: splitArgs(env.MIXAGENTS_BROKER_MCP_ARGS)
     };
   }
+  try {
+    const server = require2.resolve("mixagents-broker/dist/server.js");
+    return {
+      command: process.execPath,
+      args: [server]
+    };
+  } catch {
+  }
   return void 0;
 }
 function agentFromSnapshot(value, fallback) {
@@ -13815,7 +13874,8 @@ function agentFromSnapshot(value, fallback) {
     scope: fallback.scope,
     backendId: "mixagents",
     status: sideStatus(value.status),
-    createdAt: Date.now()
+    createdAt: Date.now(),
+    ...stringValue2(value.threadId) ?? stringValue2(value.thread_id) ? { threadId: stringValue2(value.threadId) ?? stringValue2(value.thread_id) } : {}
   };
 }
 function firstAgent(value) {
@@ -13823,7 +13883,7 @@ function firstAgent(value) {
   return value.agents.find(isRecord3);
 }
 function sideStatus(value) {
-  return value === "starting" || value === "running" || value === "completed" || value === "failed" || value === "interrupted" || value === "not_found" ? value : "running";
+  return value === "starting" || value === "running" || value === "completed" || value === "failed" || value === "interrupted" || value === "not_found" || value === "timeout" || value === "closed" ? value : "running";
 }
 function translateToolError(error, cwd) {
   if (error instanceof SubagentAgentNotFoundError) return error;
@@ -13901,7 +13961,11 @@ async function resolveSubagents(input) {
     routes = await backend.listRoutes(input.signal);
   } catch (error) {
     const message = errorMessage6(error);
-    if (config.mode === "broker") throw error;
+    const unavailable = error instanceof SubagentUnavailableError ? error : new SubagentUnavailableError(
+      "mixagents-start-failed",
+      `MixAgents \u542F\u52A8\u6216\u8DEF\u7531\u8BFB\u53D6\u5931\u8D25\uFF1A${message}`
+    );
+    if (config.mode === "broker") throw unavailable;
     if (!config.allowForkFallback) {
       throw new SubagentUnavailableError(
         "mixagents-not-configured",
@@ -13922,7 +13986,8 @@ async function resolveSubagents(input) {
     ccSwitch,
     routeMap: routeState.config,
     routes,
-    requestedRoute: input.requestedRoute
+    requestedRoute: input.requestedRoute,
+    access: input.access
   });
   if (!selection.route) {
     const message = selection.error ?? "\u6CA1\u6709\u53EF\u7528\u7684 MixAgents read route";
@@ -13969,38 +14034,907 @@ async function resolveSubagents(input) {
   };
 }
 function selectSubagentRoute(input) {
+  const access3 = input.access ?? "read-only";
   if (input.requestedRoute) {
     const route2 = input.routes.find((item) => item.id === input.requestedRoute);
-    return route2 ? { route: route2 } : { error: `\u663E\u5F0F\u6307\u5B9A\u7684 MixAgents route \u4E0D\u5B58\u5728\uFF1A${input.requestedRoute}` };
+    return route2 && (access3 === "read-only" || route2.maxAccess === "workspace-write") ? { route: route2 } : { error: `\u663E\u5F0F\u6307\u5B9A\u7684 MixAgents route \u4E0D\u5B58\u5728\uFF1A${input.requestedRoute}` };
   }
   if (input.config.routeMode === "manual") {
-    if (!input.config.readRoute) {
-      return { error: "routeMode=manual \u4F46\u672A\u914D\u7F6E subagents.readRoute" };
+    const configured = access3 === "workspace-write" ? input.config.writeRoute : input.config.readRoute;
+    if (!configured) {
+      return {
+        error: access3 === "workspace-write" ? "routeMode=manual \u4F46\u672A\u914D\u7F6E subagents.writeRoute" : "routeMode=manual \u4F46\u672A\u914D\u7F6E subagents.readRoute"
+      };
     }
-    const route2 = input.routes.find((item) => item.id === input.config.readRoute);
-    return route2 ? { route: route2 } : { error: `\u624B\u52A8\u914D\u7F6E\u7684 MixAgents read route \u4E0D\u5B58\u5728\uFF1A${input.config.readRoute}` };
+    const route2 = input.routes.find((item) => item.id === configured);
+    return route2 && (access3 === "read-only" || route2.maxAccess === "workspace-write") ? { route: route2 } : { error: `\u624B\u52A8\u914D\u7F6E\u7684 MixAgents ${access3} route \u4E0D\u5B58\u5728\u6216\u4E0D\u652F\u6301\u8BE5\u6743\u9650\uFF1A${configured}` };
   }
   const mapped = resolveRouteForProvider(
     input.routeMap,
-    input.ccSwitch.currentProviderCodex
+    input.ccSwitch.currentProviderCodex,
+    access3
   );
   if (!mapped.routeId) {
     return {
-      error: input.ccSwitch.currentProviderCodex ? `cc-switch \u5F53\u524D provider ${input.ccSwitch.currentProviderCodex} \u6CA1\u6709 readRoute \u6620\u5C04` : "\u65E0\u6CD5\u786E\u5B9A cc-switch \u5F53\u524D provider\uFF0C\u4E14\u6CA1\u6709 defaultReadRoute"
+      error: input.ccSwitch.currentProviderCodex ? `cc-switch \u5F53\u524D provider ${input.ccSwitch.currentProviderCodex} \u6CA1\u6709 ${access3} route \u6620\u5C04` : access3 === "workspace-write" ? "\u65E0\u6CD5\u786E\u5B9A cc-switch \u5F53\u524D provider\uFF0C\u4E14\u6CA1\u6709 defaultWriteRoute" : "\u65E0\u6CD5\u786E\u5B9A cc-switch \u5F53\u524D provider\uFF0C\u4E14\u6CA1\u6709 defaultReadRoute"
     };
   }
   const route = input.routes.find((item) => item.id === mapped.routeId);
-  return route ? { route } : { error: `readRoute \u6620\u5C04\u6307\u5411\u4E0D\u5B58\u5728\u7684 MixAgents route\uFF1A${mapped.routeId}` };
+  return route && (access3 === "read-only" || route.maxAccess === "workspace-write") ? { route } : { error: `${access3} route \u6620\u5C04\u6307\u5411\u4E0D\u5B58\u5728\u6216\u4E0D\u517C\u5BB9\u7684 MixAgents route\uFF1A${mapped.routeId}` };
 }
 function errorMessage6(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
-// src/integrations/project-rsi.ts
+// src/agent/subagents/broker-tools.ts
 import { createHash as createHash5 } from "crypto";
-import { lstat as lstat2, mkdtemp, readFile as readFile16, readdir as readdir5, realpath as realpath4, rm as rm13, stat as stat6, writeFile as writeFile9, mkdir as mkdir17 } from "fs/promises";
+import { readFileSync as readFileSync6 } from "fs";
+import { lstat as lstat2, realpath as realpath4 } from "fs/promises";
+import { isAbsolute as isAbsolute4, parse, relative } from "path";
+var BROKER_TOOL_VERSION = 1;
+var DEFAULT_BROKER_TOOL_NAMESPACE = "arg_bridge";
+var MAX_TASK_BYTES = 128 * 1024;
+var MAX_RESULT_BYTES = 64 * 1024;
+var MAX_IDEMPOTENCY_ENTRIES = 256;
+var MAX_WAIT_MS = 60 * 6e4;
+var BrokerToolController = class {
+  constructor(options) {
+    this.options = options;
+    this.env = options.env ?? process.env;
+    this.namespace = options.namespace ?? DEFAULT_BROKER_TOOL_NAMESPACE;
+    this.specs = brokerToolSpecs(this.namespace);
+    this.loadState();
+  }
+  options;
+  specs;
+  workers = /* @__PURE__ */ new Map();
+  aliases = /* @__PURE__ */ new Map();
+  completedCalls = /* @__PURE__ */ new Map();
+  inFlightCalls = /* @__PURE__ */ new Map();
+  backend;
+  backendConfigKey;
+  writeChain = Promise.resolve();
+  workerTimers = /* @__PURE__ */ new Map();
+  restoredTimeoutsArmed = false;
+  env;
+  namespace;
+  closed = false;
+  writeAuthorization;
+  static instructions(namespace = DEFAULT_BROKER_TOOL_NAMESPACE) {
+    return [
+      "Bridge-managed multi-agent policy:",
+      `- Delegate through the dynamic tools in the "${namespace}" namespace. Native Codex collaboration tools are not the authoritative delegation path for this Bridge thread.`,
+      `- Use ${namespace}.spawn_agent to create independent workers, ${namespace}.followup_task to send a new task to an existing worker, and ${namespace}.wait_agent to collect its result mailbox.`,
+      "- Do not report delegated work as complete until wait_agent has returned the relevant worker result or an explicit terminal status.",
+      `- Use ${namespace}.list_agents / ${namespace}.interrupt_agent / ${namespace}.close_agent to inspect or stop workers, and ${namespace}.list_routes before choosing a non-default route.`,
+      "- Task text passed to spawn_agent or followup_task is delivered as ordinary user input. Do not depend on native agent_message, encrypted_content, or a Codex child thread.",
+      `- ${namespace}.send_message is queue-only semantics. If the Broker cannot prove queue-only delivery, it must return an explicit unsupported error; use followup_task instead.`,
+      "- Workers are read-only unless this profile enables write workers AND the user authorizes the exact task with `arg-bridge-write --workspace <canonical-path> --task <task>` for this turn. Tool arguments cannot self-grant write access."
+    ].join("\n");
+  }
+  async call(tool, args, signal) {
+    if (this.closed) return failure("Broker tool controller is closed");
+    if (signal?.aborted) return failure("Broker tool call aborted");
+    try {
+      const record = isRecord4(args) ? args : {};
+      const idempotencyKey = optionalString(record.idempotency_key, "idempotency_key", 200);
+      if (idempotencyKey) {
+        const cached = this.completedCalls.get(idempotencyKey);
+        if (cached) {
+          return cached.tool === tool ? cached.response : failure(`idempotency_key ${idempotencyKey} was already used by ${cached.tool}`);
+        }
+        const running = this.inFlightCalls.get(`${tool}\0${idempotencyKey}`);
+        if (running) return await running;
+      }
+      const operation = this.dispatch(tool, record, signal ?? neverAbortSignal());
+      if (!idempotencyKey) return await operation;
+      const operationKey = `${tool}\0${idempotencyKey}`;
+      this.inFlightCalls.set(operationKey, operation);
+      try {
+        const response = await operation;
+        this.completedCalls.set(idempotencyKey, {
+          tool,
+          response,
+          createdAt: Date.now()
+        });
+        this.pruneIdempotency();
+        await this.persist();
+        return response;
+      } finally {
+        this.inFlightCalls.delete(operationKey);
+      }
+    } catch (error) {
+      return failure(safeError(error));
+    }
+  }
+  projection() {
+    return [...this.workers.values()].sort((a, b) => a.logicalPath.localeCompare(b.logicalPath)).map((worker) => projectWorker(worker));
+  }
+  setWriteAuthorization(authorization) {
+    this.writeAuthorization = authorization;
+  }
+  async close() {
+    if (this.closed) return;
+    this.closed = true;
+    for (const timer of this.workerTimers.values()) clearTimeout(timer);
+    this.workerTimers.clear();
+    await this.backend?.closeBackend?.().catch(() => {
+    });
+    await this.writeChain.catch(() => {
+    });
+  }
+  dispatch(tool, args, signal) {
+    switch (tool) {
+      case "spawn_agent":
+        return this.spawn(args, signal);
+      case "followup_task":
+        return this.followup(args, signal);
+      case "send_message":
+        return Promise.resolve(failure(
+          "send_message is not exposed with uncertain semantics: MixAgents MCP `send` may trigger a worker turn. Use followup_task for trigger-turn behavior; queue-only delivery remains unsupported."
+        ));
+      case "wait_agent":
+        return this.wait(args, signal);
+      case "list_agents":
+        return Promise.resolve(this.list(args));
+      case "list_routes":
+        return this.listRoutes(signal);
+      case "interrupt_agent":
+        return this.interrupt(args, signal, false);
+      case "close_agent":
+        return this.interrupt(args, signal, true);
+      default:
+        return Promise.resolve(failure(`Unknown Broker tool: ${tool}`));
+    }
+  }
+  async spawn(args, signal) {
+    const config = await this.requireConfig();
+    const task = requiredString(args.task, "task", MAX_TASK_BYTES);
+    const access3 = parseAccess(args.access);
+    if (access3 === "workspace-write") {
+      if (!config.allowWriteWorkers) {
+        throw new SubagentUnavailableError(
+          "write-not-authorized",
+          "workspace-write worker \u672A\u5728 profile \u4E2D\u542F\u7528\uFF1B\u9ED8\u8BA4\u53EA\u5141\u8BB8 read-only\u3002"
+        );
+      }
+    }
+    if (this.runningCount() >= config.maxConcurrentWorkers) {
+      return failure(`Broker worker concurrency limit reached (${config.maxConcurrentWorkers})`);
+    }
+    const requestedName = optionalString(args.name, "name", 64) ?? this.nextName();
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(requestedName)) {
+      return failure("name must match [A-Za-z0-9][A-Za-z0-9._-]{0,63}");
+    }
+    const existing = this.workers.get(workerKey(requestedName));
+    if (existing) return failure(`Broker worker already exists: ${existing.logicalPath}`);
+    const workspace = await canonicalWorkspace(optionalString(args.workspace, "workspace", 4096), this.options.cwd);
+    if (access3 === "read-only") {
+      const parentWorkspace = await canonicalWorkspace(void 0, this.options.cwd);
+      const rel = relative(parentWorkspace, workspace);
+      if (rel.startsWith("..") || isAbsolute4(rel)) {
+        throw new SubagentUnavailableError(
+          "workspace-denied",
+          "read-only workers may only access the parent workspace or a subdirectory of it."
+        );
+      }
+    }
+    if (access3 === "workspace-write") {
+      await assertWriteAuthorization(this.writeAuthorization, task, workspace);
+    }
+    const requestedRoute = optionalString(args.route, "route", 64);
+    const resolved = await this.resolveRoute(access3, requestedRoute, signal);
+    const worker = await this.createWorker({
+      name: requestedName,
+      task,
+      access: access3,
+      workspace,
+      resolved,
+      signal
+    });
+    this.options.onEvent?.("worker_started", projectWorker(worker));
+    return success(JSON.stringify({
+      logical_name: worker.logicalName,
+      logical_path: worker.logicalPath,
+      agent_id: worker.agent.agentId,
+      thread_id: worker.agent.threadId ?? null,
+      route: worker.route.id,
+      route_fingerprint: worker.routeFingerprint,
+      provider: worker.route.provider,
+      model: worker.route.model,
+      access: worker.access,
+      status: worker.agent.status,
+      mailbox: `Call wait_agent with this logical_path or agent_id to collect the result.`
+    }, null, 2));
+  }
+  async followup(args, signal) {
+    const task = requiredString(args.task, "task", MAX_TASK_BYTES);
+    const target = await this.resolveWorker(args);
+    const config = await this.requireConfig();
+    const requestedRoute = optionalString(args.route, "route", 64);
+    const resolved = await this.resolveRoute(target.access, requestedRoute, signal);
+    const nextFingerprint = subagentRouteFingerprint(resolved.route);
+    if (nextFingerprint !== target.routeFingerprint) {
+      await this.closeRecord(target);
+      const replacement = await this.createWorker({
+        name: target.logicalName,
+        task,
+        access: target.access,
+        workspace: target.workspace,
+        resolved,
+        signal
+      });
+      return success(JSON.stringify({
+        recreated: true,
+        reason: "route/provider/model fingerprint changed; the old Broker agent was closed",
+        ...workerInvocation(replacement)
+      }, null, 2));
+    }
+    if (target.access === "workspace-write") {
+      if (!config.allowWriteWorkers) {
+        return failure("workspace-write workers are disabled by the current profile");
+      }
+      await assertWriteAuthorization(this.writeAuthorization, task, target.workspace);
+    }
+    try {
+      target.agent = { ...target.agent, status: "running" };
+      target.task = task;
+      target.result = void 0;
+      target.error = void 0;
+      target.updatedAt = Date.now();
+      await this.persist();
+      const result = await resolved.backend.send(target.agent, task, signal);
+      this.applyResult(target, result);
+      await this.persist();
+      this.options.onEvent?.(
+        result.status === "completed" ? "worker_completed" : "worker_failed",
+        projectWorker(target)
+      );
+      return success(JSON.stringify({
+        recreated: false,
+        ...workerInvocation(target),
+        mailbox: result.text ?? null
+      }, null, 2));
+    } catch (error) {
+      if (error instanceof SubagentAgentNotFoundError) {
+        this.workers.delete(workerKey(target.logicalName));
+        this.rebuildAliases();
+        const replacement = await this.createWorker({
+          name: target.logicalName,
+          task,
+          access: target.access,
+          workspace: target.workspace,
+          resolved,
+          signal
+        });
+        return success(JSON.stringify({
+          recreated: true,
+          reason: "agent_not_found; the missing Broker agent identity was not reused",
+          ...workerInvocation(replacement)
+        }, null, 2));
+      }
+      throw error;
+    }
+  }
+  async wait(args, signal) {
+    const targets = this.resolveTargets(args);
+    if (targets.length === 0) return failure("wait_agent requires logical_names or agent_ids");
+    const requestedTimeout = numberValue2(args.timeout_ms, 1, MAX_WAIT_MS) ?? (await this.requireConfig()).workerTimeoutMs;
+    const config = await this.requireConfig();
+    const backend = await this.ensureBackend(config);
+    const timeoutSignal = AbortSignal.timeout(requestedTimeout);
+    const combined = AbortSignal.any([signal, timeoutSignal]);
+    const results = await Promise.all(targets.map(async (target) => {
+      try {
+        const result = await backend.wait(target.agent, combined, requestedTimeout);
+        this.applyResult(target, result);
+        this.options.onEvent?.(
+          result.status === "completed" ? "worker_completed" : "worker_failed",
+          projectWorker(target)
+        );
+        return {
+          logical_path: target.logicalPath,
+          agent_id: target.agent.agentId,
+          ...result
+        };
+      } catch (error) {
+        if (error instanceof SubagentAgentNotFoundError) {
+          target.agent.status = "not_found";
+          target.error = "agent_not_found";
+          return {
+            logical_path: target.logicalPath,
+            agent_id: target.agent.agentId,
+            status: "not_found",
+            error: target.error
+          };
+        }
+        if (combined.aborted) {
+          target.agent.status = "timeout";
+          target.error = "wait_agent timed out or was aborted";
+          return {
+            logical_path: target.logicalPath,
+            agent_id: target.agent.agentId,
+            status: "timeout",
+            error: target.error
+          };
+        }
+        throw error;
+      }
+    }));
+    await this.persist();
+    return success(JSON.stringify({ agents: results }, null, 2));
+  }
+  list(args) {
+    const prefix = optionalString(args.path_prefix, "path_prefix", 512);
+    const workers = this.projection().filter(
+      (worker) => !prefix || worker.logical_path.startsWith(prefix)
+    );
+    return success(JSON.stringify({ agents: workers }, null, 2));
+  }
+  async listRoutes(signal) {
+    const config = await this.requireConfig();
+    const backend = await this.ensureBackend(config);
+    const routes = await backend.listRoutes(signal);
+    const ccSwitch = await readCcSwitchState(this.env);
+    return success(JSON.stringify({
+      configured_main_provider: ccSwitch.currentProviderCodex ?? null,
+      routes: routes.map((route) => ({
+        id: route.id,
+        provider: route.provider,
+        model: route.model,
+        max_access: route.maxAccess,
+        available: route.available,
+        missing_environment: route.missingEnvironment,
+        tags: route.tags,
+        revision: route.revision ?? null,
+        target_fingerprint: route.targetFingerprint ?? null
+      }))
+    }, null, 2));
+  }
+  async interrupt(args, signal, close) {
+    const targets = this.resolveTargets(args);
+    if (targets.length === 0) return failure(`${close ? "close_agent" : "interrupt_agent"} requires a target`);
+    const config = await this.requireConfig();
+    const backend = await this.ensureBackend(config);
+    const results = [];
+    for (const target of targets) {
+      try {
+        if (close) await backend.close(target.agent, signal);
+        else await backend.interrupt(target.agent, signal);
+        target.agent.status = close ? "closed" : "interrupted";
+        target.updatedAt = Date.now();
+        results.push({
+          logical_path: target.logicalPath,
+          agent_id: target.agent.agentId,
+          status: target.agent.status
+        });
+      } catch (error) {
+        results.push({
+          logical_path: target.logicalPath,
+          agent_id: target.agent.agentId,
+          error: safeError(error)
+        });
+      }
+    }
+    await this.persist();
+    return success(JSON.stringify({ agents: results }, null, 2));
+  }
+  async createWorker(input) {
+    const agent = await input.resolved.backend.createOrReuse({
+      route: input.resolved.route,
+      task: input.task,
+      cwd: input.workspace,
+      scope: `${this.options.scope}:${input.name}`,
+      access: input.access,
+      signal: input.signal
+    });
+    const record = {
+      logicalName: input.name,
+      logicalPath: `/root/${input.name}`,
+      agent,
+      route: input.resolved.route,
+      routeFingerprint: subagentRouteFingerprint(input.resolved.route),
+      access: input.access,
+      workspace: input.workspace,
+      scope: this.options.scope,
+      task: input.task,
+      updatedAt: Date.now(),
+      idempotencyKeys: []
+    };
+    this.workers.set(workerKey(input.name), record);
+    this.rebuildAliases();
+    this.armWorkerTimeout(record, await this.requireConfig());
+    await this.persist();
+    return record;
+  }
+  async resolveRoute(access3, requestedRoute, signal) {
+    if (this.options.routeResolver) {
+      const resolved = await this.options.routeResolver({
+        access: access3,
+        ...requestedRoute ? { requestedRoute } : {},
+        signal
+      });
+      this.backend = resolved.backend;
+      this.backendConfigKey = "injected-route-resolver";
+      return resolved;
+    }
+    const config = await this.requireConfig();
+    const backend = await this.ensureBackend(config);
+    const [routes, ccSwitch, routeMap] = await Promise.all([
+      backend.listRoutes(signal),
+      readCcSwitchState(this.env),
+      loadBrokerRouteMap(this.env)
+    ]);
+    if (routeMap.error) throw new Error(routeMap.error);
+    const selection = selectSubagentRoute({
+      config,
+      ccSwitch,
+      routeMap: routeMap.config,
+      routes,
+      requestedRoute,
+      access: access3
+    });
+    if (!selection.route) {
+      throw new SubagentUnavailableError("route-unavailable", selection.error ?? "No Broker route available", {
+        access: access3
+      });
+    }
+    if (!selection.route.available) {
+      throw new SubagentUnavailableError(
+        "route-unavailable",
+        `Broker route ${selection.route.id} is unavailable` + (selection.route.missingEnvironment.length ? `; missing environment names: ${selection.route.missingEnvironment.join(", ")}` : "")
+      );
+    }
+    return { backend, route: selection.route, routes };
+  }
+  async ensureBackend(config) {
+    if (!config.enabled || config.mode === "off" || config.mode === "fork") {
+      throw new SubagentUnavailableError(
+        "mixagents-not-configured",
+        `Broker model tools are unavailable because subagents.mode=${config.mode}.`
+      );
+    }
+    const key = backendConfigKey(config);
+    if (this.options.routeResolver && this.backend) return this.backend;
+    if (this.backend && this.backendConfigKey === key) return this.backend;
+    if (this.backend) await this.backend.closeBackend?.().catch(() => {
+    });
+    this.backend = this.options.backendFactory ? this.options.backendFactory(config, this.env) : new MixAgentsBrokerBackend(config, this.env);
+    this.backendConfigKey = key;
+    return this.backend;
+  }
+  async requireConfig() {
+    const config = await this.options.getConfig();
+    if (!config.modelTools) {
+      throw new SubagentUnavailableError(
+        "mixagents-not-configured",
+        "Broker model tools are disabled in the current profile."
+      );
+    }
+    if (!this.restoredTimeoutsArmed) {
+      this.restoredTimeoutsArmed = true;
+      for (const worker of this.workers.values()) {
+        if (worker.agent.status !== "running" && worker.agent.status !== "starting") continue;
+        const elapsed = Math.max(0, Date.now() - worker.updatedAt);
+        const remaining = config.workerTimeoutMs - elapsed;
+        if (remaining <= 0) {
+          worker.agent.status = "timeout";
+          worker.error = `worker timed out while Bridge was disconnected`;
+          worker.updatedAt = Date.now();
+          continue;
+        }
+        this.armWorkerTimeout(worker, config, remaining);
+      }
+      await this.persist().catch(() => {
+      });
+    }
+    return config;
+  }
+  resolveTargets(args) {
+    const single = this.findTarget(args);
+    if (single) return [single];
+    const names = stringArray3(args.logical_names, "logical_names", 32);
+    const ids = stringArray3(args.agent_ids, "agent_ids", 32);
+    const records = [];
+    for (const value of [...names, ...ids]) {
+      const key = this.aliases.get(value);
+      const record = key ? this.workers.get(key) : void 0;
+      if (record && !records.includes(record)) records.push(record);
+    }
+    if (records.length === 0 && names.length === 0 && ids.length === 0) {
+      return [...this.workers.values()].filter(
+        (worker) => worker.agent.status === "running" || worker.agent.status === "starting"
+      );
+    }
+    return records;
+  }
+  async resolveWorker(args) {
+    const worker = this.findTarget(args);
+    if (!worker) {
+      throw new Error("followup_task requires an existing logical_name, logical_path, or agent_id");
+    }
+    return worker;
+  }
+  findTarget(args) {
+    for (const field of ["logical_path", "logical_name", "agent_id"]) {
+      const value = optionalString(args[field], field, 512);
+      if (!value) continue;
+      const key = this.aliases.get(value);
+      if (key) return this.workers.get(key);
+    }
+    return void 0;
+  }
+  nextName() {
+    let index = 1;
+    while (this.workers.has(workerKey(`agent-${index}`))) index += 1;
+    return `agent-${index}`;
+  }
+  runningCount() {
+    return [...this.workers.values()].filter(
+      (worker) => worker.agent.status === "starting" || worker.agent.status === "running"
+    ).length;
+  }
+  applyResult(record, result) {
+    record.agent.status = result.status;
+    record.updatedAt = Date.now();
+    if (result.text) record.result = truncate2(redactSecrets(result.text), MAX_RESULT_BYTES);
+    if (result.error) record.error = truncate2(redactSecrets(result.error), 8e3);
+    if (result.status !== "running" && result.status !== "starting") {
+      const timer = this.workerTimers.get(record.logicalPath);
+      if (timer) clearTimeout(timer);
+      this.workerTimers.delete(record.logicalPath);
+    }
+  }
+  armWorkerTimeout(record, config, delayMs = config.workerTimeoutMs) {
+    const previous = this.workerTimers.get(record.logicalPath);
+    if (previous) clearTimeout(previous);
+    const timer = setTimeout(() => {
+      if (record.agent.status !== "running" && record.agent.status !== "starting") return;
+      void this.backend?.interrupt(record.agent, AbortSignal.timeout(3e4)).catch(() => {
+      });
+      record.agent.status = "timeout";
+      record.error = `worker timed out after ${config.workerTimeoutMs}ms`;
+      record.updatedAt = Date.now();
+      this.options.onEvent?.("worker_failed", projectWorker(record));
+      void this.persist();
+    }, delayMs);
+    timer.unref?.();
+    this.workerTimers.set(record.logicalPath, timer);
+  }
+  async closeRecord(record) {
+    const timer = this.workerTimers.get(record.logicalPath);
+    if (timer) clearTimeout(timer);
+    this.workerTimers.delete(record.logicalPath);
+    const config = await this.requireConfig();
+    const backend = await this.ensureBackend(config);
+    await backend.interrupt(record.agent, AbortSignal.timeout(3e4)).catch(() => {
+    });
+    await backend.close(record.agent, AbortSignal.timeout(3e4)).catch(() => {
+    });
+    this.workers.delete(workerKey(record.logicalName));
+    this.rebuildAliases();
+    await this.persist();
+  }
+  rebuildAliases() {
+    this.aliases.clear();
+    for (const [key, worker] of this.workers) {
+      this.aliases.set(key, key);
+      this.aliases.set(worker.logicalPath, key);
+      this.aliases.set(worker.agent.agentId, key);
+    }
+  }
+  pruneIdempotency() {
+    while (this.completedCalls.size > MAX_IDEMPOTENCY_ENTRIES) {
+      let oldestKey;
+      let oldest = Number.POSITIVE_INFINITY;
+      for (const [key, value] of this.completedCalls) {
+        if (value.createdAt < oldest) {
+          oldest = value.createdAt;
+          oldestKey = key;
+        }
+      }
+      if (!oldestKey) break;
+      this.completedCalls.delete(oldestKey);
+    }
+  }
+  loadState() {
+    let parsed;
+    try {
+      parsed = JSON.parse(
+        readStateFile(this.options.stateFile) || "{}"
+      );
+    } catch {
+      return;
+    }
+    if (parsed.version !== 1) return;
+    for (const worker of parsed.workers ?? []) {
+      if (!worker?.logicalName || !worker.logicalPath || !worker.agent?.agentId || !worker.route?.id || !worker.workspace) continue;
+      this.workers.set(workerKey(worker.logicalName), {
+        ...worker,
+        idempotencyKeys: Array.isArray(worker.idempotencyKeys) ? worker.idempotencyKeys : []
+      });
+    }
+    for (const [key, value] of Object.entries(parsed.completedCalls ?? {})) {
+      if (value?.response && typeof value.response.text === "string") {
+        this.completedCalls.set(key, value);
+      }
+    }
+    this.rebuildAliases();
+  }
+  async persist() {
+    const body = {
+      version: 1,
+      workers: [...this.workers.values()],
+      completedCalls: Object.fromEntries(this.completedCalls)
+    };
+    const snapshot = `${JSON.stringify(body, null, 2)}
+`;
+    this.writeChain = this.writeChain.catch(() => {
+    }).then(async () => {
+      await writeFileAtomic(this.options.stateFile, snapshot, { mode: 384 });
+    });
+    await this.writeChain;
+  }
+};
+function brokerToolSpecs(namespace = DEFAULT_BROKER_TOOL_NAMESPACE) {
+  const target = {
+    type: "object",
+    properties: {
+      logical_name: { type: "string", description: "Stable logical worker name." },
+      logical_path: { type: "string", description: "Stable logical path such as /root/reviewer." },
+      agent_id: { type: "string", description: "Broker agent ID returned by spawn_agent." }
+    },
+    additionalProperties: false
+  };
+  return [{
+    type: "namespace",
+    name: namespace,
+    description: "Bridge-owned cross-provider subagent tools. Task text is sent as ordinary user input.",
+    tools: [
+      {
+        type: "function",
+        name: "spawn_agent",
+        description: "Spawn an independent Broker worker. The task is ordinary plaintext user input. Defaults to read-only.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            name: { type: "string", description: "Stable worker name; unique within this parent thread." },
+            task: { type: "string", description: "Task body delivered as ordinary user input to the worker." },
+            route: { type: "string", description: "Optional explicit Broker route ID." },
+            access: { enum: ["read-only", "workspace-write"], type: "string" },
+            workspace: { type: "string", description: "Optional workspace; defaults to the parent cwd." },
+            idempotency_key: { type: "string" }
+          },
+          required: ["task"],
+          additionalProperties: false
+        }
+      },
+      {
+        type: "function",
+        name: "followup_task",
+        description: "Trigger a new worker turn and return its result mailbox. Plaintext task input; no native agent_message is used.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            ...target.properties,
+            task: { type: "string" },
+            route: { type: "string" },
+            idempotency_key: { type: "string" }
+          },
+          required: ["task"],
+          additionalProperties: false
+        }
+      },
+      {
+        type: "function",
+        name: "send_message",
+        description: "Queue-only send. Returns explicit unsupported when the backend cannot prove queue-only semantics.",
+        inputSchema: {
+          type: "object",
+          properties: { ...target.properties, message: { type: "string" } },
+          required: ["message"],
+          additionalProperties: false
+        }
+      },
+      {
+        type: "function",
+        name: "wait_agent",
+        description: "Collect one or more worker result mailboxes.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            logical_names: { type: "array", items: { type: "string" }, maxItems: 32 },
+            agent_ids: { type: "array", items: { type: "string" }, maxItems: 32 },
+            timeout_ms: { type: "integer", minimum: 1, maximum: MAX_WAIT_MS }
+          },
+          additionalProperties: false
+        }
+      },
+      {
+        type: "function",
+        name: "list_agents",
+        description: "List logical path, Broker agent ID, app-server thread ID, route, access, status, and mailbox summary.",
+        inputSchema: {
+          type: "object",
+          properties: { path_prefix: { type: "string" } },
+          additionalProperties: false
+        }
+      },
+      {
+        type: "function",
+        name: "list_routes",
+        description: "List available Broker routes and non-secret availability details.",
+        inputSchema: { type: "object", properties: {}, additionalProperties: false }
+      },
+      {
+        type: "function",
+        name: "interrupt_agent",
+        description: "Interrupt one or more workers.",
+        inputSchema: {
+          type: "object",
+          properties: target.properties,
+          additionalProperties: false
+        }
+      },
+      {
+        type: "function",
+        name: "close_agent",
+        description: "Close one or more workers.",
+        inputSchema: {
+          type: "object",
+          properties: target.properties,
+          additionalProperties: false
+        }
+      }
+    ]
+  }];
+}
+function brokerCodexThreadConfig(config) {
+  if (!config.enabled || !config.modelTools || config.mode !== "auto" && config.mode !== "broker") {
+    return void 0;
+  }
+  return {
+    features: {
+      multi_agent_v2: {
+        enabled: true,
+        ...config.nativeToolPolicy === "shadow" ? { disable_native_tools: true } : {},
+        root_agent_usage_hint_text: BrokerToolController.instructions(config.toolNamespace)
+      }
+    }
+  };
+}
+function workerInvocation(worker) {
+  return {
+    logical_name: worker.logicalName,
+    logical_path: worker.logicalPath,
+    agent_id: worker.agent.agentId,
+    thread_id: worker.agent.threadId ?? null,
+    route: worker.route.id,
+    route_fingerprint: worker.routeFingerprint,
+    provider: worker.route.provider,
+    model: worker.route.model,
+    access: worker.access,
+    status: worker.agent.status
+  };
+}
+function projectWorker(worker) {
+  return {
+    logical_name: worker.logicalName,
+    logical_path: worker.logicalPath,
+    agent_id: worker.agent.agentId,
+    thread_id: worker.agent.threadId ?? null,
+    route: worker.route.id,
+    route_fingerprint: worker.routeFingerprint,
+    provider: worker.route.provider,
+    model: worker.route.model,
+    access: worker.access,
+    workspace: worker.workspace,
+    status: worker.agent.status,
+    result: worker.result ?? null,
+    error: worker.error ?? null,
+    updated_at: new Date(worker.updatedAt).toISOString()
+  };
+}
+function workerKey(logicalName) {
+  return logicalName;
+}
+function parseAccess(value) {
+  if (value === void 0 || value === null || value === "read-only") return "read-only";
+  if (value === "workspace-write") return "workspace-write";
+  throw new Error("access must be read-only or workspace-write");
+}
+async function canonicalWorkspace(requested, fallback) {
+  const value = requested ?? fallback;
+  if (!isAbsolute4(value)) throw new Error("workspace must be an absolute path");
+  const canonical = await realpath4(value).catch(() => void 0);
+  if (!canonical) throw new Error(`workspace does not exist: ${value}`);
+  const info = await lstat2(canonical);
+  if (!info.isDirectory()) throw new Error("workspace must be a directory");
+  if (canonical === parse(canonical).root) throw new Error("workspace cannot be a filesystem root");
+  return canonical;
+}
+async function assertWriteAuthorization(authorization, task, workspace) {
+  if (!authorization) {
+    throw new SubagentUnavailableError(
+      "write-not-authorized",
+      "workspace-write requires `arg-bridge-write --workspace <path> --task <task>` before the model turn."
+    );
+  }
+  const authorizedWorkspace = requiredString(
+    authorization.workspace,
+    "write_authorization.workspace",
+    4096
+  );
+  const authorizedTask = requiredString(
+    authorization.task,
+    "write_authorization.task",
+    MAX_TASK_BYTES
+  );
+  const canonical = await realpath4(authorizedWorkspace).catch(() => void 0);
+  if (canonical !== workspace || authorizedTask !== task) {
+    throw new SubagentUnavailableError(
+      "write-not-authorized",
+      "workspace-write authorization must exactly match the canonical workspace and task."
+    );
+  }
+}
+function requiredString(value, label, maxBytes) {
+  if (typeof value !== "string" || !value.trim()) throw new Error(`${label} must be a non-empty string`);
+  if (Buffer.byteLength(value, "utf8") > maxBytes) throw new Error(`${label} exceeds ${maxBytes} bytes`);
+  return value;
+}
+function optionalString(value, label, maxBytes) {
+  if (value === void 0 || value === null || value === "") return void 0;
+  return requiredString(value, label, maxBytes);
+}
+function stringArray3(value, label, maximum) {
+  if (value === void 0 || value === null) return [];
+  if (!Array.isArray(value) || value.length > maximum || value.some((item) => typeof item !== "string")) {
+    throw new Error(`${label} must be an array of at most ${maximum} strings`);
+  }
+  return [...new Set(value.map((item) => item.trim()).filter(Boolean))];
+}
+function numberValue2(value, minimum, maximum) {
+  if (value === void 0 || value === null) return void 0;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new Error(`numeric value must be an integer between ${minimum} and ${maximum}`);
+  }
+  return value;
+}
+function backendConfigKey(config) {
+  return createHash5("sha256").update(JSON.stringify(config.mixagents ?? {})).digest("hex");
+}
+function safeError(error) {
+  return truncate2(redactSecrets(error instanceof Error ? error.message : String(error)), 8e3);
+}
+function truncate2(value, maximum) {
+  return Buffer.byteLength(value, "utf8") <= maximum ? value : `${value.slice(0, maximum)}\u2026[truncated]`;
+}
+function success(text2) {
+  return { success: true, text: text2 };
+}
+function failure(text2) {
+  return { success: false, text: text2 };
+}
+function isRecord4(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+function neverAbortSignal() {
+  return new AbortController().signal;
+}
+function readStateFile(path) {
+  try {
+    return readFileSync6(path, "utf8");
+  } catch {
+    return void 0;
+  }
+}
+
+// src/integrations/project-rsi.ts
+import { createHash as createHash6 } from "crypto";
+import { lstat as lstat3, mkdtemp, readFile as readFile16, readdir as readdir5, realpath as realpath5, rm as rm13, stat as stat6, writeFile as writeFile9, mkdir as mkdir17 } from "fs/promises";
 import { homedir as homedir9, tmpdir as tmpdir4 } from "os";
-import { dirname as dirname18, isAbsolute as isAbsolute4, join as join27, parse, relative, resolve as resolve4 } from "path";
+import { dirname as dirname18, isAbsolute as isAbsolute5, join as join27, parse as parse2, relative as relative2, resolve as resolve4 } from "path";
 var CONFIG_RELATIVE_PATH = join27(".project-rsi", "config.json");
 var EVIDENCE_RELATIVE_PATH = join27(".agent", "rsi");
 var MAX_CONFIG_BYTES = 256 * 1024;
@@ -14066,7 +15000,7 @@ async function projectRsiStatus(config, cwd) {
       initialized: false,
       runner: "unknown",
       validator: "unknown",
-      error: safeError(error)
+      error: safeError2(error)
     };
   }
   if (!project) {
@@ -14143,7 +15077,7 @@ async function writeRsiReviewEvidence(runDir, review) {
     access: review.access,
     agentId: review.agentId,
     verdict: redactSecrets(review.verdict).slice(0, 80),
-    responseHash: createHash5("sha256").update(safeResponse).digest("hex"),
+    responseHash: createHash6("sha256").update(safeResponse).digest("hex"),
     response: safeResponse.slice(0, 16e3),
     startedAt: review.startedAt,
     completedAt: review.completedAt
@@ -14257,7 +15191,7 @@ async function readProject(root, configPath) {
   try {
     parsed = JSON.parse(await readFile16(configPath, "utf8"));
   } catch (error) {
-    throw new Error(`\u65E0\u6CD5\u89E3\u6790 Project RSI \u914D\u7F6E ${configPath}: ${safeError(error)}`);
+    throw new Error(`\u65E0\u6CD5\u89E3\u6790 Project RSI \u914D\u7F6E ${configPath}: ${safeError2(error)}`);
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error(`Project RSI \u914D\u7F6E\u5FC5\u987B\u662F\u5BF9\u8C61\uFF1A${configPath}`);
@@ -14265,7 +15199,7 @@ async function readProject(root, configPath) {
   const config = parsed;
   if (config.projectRoot) {
     const declared = resolve4(safeRoot, config.projectRoot);
-    const canonicalDeclared = await realpath4(declared).catch(() => void 0);
+    const canonicalDeclared = await realpath5(declared).catch(() => void 0);
     if (canonicalDeclared !== safeRoot) {
       throw new Error("Project RSI \u914D\u7F6E\u4E2D\u7684 projectRoot \u4E0E\u53D1\u73B0\u76EE\u5F55\u4E0D\u4E00\u81F4");
     }
@@ -14282,13 +15216,13 @@ async function readProject(root, configPath) {
 async function canonicalSafeProjectRoot(input) {
   if (!input.trim()) return void 0;
   const candidate = resolve4(input);
-  if (!isAbsolute4(candidate) || candidate === parse(candidate).root) return void 0;
-  const canonical = await realpath4(candidate).catch(() => void 0);
+  if (!isAbsolute5(candidate) || candidate === parse2(candidate).root) return void 0;
+  const canonical = await realpath5(candidate).catch(() => void 0);
   if (!canonical) return void 0;
   const home = resolve4(homedir9());
-  if (canonical === home || canonical === parse(canonical).root) return void 0;
-  if (dirname18(canonical) === parse(canonical).root) return void 0;
-  const info = await lstat2(canonical);
+  if (canonical === home || canonical === parse2(canonical).root) return void 0;
+  if (dirname18(canonical) === parse2(canonical).root) return void 0;
+  const info = await lstat3(canonical);
   return info.isDirectory() && !info.isSymbolicLink() ? canonical : void 0;
 }
 async function listRuns(project) {
@@ -14317,12 +15251,12 @@ async function listRuns(project) {
     const manifestRunId = typeof raw.runId === "string" ? raw.runId.trim() : "";
     if (manifestRunId !== entry.name) continue;
     const declaredRoot = typeof raw.projectRoot === "string" ? raw.projectRoot.trim() : typeof raw.project === "object" && raw.project && !Array.isArray(raw.project) ? raw.project.root : void 0;
-    const canonicalDeclared = typeof declaredRoot === "string" && declaredRoot.trim() ? await realpath4(resolve4(project.root, declaredRoot.trim())).catch(() => void 0) : void 0;
+    const canonicalDeclared = typeof declaredRoot === "string" && declaredRoot.trim() ? await realpath5(resolve4(project.root, declaredRoot.trim())).catch(() => void 0) : void 0;
     if (canonicalDeclared !== project.root) {
       continue;
     }
     const rawManifest = await readFile16(manifestPath, "utf8");
-    const manifestHash = createHash5("sha256").update(rawManifest).digest("hex");
+    const manifestHash = createHash6("sha256").update(rawManifest).digest("hex");
     const receipt = await readValidatorReceipt(dir, entry.name, manifestHash);
     const task = isRecordValue(raw.task);
     const turnContext = isRecordValue(raw.turn);
@@ -14374,7 +15308,7 @@ async function readValidatorReceipt(runDir, runId, manifestHash) {
         } : {}
       };
     } catch (error) {
-      return { path, passed: false, reason: safeError(error) };
+      return { path, passed: false, reason: safeError2(error) };
     }
   }
   return { path: join27(runDir, "validator.json"), passed: false, reason: "\u7F3A\u5C11 validator receipt" };
@@ -14417,10 +15351,10 @@ async function isRegularFile(path) {
   return (await stat6(path).catch(() => void 0))?.isFile() ?? false;
 }
 function isWithin(root, candidate) {
-  const rel = relative(root, candidate);
-  return rel === "" || !rel.startsWith("..") && !isAbsolute4(rel);
+  const rel = relative2(root, candidate);
+  return rel === "" || !rel.startsWith("..") && !isAbsolute5(rel);
 }
-function safeError(error) {
+function safeError2(error) {
   return redactSecrets(error instanceof Error ? error.message : String(error));
 }
 function abortError3() {
@@ -14639,10 +15573,11 @@ function proxyEnvironment(env) {
 // src/agent/structured/codex.ts
 var toolItems = /* @__PURE__ */ new Set(["commandExecution", "fileChange", "mcpToolCall", "collabAgentToolCall", "webSearch", "imageGeneration", "dynamicToolCall"]);
 var CodexStructuredSession = class _CodexStructuredSession {
-  constructor(id, endpoint, rpc) {
+  constructor(id, endpoint, rpc, brokerTools) {
     this.id = id;
     this.endpoint = endpoint;
     this.rpc = rpc;
+    this.brokerTools = brokerTools;
     this.listener = (message) => this.receive(message);
     rpc.on("message", this.listener);
     rpc.on("disconnected", this.disconnected);
@@ -14650,6 +15585,7 @@ var CodexStructuredSession = class _CodexStructuredSession {
   id;
   endpoint;
   rpc;
+  brokerTools;
   emit;
   complete;
   turnId;
@@ -14668,6 +15604,7 @@ var CodexStructuredSession = class _CodexStructuredSession {
   acknowledgements = /* @__PURE__ */ new Map();
   deferredInteractions = [];
   usageTotal;
+  toolAbort = new AbortController();
   listener;
   /** False when the underlying App Server channel is gone and must be rebuilt. */
   isAlive() {
@@ -14734,6 +15671,8 @@ ${p4.command ?? JSON.stringify(p4.changes ?? {})}`,
             choices: options.map((option, i) => ({ label: option.label, value: String(i + 1) }))
           }));
         }
+      } else if (message.method === "item/tool/call") {
+        void this.handleDynamicToolCall(message.id, p4);
       } else {
         this.rpc.rejectRequest(message.id, "Unsupported control request");
         this.emit?.(textEvent(`\u672A\u5B9E\u73B0\u7684 Codex \u63A7\u5236\u8BF7\u6C42\uFF1A${message.method}
@@ -14819,6 +15758,28 @@ ${p4.command ?? JSON.stringify(p4.changes ?? {})}`,
       }
     }
   }
+  async handleDynamicToolCall(id, params) {
+    const expectedNamespace = this.brokerTools?.specs[0]?.name;
+    let result;
+    if (!this.brokerTools || !expectedNamespace) {
+      result = { success: false, text: "Bridge Broker tools are not configured for this thread." };
+    } else if (params.namespace && params.namespace !== expectedNamespace) {
+      result = {
+        success: false,
+        text: `Unknown dynamic tool namespace: ${String(params.namespace)}; expected ${expectedNamespace}.`
+      };
+    } else {
+      const tool = typeof params.tool === "string" ? params.tool : "";
+      result = await this.brokerTools.call(tool, params.arguments, this.toolAbort.signal);
+    }
+    try {
+      this.rpc.respond(id, {
+        contentItems: [{ type: "inputText", text: result.text }],
+        success: result.success
+      });
+    } catch {
+    }
+  }
   async submit(options, emit2, signal) {
     if (this.emit) throw new Error("Structured thread already has an active relay");
     if (signal.aborted) return;
@@ -14873,6 +15834,9 @@ ${options.prompt}` : options.prompt }];
       this.emit = void 0;
       this.complete = void 0;
     }
+  }
+  setBrokerWriteAuthorization(authorization) {
+    this.brokerTools?.setWriteAuthorization?.(authorization);
   }
   async command(input) {
     const [name, ...args] = input.trim().split(/\s+/);
@@ -15098,6 +16062,7 @@ ${options.prompt}` : options.prompt }];
     await this.close();
   }
   async close() {
+    this.toolAbort.abort();
     this.rpc.off("message", this.listener);
     this.rpc.off("disconnected", this.disconnected);
     for (const waiter of this.acknowledgements.values()) waiter.reject(new Error("Session closed"));
@@ -15105,6 +16070,8 @@ ${options.prompt}` : options.prompt }];
     this.pending.clear();
     this.menus.clear();
     this.finish();
+    await this.brokerTools?.close().catch(() => {
+    });
   }
   disconnect() {
     this.rpc.close();
@@ -15426,8 +16393,8 @@ ${JSON.stringify(input, null, 2)}`,
 };
 
 // src/agent/structured/view.ts
-import { createHash as createHash6 } from "crypto";
-import { mkdir as mkdir18, appendFile, lstat as lstat3, chmod as chmod7 } from "fs/promises";
+import { createHash as createHash7 } from "crypto";
+import { mkdir as mkdir18, appendFile, lstat as lstat4, chmod as chmod7 } from "fs/promises";
 import { join as join28 } from "path";
 var quote = (value) => `'${value.replace(/'/g, `'\\''`)}'`;
 var StructuredView = class {
@@ -15446,10 +16413,10 @@ var StructuredView = class {
     if (native) this.nativeSpec = native;
     if (cwd) this.nativeCwd = cwd;
     await mkdir18(this.directory, { recursive: true, mode: 448 });
-    const info = await lstat3(this.directory);
+    const info = await lstat4(this.directory);
     if (info.isSymbolicLink() || !info.isDirectory() || process.getuid && info.uid !== process.getuid()) throw new Error("Unsafe terminal view directory");
     await chmod7(this.directory, 448);
-    const name = `argbridge-api-${createHash6("sha256").update(this.key).digest("hex").slice(0, 16)}`;
+    const name = `argbridge-api-${createHash7("sha256").update(this.key).digest("hex").slice(0, 16)}`;
     this.logPath = join28(this.directory, `${name}.log`);
     await appendFile(this.logPath, "", { mode: 384 });
     if (!native) {
@@ -15490,7 +16457,7 @@ var StructuredView = class {
     if (options.native) this.nativeSpec = options.native;
     if (artifactEnv && Object.keys(artifactEnv).length > 0) {
       const socket = this.statusValue.terminal?.socketPath;
-      const name = `argbridge-api-${createHash6("sha256").update(this.key).digest("hex").slice(0, 16)}`;
+      const name = `argbridge-api-${createHash7("sha256").update(this.key).digest("hex").slice(0, 16)}`;
       if (socket) {
         for (const [key, value] of Object.entries(artifactEnv)) {
           if (value === void 0) continue;
@@ -15563,7 +16530,7 @@ ${event.output}
 
 // src/agent/structured/tmux-discovery.ts
 import { basename as basename6, resolve as resolvePath } from "path";
-import { readFileSync as readFileSync6, readlinkSync as readlinkSync2 } from "fs";
+import { readFileSync as readFileSync7, readlinkSync as readlinkSync2 } from "fs";
 function listStructuredTmuxPanes(socket) {
   return listTmuxAgentPanes(socket).flatMap((pane) => {
     const processArgs = [
@@ -15635,13 +16602,13 @@ function processEnvironmentForPidTree(rootPid) {
   let fallback = {};
   for (const pid of ids) {
     try {
-      const raw = readFileSync6(`/proc/${pid}/environ`, "utf8");
+      const raw = readFileSync7(`/proc/${pid}/environ`, "utf8");
       const env = Object.fromEntries(raw.split("\0").flatMap((item) => {
         const index = item.indexOf("=");
         return index > 0 ? [[item.slice(0, index), item.slice(index + 1)]] : [];
       }));
       if (!Object.keys(fallback).length) fallback = env;
-      const argv = readFileSync6(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
+      const argv = readFileSync7(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
       if (argv.slice(0, 2).some((arg) => basename6(arg) === "codex")) return env;
     } catch {
     }
@@ -15672,7 +16639,7 @@ function processArgvTree(rootPid) {
   return [...ids].flatMap((pid) => {
     if (process.platform === "linux") {
       try {
-        const argv = readFileSync6(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
+        const argv = readFileSync7(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
         if (argv.length) return [argv];
       } catch {
       }
@@ -15697,7 +16664,7 @@ function processArgvForPane(pane) {
     let tmuxMatch = false;
     let cwdMatch = false;
     try {
-      const env = readFileSync6(`/proc/${pid}/environ`, "utf8");
+      const env = readFileSync7(`/proc/${pid}/environ`, "utf8");
       const values = /* @__PURE__ */ new Map();
       for (const item of env.split("\0")) {
         const equals = item.indexOf("=");
@@ -15744,6 +16711,29 @@ function parseBtwRequest(prompt) {
     body = body.slice(explicit[0].length).trim();
   }
   return { body, ...route ? { route } : {} };
+}
+function parseWriteAuthorizationPrompt(prompt) {
+  const marker = /^\s*arg-bridge-write(?:\s|$)/iu;
+  if (!marker.test(prompt)) return { prompt };
+  const match = /^\s*arg-bridge-write\s+--workspace\s+(?:"([^"]+)"|(\S+))\s+--task\s+([\s\S]+)$/iu.exec(prompt);
+  if (!match) {
+    return {
+      prompt,
+      error: "workspace-write \u6388\u6743\u683C\u5F0F\u65E0\u6548\u3002\u8BF7\u4F7F\u7528\uFF1Aarg-bridge-write --workspace /abs/path --task <\u5B8C\u6574\u4EFB\u52A1>"
+    };
+  }
+  const workspace = (match[1] ?? match[2] ?? "").trim();
+  const task = match[3].trim();
+  if (!workspace || !task) {
+    return {
+      prompt,
+      error: "workspace-write \u6388\u6743\u7F3A\u5C11 workspace \u6216 task\u3002\u8BF7\u4F7F\u7528\uFF1Aarg-bridge-write --workspace /abs/path --task <\u5B8C\u6574\u4EFB\u52A1>"
+    };
+  }
+  return {
+    prompt: task,
+    authorization: { workspace, task }
+  };
 }
 function routeChangeReason(state, route, cwd) {
   if (state.cwd !== cwd) return `workspace ${state.cwd} \u2192 ${cwd}`;
@@ -15816,10 +16806,10 @@ async function resolveAppServerSocketPath(candidate) {
     throw new Error("App Server endpoint \u4E0D\u5B89\u5168");
   }
   const requested = resolve5(candidate);
-  const resolvedPath = await realpath5(requested);
+  const resolvedPath = await realpath6(requested);
   await assertOwnedParents(resolvedPath);
   if (requested !== resolvedPath) {
-    const requestedParent = await realpath5(join29(requested, ".."));
+    const requestedParent = await realpath6(join29(requested, ".."));
     await assertOwnedParents(requestedParent);
   }
   const info = await stat7(resolvedPath);
@@ -15835,7 +16825,7 @@ async function assertOwnedParents(target) {
     const directory = resolve5(current);
     if (directory === "/") return;
     if (trustedSocketParents.has(directory)) return;
-    const info = await lstat4(directory);
+    const info = await lstat5(directory);
     if (!isSafeSocketParent(info)) throw new Error("App Server socket \u4E0D\u5B89\u5168");
     trustedSocketParents.add(directory);
     current = join29(directory, "..");
@@ -15857,9 +16847,11 @@ var StructuredAdapter = class {
     this.bindingsFile = join29(options.profileDir, "structured", "tmux-bindings.json");
     this.candidatesFile = join29(options.profileDir, "structured", "tmux-candidates.json");
     this.sidesFile = join29(options.profileDir, "structured", "subagent-sides.json");
+    this.brokerThreadsFile = join29(options.profileDir, "structured", "broker-threads.json");
     this.loadBindings();
     this.loadCandidates();
     this.loadMixagentsSides();
+    this.loadBrokerThreads();
     this.tmux = {
       list: async (socket) => this.listStructuredPanes(socket),
       bind: async (scope, selector) => this.bindTmuxPane(scope, selector),
@@ -15956,6 +16948,8 @@ var StructuredAdapter = class {
   bindingsFile;
   candidatesFile;
   sidesFile;
+  brokerThreadsFile;
+  brokerThreads = /* @__PURE__ */ new Map();
   candidates = /* @__PURE__ */ new Map();
   mixagentsSides = /* @__PURE__ */ new Map();
   credentialResolution = { env: {}, injected: false, missingToken: false };
@@ -16044,7 +17038,7 @@ var StructuredAdapter = class {
   }
   loadBindings() {
     try {
-      const parsed = JSON.parse(readFileSync7(this.bindingsFile, "utf8"));
+      const parsed = JSON.parse(readFileSync8(this.bindingsFile, "utf8"));
       if (parsed.version !== 1) return;
       for (const scope of parsed.disabled ?? []) if (typeof scope === "string") this.autoDiscoveryDisabled.add(scope);
       for (const [scope, binding] of Object.entries(parsed.bindings ?? {})) {
@@ -16055,7 +17049,7 @@ var StructuredAdapter = class {
   }
   loadCandidates() {
     try {
-      const parsed = JSON.parse(readFileSync7(this.candidatesFile, "utf8"));
+      const parsed = JSON.parse(readFileSync8(this.candidatesFile, "utf8"));
       if (parsed.version !== 1) return;
       for (const [key, candidate] of Object.entries(parsed.candidates ?? {})) {
         if (candidate?.threadId && candidate.cwd && candidate.target?.socketPath && candidate.target?.sessionName) this.candidates.set(key, candidate);
@@ -16069,7 +17063,7 @@ var StructuredAdapter = class {
   }
   loadMixagentsSides() {
     try {
-      const parsed = JSON.parse(readFileSync7(this.sidesFile, "utf8"));
+      const parsed = JSON.parse(readFileSync8(this.sidesFile, "utf8"));
       if (parsed.version !== 1) return;
       for (const [key, side] of Object.entries(parsed.sides ?? {})) {
         if (!side?.agent?.agentId || !side.route?.id || !side.cwd || !side.scope) continue;
@@ -16116,6 +17110,64 @@ var StructuredAdapter = class {
   async currentRsiConfig() {
     const profile2 = await this.reloadProfileConfig();
     return profile2?.rsi ?? this.options.rsi ?? DEFAULT_RSI_CONFIG;
+  }
+  async brokerToolsEnabled() {
+    const config = await this.currentSubagentsConfig();
+    return {
+      enabled: this.id === "codex" && config.enabled && config.modelTools && (config.mode === "auto" || config.mode === "broker"),
+      config
+    };
+  }
+  loadBrokerThreads() {
+    try {
+      const parsed = JSON.parse(readFileSync8(this.brokerThreadsFile, "utf8"));
+      if (parsed.version !== 1) return;
+      for (const [threadId, value] of Object.entries(parsed.threads ?? {})) {
+        if (!threadId || value?.version !== BROKER_TOOL_VERSION || !value.namespace) continue;
+        this.brokerThreads.set(threadId, {
+          version: value.version,
+          namespace: value.namespace,
+          createdAt: value.createdAt ?? Date.now()
+        });
+      }
+    } catch {
+    }
+  }
+  async saveBrokerThreads() {
+    await mkdir19(join29(this.options.profileDir, "structured"), { recursive: true, mode: 448 });
+    await writeFileAtomic(
+      this.brokerThreadsFile,
+      `${JSON.stringify({ version: 1, threads: Object.fromEntries(this.brokerThreads) }, null, 2)}
+`,
+      { mode: 384 }
+    );
+  }
+  hasBrokerTools(threadId, namespace) {
+    const marker = this.brokerThreads.get(threadId);
+    return marker?.version === BROKER_TOOL_VERSION && marker.namespace === namespace;
+  }
+  async markBrokerThread(threadId, namespace) {
+    this.brokerThreads.set(threadId, {
+      version: BROKER_TOOL_VERSION,
+      namespace,
+      createdAt: this.brokerThreads.get(threadId)?.createdAt ?? Date.now()
+    });
+    await this.saveBrokerThreads();
+  }
+  brokerController(threadId, scope, cwd, namespace) {
+    return new BrokerToolController({
+      threadId,
+      cwd,
+      scope,
+      stateFile: join29(
+        this.options.profileDir,
+        "structured",
+        `broker-workers-${createHash8("sha256").update(threadId).digest("hex").slice(0, 24)}.json`
+      ),
+      env: this.options.env ?? process.env,
+      namespace,
+      getConfig: () => this.currentSubagentsConfig()
+    });
   }
   async reloadProfileConfig() {
     if (!this.options.configFile || !this.options.profile) return void 0;
@@ -16330,11 +17382,13 @@ var StructuredAdapter = class {
     emit2(textEvent(`MixAgents side \u72B6\u6001\uFF1A${result.status}`));
   }
   async enforceRsiGate(input) {
-    if (!input.persistentChanges && !input.highImpact) return;
-    if (/^\/(?:btw|model|compact|stop|status|skills)(?:\s|$)/iu.test(input.prompt.trim())) return;
+    if (!input.persistentChanges && !input.highImpact) return { ok: true };
+    if (/^\/(?:btw|model|compact|stop|status|skills)(?:\s|$)/iu.test(input.prompt.trim())) {
+      return { ok: true };
+    }
     const config = await this.currentRsiConfig();
-    if (config.mode === "off") return;
-    const taskHash = createHash7("sha256").update(input.prompt).digest("hex");
+    if (config.mode === "off") return { ok: true };
+    const taskHash = createHash8("sha256").update(input.prompt).digest("hex");
     const turnContext = {
       turnStartedAt: input.turnStartedAt,
       threadId: input.threadId,
@@ -16343,7 +17397,7 @@ var StructuredAdapter = class {
     const project = await discoverProjectRsi(input.cwd, config.projectRoot);
     if (!project) {
       if (config.projectRoot) throw new Error(`Project RSI \u6839\u76EE\u5F55\u672A\u521D\u59CB\u5316\u6216\u4E0D\u5B58\u5728\uFF1A${config.projectRoot}`);
-      return;
+      return { ok: true };
     }
     let result = await verifyFreshRsiRun(project, turnContext);
     if (!result.ok) {
@@ -16351,7 +17405,11 @@ var StructuredAdapter = class {
       if (latest && latest.manifestMtimeMs >= input.turnStartedAt && !latest.validatorPassed) {
         const validation = await runUpstreamValidator(project, latest, config, input.signal);
         if (!validation.ok) {
-          throw new Error(`Project RSI validator \u672A\u901A\u8FC7\uFF1A${validation.reason}`);
+          return {
+            ok: false,
+            reason: `Project RSI validator \u672A\u901A\u8FC7\uFF1A${validation.reason}`,
+            runDir: latest.dir
+          };
         }
         result = await verifyFreshRsiRun(project, turnContext);
       } else {
@@ -16364,16 +17422,24 @@ var StructuredAdapter = class {
         );
         if (runner.attempted) {
           if (!runner.ok) {
-            throw new Error(`Project RSI runner \u672A\u6210\u529F\uFF1A${runner.reason}`);
+            const latestAfterRunner = await latestRsiRun(project);
+            return {
+              ok: false,
+              reason: `Project RSI runner \u672A\u6210\u529F\uFF1A${runner.reason}`,
+              ...latestAfterRunner ? { runDir: latestAfterRunner.dir } : {}
+            };
           }
           result = await verifyFreshRsiRun(project, turnContext);
         }
       }
     }
     if (!result.ok) {
-      throw new Error(
-        `${result.reason}\u3002\u8BF7\u901A\u8FC7\u9879\u76EE\u4E0A\u6E38 Project RSI runner \u751F\u6210\u672C\u8F6E run\u3001probe \u548C validator receipt \u540E\u91CD\u8BD5\uFF1Bbridge \u4E0D\u4F1A\u4F2A\u9020\u8BC1\u636E\u6216\u964D\u4F4E validator \u95E8\u69DB\u3002`
-      );
+      const latest = await latestRsiRun(project);
+      return {
+        ok: false,
+        reason: `${result.reason}\u3002\u8BF7\u901A\u8FC7\u9879\u76EE\u4E0A\u6E38 Project RSI runner \u751F\u6210\u672C\u8F6E run\u3001probe \u548C validator receipt \u540E\u91CD\u8BD5\uFF1Bbridge \u4E0D\u4F1A\u4F2A\u9020\u8BC1\u636E\u6216\u964D\u4F4E validator \u95E8\u69DB\u3002`,
+        ...latest ? { runDir: latest.dir } : {}
+      };
     }
     input.emit({
       type: "system",
@@ -16382,7 +17448,21 @@ var StructuredAdapter = class {
     });
     input.emit(textEvent(`Project RSI gate\uFF1APASS\uFF08run=${result.runId}\uFF0Cvalidator receipt \u5DF2\u9A8C\u8BC1\uFF09
 `));
-    await this.runRsiReview(project.root, result.runDir, input.signal, input.emit);
+    const review = await this.runRsiReview(project.root, result.runDir, input.signal, input.emit);
+    if (!review.ok) {
+      return {
+        ok: false,
+        reason: `Project RSI reviewer \u672A\u901A\u8FC7\uFF1A${review.reason}`,
+        runId: result.runId,
+        runDir: result.runDir
+      };
+    }
+    return {
+      ok: true,
+      runId: result.runId,
+      runDir: result.runDir,
+      ...review.path ? { reviewPath: review.path } : {}
+    };
   }
   async runRsiReview(projectRoot, runDir, signal, emit2) {
     const rsi = await this.currentRsiConfig();
@@ -16404,13 +17484,13 @@ var StructuredAdapter = class {
         signal
       });
     } catch (error) {
-      emit2(textEvent(`Project RSI reviewer \u672A\u8FD0\u884C\uFF1A${error instanceof Error ? error.message : String(error)}
-`));
-      return;
+      return {
+        ok: false,
+        reason: `reviewer \u672A\u8FD0\u884C\uFF1A${error instanceof Error ? error.message : String(error)}`
+      };
     }
     if (resolved.kind !== "mixagents" || !resolved.backend || !resolved.route) {
-      emit2(textEvent("Project RSI reviewer \u672A\u8FD0\u884C\uFF1A\u6CA1\u6709\u53EF\u7528\u7684 MixAgents read route\u3002\n"));
-      return;
+      return { ok: false, reason: "\u6CA1\u6709\u53EF\u7528\u7684 MixAgents read route" };
     }
     const manifest = await readFile18(join29(runDir, "manifest.json"), "utf8").catch(() => "{}");
     const startedAt = Date.now();
@@ -16434,9 +17514,10 @@ ${truncateSnapshot(redactDiagnosticText(redactSecrets(manifest)), 8e3)}
       try {
         const outcome = await resolved.backend.wait(agent, signal);
         if (outcome.status !== "completed" || !outcome.text) {
-          emit2(textEvent(`Project RSI reviewer ${outcome.status}\uFF1A${outcome.error ?? "\u65E0\u8F93\u51FA"}
-`));
-          return;
+          return {
+            ok: false,
+            reason: `reviewer ${outcome.status}\uFF1A${outcome.error ?? "\u65E0\u8F93\u51FA"}`
+          };
         }
         const path = await writeRsiReviewEvidence(runDir, {
           route: resolved.route.id,
@@ -16451,14 +17532,118 @@ ${truncateSnapshot(redactDiagnosticText(redactSecrets(manifest)), 8e3)}
         });
         emit2(textEvent(`Project RSI reviewer\uFF1Aroute=${resolved.route.id} access=read-only evidence=${path}
 `));
+        return { ok: true, path };
       } finally {
         await resolved.backend.close(agent, signal).catch(() => {
         });
       }
+    } catch (error) {
+      return {
+        ok: false,
+        reason: error instanceof Error ? error.message : String(error)
+      };
     } finally {
       await resolved.backend.closeBackend?.().catch(() => {
       });
     }
+  }
+  async enforceRsiWithRepair(input) {
+    const config = await this.currentRsiConfig();
+    let attemptStartedAt = input.turnStartedAt;
+    let gate = await this.enforceRsiGate({
+      cwd: input.cwd,
+      prompt: input.prompt,
+      threadId: input.threadId,
+      turnStartedAt: attemptStartedAt,
+      persistentChanges: input.persistentChanges,
+      highImpact: input.highImpact,
+      emit: input.emit,
+      signal: input.signal
+    });
+    const rounds = [];
+    for (let round = 1; !gate.ok && round <= config.maxRepairRounds; round += 1) {
+      if (input.signal.aborted) throw new Error("Project RSI repair loop aborted");
+      const startedAt = Date.now();
+      attemptStartedAt = startedAt;
+      const reason = gate.reason ?? "Project RSI gate failed";
+      input.emit(textEvent(
+        `Project RSI repair round ${round}/${config.maxRepairRounds}\uFF1A\u6536\u5230\u7ED3\u6784\u5316 findings\uFF0C\u7236 agent \u5C06\u5728\u540C\u4E00 thread \u4FEE\u590D\u540E\u91CD\u65B0\u751F\u6210 fresh run\u3002
+`
+      ));
+      const repairPrompt = [
+        `Project RSI validator/reviewer did not pass (repair round ${round}/${config.maxRepairRounds}).`,
+        "Fix the underlying project evidence or implementation in this same task. Do not fabricate receipts, lower thresholds, delete tests, or approve proposals automatically.",
+        "After repairing, invoke the upstream Project RSI runner and validator so a new run is bound to this thread and task.",
+        "<validator-findings>",
+        truncateSnapshot(reason, 8e3),
+        "</validator-findings>"
+      ].join("\n");
+      const timeout = AbortSignal.timeout(config.repairTimeoutMs);
+      const repairSignal = AbortSignal.any([input.signal, timeout]);
+      const repairOptions = {
+        ...input.payload,
+        prompt: repairPrompt
+      };
+      try {
+        await input.target.submit(repairOptions, input.submitEmit, repairSignal);
+      } catch (error) {
+        if (timeout.aborted) {
+          gate = {
+            ok: false,
+            reason: `Project RSI repair round ${round} timed out after ${config.repairTimeoutMs}ms`,
+            ...gate.runDir ? { runDir: gate.runDir } : {}
+          };
+          break;
+        }
+        throw error;
+      }
+      const completedAt = Date.now();
+      rounds.push({
+        round,
+        findings: truncateSnapshot(redactSecrets(reason), 8e3),
+        promptHash: createHash8("sha256").update(repairPrompt).digest("hex"),
+        startedAt: new Date(startedAt).toISOString(),
+        completedAt: new Date(completedAt).toISOString()
+      });
+      if (gate.runDir) {
+        await this.writeRsiRepairEvidence(gate.runDir, rounds, void 0);
+      }
+      gate = await this.enforceRsiGate({
+        cwd: input.cwd,
+        prompt: input.prompt,
+        threadId: input.threadId,
+        turnStartedAt: attemptStartedAt,
+        persistentChanges: true,
+        highImpact: input.highImpact,
+        emit: input.emit,
+        signal: input.signal
+      });
+    }
+    if (!gate.ok) {
+      if (gate.runDir) {
+        await this.writeRsiRepairEvidence(gate.runDir, rounds, gate.reason);
+      }
+      throw new Error(
+        `Project RSI gate \u5728 ${config.maxRepairRounds} \u8F6E\u4FEE\u590D\u540E\u4ECD\u672A\u901A\u8FC7\uFF1A${gate.reason ?? "unknown reason"}`
+      );
+    }
+    if (gate.runDir && rounds.length > 0) {
+      await this.writeRsiRepairEvidence(gate.runDir, rounds, void 0);
+    }
+  }
+  async writeRsiRepairEvidence(runDir, rounds, finalFailure) {
+    await writeFileAtomic(
+      join29(runDir, "repair-loop.json"),
+      `${JSON.stringify({
+        version: 1,
+        rounds,
+        finalVerdict: finalFailure ? "failed" : "passed",
+        ...finalFailure ? { finalFailure: redactSecrets(finalFailure) } : {},
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+      }, null, 2)}
+`,
+      { mode: 384 }
+    );
   }
   async saveBindings() {
     await mkdir19(join29(this.options.profileDir, "structured"), { recursive: true, mode: 448 });
@@ -16675,6 +17860,9 @@ ${truncateSnapshot(redactDiagnosticText(redactSecrets(manifest)), 8e3)}
     return this.createRun(options, true);
   }
   createRun(options, side) {
+    const parsedWriteAuthorization = side ? { prompt: options.prompt } : parseWriteAuthorizationPrompt(options.prompt);
+    options = { ...options, prompt: parsedWriteAuthorization.prompt };
+    const writeAuthorization = parsedWriteAuthorization.authorization;
     const events = new AsyncEventQueue();
     const abort = new AbortController();
     let detached = false;
@@ -16682,6 +17870,7 @@ ${truncateSnapshot(redactDiagnosticText(redactSecrets(manifest)), 8e3)}
     let persistentChanges = false;
     let highImpact = false;
     let mainFailed = false;
+    let authorizedMain;
     let bufferedDone;
     let assistantOutput = "";
     const turnStartedAt = Date.now();
@@ -16711,6 +17900,7 @@ ${truncateSnapshot(redactDiagnosticText(redactSecrets(manifest)), 8e3)}
     };
     void (async () => {
       try {
+        if (parsedWriteAuthorization.error) throw new Error(parsedWriteAuthorization.error);
         const scope = options.scopeId ?? options.cwd ?? "";
         const known = this.sessions.get(scope);
         if (side && options.liveInputMode === "side-exit" && options.cwd) {
@@ -16728,6 +17918,14 @@ ${truncateSnapshot(redactDiagnosticText(redactSecrets(manifest)), 8e3)}
         }
         const current = await this.session(options);
         if (abort.signal.aborted) return;
+        if (writeAuthorization && current.main instanceof CodexStructuredSession) {
+          current.main.setBrokerWriteAuthorization(writeAuthorization);
+          authorizedMain = current.main;
+          emit2(textEvent(
+            `workspace-write \u6388\u6743\u5DF2\u7ED1\u5B9A\u5F53\u524D\u4EFB\u52A1\uFF1Aworkspace=${writeAuthorization.workspace}
+`
+          ));
+        }
         const activeMixagents = this.mixagentsSideForScope(scope);
         if (!side && options.liveInputMode === "command" && activeMixagents && /^\/status(?:\s|$)/iu.test(options.prompt.trim())) {
           emit2(textEvent(
@@ -16853,17 +18051,28 @@ ${prompt}
           this.sessions.delete(scope2);
           const rebuilt = await this.session(options);
           if (!(rebuilt.main instanceof CodexStructuredSession)) throw error;
-          target = rebuilt.main;
+          const rebuiltMain = rebuilt.main;
+          target = rebuiltMain;
+          if (writeAuthorization) {
+            rebuiltMain.setBrokerWriteAuthorization(writeAuthorization);
+            authorizedMain = rebuiltMain;
+          }
           await target.submit(payload, submitEmit, abort.signal);
         }
         if (!side && target === current.main && !mainFailed) {
-          await this.enforceRsiGate({
+          if (!(current.main instanceof CodexStructuredSession)) {
+            throw new Error("Project RSI repair loop requires a Codex structured main session");
+          }
+          await this.enforceRsiWithRepair({
             cwd: options.cwd,
             prompt: options.prompt,
             threadId: current.main.id,
             turnStartedAt,
             persistentChanges,
             highImpact,
+            payload,
+            target: current.main,
+            submitEmit,
             emit: emit2,
             signal: abort.signal
           });
@@ -16896,7 +18105,13 @@ ${prompt}
           terminationReason: abort.signal.aborted ? "interrupted" : "failed"
         });
       } finally {
-        if (!terminal && !detached) emit2({ type: "done", terminationReason: abort.signal.aborted ? "interrupted" : "normal" });
+        authorizedMain?.setBrokerWriteAuthorization(void 0);
+        if (!terminal && !detached) {
+          emit2({
+            type: "done",
+            terminationReason: abort.signal.aborted ? "interrupted" : "normal"
+          });
+        }
         events.close();
       }
     })();
@@ -16915,11 +18130,11 @@ ${prompt}
   }
   makeView(scope) {
     const key = `${this.options.profileDir}\0${scope}`;
-    const directory = join29(tmpdir5(), `ab-view-${process.getuid?.() ?? "user"}-${createHash7("sha256").update(key).digest("hex").slice(0, 12)}`);
+    const directory = join29(tmpdir5(), `ab-view-${process.getuid?.() ?? "user"}-${createHash8("sha256").update(key).digest("hex").slice(0, 12)}`);
     return new StructuredView(directory, key);
   }
   stateFile(scope, cwd) {
-    return join29(this.options.profileDir, "structured", `${createHash7("sha256").update(scope).update("\0").update(cwd).digest("hex")}.json`);
+    return join29(this.options.profileDir, "structured", `${createHash8("sha256").update(scope).update("\0").update(cwd).digest("hex")}.json`);
   }
   async saved(scope, cwd) {
     try {
@@ -17029,6 +18244,7 @@ ${prompt}
       if (this.options.codexHome) env.CODEX_HOME = this.options.codexHome;
       else if (process.env.CODEX_HOME) env.CODEX_HOME = process.env.CODEX_HOME;
       applyCodexCredentialEnv(this.credentialResolution, env);
+      const brokerState = await this.brokerToolsEnabled();
       if (!bound2 && !this.autoDiscoveryDisabled.has(scope) && saved?.view?.terminal) {
         const pane = activeStructuredTmuxPane(saved.view.terminal.socketPath, saved.view.terminal.target);
         if (pane?.structured?.endpoint) {
@@ -17038,6 +18254,11 @@ ${prompt}
         }
       }
       if (bound2) {
+        if (brokerState.enabled && !this.hasBrokerTools(bound2.threadId, brokerState.config.toolNamespace)) {
+          throw new Error(
+            "\u8BE5 tmux thread \u6CA1\u6709 Bridge Broker dynamic tools\uFF0C\u65E0\u6CD5\u5B89\u5168\u5173\u95ED native collaboration\u3002\u8BF7\u5148\u4ECE Bridge \u542F\u52A8\u65B0 thread\uFF1B\u65E7 thread \u4E0D\u80FD\u4F2A\u88C5\u6210 Broker orchestration\u3002"
+          );
+        }
         let rpc2;
         let endpoint2 = bound2.endpoint;
         let spawnedFresh = false;
@@ -17071,13 +18292,35 @@ ${prompt}
           if (!Array.isArray(loaded.data) || !loaded.data.includes(bound2.threadId)) throw new Error("tmux \u5F53\u524D resume \u7684 thread \u4E0D\u5728\u5BF9\u5E94 App Server \u4E2D");
           const resumed = await resumeCodexThread(
             rpc2,
-            { threadId: bound2.threadId, excludeTurns: true, cwd },
+            {
+              threadId: bound2.threadId,
+              excludeTurns: true,
+              cwd,
+              ...brokerState.enabled ? { config: brokerCodexThreadConfig(brokerState.config) } : {}
+            },
             options.liveInputMode ? {} : codexThreadPermissionOverrides(options.sandbox ?? this.options.sandbox)
           );
           if (resumed.thread?.id !== bound2.threadId) throw new Error("App Server \u8FD4\u56DE\u4E86\u4E0D\u540C\u7684 thread");
-          const attached = new CodexStructuredSession(bound2.threadId, endpoint2, rpc2);
+          const brokerTools = brokerState.enabled ? this.brokerController(
+            bound2.threadId,
+            scope,
+            cwd,
+            brokerState.config.toolNamespace
+          ) : void 0;
+          const attached = new CodexStructuredSession(bound2.threadId, endpoint2, rpc2, brokerTools);
           await attached.syncState();
-          await writeFileAtomic(stateFile, JSON.stringify({ id: bound2.threadId, cwd, scope, kind: this.id, endpoint: endpoint2, bound: true }, null, 2));
+          await writeFileAtomic(stateFile, JSON.stringify({
+            id: bound2.threadId,
+            cwd,
+            scope,
+            kind: this.id,
+            endpoint: endpoint2,
+            bound: true,
+            ...brokerState.enabled ? {
+              brokerToolsVersion: BROKER_TOOL_VERSION,
+              brokerToolNamespace: brokerState.config.toolNamespace
+            } : {}
+          }, null, 2));
           if (spawnedFresh) {
             await view.ensureNative(artifactEnvFrom(options), {
               force: true,
@@ -17128,18 +18371,65 @@ ${prompt}
         fingerprint: this.codexHostFingerprint(env),
         ...this.runtimeIdentity ? { runtimeIdentity: this.runtimeIdentity } : {}
       }));
-      const restored = saved ? new CodexStructuredSession(saved.id, endpoint, rpc) : void 0;
+      const savedHasBrokerTools = saved ? this.hasBrokerTools(saved.id, brokerState.config.toolNamespace) : false;
+      if (brokerState.enabled && saved && !savedHasBrokerTools) {
+        rpc.close();
+        throw new Error(
+          "\u65E7\u7ED3\u6784\u5316 thread \u6CA1\u6709\u6301\u4E45\u5316\u7684 Bridge Broker dynamic tools\uFF1B\u4E3A\u907F\u514D native spawn_agent \u518D\u6B21\u628A\u4EFB\u52A1\u5199\u5165 provider \u65E0\u6CD5\u8BFB\u53D6\u7684 encrypted_content\uFF0C\u672C\u6B21 resume \u5DF2\u62D2\u7EDD\u3002\u8BF7\u5728\u5F53\u524D workspace \u65B0\u5EFA\u4F1A\u8BDD\uFF1B\u65E7\u5386\u53F2\u4ECD\u53EF\u53EA\u8BFB\u67E5\u770B\u3002"
+        );
+      }
+      let restored;
       try {
+        let brokerDeveloperInstructions;
+        if (!saved && brokerState.enabled) {
+          const configRead = await rpc.request("config/read", { cwd });
+          const existing = configRead.config?.developer_instructions;
+          if (existing != null && typeof existing !== "string") {
+            throw new Error("Cannot preserve native developer instructions");
+          }
+          brokerDeveloperInstructions = [
+            existing?.trim() ? existing : "",
+            BrokerToolController.instructions(brokerState.config.toolNamespace)
+          ].filter(Boolean).join("\n\n");
+        }
+        const brokerConfig = brokerState.enabled ? brokerCodexThreadConfig(brokerState.config) : void 0;
         const common = {
           cwd,
           ...!saved && options.model ? { model: options.model } : {},
-          ...!saved && options.reasoningEffort ? { config: { model_reasoning_effort: options.reasoningEffort } } : {}
+          ...!saved && options.reasoningEffort || brokerConfig ? {
+            config: {
+              ...!saved && options.reasoningEffort ? { model_reasoning_effort: options.reasoningEffort } : {},
+              ...brokerConfig
+            }
+          } : {},
+          ...!saved && brokerState.enabled ? { dynamicTools: brokerToolSpecs(brokerState.config.toolNamespace) } : {},
+          ...brokerDeveloperInstructions ? { developerInstructions: brokerDeveloperInstructions } : {}
         };
         const overrides = readOnlyReconnect ? {} : codexThreadPermissionOverrides(options.sandbox ?? this.options.sandbox ?? "read-only");
-        const result = saved ? await resumeCodexThread(rpc, { ...common, threadId: saved.id, excludeTurns: true }, overrides) : await rpc.request("thread/start", { ...common, ...overrides });
+        let result;
+        try {
+          result = saved ? await resumeCodexThread(rpc, { ...common, threadId: saved.id, excludeTurns: true }, overrides) : await rpc.request("thread/start", { ...common, ...overrides });
+        } catch (error) {
+          if (!saved && brokerState.enabled) {
+            throw new Error(
+              `Codex App Server \u4E0D\u652F\u6301 Bridge Broker dynamic tools/native shadowing\uFF1B\u62D2\u7EDD\u542F\u52A8\u4E00\u4E2A\u4F1A\u9759\u9ED8\u7ED5\u8FC7 Broker \u7684 thread\uFF1A${error instanceof Error ? error.message : String(error)}`
+            );
+          }
+          throw error;
+        }
         const id = result.thread?.id;
         if (typeof id !== "string") throw new Error("Codex did not return a thread ID");
-        main = restored ?? new CodexStructuredSession(id, endpoint, rpc);
+        if (!saved && brokerState.enabled) {
+          await this.markBrokerThread(id, brokerState.config.toolNamespace);
+        }
+        const brokerTools = brokerState.enabled ? this.brokerController(
+          id,
+          scope,
+          cwd,
+          brokerState.config.toolNamespace
+        ) : void 0;
+        restored = saved && brokerState.enabled ? new CodexStructuredSession(saved.id, endpoint, rpc, brokerTools) : void 0;
+        main = restored ?? new CodexStructuredSession(id, endpoint, rpc, brokerTools);
         await main.syncState();
         const nativeSpec = this.options.nativeView !== false ? {
           binary: this.options.binary,
@@ -17150,7 +18440,18 @@ ${prompt}
         } : void 0;
         await view.start(saved ? nativeSpec : void 0, cwd);
         if (!saved && nativeSpec) pendingNative = nativeSpec;
-        await writeFileAtomic(stateFile, JSON.stringify({ id, cwd, scope, kind: this.id, endpoint, view: view.status() }));
+        await writeFileAtomic(stateFile, JSON.stringify({
+          id,
+          cwd,
+          scope,
+          kind: this.id,
+          endpoint,
+          view: view.status(),
+          ...brokerState.enabled ? {
+            brokerToolsVersion: BROKER_TOOL_VERSION,
+            brokerToolNamespace: brokerState.config.toolNamespace
+          } : {}
+        }));
       } catch (error) {
         await restored?.close();
         rpc.close();
@@ -17209,7 +18510,7 @@ ${prompt}
 };
 
 // src/agent/structured/preferred.ts
-import { readFileSync as readFileSync8 } from "fs";
+import { readFileSync as readFileSync9 } from "fs";
 import { join as join30 } from "path";
 import { mkdir as mkdir20 } from "fs/promises";
 var PreferredStructuredAdapter = class {
@@ -17221,11 +18522,11 @@ var PreferredStructuredAdapter = class {
     this.displayName = `${structured.displayName} (live fallback)`;
     this.file = join30(directory, "preferred-panes.json");
     try {
-      const data = JSON.parse(readFileSync8(this.file, "utf8"));
+      const data = JSON.parse(readFileSync9(this.file, "utf8"));
       if (data.version === 1) for (const [scope, target] of Object.entries(data.targets ?? {})) this.targets.set(scope, target);
     } catch {
       try {
-        const old = JSON.parse(readFileSync8(join30(directory, "structured", "tmux-bindings.json"), "utf8"));
+        const old = JSON.parse(readFileSync9(join30(directory, "structured", "tmux-bindings.json"), "utf8"));
         if (old.version === 1) for (const [scope, binding] of Object.entries(old.bindings ?? {})) {
           const target = binding.target;
           if (target?.paneId) this.targets.set(scope, target);
@@ -17394,7 +18695,7 @@ var PreferredStructuredAdapter = class {
 
 // src/bot/channel.ts
 import { createLarkChannel } from "@larksuite/channel";
-import { createHash as createHash13 } from "crypto";
+import { createHash as createHash14 } from "crypto";
 import { homedir as homedir12 } from "os";
 import { dirname as dirname22, join as join34 } from "path";
 
@@ -17592,7 +18893,7 @@ function codexCapability(profile2) {
 }
 
 // src/bridge-agent/router.ts
-import { createHash as createHash8 } from "crypto";
+import { createHash as createHash9 } from "crypto";
 var OpenAiCompatibleBridgeClassifier = class {
   endpoint;
   model;
@@ -17685,7 +18986,7 @@ function looksLikeTerminalPicker(text2) {
   return isStructuredLiveInteraction(text2);
 }
 function sha256(value) {
-  return createHash8("sha256").update(value).digest("hex");
+  return createHash9("sha256").update(value).digest("hex");
 }
 
 // src/agent/models.ts
@@ -17792,9 +19093,9 @@ function safeJsonStringify(value) {
 
 // src/commands/index.ts
 import { randomUUID as randomUUID4 } from "crypto";
-import { lstat as lstat5, readFile as readFile19, realpath as realpath6 } from "fs/promises";
+import { lstat as lstat6, readFile as readFile19, realpath as realpath7 } from "fs/promises";
 import { homedir as homedir11 } from "os";
-import { basename as basename7, dirname as dirname19, isAbsolute as isAbsolute5, relative as relative2, sep } from "path";
+import { basename as basename7, dirname as dirname19, isAbsolute as isAbsolute6, relative as relative3, sep } from "path";
 
 // src/card/account-cards.ts
 function maskAppId(id) {
@@ -18677,7 +19978,7 @@ function escapeCode(s) {
 }
 
 // src/policy/fingerprint.ts
-import { createHash as createHash9 } from "crypto";
+import { createHash as createHash10 } from "crypto";
 
 // src/session/jcs.ts
 function canonicalizeJcs(value) {
@@ -18740,7 +20041,7 @@ function attachmentPolicyConfigDigest(input) {
   });
 }
 function digestCanonical(value) {
-  return createHash9("sha256").update(canonicalizeJcs(value)).digest().subarray(0, 16).toString("base64url");
+  return createHash10("sha256").update(canonicalizeJcs(value)).digest().subarray(0, 16).toString("base64url");
 }
 
 // src/policy/access.ts
@@ -18787,7 +20088,7 @@ function toolBodyMd(tool) {
   const inputMd = renderInput(tool);
   if (inputMd) parts.push(inputMd);
   if (tool.output) {
-    const truncated = truncate2(tool.output, OUTPUT_MAX);
+    const truncated = truncate3(tool.output, OUTPUT_MAX);
     if (tool.status === "error") {
       parts.push(`**Error**
 \`\`\`
@@ -18855,7 +20156,7 @@ function renderInput(tool) {
       const cmd = str("command");
       return cmd ? `**Command**
 \`\`\`bash
-${truncate2(cmd, BODY_FIELD_MAX)}
+${truncate3(cmd, BODY_FIELD_MAX)}
 \`\`\`` : "";
     }
     case "Read":
@@ -18874,7 +20175,7 @@ ${truncate2(cmd, BODY_FIELD_MAX)}
     case "WebFetch":
       return str("url") ? `**URL** ${str("url")}` : "";
     case "WebSearch":
-      return str("query") ? `**Query** \`${truncate2(str("query"), BODY_FIELD_MAX)}\`` : "";
+      return str("query") ? `**Query** \`${truncate3(str("query"), BODY_FIELD_MAX)}\`` : "";
     default:
       return "";
   }
@@ -18888,7 +20189,7 @@ ${out}
 function shortenPath(p4) {
   return p4;
 }
-function truncate2(s, max) {
+function truncate3(s, max) {
   return s.length > max ? `${s.slice(0, max)}\u2026` : s;
 }
 
@@ -19466,7 +20767,7 @@ function reasoningPanel(content, active2) {
     title,
     expanded: active2,
     border: "grey",
-    body: truncate3(content, REASONING_MAX)
+    body: truncate4(content, REASONING_MAX)
   });
 }
 function toolPanel(tool, expanded) {
@@ -19574,7 +20875,7 @@ function summaryText(state) {
   if (state.footer === "streaming") return "\u6B63\u5728\u8F93\u51FA";
   return "\u601D\u8003\u4E2D";
 }
-function truncate3(s, max) {
+function truncate4(s, max) {
   return s.length > max ? `${s.slice(0, max)}\u2026` : s;
 }
 
@@ -20073,8 +21374,8 @@ function normalizeThread(input) {
   const threadId = stringValue3(raw.id);
   const cwd = stringValue3(raw.cwd);
   if (!threadId || !cwd) return void 0;
-  const createdAt = numberValue2(raw.createdAt);
-  const updatedAt = numberValue2(raw.updatedAt);
+  const createdAt = numberValue3(raw.createdAt);
+  const updatedAt = numberValue3(raw.updatedAt);
   return {
     threadId,
     ...stringValue3(raw.sessionId) ? { sessionId: stringValue3(raw.sessionId) } : {},
@@ -20107,7 +21408,7 @@ function sourceValue(input) {
 function stringValue3(input) {
   return typeof input === "string" ? input : void 0;
 }
-function numberValue2(input) {
+function numberValue3(input) {
   return typeof input === "number" && Number.isFinite(input) ? input : void 0;
 }
 function recordValue2(input) {
@@ -20349,7 +21650,7 @@ function expandTilde(p4) {
   return p4;
 }
 function isAbsoluteOrTilde(p4) {
-  return isAbsolute5(p4) || p4 === "~" || p4.startsWith("~/");
+  return isAbsolute6(p4) || p4 === "~" || p4.startsWith("~/");
 }
 async function handleSendFile(args, ctx) {
   const input = args.trim();
@@ -20360,7 +21661,7 @@ async function handleSendFile(args, ctx) {
   const requestedPath = expandTilde(input);
   let entry;
   try {
-    entry = await lstat5(requestedPath);
+    entry = await lstat6(requestedPath);
   } catch {
     await reply(ctx, "\u6587\u4EF6\u4E0D\u5B58\u5728\u6216\u4E0D\u53EF\u8BBF\u95EE\u3002");
     return;
@@ -20373,7 +21674,7 @@ async function handleSendFile(args, ctx) {
     await reply(ctx, "\u53EA\u80FD\u53D1\u9001\u666E\u901A\u6587\u4EF6\u3002");
     return;
   }
-  const resolvedPath = await realpath6(requestedPath).catch(() => void 0);
+  const resolvedPath = await realpath7(requestedPath).catch(() => void 0);
   if (!resolvedPath) {
     await reply(ctx, "\u6587\u4EF6\u4E0D\u5B58\u5728\u6216\u4E0D\u53EF\u8BBF\u95EE\u3002");
     return;
@@ -20416,7 +21717,7 @@ async function resolveSendFileRoots(ctx) {
     commandProfilePaths(ctx).mediaDir,
     ...ctx.controls.profileConfig.outbound.allowedFileDirs.map(expandTilde)
   ].filter((path) => Boolean(path));
-  const roots = await Promise.all(candidates.map((path) => realpath6(path).catch(() => void 0)));
+  const roots = await Promise.all(candidates.map((path) => realpath7(path).catch(() => void 0)));
   return [...new Set(roots.filter((path) => Boolean(path)))];
 }
 function sendFileFailureMessage(err) {
@@ -20427,8 +21728,8 @@ function sendFileFailureMessage(err) {
   return "\u6587\u4EF6\u4E0A\u4F20\u5230\u98DE\u4E66\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u5E94\u7528\u6743\u9650\u3001token \u548C\u7F51\u7EDC\u540E\u91CD\u8BD5\u3002";
 }
 function isPathWithinRoot(path, root) {
-  const pathRelative = relative2(root, path);
-  return pathRelative === "" || pathRelative !== ".." && !pathRelative.startsWith(`..${sep}`) && !isAbsolute5(pathRelative);
+  const pathRelative = relative3(root, path);
+  return pathRelative === "" || pathRelative !== ".." && !pathRelative.startsWith(`..${sep}`) && !isAbsolute6(pathRelative);
 }
 function formatByteLimit(bytes) {
   if (bytes >= 1024 * 1024) return `${Math.floor(bytes / (1024 * 1024))} MiB`;
@@ -21222,9 +22523,9 @@ ${fence}`;
 }
 function parseTmuxSocketArgument(parts) {
   if (parts.length === 0) return "";
-  if (parts.length === 1) return isAbsolute5(parts[0]) ? parts[0] : null;
+  if (parts.length === 1) return isAbsolute6(parts[0]) ? parts[0] : null;
   if (parts.length === 2 && parts[0] === "-L") return parts[1];
-  if (parts.length === 2 && parts[0] === "-S") return isAbsolute5(parts[1]) ? parts[1] : null;
+  if (parts.length === 2 && parts[0] === "-S") return isAbsolute6(parts[1]) ? parts[1] : null;
   return null;
 }
 function formatTmuxList(panes, profile2 = "codex") {
@@ -23883,7 +25184,7 @@ function footerLine(status) {
 }
 
 // src/media/cache.ts
-import { createHash as createHash10 } from "crypto";
+import { createHash as createHash11 } from "crypto";
 import { createReadStream as createReadStream2 } from "fs";
 import { mkdir as mkdir21, readdir as readdir7, rename as rename4, rm as rm14, stat as stat9 } from "fs/promises";
 import { join as join33 } from "path";
@@ -24109,7 +25410,7 @@ async function listFiles(root) {
   return out;
 }
 async function hashFile(path) {
-  const hash = createHash10("sha256");
+  const hash = createHash11("sha256");
   for await (const chunk of createReadStream2(path)) {
     hash.update(chunk);
   }
@@ -25109,9 +26410,9 @@ function recordRunSessionEvent(input) {
 }
 
 // src/bot/comment-resource.ts
-import { createHash as createHash11 } from "crypto";
+import { createHash as createHash12 } from "crypto";
 function commentTokenDigest(token) {
-  return createHash11("sha256").update(token).digest("hex").slice(0, 16);
+  return createHash12("sha256").update(token).digest("hex").slice(0, 16);
 }
 function commentDocumentScopeId(fileToken) {
   return `comment-doc:${commentTokenDigest(fileToken)}`;
@@ -26141,10 +27442,10 @@ async function removeReaction(channel, messageId, reactionId) {
 }
 
 // src/bot/artifact-broker.ts
-import { createHash as createHash12, randomBytes as randomBytes5 } from "crypto";
-import { lstat as lstat6, mkdir as mkdir23, readFile as readFile21, realpath as realpath7, rm as rm15 } from "fs/promises";
+import { createHash as createHash13, randomBytes as randomBytes5 } from "crypto";
+import { lstat as lstat7, mkdir as mkdir23, readFile as readFile21, realpath as realpath8, rm as rm15 } from "fs/promises";
 import { createServer } from "net";
-import { basename as basename8, dirname as dirname21, isAbsolute as isAbsolute6, relative as relative3, resolve as resolve6, sep as sep2 } from "path";
+import { basename as basename8, dirname as dirname21, isAbsolute as isAbsolute7, relative as relative4, resolve as resolve6, sep as sep2 } from "path";
 var ArtifactBroker = class {
   constructor(socketPath, channel, allowLocalFileRoot, persistentStatePath) {
     this.channel = channel;
@@ -26273,7 +27574,7 @@ var ArtifactBroker = class {
     if (typeof request.path !== "string" || !request.path.trim()) {
       throw new Error("\u8BF7\u63D0\u4F9B\u8981\u53D1\u9001\u7684\u6587\u4EF6\u8DEF\u5F84");
     }
-    if (isAbsolute6(request.path)) throw new Error("\u6587\u4EF6\u8DEF\u5F84\u5FC5\u987B\u76F8\u5BF9\u5F53\u524D\u5DE5\u4F5C\u76EE\u5F55");
+    if (isAbsolute7(request.path)) throw new Error("\u6587\u4EF6\u8DEF\u5F84\u5FC5\u987B\u76F8\u5BF9\u5F53\u524D\u5DE5\u4F5C\u76EE\u5F55");
     if (request.path.split(/[\\/]+/u).some((part) => part === "..")) {
       throw new Error("\u6587\u4EF6\u8DEF\u5F84\u4E0D\u80FD\u5305\u542B ..");
     }
@@ -26281,12 +27582,12 @@ var ArtifactBroker = class {
       throw new Error("\u5F53\u524D\u4EFB\u52A1\u5C1A\u672A\u6388\u6743\u6587\u4EF6\u76EE\u5F55\uFF1B\u8BF7\u5728\u5F53\u524D\u4EFB\u52A1\u4E2D\u91CD\u65B0\u8BF7\u6C42\u53D1\u9001");
     }
     const requested = resolve6(grant.allowedRoots[0], request.path);
-    const entry = await lstat6(requested).catch(() => void 0);
+    const entry = await lstat7(requested).catch(() => void 0);
     if (!entry) throw new Error("\u6587\u4EF6\u4E0D\u5B58\u5728\u6216\u4E0D\u53EF\u8BBF\u95EE");
     if (entry.isSymbolicLink()) throw new Error("\u4E0D\u5141\u8BB8\u53D1\u9001\u7B26\u53F7\u94FE\u63A5");
     if (!entry.isFile()) throw new Error("\u53EA\u80FD\u53D1\u9001\u666E\u901A\u6587\u4EF6");
     if (entry.size > grant.maxFileBytes) throw new Error(`\u6587\u4EF6\u8D85\u8FC7\u53D1\u9001\u4E0A\u9650\uFF08${grant.maxFileBytes} B\uFF09`);
-    const resolved = await realpath7(requested);
+    const resolved = await realpath8(requested);
     const root = await findCanonicalAllowedRoot(resolved, grant.allowedRoots);
     if (!root) throw new Error("\u6587\u4EF6\u4E0D\u5728\u5F53\u524D\u4EFB\u52A1\u5141\u8BB8\u7684\u76EE\u5F55\u5185");
     if (!await this.allowLocalFileRoot(root)) throw new Error("bridge \u672A\u5141\u8BB8\u8BE5\u6587\u4EF6\u76EE\u5F55");
@@ -26348,17 +27649,17 @@ var ArtifactBroker = class {
   }
 };
 function isPathWithinRoot2(path, root) {
-  const pathRelative = relative3(root, path);
-  return pathRelative === "" || pathRelative !== ".." && !pathRelative.startsWith(`..${sep2}`) && !isAbsolute6(pathRelative);
+  const pathRelative = relative4(root, path);
+  return pathRelative === "" || pathRelative !== ".." && !pathRelative.startsWith(`..${sep2}`) && !isAbsolute7(pathRelative);
 }
 function artifactBrokerSocketPath(socketPath) {
   if (process.platform !== "win32") return socketPath;
-  const digest = createHash12("sha256").update(resolve6(socketPath)).digest("hex").slice(0, 32);
+  const digest = createHash13("sha256").update(resolve6(socketPath)).digest("hex").slice(0, 32);
   return `\\\\.\\pipe\\arg-bridge-artifact-${digest}`;
 }
 async function findCanonicalAllowedRoot(path, roots) {
   for (const root of roots) {
-    const canonicalRoot = await realpath7(root).catch(() => void 0);
+    const canonicalRoot = await realpath8(root).catch(() => void 0);
     if (canonicalRoot && isPathWithinRoot2(path, canonicalRoot)) return root;
   }
   return void 0;
@@ -26366,7 +27667,7 @@ async function findCanonicalAllowedRoot(path, roots) {
 function isPersistentGrant(value) {
   if (!value || typeof value !== "object") return false;
   const grant = value;
-  return grant.persistent === true && typeof grant.token === "string" && /^[A-Za-z0-9_-]{16,200}$/u.test(grant.token) && typeof grant.scope === "string" && grant.scope.length > 0 && typeof grant.chatId === "string" && grant.chatId.length > 0 && typeof grant.replyTo === "string" && grant.replyTo.length > 0 && Array.isArray(grant.allowedRoots) && grant.allowedRoots.every((root) => typeof root === "string" && isAbsolute6(root)) && typeof grant.maxFileBytes === "number" && Number.isSafeInteger(grant.maxFileBytes) && grant.maxFileBytes > 0;
+  return grant.persistent === true && typeof grant.token === "string" && /^[A-Za-z0-9_-]{16,200}$/u.test(grant.token) && typeof grant.scope === "string" && grant.scope.length > 0 && typeof grant.chatId === "string" && grant.chatId.length > 0 && typeof grant.replyTo === "string" && grant.replyTo.length > 0 && Array.isArray(grant.allowedRoots) && grant.allowedRoots.every((root) => typeof root === "string" && isAbsolute7(root)) && typeof grant.maxFileBytes === "number" && Number.isSafeInteger(grant.maxFileBytes) && grant.maxFileBytes > 0;
 }
 function normalizeCaption(value) {
   if (value === void 0) return void 0;
@@ -29536,7 +30837,7 @@ async function processAgentStream(handle, events, scope, idleTimeoutMs, progress
     interrupted: handle.interrupted,
     sourceChars: finalSourceText.length,
     sourceBytes: Buffer.byteLength(finalSourceText, "utf8"),
-    sourceSha256: createHash13("sha256").update(finalSourceText).digest("hex"),
+    sourceSha256: createHash14("sha256").update(finalSourceText).digest("hex"),
     renderedMarkdownBytes: Buffer.byteLength(finalMarkdown, "utf8"),
     renderedCardBytes: Buffer.byteLength(finalCard, "utf8")
   });
@@ -29814,7 +31115,7 @@ function detectLiveInteraction(text2, allowBareConfirmation = false, autoConfirm
     // A prefix signature made two long menus look identical whenever they
     // shared their title and early choices. Hash the complete current surface
     // so repeated redraws dedupe, while every genuinely nested menu is sent.
-    signature: createHash13("sha256").update(prompt).update("\0").update(buttons.map((button2) => button2.input).join("|")).digest("hex"),
+    signature: createHash14("sha256").update(prompt).update("\0").update(buttons.map((button2) => button2.input).join("|")).digest("hex"),
     prompt: displayPrompt.slice(0, isCodexModelPickerPrompt(prompt) ? 4e3 : 1200),
     buttons
   };
@@ -30183,8 +31484,8 @@ async function ensureDeliveredTail(input) {
   });
   log.info("outbound", "delivery-integrity", {
     scope: input.scope,
-    sourceSha256: createHash13("sha256").update(input.source).digest("hex"),
-    deliveredSha256: createHash13("sha256").update(input.delivered).digest("hex"),
+    sourceSha256: createHash14("sha256").update(input.source).digest("hex"),
+    deliveredSha256: createHash14("sha256").update(input.delivered).digest("hex"),
     sourceBytes: Buffer.byteLength(input.source, "utf8"),
     deliveredBytes: Buffer.byteLength(input.delivered, "utf8"),
     tailCovered: covered
@@ -31282,7 +32583,7 @@ function readTmuxSessionEnvironment(name, env) {
 }
 
 // src/cli/commands/native.ts
-import { readFile as readFile26, lstat as lstat7 } from "fs/promises";
+import { readFile as readFile26, lstat as lstat8 } from "fs/promises";
 import { join as join35 } from "path";
 async function runNative(thread, opts) {
   const rootPaths = resolveAppPaths();
@@ -31344,7 +32645,7 @@ async function runNative(thread, opts) {
     if (!endpoint.startsWith("unix:///")) continue;
     let observer;
     try {
-      const stat10 = await lstat7(endpoint.slice("unix://".length));
+      const stat10 = await lstat8(endpoint.slice("unix://".length));
       if (!stat10.isSocket() || process.getuid && stat10.uid !== process.getuid()) continue;
       observer = await RpcClient.connect(`ws+unix://${endpoint.slice("unix://".length)}:/`);
       await observer.initialize();
@@ -31411,9 +32712,9 @@ async function waitChild(child) {
 }
 
 // src/cli/commands/settings.ts
-import { realpath as realpath8 } from "fs/promises";
+import { realpath as realpath9 } from "fs/promises";
 import { homedir as homedir14 } from "os";
-import { dirname as dirname24, parse as parse2, resolve as resolve7 } from "path";
+import { dirname as dirname24, parse as parse3, resolve as resolve7 } from "path";
 import * as p3 from "@clack/prompts";
 
 // src/agent/subagents/diagnostics.ts
@@ -31433,6 +32734,18 @@ async function collectSubagentDiagnostics(input) {
     configuredMode: input.config.mode,
     enabled: input.config.enabled,
     routeMode: input.config.routeMode,
+    modelTools: {
+      configured: input.config.modelTools,
+      namespace: input.config.toolNamespace,
+      nativeToolPolicy: input.config.nativeToolPolicy,
+      brokerWired: input.config.modelTools && input.config.nativeToolPolicy === "shadow" && input.config.enabled && (input.config.mode === "auto" || input.config.mode === "broker"),
+      ...!input.config.modelTools ? { degradedReason: "modelTools=false; native collaboration remains visible" } : input.config.nativeToolPolicy !== "shadow" ? { degradedReason: "nativeToolPolicy=preserve; native collaboration may bypass Broker" } : {}
+    },
+    limits: {
+      maxConcurrentWorkers: input.config.maxConcurrentWorkers,
+      workerTimeoutMs: input.config.workerTimeoutMs,
+      allowWriteWorkers: input.config.allowWriteWorkers
+    },
     launchConfigured: Boolean(resolveMixAgentsLaunchConfig(input.config, env)),
     toolContract: "unknown",
     mcpStart: "not-configured",
@@ -31444,6 +32757,11 @@ async function collectSubagentDiagnostics(input) {
     ccSwitch: {
       currentProviderCodex: ccSwitch.currentProviderCodex ?? null,
       currentProviderName,
+      providers: ccSwitch.providers.map((provider) => ({
+        id: provider.id,
+        name: provider.name,
+        current: provider.current
+      })),
       settingsPath: ccSwitch.settingsPath,
       ...ccSwitch.error ? { error: redactSecrets(ccSwitch.error) } : {}
     },
@@ -31454,6 +32772,7 @@ async function collectSubagentDiagnostics(input) {
     },
     brokerConfigPath: env.MIXAGENTS_BROKER_CONFIG?.trim() || join36(env.XDG_CONFIG_HOME?.trim() || join36(homedir13(), ".config"), "mixagents", "broker.json"),
     selectedRoute: { id: null },
+    selectedWriteRoute: { id: null },
     readRoutes: [],
     writeRoutes: [],
     nextCommands: [
@@ -31478,6 +32797,13 @@ async function collectSubagentDiagnostics(input) {
       routes,
       requestedRoute: input.requestedRoute
     });
+    const writeSelection = selectSubagentRoute({
+      config: input.config,
+      ccSwitch,
+      routeMap: routeMapState.config,
+      routes,
+      access: "workspace-write"
+    });
     return {
       ...base,
       launchCommand: basename9(launch.command),
@@ -31489,6 +32815,11 @@ async function collectSubagentDiagnostics(input) {
         id: selection.route?.id ?? null,
         ...input.requestedRoute ? { source: "explicit" } : selection.route ? { source: routeSelectionSource(input.config, ccSwitch, routeMapState.config) } : {},
         ...selection.error ? { error: redactSecrets(selection.error) } : {}
+      },
+      selectedWriteRoute: {
+        id: writeSelection.route?.id ?? null,
+        ...writeSelection.route ? { source: routeSelectionSource(input.config, ccSwitch, routeMapState.config, "workspace-write") } : {},
+        ...writeSelection.error ? { error: redactSecrets(writeSelection.error) } : {}
       },
       readRoutes: routes.map((route) => ({
         id: route.id,
@@ -31549,9 +32880,10 @@ function describeCredentialState(config, env) {
     missingEnvironment
   };
 }
-function routeSelectionSource(config, ccSwitch, map) {
+function routeSelectionSource(config, ccSwitch, map, access3 = "read-only") {
   if (config.routeMode === "manual") return "manual";
-  if (ccSwitch.currentProviderCodex && map?.providers[ccSwitch.currentProviderCodex]?.readRoute) {
+  const mapped = access3 === "workspace-write" ? map?.providers[ccSwitch.currentProviderCodex ?? ""]?.writeRoute : map?.providers[ccSwitch.currentProviderCodex ?? ""]?.readRoute;
+  if (ccSwitch.currentProviderCodex && mapped) {
     return "cc-switch";
   }
   return "default";
@@ -31566,7 +32898,6 @@ async function runSettings(options = {}) {
     return;
   }
   p3.intro(`arg-bridge settings \xB7 profile=${snapshot.profile}`);
-  p3.note(formatSnapshot(snapshot), "\u5F53\u524D\u72B6\u6001");
   const settingsEnv = options.env ?? process.env;
   const paths2 = resolveAppPaths({
     rootDir: settingsEnv.LARK_CHANNEL_HOME,
@@ -31575,148 +32906,375 @@ async function runSettings(options = {}) {
   const rawRoot = await loadRootConfig(paths2.configFile);
   const rawProfile = rawRoot?.profiles[snapshot.profile];
   if (!rawRoot || !rawProfile) throw new Error(`profile \u4E0D\u5B58\u5728\uFF1A${snapshot.profile}`);
+  const diagnostics = snapshot.subagents.diagnostics;
+  const currentSubagents = snapshot.subagents.config;
+  const currentRsi = snapshot.rsi.config;
+  const ccProviders = diagnostics.ccSwitch.providers.length > 0 ? diagnostics.ccSwitch.providers : diagnostics.ccSwitch.currentProviderCodex ? [{
+    id: diagnostics.ccSwitch.currentProviderCodex,
+    name: diagnostics.ccSwitch.currentProviderName ?? diagnostics.ccSwitch.currentProviderCodex,
+    current: true
+  }] : [];
+  const providerSummary = ccProviders.length > 0 ? ccProviders.map(
+    (provider) => `${provider.current ? "\u25CF" : "\u25CB"} ${provider.name} (${provider.id})`
+  ).join("\n") : "(cc-switch \u672A\u8FD4\u56DE\u53EF\u7528\u8D26\u53F7)";
+  const availableReadRoutes = diagnostics.readRoutes.filter((route) => route.available);
+  const availableWriteRoutes = diagnostics.writeRoutes.filter((route) => route.available);
+  const unavailableRoutes = diagnostics.readRoutes.filter((route) => !route.available);
+  p3.note([
+    `\u4E3B\u5BF9\u8BDD\u8D26\u53F7\uFF1A${diagnostics.ccSwitch.currentProviderName ?? "(unknown)"} [${diagnostics.ccSwitch.currentProviderCodex ?? "(unknown)"}]`,
+    `Codex \u6A21\u578B\uFF1A${snapshot.mainProvider.configuredModel ?? "(config default)"}`,
+    "",
+    "cc-switch \u4E2D\u7684 Codex \u8D26\u53F7\uFF1A",
+    providerSummary,
+    "",
+    "\u8FD9\u91CC\u53EA\u8BFB\u53D6\u8D26\u53F7 ID\u3001\u540D\u79F0\u548C\u8FD0\u884C\u72B6\u6001\uFF1B\u4E0D\u4F1A\u8BFB\u53D6\u3001\u663E\u793A\u6216\u5BFC\u51FA API Key\u3002\u4E3B\u5BF9\u8BDD provider \u4ECD\u7531 cc-switch \u51B3\u5B9A\u3002"
+  ].join("\n"), "\u6B65\u9AA4 1 / 5 \xB7 \u81EA\u52A8\u8BFB\u53D6\u4E3B\u5BF9\u8BDD\u914D\u7F6E");
   const selectedMode = await p3.select({
-    message: "\u5B50\u4EE3\u7406 /btw \u6A21\u5F0F",
-    initialValue: snapshot.subagents.config.mode,
+    message: "\u5B50\u4EE3\u7406\u5728 Broker \u4E0D\u53EF\u7528\u65F6\u600E\u4E48\u529E\uFF1F",
+    initialValue: currentSubagents.mode,
     options: [
-      { value: "auto", label: "auto", hint: "\u4F18\u5148 MixAgents\uFF1B\u4E0D\u53EF\u7528\u65F6\u6309\u8BBE\u7F6E fork" },
-      { value: "broker", label: "broker", hint: "\u5FC5\u987B\u4F7F\u7528 MixAgents\uFF0C\u5931\u8D25\u65F6\u660E\u786E\u62A5\u9519" },
-      { value: "fork", label: "fork", hint: "\u6CBF\u7528 Codex thread/fork\uFF0C\u517C\u5BB9\u964D\u7EA7" },
-      { value: "off", label: "off", hint: "\u7981\u7528 /btw \u5B50\u4EE3\u7406" }
+      {
+        value: "auto",
+        label: "\u81EA\u52A8\uFF08\u63A8\u8350\uFF09",
+        hint: "\u4F18\u5148\u4F7F\u7528 MixAgents\uFF1B\u4E0D\u53EF\u7528\u65F6\u6309\u4E0B\u65B9\u8BBE\u7F6E\u51B3\u5B9A\u662F\u5426\u7528\u672C\u5730 Codex fork"
+      },
+      {
+        value: "broker",
+        label: "\u53EA\u5141\u8BB8 MixAgents",
+        hint: "\u4E0D\u4F1A\u9759\u9ED8\u964D\u7EA7\uFF1B\u914D\u7F6E\u6216 Key \u4E0D\u5B8C\u6574\u65F6\u660E\u786E\u62A5\u9519"
+      },
+      {
+        value: "fork",
+        label: "\u53EA\u7528\u672C\u5730 Codex fork",
+        hint: "\u4E0D\u8DE8 provider\uFF0C\u6CBF\u7528\u5F53\u524D Codex \u6A21\u578B"
+      },
+      { value: "off", label: "\u5173\u95ED\u5B50\u4EE3\u7406", hint: "\u4E3B\u5BF9\u8BDD\u4E0D\u53D7\u5F71\u54CD" }
     ]
   });
   assertPrompt(selectedMode);
-  const routeMode = await p3.select({
-    message: "MixAgents read route \u9009\u62E9\u65B9\u5F0F",
-    initialValue: snapshot.subagents.config.routeMode,
-    options: [
-      { value: "follow-cc-switch", label: "follow-cc-switch", hint: "\u6BCF\u6B21 /btw \u91CD\u65B0\u8BFB\u53D6 cc-switch" },
-      { value: "manual", label: "manual", hint: "\u56FA\u5B9A\u4F7F\u7528\u4E00\u4E2A Broker route" }
-    ]
-  });
-  assertPrompt(routeMode);
-  let readRoute = snapshot.subagents.config.readRoute;
-  if (routeMode === "manual") {
-    const routeOptions = snapshot.subagents.diagnostics.readRoutes.filter((route) => route.available).map((route) => ({
+  let allowForkFallback = currentSubagents.allowForkFallback;
+  if (selectedMode === "auto") {
+    const fallback = await p3.confirm({
+      message: "MixAgents \u6682\u65F6\u4E0D\u53EF\u7528\u65F6\uFF0C\u662F\u5426\u6539\u7528\u672C\u5730 Codex fork\uFF1F",
+      initialValue: allowForkFallback
+    });
+    assertPrompt(fallback);
+    allowForkFallback = fallback;
+  }
+  let routeMode = currentSubagents.routeMode;
+  let readRoute = currentSubagents.readRoute;
+  let selectedCcProvider = diagnostics.ccSwitch.currentProviderCodex ?? ccProviders[0]?.id ?? null;
+  let selectedReadRoute = readRoute;
+  const routeMapState = await loadBrokerRouteMap(settingsEnv);
+  if (routeMapState.error) throw new Error(routeMapState.error);
+  if ((selectedMode === "auto" || selectedMode === "broker") && ccProviders.length > 0) {
+    p3.note([
+      "\u5B50\u4EE3\u7406\u53EF\u4EE5\u4F7F\u7528\u4E0E\u4E3B\u5BF9\u8BDD\u4E0D\u540C\u7684 provider\u3002\u4E0B\u9762\u5148\u9009 cc-switch \u8D26\u53F7\uFF0C\u518D\u9009\u8BE5\u8D26\u53F7\u5BF9\u5E94\u7684 MixAgents \u7EBF\u8DEF\u3002",
+      "\u9009\u62E9\u5907\u7528\u8D26\u53F7\u53EA\u4F1A\u4FDD\u5B58\u6620\u5C04\uFF1B\u4E3B\u5BF9\u8BDD\u4E0D\u4F1A\u56E0\u6B64\u5207\u6362\uFF0C\u7B49\u4F60\u5728 cc-switch \u771F\u6B63\u5207\u6362\u8D26\u53F7\u65F6\u624D\u751F\u6548\u3002",
+      availableReadRoutes.length === 0 ? "\u5F53\u524D\u6CA1\u6709\u53EF\u7528\u7EBF\u8DEF\u3002\u8BF7\u5148\u914D\u7F6E MixAgents broker.json \u6216\u8865\u9F50\u7EBF\u8DEF\u51ED\u636E\u3002" : `\u53D1\u73B0 ${availableReadRoutes.length} \u6761\u53EF\u7528\u53EA\u8BFB\u7EBF\u8DEF\u3002`,
+      ...unavailableRoutes.length ? [`\u4E0D\u53EF\u7528\u7EBF\u8DEF\uFF1A${unavailableRoutes.map(
+        (route) => `${route.id}(${route.missingEnvironment.join(",") || "unavailable"})`
+      ).join("\u3001")}`] : []
+    ].join("\n"), "\u6B65\u9AA4 2 / 5 \xB7 \u9009\u62E9\u5B50\u4EE3\u7406\u8D26\u53F7");
+    const providerChoice = await p3.select({
+      message: "\u628A\u5B50\u4EE3\u7406\u7EBF\u8DEF\u7ED1\u5B9A\u5230\u54EA\u4E2A cc-switch \u8D26\u53F7\uFF1F",
+      initialValue: selectedCcProvider && ccProviders.some((provider) => provider.id === selectedCcProvider) ? selectedCcProvider : ccProviders[0].id,
+      options: ccProviders.map((provider) => ({
+        value: provider.id,
+        label: `${provider.name} (${provider.id})`,
+        hint: provider.current ? "\u5F53\u524D\u4E3B\u5BF9\u8BDD\u8D26\u53F7" : "\u5907\u7528\u8D26\u53F7\uFF1B\u5207\u6362\u8FC7\u53BB\u540E\u751F\u6548"
+      }))
+    });
+    assertPrompt(providerChoice);
+    selectedCcProvider = providerChoice;
+    const mappedRoute = routeMapState.config?.providers[selectedCcProvider]?.readRoute;
+    const routeOptions = availableReadRoutes.map((route) => ({
       value: route.id,
-      label: `${route.id} \xB7 ${route.provider}/${route.model}`,
-      hint: route.maxAccess
+      label: `${route.provider} / ${route.model}`,
+      hint: `${route.id} \xB7 \u9ED8\u8BA4\u53EA\u8BFB`
     }));
-    if (routeOptions.length === 0) {
-      const entered = await p3.text({
-        message: "\u6CA1\u6709\u53D1\u73B0\u53EF\u7528 route\u3002\u8F93\u5165 route id\uFF08\u7559\u7A7A\u4FDD\u6301\u5F53\u524D\u503C\uFF09",
-        initialValue: readRoute ?? "",
-        placeholder: "route-id"
-      });
-      assertPrompt(entered);
-      readRoute = entered.trim() || null;
-    } else {
-      const selected = await p3.select({
-        message: "\u56FA\u5B9A read route",
-        initialValue: readRoute && routeOptions.some((route) => route.value === readRoute) ? readRoute : routeOptions[0].value,
+    if (routeOptions.length > 0) {
+      const initialRoute = readRoute && routeOptions.some((route) => route.value === readRoute) ? readRoute : mappedRoute && routeOptions.some((route) => route.value === mappedRoute) ? mappedRoute : diagnostics.selectedRoute.id && routeOptions.some((route) => route.value === diagnostics.selectedRoute.id) ? diagnostics.selectedRoute.id : routeOptions[0].value;
+      const routeChoice = await p3.select({
+        message: "\u8FD9\u4E2A\u8D26\u53F7\u4F7F\u7528\u54EA\u6761\u5B50\u4EE3\u7406\u7EBF\u8DEF\uFF1F",
+        initialValue: initialRoute,
         options: routeOptions
       });
-      assertPrompt(selected);
-      readRoute = selected;
+      assertPrompt(routeChoice);
+      selectedReadRoute = routeChoice;
     }
+    const strategy = await p3.select({
+      message: "\u4EE5\u540E\u5728 cc-switch \u5207\u6362\u4E3B\u8D26\u53F7\u65F6\uFF0C\u5B50\u4EE3\u7406\u7EBF\u8DEF\u600E\u4E48\u5904\u7406\uFF1F",
+      initialValue: currentSubagents.routeMode === "manual" ? "manual" : "follow",
+      options: [
+        {
+          value: "follow",
+          label: "\u81EA\u52A8\u4F7F\u7528\u8BE5\u8D26\u53F7\u7ED1\u5B9A\u7684\u7EBF\u8DEF\uFF08\u63A8\u8350\uFF09",
+          hint: "\u540C\u4E00\u4E2A cc-switch \u8D26\u53F7\u59CB\u7EC8\u4F7F\u7528\u4E0A\u9762\u9009\u5B9A\u7684\u7EBF\u8DEF"
+        },
+        {
+          value: "manual",
+          label: "\u59CB\u7EC8\u56FA\u5B9A\u8FD9\u4E00\u6761\u7EBF\u8DEF",
+          hint: "\u4E0D\u7BA1\u4E3B\u5BF9\u8BDD\u8D26\u53F7\u600E\u4E48\u5207\u6362\uFF0C\u5B50\u4EE3\u7406\u90FD\u7528\u8FD9\u6761\u7EBF\u8DEF"
+        }
+      ]
+    });
+    assertPrompt(strategy);
+    routeMode = strategy === "follow" ? "follow-cc-switch" : "manual";
+    readRoute = strategy === "manual" ? selectedReadRoute : null;
   }
-  const allowForkFallback = await p3.confirm({
-    message: "auto \u6A21\u5F0F\u4E0B\uFF0CMixAgents \u4E0D\u53EF\u7528\u65F6\u5141\u8BB8\u964D\u7EA7\u5230 Codex fork\uFF1F",
-    initialValue: snapshot.subagents.config.allowForkFallback
-  });
-  assertPrompt(allowForkFallback);
-  const includeProgressSnapshot = await p3.confirm({
-    message: "/btw \u662F\u5426\u643A\u5E26\u6700\u591A 2400 \u5B57\u7B26\u3001\u5DF2\u8131\u654F\u7684\u4E3B\u4EFB\u52A1\u8FDB\u5EA6\u5FEB\u7167\uFF1F",
-    initialValue: snapshot.subagents.config.includeProgressSnapshot
-  });
-  assertPrompt(includeProgressSnapshot);
-  const currentMcp = rawProfile.subagents?.mixagents;
-  const mcpCommand = await p3.text({
-    message: "MixAgents MCP executable\uFF08\u7559\u7A7A\u4FDD\u6301\u5F53\u524D\u503C\uFF1B\u4E0D\u5F97\u628A token \u5199\u5165\u53C2\u6570\uFF09",
-    initialValue: currentMcp?.mcpCommand ?? "",
-    placeholder: "mixagents-broker"
-  });
-  assertPrompt(mcpCommand);
-  const mcpArgsText = await p3.text({
-    message: "\u66FF\u6362 MCP \u53C2\u6570 JSON \u6570\u7EC4\uFF08\u7559\u7A7A\u4FDD\u6301\u73B0\u503C\u4E14\u4E0D\u56DE\u663E\uFF1B\u8F93\u5165 [] \u6E05\u7A7A\uFF09",
-    initialValue: "",
-    placeholder: "\u7559\u7A7A\u4FDD\u6301"
-  });
-  assertPrompt(mcpArgsText);
-  const mcpArgs = mcpArgsText.trim() ? parseStringArray(mcpArgsText, "MCP \u53C2\u6570") : currentMcp?.mcpArgs ?? [];
-  const credentialMode = await p3.select({
-    message: "Broker \u51ED\u636E\u7531\u8C01\u89E3\u6790\uFF1F",
-    initialValue: currentMcp?.credentialMode ?? "inherit-env",
+  const currentCredential = currentMcpCredentials(rawProfile);
+  let credentialMode = currentCredential.mode;
+  let credentialEnvKeys = currentCredential.credentialEnvKeys.join(", ");
+  let credentialProvider = currentCredential.credentialProvider ?? "";
+  if (selectedMode === "auto" || selectedMode === "broker") {
+    p3.note([
+      "Bridge \u4E0D\u4F1A\u8BFB\u53D6\u3001\u6253\u5370\u6216\u4FDD\u5B58 API Key\u3002",
+      `\u5F53\u524D\u542F\u52A8\u73AF\u5883\u4E2D\u7684 MIXAGENTS_BROKER_CREDENTIALS_JSON\uFF1A${settingsEnv.MIXAGENTS_BROKER_CREDENTIALS_JSON?.trim() ? "PRESENT" : "MISSING"}`,
+      "",
+      "\u63A8\u8350\u65B9\u5F0F\uFF1A\u7531\u542F\u52A8 Bridge \u7684\u73AF\u5883/secret manager \u63D0\u4F9B\uFF1A",
+      "  MIXAGENTS_BROKER_CREDENTIALS_JSON",
+      "\u8FD9\u4E2A\u53D8\u91CF\u5185\u90E8\u662F\u201C\u73AF\u5883\u53D8\u91CF\u540D \u2192 Key\u201D\u7684 JSON\uFF1BBridge \u53EA\u68C0\u67E5\u53D8\u91CF\u662F\u5426\u5B58\u5728\uFF0C\u5E76\u628A\u73AF\u5883\u4EA4\u7ED9 MixAgents \u5B50\u8FDB\u7A0B\u3002",
+      "",
+      "MixAgents \u5F53\u524D\u516C\u5F00\u7248\u672C 0.1.1 \u5C1A\u672A\u5B9E\u73B0\u76F4\u63A5\u8BFB\u53D6 cc-switch Key\uFF1B\u201CMixAgents managed\u201D \u4EC5\u4FDD\u7559\u4E3A\u672A\u9A8C\u8BC1\u63A5\u53E3\u3002"
+    ].join("\n"), "\u6B65\u9AA4 3 / 5 \xB7 \u5B50\u4EE3\u7406 Key \u7531\u8C01\u63D0\u4F9B");
+    const selectedCredentialMode = await p3.select({
+      message: "\u5B50\u4EE3\u7406 Key \u4ECE\u54EA\u91CC\u6765\uFF1F",
+      initialValue: credentialMode === "mixagents-managed" ? "inherit-env" : credentialMode,
+      options: [
+        {
+          value: "inherit-env",
+          label: "\u542F\u52A8\u73AF\u5883\u5DF2\u63D0\u4F9B\uFF08\u63A8\u8350\uFF09",
+          hint: "\u53EA\u4FDD\u5B58\u73AF\u5883\u53D8\u91CF\u540D\uFF1B\u4E0D\u4F1A\u628A Key \u5199\u8FDB arg-bridge \u914D\u7F6E"
+        },
+        {
+          value: "mixagents-managed",
+          label: "\u7531 MixAgents \u7BA1\u7406\uFF08\u672A\u9A8C\u8BC1\uFF09",
+          hint: "\u9700\u8981 MixAgents/\u53D7\u4FE1 helper \u81EA\u884C\u89E3\u6790 cc-switch\uFF1B\u5F53\u524D 0.1.1 \u4E0D\u5177\u5907\u8BE5\u80FD\u529B"
+        }
+      ]
+    });
+    assertPrompt(selectedCredentialMode);
+    credentialMode = selectedCredentialMode;
+    if (credentialMode === "inherit-env") {
+      const envKeysInput = await p3.text({
+        message: "Bridge \u542F\u52A8\u73AF\u5883\u4E2D\u7684 Key \u5BB9\u5668\u53D8\u91CF\u540D\uFF08\u53EA\u586B\u540D\u79F0\uFF09",
+        initialValue: credentialEnvKeys || "MIXAGENTS_BROKER_CREDENTIALS_JSON",
+        placeholder: "MIXAGENTS_BROKER_CREDENTIALS_JSON"
+      });
+      assertPrompt(envKeysInput);
+      credentialEnvKeys = envKeysInput;
+    } else {
+      credentialEnvKeys = "";
+    }
+    const missingCredentialNames = credentialEnvKeys.split(",").map((value) => value.trim()).filter(Boolean).filter((name) => !settingsEnv[name]?.trim());
+    if (missingCredentialNames.length > 0) {
+      p3.note(
+        `\u5F53\u524D\u8FDB\u7A0B\u7F3A\u5C11\u8FD9\u4E9B\u73AF\u5883\u53D8\u91CF\uFF1A${missingCredentialNames.join(", ")}\u3002\u8BBE\u7F6E\u4ECD\u53EF\u4FDD\u5B58\uFF0C\u4F46\u5728\u542F\u52A8 Bridge \u7684\u73AF\u5883\u8865\u9F50\u4E4B\u524D\uFF0C\u76F8\u5173\u5B50\u4EE3\u7406\u7EBF\u8DEF\u4F1A\u663E\u793A\u4E0D\u53EF\u7528\u3002`,
+        "\u51ED\u636E\u72B6\u6001\u63D0\u9192"
+      );
+    }
+    credentialProvider = credentialMode === "mixagents-managed" ? selectedCcProvider ?? diagnostics.ccSwitch.currentProviderCodex ?? "" : "";
+  }
+  p3.note([
+    "Project RSI \u662F\u201C\u9879\u76EE\u5B8C\u6210\u8BC1\u636E\u6821\u9A8C\u201D\uFF1A\u53EA\u6709\u9879\u76EE\u5DF2\u7ECF\u521B\u5EFA .project-rsi/config.json \u65F6\u624D\u542F\u7528\u3002",
+    "\u666E\u901A\u95EE\u7B54\u4E0D\u4F1A\u89E6\u53D1\uFF1B\u4EA7\u751F\u6587\u4EF6\u4FEE\u6539\u6216\u9AD8\u5F71\u54CD\u7ED3\u8BBA\u65F6\uFF0C\u624D\u8981\u6C42\u9879\u76EE\u81EA\u5DF1\u7684 runner/validator \u751F\u6210\u65B0\u8BC1\u636E\u3002",
+    "Bridge \u4E0D\u4F1A\u81EA\u52A8\u521D\u59CB\u5316\u9879\u76EE\u3001\u4F2A\u9020 receipt \u6216\u964D\u4F4E\u9879\u76EE\u6821\u9A8C\u6807\u51C6\u3002"
+  ].join("\n"), "\u6B65\u9AA4 4 / 5 \xB7 \u9879\u76EE\u5B8C\u6210\u8BC1\u636E\u6821\u9A8C");
+  const rsiMode = await p3.select({
+    message: "\u4EA7\u751F\u6587\u4EF6\u4FEE\u6539\u65F6\u8981\u4E0D\u8981\u505A\u9879\u76EE\u8BC1\u636E\u6821\u9A8C\uFF1F",
+    initialValue: currentRsi.mode,
     options: [
       {
-        value: "mixagents-managed",
-        label: "MixAgents managed",
-        hint: "Bridge \u53EA\u4F20 provider \u5F15\u7528\uFF1B\u7531 MixAgents/\u53EF\u4FE1 helper \u8BFB\u53D6 cc-switch \u51ED\u636E"
+        value: "auto",
+        label: "\u81EA\u52A8\uFF08\u63A8\u8350\uFF09",
+        hint: "\u9879\u76EE\u5DF2\u521D\u59CB\u5316\u65F6\u542F\u7528\uFF1B\u666E\u901A\u95EE\u7B54\u4E0D\u89E6\u53D1"
       },
       {
-        value: "inherit-env",
-        label: "inherit-env",
-        hint: "MCP \u670D\u52A1\u4ECE\u5DF2\u5B89\u5168\u6CE8\u5165\u7684\u7236\u8FDB\u7A0B\u73AF\u5883\u8BFB\u53D6\uFF1BBridge \u53EA\u68C0\u67E5\u53D8\u91CF\u540D"
+        value: "off",
+        label: "\u5173\u95ED",
+        hint: "\u4E0D\u4F7F\u7528 Bridge \u7684 Project RSI \u5B8C\u6210\u95E8\u7981"
       }
     ]
   });
-  assertPrompt(credentialMode);
-  const credentialProvider = await p3.text({
-    message: "managed \u6A21\u5F0F\u7684 opaque provider \u5F15\u7528\uFF08inherit-env \u53EF\u7559\u7A7A\uFF09",
-    initialValue: currentMcp?.credentialProvider ?? snapshot.ccSwitch.currentProviderCodex ?? "",
-    placeholder: "cc-switch-provider-id"
-  });
-  assertPrompt(credentialProvider);
-  if (credentialProvider.trim() && !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(credentialProvider.trim())) {
-    throw new Error("credential provider \u5FC5\u987B\u662F opaque ID\uFF0C\u4E0D\u5F97\u5305\u542B URL\u3001\u7A7A\u767D\u6216\u51ED\u636E\u6750\u6599");
-  }
-  const credentialEnvKeys = await p3.text({
-    message: "MCP \u6240\u9700\u73AF\u5883\u53D8\u91CF\u540D\uFF0C\u9017\u53F7\u5206\u9694\uFF08\u53EA\u4FDD\u5B58\u540D\u79F0\uFF09",
-    initialValue: (currentMcp?.credentialEnvKeys ?? []).join(", "),
-    placeholder: "MIXAGENTS_BROKER_CREDENTIALS_JSON"
-  });
-  assertPrompt(credentialEnvKeys);
-  const rsiMode = await p3.select({
-    message: "Project RSI \u5B8C\u6210\u95E8\u7981",
-    initialValue: snapshot.rsi.config.mode,
-    options: [
-      { value: "auto", label: "auto", hint: "\u6301\u4E45\u4FEE\u6539/\u9AD8\u5F71\u54CD\u7ED3\u8BBA\u5FC5\u987B\u6709 fresh receipt" },
-      { value: "off", label: "off", hint: "\u5173\u95ED bridge \u4FA7\u95E8\u7981\uFF1B\u9879\u76EE hook \u4E0D\u53D7\u5F71\u54CD" }
-    ]
-  });
   assertPrompt(rsiMode);
-  const projectRootText = await p3.text({
-    message: "Project RSI \u9879\u76EE canonical root\uFF08\u7559\u7A7A\u81EA\u52A8\u5411\u4E0A\u53D1\u73B0\uFF1B\u4E0D\u4F1A\u81EA\u52A8 init\uFF09",
-    initialValue: snapshot.rsi.config.projectRoot ?? "",
-    placeholder: "/absolute/project/root"
-  });
+  const projectRootText = rsiMode === "auto" ? await p3.text({
+    message: "\u9879\u76EE\u6839\u76EE\u5F55\uFF08\u901A\u5E38\u7559\u7A7A\uFF0C\u81EA\u52A8\u4ECE\u5F53\u524D\u5DE5\u4F5C\u533A\u5411\u4E0A\u67E5\u627E\uFF09",
+    initialValue: currentRsi.projectRoot ?? "",
+    placeholder: "\u7559\u7A7A\u5373\u53EF"
+  }) : "";
   assertPrompt(projectRootText);
   const projectRoot = projectRootText.trim() ? await validatedRsiRoot(projectRootText.trim()) : null;
-  const reviewerRouteMode = await p3.select({
-    message: "RSI reviewer route \u9009\u62E9\u65B9\u5F0F",
-    initialValue: snapshot.rsi.config.reviewerRouteMode,
-    options: [
-      { value: "follow-cc-switch", label: "follow-cc-switch" },
-      { value: "manual", label: "manual" }
-    ]
-  });
-  assertPrompt(reviewerRouteMode);
-  let reviewerRoute = snapshot.rsi.config.reviewerRoute;
-  if (reviewerRouteMode === "manual" && snapshot.subagents.diagnostics.readRoutes.length > 0) {
-    const selected = await p3.select({
-      message: "RSI reviewer read route",
-      initialValue: reviewerRoute ?? snapshot.subagents.diagnostics.readRoutes[0].id,
-      options: snapshot.subagents.diagnostics.readRoutes.map((route) => ({
-        value: route.id,
-        label: `${route.id} \xB7 ${route.provider}/${route.model}`,
-        hint: route.available ? "read-only" : "unavailable"
-      }))
+  let reviewerRouteMode = currentRsi.reviewerRouteMode;
+  let reviewerRoute = currentRsi.reviewerRoute;
+  if (rsiMode === "auto") {
+    const reviewerStrategy = await p3.select({
+      message: "RSI \u8BC1\u636E\u7531\u54EA\u4E2A\u5B50\u4EE3\u7406\u590D\u6838\uFF1F",
+      initialValue: currentRsi.reviewerRouteMode === "manual" ? "manual" : "follow",
+      options: [
+        {
+          value: "follow",
+          label: "\u8DDF\u968F\u5F53\u524D\u5B50\u4EE3\u7406\u7EBF\u8DEF\uFF08\u63A8\u8350\uFF09",
+          hint: "\u4E0E /btw\u3001\u81EA\u52A8\u6D3E\u5DE5\u4F7F\u7528\u540C\u4E00 cc-switch \u6620\u5C04"
+        },
+        {
+          value: "manual",
+          label: "\u56FA\u5B9A\u4E00\u6761\u590D\u6838\u7EBF\u8DEF",
+          hint: "\u9002\u5408\u4E13\u95E8\u4F7F\u7528\u4E00\u4E2A\u5BA1\u9605\u6A21\u578B"
+        }
+      ]
     });
-    assertPrompt(selected);
-    reviewerRoute = selected;
+    assertPrompt(reviewerStrategy);
+    reviewerRouteMode = reviewerStrategy === "follow" ? "follow-cc-switch" : "manual";
+    reviewerRoute = reviewerStrategy === "follow" ? null : reviewerRoute;
+    if (reviewerStrategy === "manual" && availableReadRoutes.length > 0) {
+      const selected = await p3.select({
+        message: "\u9009\u62E9\u56FA\u5B9A\u590D\u6838\u7EBF\u8DEF",
+        initialValue: reviewerRoute && availableReadRoutes.some((route) => route.id === reviewerRoute) ? reviewerRoute : selectedReadRoute && availableReadRoutes.some((route) => route.id === selectedReadRoute) ? selectedReadRoute : availableReadRoutes[0].id,
+        options: availableReadRoutes.map((route) => ({
+          value: route.id,
+          label: `${route.provider} / ${route.model}`,
+          hint: route.id
+        }))
+      });
+      assertPrompt(selected);
+      reviewerRoute = selected;
+    }
   }
+  let writeRoute = currentSubagents.writeRoute;
+  let allowWriteWorkers = currentSubagents.allowWriteWorkers;
+  let modelTools = currentSubagents.modelTools;
+  let nativeToolPolicy = currentSubagents.nativeToolPolicy;
+  let maxConcurrentWorkers = currentSubagents.maxConcurrentWorkers;
+  let workerTimeoutMs = currentSubagents.workerTimeoutMs;
+  let includeProgressSnapshot = currentSubagents.includeProgressSnapshot;
+  let maxRepairRounds = currentRsi.maxRepairRounds;
+  const currentMcp = rawProfile.subagents?.mixagents;
+  let mcpCommand = currentMcp?.mcpCommand ?? "";
+  let mcpArgs = currentMcp?.mcpArgs ?? [];
+  const advanced = await p3.confirm({
+    message: "\u662F\u5426\u5C55\u5F00\u9AD8\u7EA7\u53C2\u6570\uFF1F\uFF08\u5E76\u53D1\u3001\u5199\u6743\u9650\u3001\u81EA\u5B9A\u4E49 MCP\u3001\u4FEE\u590D\u8F6E\u6B21\uFF09",
+    initialValue: false
+  });
+  assertPrompt(advanced);
+  if (advanced) {
+    const snapshotConfirm = await p3.confirm({
+      message: "/btw \u662F\u5426\u9644\u5E26\u5DF2\u8131\u654F\u7684\u4E3B\u4EFB\u52A1\u8FDB\u5EA6\u6458\u8981\uFF1F",
+      initialValue: includeProgressSnapshot
+    });
+    assertPrompt(snapshotConfirm);
+    includeProgressSnapshot = snapshotConfirm;
+    const toolsConfirm = await p3.confirm({
+      message: "\u5141\u8BB8\u7236 Codex \u6A21\u578B\u81EA\u52A8\u8C03\u7528 Broker \u5B50\u4EE3\u7406\u5DE5\u5177\uFF1F",
+      initialValue: modelTools
+    });
+    assertPrompt(toolsConfirm);
+    modelTools = toolsConfirm;
+    const nativeChoice = await p3.select({
+      message: "Codex \u81EA\u5E26\u7684\u5B50\u4EE3\u7406\u5DE5\u5177\u600E\u4E48\u5904\u7406\uFF1F",
+      initialValue: nativeToolPolicy,
+      options: [
+        {
+          value: "shadow",
+          label: "\u9690\u85CF native \u5DE5\u5177\uFF08\u63A8\u8350\uFF09",
+          hint: "\u53EA\u8D70 Broker\uFF0C\u907F\u514D\u7B2C\u4E09\u65B9 provider \u6536\u5230\u52A0\u5BC6\u5B50\u4EFB\u52A1\u540E\u65E0\u6CD5\u8BFB\u53D6"
+        },
+        {
+          value: "preserve",
+          label: "\u4FDD\u7559 native \u5DE5\u5177",
+          hint: "\u53EF\u80FD\u7ED5\u8FC7 Broker\uFF1Bdoctor \u4F1A\u6807\u8BB0\u98CE\u9669"
+        }
+      ]
+    });
+    assertPrompt(nativeChoice);
+    nativeToolPolicy = nativeChoice;
+    const concurrencyText = await p3.text({
+      message: "\u6700\u591A\u540C\u65F6\u8FD0\u884C\u51E0\u4E2A\u5B50\u4EE3\u7406\uFF1F\uFF081-32\uFF09",
+      initialValue: String(maxConcurrentWorkers)
+    });
+    assertPrompt(concurrencyText);
+    maxConcurrentWorkers = boundedIntegerInput(concurrencyText, 1, 32, "\u6700\u5927\u5E76\u53D1\u5B50\u4EE3\u7406\u6570");
+    const timeoutText = await p3.text({
+      message: "\u5355\u4E2A\u5B50\u4EE3\u7406\u6700\u957F\u8FD0\u884C\u65F6\u95F4\uFF08\u5206\u949F\uFF09",
+      initialValue: String(workerTimeoutMs / 6e4)
+    });
+    assertPrompt(timeoutText);
+    workerTimeoutMs = Math.round(
+      boundedNumberInput(timeoutText, 0.5, 1440, "\u5B50\u4EE3\u7406\u8D85\u65F6\u5206\u949F\u6570") * 6e4
+    );
+    const writeWorkers = await p3.confirm({
+      message: "\u5141\u8BB8\u6A21\u578B\u521B\u5EFA\u53EF\u5199\u6587\u4EF6\u7684\u5B50\u4EE3\u7406\uFF1F\uFF08\u4ECD\u9700\u7528\u6237\u9010\u4EFB\u52A1\u6388\u6743\uFF09",
+      initialValue: allowWriteWorkers
+    });
+    assertPrompt(writeWorkers);
+    allowWriteWorkers = writeWorkers;
+    if (availableWriteRoutes.length > 0) {
+      const noneValue = "__none__";
+      const selected = await p3.select({
+        message: "\u53EF\u5199\u5B50\u4EE3\u7406\u4F7F\u7528\u54EA\u6761\u7EBF\u8DEF\uFF1F",
+        initialValue: writeRoute && availableWriteRoutes.some((route) => route.id === writeRoute) ? writeRoute : noneValue,
+        options: [
+          { value: noneValue, label: "\u4E0D\u914D\u7F6E\u53EF\u5199\u7EBF\u8DEF", hint: "\u53EA\u5141\u8BB8\u53EA\u8BFB\u5B50\u4EE3\u7406" },
+          ...availableWriteRoutes.map((route) => ({
+            value: route.id,
+            label: `${route.provider} / ${route.model}`,
+            hint: `${route.id} \xB7 \u9700\u8981\u9010\u4EFB\u52A1\u6388\u6743`
+          }))
+        ]
+      });
+      assertPrompt(selected);
+      writeRoute = selected === noneValue ? null : selected;
+    }
+    const repairText = await p3.text({
+      message: "RSI \u6821\u9A8C\u5931\u8D25\u540E\uFF0C\u6700\u591A\u81EA\u52A8\u4FEE\u590D\u51E0\u8F6E\uFF1F\uFF080-10\uFF09",
+      initialValue: String(maxRepairRounds)
+    });
+    assertPrompt(repairText);
+    maxRepairRounds = boundedIntegerInput(repairText, 0, 10, "RSI \u6700\u5927\u4FEE\u590D\u8F6E\u6B21");
+    const command = await p3.text({
+      message: "\u81EA\u5B9A\u4E49 MixAgents MCP \u547D\u4EE4\uFF08\u901A\u5E38\u7559\u7A7A\uFF0C\u81EA\u52A8\u4F7F\u7528 npm \u5305\uFF09",
+      initialValue: mcpCommand,
+      placeholder: "\u7559\u7A7A\u81EA\u52A8\u53D1\u73B0"
+    });
+    assertPrompt(command);
+    mcpCommand = command.trim();
+    const argsText = await p3.text({
+      message: "\u81EA\u5B9A\u4E49 MCP \u53C2\u6570 JSON \u6570\u7EC4\uFF08\u7559\u7A7A\u4FDD\u6301\u73B0\u503C\uFF09",
+      initialValue: "",
+      placeholder: '\u4F8B\u5982 ["dist/server.js"]'
+    });
+    assertPrompt(argsText);
+    if (argsText.trim()) mcpArgs = parseStringArray(argsText, "MCP \u53C2\u6570");
+  }
+  let nextRouteMap;
+  if ((selectedMode === "auto" || selectedMode === "broker") && routeMode === "follow-cc-switch" && selectedCcProvider && selectedReadRoute) {
+    const baseMap = routeMapState.config ?? { version: 1, providers: {} };
+    const existing = baseMap.providers[selectedCcProvider] ?? {};
+    nextRouteMap = {
+      ...baseMap,
+      providers: {
+        ...baseMap.providers,
+        [selectedCcProvider]: {
+          ...existing,
+          readRoute: selectedReadRoute,
+          ...allowWriteWorkers && writeRoute ? { writeRoute } : {}
+        }
+      }
+    };
+  }
+  const modeText = selectedMode === "auto" ? "\u81EA\u52A8\uFF1A\u4F18\u5148 MixAgents\uFF0C\u5931\u8D25\u65F6\u6309\u8BBE\u7F6E\u51B3\u5B9A" : selectedMode === "broker" ? "\u53EA\u5141\u8BB8 MixAgents" : selectedMode === "fork" ? "\u53EA\u7528\u672C\u5730 Codex fork" : "\u5173\u95ED\u5B50\u4EE3\u7406";
+  const routeText = selectedMode === "auto" || selectedMode === "broker" ? routeMode === "follow-cc-switch" ? `\u8D26\u53F7 ${selectedCcProvider ?? "(none)"} \u81EA\u52A8\u7ED1\u5B9A\u7EBF\u8DEF ${selectedReadRoute ?? "(none)"}` : `\u56FA\u5B9A\u7EBF\u8DEF ${selectedReadRoute ?? readRoute ?? "(none)"}` : "(\u4E0D\u9002\u7528)";
+  const credentialText = credentialMode === "inherit-env" ? `\u542F\u52A8\u73AF\u5883\u53D8\u91CF ${credentialEnvKeys || "(\u672A\u914D\u7F6E)"}` : "MixAgents managed\uFF08\u5F53\u524D\u7248\u672C\u672A\u9A8C\u8BC1\uFF09";
+  p3.note([
+    `\u4E3B\u5BF9\u8BDD\uFF1A${diagnostics.ccSwitch.currentProviderName ?? "(unknown)"}\uFF08\u4FDD\u6301\u4E0D\u53D8\uFF09`,
+    `\u5B50\u4EE3\u7406\uFF1A${modeText}`,
+    `\u5B50\u4EE3\u7406\u7EBF\u8DEF\uFF1A${routeText}`,
+    `Key\uFF1A${credentialText}`,
+    `\u9879\u76EE\u8BC1\u636E\u6821\u9A8C\uFF1A${rsiMode === "off" ? "\u5173\u95ED" : "\u81EA\u52A8\uFF08\u53EA\u5BF9\u5DF2\u521D\u59CB\u5316\u9879\u76EE\uFF09"}`,
+    advanced ? "\u9AD8\u7EA7\u53C2\u6570\uFF1A\u5DF2\u5C55\u5F00\u7F16\u8F91" : "\u9AD8\u7EA7\u53C2\u6570\uFF1A\u4FDD\u6301\u539F\u503C"
+  ].join("\n"), "\u6B65\u9AA4 5 / 5 \xB7 \u4FDD\u5B58\u524D\u786E\u8BA4");
   const save = await p3.confirm({
-    message: "\u4FDD\u5B58\u5230\u5F53\u524D profile\uFF1F\u4E0B\u4E00\u6761 /btw \u4F1A\u7ACB\u5373\u4F7F\u7528\u65B0\u8BBE\u7F6E\uFF0C\u65E0\u9700\u91CD\u5EFA\u65E7\u4F1A\u8BDD\u3002",
+    message: "\u6309\u4EE5\u4E0A\u8BBE\u7F6E\u4FDD\u5B58\uFF1F",
     initialValue: true
   });
   assertPrompt(save);
@@ -31730,13 +33288,21 @@ async function runSettings(options = {}) {
     const profile2 = root.profiles[snapshot.profile];
     if (!profile2) throw new Error(`profile \u4E0D\u5B58\u5728\uFF1A${snapshot.profile}`);
     const normalizedKeys = credentialEnvKeys.split(",").map((value) => value.trim()).filter(Boolean);
-    const nextMcp = mcpCommand.trim() || currentMcp?.mcpCommand ? {
-      ...currentMcp,
-      mcpCommand: mcpCommand.trim() || currentMcp.mcpCommand,
-      ...mcpArgs.length > 0 ? { mcpArgs } : { mcpArgs: void 0 },
+    if (nextRouteMap) await saveBrokerRouteMap(nextRouteMap, settingsEnv);
+    const {
+      mcpCommand: _previousMcpCommand,
+      credentialMode: _previousCredentialMode,
+      credentialProvider: _previousCredentialProvider,
+      credentialEnvKeys: _previousCredentialEnvKeys,
+      ...mcpBase
+    } = currentMcp ?? {};
+    const nextMcp = selectedMode === "auto" || selectedMode === "broker" || currentMcp ? {
+      ...mcpBase,
+      ...mcpCommand.trim() ? { mcpCommand: mcpCommand.trim() } : {},
+      ...mcpArgs.length > 0 ? { mcpArgs } : {},
       credentialMode,
-      ...credentialProvider.trim() ? { credentialProvider: credentialProvider.trim() } : { credentialProvider: void 0 },
-      ...normalizedKeys.length > 0 ? { credentialEnvKeys: normalizedKeys } : { credentialEnvKeys: void 0 }
+      ...credentialProvider.trim() ? { credentialProvider: credentialProvider.trim() } : {},
+      ...normalizedKeys.length > 0 ? { credentialEnvKeys: normalizedKeys } : {}
     } : void 0;
     root.profiles[snapshot.profile] = {
       ...profile2,
@@ -31747,6 +33313,12 @@ async function runSettings(options = {}) {
         mode: selectedMode,
         routeMode,
         readRoute,
+        writeRoute: routeMode === "manual" ? writeRoute : null,
+        modelTools,
+        nativeToolPolicy,
+        maxConcurrentWorkers,
+        workerTimeoutMs,
+        allowWriteWorkers,
         allowForkFallback,
         includeProgressSnapshot,
         ...nextMcp ? { mixagents: nextMcp } : {}
@@ -31757,12 +33329,15 @@ async function runSettings(options = {}) {
         mode: rsiMode,
         projectRoot,
         reviewerRouteMode,
-        reviewerRoute
+        reviewerRoute,
+        maxRepairRounds
       }
     };
     await saveRootConfig(root, paths2.configFile);
   });
-  p3.outro("\u5DF2\u4FDD\u5B58\u3002\u4E0B\u4E00\u6761 /btw \u4F1A\u91CD\u65B0\u89E3\u6790 cc-switch\u3001Broker routes \u548C\u672C\u8BBE\u7F6E\u3002");
+  p3.outro(
+    "\u5DF2\u4FDD\u5B58\u3002\u4E0B\u4E00\u6761 /btw \u4F1A\u91CD\u65B0\u89E3\u6790\u8DEF\u7531\uFF1BBroker dynamic tools/native shadow \u4ECE\u65B0 thread \u751F\u6548\uFF0C\u65E7 thread \u4E0D\u4F1A\u9759\u9ED8\u7ED5\u8FC7\u3002"
+  );
 }
 async function loadSettingsSnapshot(options = {}) {
   const env = options.env ?? process.env;
@@ -31847,6 +33422,14 @@ async function loadSettingsSnapshot(options = {}) {
 function formatSettings(snapshot) {
   return formatSnapshot(snapshot);
 }
+function currentMcpCredentials(profile2) {
+  const mixagents = profile2.subagents?.mixagents;
+  return {
+    mode: mixagents?.credentialMode === "mixagents-managed" ? "mixagents-managed" : "inherit-env",
+    credentialEnvKeys: mixagents?.credentialEnvKeys ?? [],
+    ...mixagents?.credentialProvider ? { credentialProvider: mixagents.credentialProvider } : {}
+  };
+}
 function formatSnapshot(snapshot) {
   const diagnostics = snapshot.subagents.diagnostics;
   const provider = snapshot.ccSwitch.currentProviderCodex ?? "(unknown)";
@@ -31860,6 +33443,9 @@ function formatSnapshot(snapshot) {
     `profile=${snapshot.profile} agentKind=${snapshot.agentKind}`,
     `workspace=${snapshot.workspace}`,
     `cc-switch provider=${provider} name=${snapshot.ccSwitch.currentProviderName ?? "(unknown)"}`,
+    `cc-switch accounts=${diagnostics.ccSwitch.providers.length > 0 ? diagnostics.ccSwitch.providers.map(
+      (item) => `${item.current ? "*" : "-"}${item.id}:${item.name}`
+    ).join(" | ") : "(none reported)"}`,
     `main configured: ccSwitch=${snapshot.mainProvider.configuredCcSwitchProviderId ?? "(unknown)"} codexProvider=${snapshot.mainProvider.configuredCodexProviderId ?? "(unknown)"} model=${snapshot.mainProvider.configuredModel ?? "(config-default)"}`,
     `main running: ${snapshot.mainProvider.running.length > 0 ? snapshot.mainProvider.running.map(
       (run) => `ccSwitch=${run.ccSwitchProviderId ?? "?"} codexProvider=${run.codexProviderId} model=${run.model ?? "?"}`
@@ -31867,8 +33453,11 @@ function formatSnapshot(snapshot) {
     `main running with legacy/unknown identity=${snapshot.mainProvider.runningUnknown}`,
     `provider switch=${snapshot.mainProvider.pendingSwitch}; safe point=${snapshot.mainProvider.safeSwitchPoint}`,
     `MixAgents mode=${snapshot.subagents.config.mode} routeMode=${snapshot.subagents.config.routeMode} MCP=${diagnostics.mcp.status} version=${diagnostics.packageVersion ?? "(unknown)"}`,
+    `Broker tools=${diagnostics.modelTools.brokerWired ? "wired" : "degraded"} namespace=${diagnostics.modelTools.namespace} native=${diagnostics.modelTools.nativeToolPolicy} maxWorkers=${diagnostics.limits.maxConcurrentWorkers} workerTimeoutMs=${diagnostics.limits.workerTimeoutMs} writeWorkers=${diagnostics.limits.allowWriteWorkers}`,
+    `Broker tools degraded=${diagnostics.modelTools.degradedReason ?? "(none)"}`,
     `credential mode=${diagnostics.credentials.mode} status=${diagnostics.credentials.status} providerRef=${diagnostics.credentials.providerReference ?? "(none)"}`,
     `selected route=${diagnostics.selectedRoute.id ?? "(none)"}` + (diagnostics.selectedRoute.error ? ` error=${diagnostics.selectedRoute.error}` : ""),
+    `selected write route=${diagnostics.selectedWriteRoute.id ?? "(none)"}` + (diagnostics.selectedWriteRoute.error ? ` error=${diagnostics.selectedWriteRoute.error}` : ""),
     `route config=${diagnostics.routeMap.path}`,
     `MixAgents broker config=${diagnostics.brokerConfigPath}`,
     "read routes:",
@@ -31877,6 +33466,7 @@ function formatSnapshot(snapshot) {
     ...writeLines,
     `RSI mode=${snapshot.rsi.config.mode} initialized=${snapshot.rsi.status.initialized} root=${snapshot.rsi.status.projectRoot ?? "(auto/new)"} runner=${snapshot.rsi.status.runner} validator=${snapshot.rsi.status.validator}`,
     `RSI latest run=${snapshot.rsi.status.latestRun?.runId ?? "(none)"} validated=${snapshot.rsi.status.latestRun?.validated ?? false}`,
+    `RSI feedback loop maxRounds=${snapshot.rsi.config.maxRepairRounds} timeoutMs=${snapshot.rsi.config.repairTimeoutMs}`,
     `RSI gate: bridge=${snapshot.rsi.status.bridgeGate} nativeTerminal=${snapshot.rsi.status.nativeTerminalGate} historicalTaskRsi=${snapshot.rsi.status.historicalTaskRsi}`,
     "next commands:",
     ...snapshot.nextCommands.map((command) => `- ${command}`)
@@ -31898,11 +33488,25 @@ function parseStringArray(value, label) {
   }
   return parsed;
 }
+function boundedIntegerInput(value, minimum, maximum, label) {
+  const parsed = Number(value.trim());
+  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
+    throw new Error(`${label}\u5FC5\u987B\u662F ${minimum}-${maximum} \u7684\u6574\u6570`);
+  }
+  return parsed;
+}
+function boundedNumberInput(value, minimum, maximum, label) {
+  const parsed = Number(value.trim());
+  if (!Number.isFinite(parsed) || parsed < minimum || parsed > maximum) {
+    throw new Error(`${label}\u5FC5\u987B\u662F ${minimum}-${maximum} \u7684\u6570\u5B57`);
+  }
+  return parsed;
+}
 async function validatedRsiRoot(input) {
   if (!input || input.includes("\0")) throw new Error("Project RSI root \u65E0\u6548");
-  const candidate = await realpath8(resolve7(input)).catch(() => void 0);
+  const candidate = await realpath9(resolve7(input)).catch(() => void 0);
   if (!candidate) throw new Error(`Project RSI root \u4E0D\u5B58\u5728\uFF1A${input}`);
-  if (candidate === parse2(candidate).root || candidate === resolve7(homedir14()) || dirname24(candidate) === parse2(candidate).root) {
+  if (candidate === parse3(candidate).root || candidate === resolve7(homedir14()) || dirname24(candidate) === parse3(candidate).root) {
     throw new Error("Project RSI root \u4E0D\u80FD\u662F /\u3001home \u6216\u5BBD\u6CDB\u7236\u76EE\u5F55");
   }
   const project = await discoverProjectRsi(candidate, candidate);
@@ -31943,7 +33547,7 @@ function providerSwitchState(running, configuredCcSwitchProviderId, configured, 
 }
 
 // src/cli/commands/doctor.ts
-import { createHash as createHash14 } from "crypto";
+import { createHash as createHash15 } from "crypto";
 async function runDoctor(options = {}) {
   const report = await loadDoctorReport(options);
   if (options.json || !process.stdout.isTTY) {
@@ -31965,6 +33569,7 @@ ${report.checks.map((check2) => `- [${check2.status}] ${check2.id}: ${check2.mes
 async function loadDoctorReport(options = {}) {
   const snapshot = await loadSettingsSnapshot(options);
   const diagnostics = snapshot.subagents.diagnostics;
+  const explicitBroker = snapshot.subagents.config.mode === "broker";
   const checks = [];
   checks.push({
     id: "profile",
@@ -31972,9 +33577,24 @@ async function loadDoctorReport(options = {}) {
     message: `profile=${snapshot.profile} agentKind=${snapshot.agentKind}`
   });
   checks.push({
+    id: "broker-model-tools",
+    status: diagnostics.modelTools.brokerWired ? "pass" : explicitBroker || diagnostics.modelTools.configured ? "fail" : "warn",
+    message: diagnostics.modelTools.brokerWired ? `Broker dynamic tools configured; namespace=${diagnostics.modelTools.namespace}; native=${diagnostics.modelTools.nativeToolPolicy}` : diagnostics.modelTools.degradedReason ?? "Broker model tools are not wired"
+  });
+  checks.push({
+    id: "native-collaboration",
+    status: diagnostics.modelTools.brokerWired ? "pass" : "warn",
+    message: diagnostics.modelTools.brokerWired ? "Bridge-managed new threads disable native collaboration tools; old unmarked threads fail closed" : "native collaboration is preserved and may bypass Broker; encrypted agent_message failures remain possible"
+  });
+  checks.push({
     id: "main-provider",
     status: snapshot.mainProvider.pendingSwitch === "pending-next-turn" ? "warn" : "pass",
     message: `ccSwitch=${snapshot.mainProvider.configuredCcSwitchProviderId ?? "unknown"} codexProvider=${snapshot.mainProvider.configuredCodexProviderId ?? "unknown"} running=${snapshot.mainProvider.running.length} switch=${snapshot.mainProvider.pendingSwitch}`
+  });
+  checks.push({
+    id: "write-route",
+    status: diagnostics.selectedWriteRoute.id && diagnostics.limits.allowWriteWorkers ? "pass" : "warn",
+    message: diagnostics.selectedWriteRoute.id ? `selected=${diagnostics.selectedWriteRoute.id} explicitTaskWorkspaceAuthorization=${diagnostics.limits.allowWriteWorkers}` : diagnostics.limits.allowWriteWorkers ? "workspace-write workers enabled but no write route is wired" : "workspace-write workers disabled by default"
   });
   checks.push(diagnostics.ccSwitch.currentProviderCodex ? {
     id: "cc-switch",
@@ -31985,7 +33605,6 @@ async function loadDoctorReport(options = {}) {
     status: "warn",
     message: `\u672A\u8BC6\u522B\u5F53\u524D Codex provider\uFF1Bsettings=${diagnostics.ccSwitch.settingsPath}`
   });
-  const explicitBroker = snapshot.subagents.config.mode === "broker";
   if (diagnostics.mcp.status === "available") {
     checks.push({
       id: "mixagents-mcp",
@@ -32009,6 +33628,16 @@ async function loadDoctorReport(options = {}) {
     id: "credential-delegation",
     status: diagnostics.credentials.status === "present" ? "pass" : diagnostics.credentials.status === "delegated-unverified" ? "warn" : diagnostics.credentials.mode === "mixagents-managed" ? "fail" : "warn",
     message: diagnostics.credentials.mode === "mixagents-managed" ? `MixAgents managed\uFF1Bbridge \u53EA\u4F20 providerRef=${diagnostics.credentials.providerReference ?? "(missing)"}` : `inherit-env\uFF1Bpresent/missing only: ${diagnostics.credentials.missingEnvironment.join(",") || "none missing"}`
+  });
+  checks.push({
+    id: "rsi-feedback-loop",
+    status: snapshot.rsi.config.mode === "off" ? "pass" : snapshot.rsi.config.maxRepairRounds > 0 ? "pass" : "warn",
+    message: snapshot.rsi.config.mode === "off" ? "disabled" : `maxRepairRounds=${snapshot.rsi.config.maxRepairRounds} timeoutMs=${snapshot.rsi.config.repairTimeoutMs}; reviewer is required for a pass`
+  });
+  checks.push({
+    id: "worker-startup",
+    status: "warn",
+    message: options.probeRoute ? "explicit route probe covers worker startup; ordinary doctor remains non-paid" : "not-run-by-default; use explicit `doctor --probe-route <id>` or E2E test"
   });
   checks.push({
     id: "route-generation",
@@ -32088,13 +33717,36 @@ async function loadDoctorReport(options = {}) {
       routeConfigPath: diagnostics.routeMap.path,
       brokerConfigPath: diagnostics.brokerConfigPath,
       selectedRoute: diagnostics.selectedRoute.id,
+      selectedWriteRoute: diagnostics.selectedWriteRoute.id,
       readRoutes: diagnostics.readRoutes.map((route) => ({
         id: route.id,
         provider: route.provider,
         model: route.model,
         available: route.available,
         missingEnvironment: route.missingEnvironment
-      }))
+      })),
+      modelTools: diagnostics.modelTools,
+      limits: diagnostics.limits
+    },
+    nativeCollaboration: {
+      brokerShadowConfigured: diagnostics.modelTools.configured && diagnostics.modelTools.nativeToolPolicy === "shadow",
+      nativeBypassPossible: !diagnostics.modelTools.brokerWired,
+      trustedBrokerInterceptionHook: "not-installed-or-unverified",
+      hookCanBlockOrRewrite: true,
+      hookCanReplaceTool: false,
+      brokerDynamicToolsAvailableOnNewThreads: diagnostics.modelTools.brokerWired,
+      existingThreadsWithoutMarker: "fail-closed",
+      directCodexTuiCoverage: "requires-trusted-hook"
+    },
+    workerRuntime: {
+      startupVerification: "not-run-by-default",
+      command: `arg-bridge doctor --profile ${snapshot.profile} --json --probe-route <read-route>`
+    },
+    rsiFeedbackLoop: {
+      configured: snapshot.rsi.config.mode !== "off" && snapshot.rsi.config.maxRepairRounds > 0,
+      maxRepairRounds: snapshot.rsi.config.maxRepairRounds,
+      repairTimeoutMs: snapshot.rsi.config.repairTimeoutMs,
+      reviewerRequired: true
     },
     rsi: snapshot.rsi.status,
     ...probe ? { probe } : {},
@@ -32161,7 +33813,7 @@ async function probeSubagentRoute(options, requestedRoute) {
         provider: resolved.route.provider,
         model: resolved.route.model,
         access: "read-only",
-        ...result.text ? { outputHash: createHash14("sha256").update(result.text).digest("hex") } : {},
+        ...result.text ? { outputHash: createHash15("sha256").update(result.text).digest("hex") } : {},
         note: "explicit-paid-request; no fallback or replay"
       };
     } finally {
@@ -32193,10 +33845,10 @@ function classifyProbeError(message, aborted) {
 }
 
 // src/cli/commands/migrate-local-poc.ts
-import { createHash as createHash15 } from "crypto";
+import { createHash as createHash16 } from "crypto";
 import {
   copyFile as copyFile3,
-  lstat as lstat8,
+  lstat as lstat9,
   mkdir as mkdir25,
   readFile as readFile27,
   readdir as readdir8,
@@ -32250,13 +33902,13 @@ async function migrateLocalPoc(options = {}) {
     conflicts: [],
     rollback: []
   };
-  for (const relative4 of ["dist/cli.js", "dist/broker-side.js"]) {
-    const path = join37(packageDir, relative4);
+  for (const relative5 of ["dist/cli.js", "dist/broker-side.js"]) {
+    const path = join37(packageDir, relative5);
     const body = await readFile27(path, "utf8").catch(() => void 0);
     if (body === void 0) continue;
     const marker = POC_MARKERS.some((item) => body.includes(item));
-    const sha2562 = createHash15("sha256").update(body).digest("hex");
-    const expectedHash = packageVersion ? KNOWN_CLEAN_HASHES[packageVersion]?.[relative4] : void 0;
+    const sha2562 = createHash16("sha256").update(body).digest("hex");
+    const expectedHash = packageVersion ? KNOWN_CLEAN_HASHES[packageVersion]?.[relative5] : void 0;
     const unknownOneVersionSevenFile = packageVersion === "1.6.7" && !expectedHash;
     const unknownModifiedKnownVersion = Boolean(expectedHash && expectedHash !== sha2562);
     if (!marker) {
@@ -32305,7 +33957,7 @@ async function migrateLocalPoc(options = {}) {
   }
   const changes = report.package.patchedFiles.some((file) => file.action === "restore-backup") || report.sideMap?.action === "upgrade";
   if (apply && report.conflicts.length === 0 && changes) {
-    const hasConfig = await lstat8(rootPaths.configFile).then((info) => info.isFile()).catch(() => false);
+    const hasConfig = await lstat9(rootPaths.configFile).then((info) => info.isFile()).catch(() => false);
     if (hasConfig) {
       const backup = `${rootPaths.configFile}.local-poc-${timestamp}`;
       await copyFile3(rootPaths.configFile, backup);
@@ -32477,7 +34129,7 @@ var program = new Command();
 program.name("arg-bridge").description("Bridge Feishu/Lark messenger with local CLI coding agents").version(package_default.version, "-v, --version");
 program.command("native [thread]").description("Open or resume an agent in this shell; Codex shares an App Server with Bridge").option("--profile <name>", "profile whose agent and permissions to use").action(async (thread, opts) => runNative(thread, opts));
 program.command("codex [thread]").description("Alias for `native`/`native <thread>`; launches the official Codex binary without replacing it").option("--profile <name>", "profile whose Codex agent and permissions to use").action(async (thread, opts) => runNative(thread, opts));
-program.command("settings").description("View or edit MixAgents /btw routing and Project RSI settings").option("--profile <name>", "profile to inspect or edit (defaults to active profile)").option("--json", "print a machine-readable, secret-free snapshot without prompting").action(async (opts) => {
+program.command("settings").description("Open the guided cc-switch/MixAgents/Project RSI settings flow").option("--profile <name>", "profile to inspect or edit (defaults to active profile)").option("--json", "print a machine-readable, secret-free snapshot without prompting").action(async (opts) => {
   await runSettings(opts);
 });
 program.command("doctor").description("Diagnose cc-switch, MixAgents routes, credentials presence and Project RSI").option("--profile <name>", "profile to diagnose (defaults to active profile)").option("--json", "print a machine-readable, secret-free report").option("--probe-route <id>", "explicitly spend one read-only Broker request on this route; never falls back").action(async (opts) => {

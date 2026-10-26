@@ -1,5 +1,6 @@
 import {
   DEFAULT_SUBAGENT_CONFIG,
+  type SubagentAccess,
   type SubagentConfig,
 } from '../../config/profile-schema';
 import { loadBrokerRouteMap, resolveRouteForProvider, type BrokerRouteMap } from '../../integrations/broker-routes';
@@ -18,6 +19,8 @@ export interface ResolveSubagentInput {
   cwd: string;
   /** Explicit per-command route (highest priority). */
   requestedRoute?: string;
+  /** Access requested for the worker. /btw always supplies read-only. */
+  access?: SubagentAccess;
   signal: AbortSignal;
 }
 
@@ -61,7 +64,13 @@ export async function resolveSubagents(input: ResolveSubagentInput): Promise<Res
     routes = await backend.listRoutes(input.signal);
   } catch (error) {
     const message = errorMessage(error);
-    if (config.mode === 'broker') throw error;
+    const unavailable = error instanceof SubagentUnavailableError
+      ? error
+      : new SubagentUnavailableError(
+          'mixagents-start-failed',
+          `MixAgents 启动或路由读取失败：${message}`,
+        );
+    if (config.mode === 'broker') throw unavailable;
     if (!config.allowForkFallback) {
       throw new SubagentUnavailableError(
         'mixagents-not-configured',
@@ -84,6 +93,7 @@ export async function resolveSubagents(input: ResolveSubagentInput): Promise<Res
     routeMap: routeState.config,
     routes,
     requestedRoute: input.requestedRoute,
+    access: input.access,
   });
   if (!selection.route) {
     const message = selection.error ?? '没有可用的 MixAgents read route';
@@ -143,37 +153,49 @@ export function selectSubagentRoute(input: {
   routeMap: BrokerRouteMap | undefined;
   routes: SubagentRoute[];
   requestedRoute?: string;
+  access?: SubagentAccess;
 }): { route?: SubagentRoute; error?: string } {
+  const access = input.access ?? 'read-only';
   if (input.requestedRoute) {
     const route = input.routes.find(item => item.id === input.requestedRoute);
-    return route
+    return route && (access === 'read-only' || route.maxAccess === 'workspace-write')
       ? { route }
       : { error: `显式指定的 MixAgents route 不存在：${input.requestedRoute}` };
   }
   if (input.config.routeMode === 'manual') {
-    if (!input.config.readRoute) {
-      return { error: 'routeMode=manual 但未配置 subagents.readRoute' };
+    const configured = access === 'workspace-write'
+      ? input.config.writeRoute
+      : input.config.readRoute;
+    if (!configured) {
+      return {
+        error: access === 'workspace-write'
+          ? 'routeMode=manual 但未配置 subagents.writeRoute'
+          : 'routeMode=manual 但未配置 subagents.readRoute',
+      };
     }
-    const route = input.routes.find(item => item.id === input.config.readRoute);
-    return route
+    const route = input.routes.find(item => item.id === configured);
+    return route && (access === 'read-only' || route.maxAccess === 'workspace-write')
       ? { route }
-      : { error: `手动配置的 MixAgents read route 不存在：${input.config.readRoute}` };
+      : { error: `手动配置的 MixAgents ${access} route 不存在或不支持该权限：${configured}` };
   }
   const mapped = resolveRouteForProvider(
     input.routeMap,
     input.ccSwitch.currentProviderCodex,
+    access,
   );
   if (!mapped.routeId) {
     return {
       error: input.ccSwitch.currentProviderCodex
-        ? `cc-switch 当前 provider ${input.ccSwitch.currentProviderCodex} 没有 readRoute 映射`
-        : '无法确定 cc-switch 当前 provider，且没有 defaultReadRoute',
+        ? `cc-switch 当前 provider ${input.ccSwitch.currentProviderCodex} 没有 ${access} route 映射`
+        : access === 'workspace-write'
+          ? '无法确定 cc-switch 当前 provider，且没有 defaultWriteRoute'
+          : '无法确定 cc-switch 当前 provider，且没有 defaultReadRoute',
     };
   }
   const route = input.routes.find(item => item.id === mapped.routeId);
-  return route
+  return route && (access === 'read-only' || route.maxAccess === 'workspace-write')
     ? { route }
-    : { error: `readRoute 映射指向不存在的 MixAgents route：${mapped.routeId}` };
+    : { error: `${access} route 映射指向不存在或不兼容的 MixAgents route：${mapped.routeId}` };
 }
 
 function errorMessage(error: unknown): string {

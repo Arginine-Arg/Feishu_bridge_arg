@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "codexVersion": "0.164.0",
+  "threadId": "01a178cc-47f4-78d3-9451-f36ce5c8dec7",
+  "transport": "codex app-server stdio",
+  "nativeCollaboration": "shadowed by features.multi_agent_v2.disable_native_tools",
+  "toolCalls": [
+    {
+      "namespace": "arg_bridge",
+      "tool": "spawn_agent",
+      "arguments": {
+        "name": "trace-reviewer",
+        "task": "Inspect the package as a plaintext Broker task"
+      }
+    },
+    {
+      "namespace": "arg_bridge",
+      "tool": "wait_agent",
+      "arguments": {
+        "logical_names": [
+          "trace-reviewer"
+        ],
+        "timeout_ms": 2000
+      }
+    }
+  ],
+  "worker": {
+    "route": "trace-read",
+    "provider": "trace-provider",
+    "model": "trace-model",
+    "access": "read-only",
+    "agentId": "broker-agent-trace",
+    "threadId": "broker-worker-thread-trace",
+    "taskDelivery": "ordinary plaintext MCP input",
+    "result": "WORKER_RESULT_TRACE_OK"
+  },
+  "providerTrace": {
+    "requests": 3,
+    "secondRequestContainsFunctionCallOutput": true,
+    "thirdRequestContainsWorkerResult": true,
+    "usedAgentMessageEncryptedContent": false
+  },
+  "secrets": "none; OPENAI_API_KEY was a non-network trace-only value"
+}

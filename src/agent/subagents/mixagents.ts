@@ -1,3 +1,4 @@
+import { createRequire } from 'node:module';
 import type { SubagentConfig, SubagentMixAgentsConfig } from '../../config/profile-schema';
 import { McpStdioClient, McpToolError, redactSecrets } from './mcp-client';
 import {
@@ -21,6 +22,7 @@ const REQUIRED_TOOLS = [
 
 const WAIT_REQUEST_MS = 120_000;
 const DEFAULT_TOTAL_WAIT_MS = 15 * 60_000;
+const require = createRequire(import.meta.url);
 
 export interface MixAgentsLaunchConfig {
   command: string;
@@ -318,6 +320,16 @@ export function resolveMixAgentsLaunchConfig(
       args: splitArgs(env.MIXAGENTS_BROKER_MCP_ARGS),
     };
   }
+  try {
+    const server = require.resolve('mixagents-broker/dist/server.js');
+    return {
+      command: process.execPath,
+      args: [server],
+    };
+  } catch {
+    // The public package is optional; explicit configuration remains the
+    // fallback when the runtime did not install it.
+  }
   return undefined;
 }
 
@@ -356,6 +368,9 @@ function agentFromSnapshot(
     backendId: 'mixagents',
     status: sideStatus(value.status),
     createdAt: Date.now(),
+    ...(stringValue(value.threadId) ?? stringValue(value.thread_id)
+      ? { threadId: stringValue(value.threadId) ?? stringValue(value.thread_id) }
+      : {}),
   };
 }
 
@@ -370,7 +385,9 @@ function sideStatus(value: unknown): SideAgent['status'] {
     value === 'completed' ||
     value === 'failed' ||
     value === 'interrupted' ||
-    value === 'not_found'
+    value === 'not_found' ||
+    value === 'timeout' ||
+    value === 'closed'
     ? value
     : 'running';
 }
