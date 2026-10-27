@@ -258,8 +258,12 @@ not remove a conflicting explicit model setting.
 
 The optional MixAgents backend is now the preferred `/btw` backend when its six
 tools and selected route are available. It is selected for Codex and Claude
-structured sessions alike. The old ephemeral Codex fork remains an explicit
-auto-mode fallback and includes developer instructions and a boundary
+structured sessions alike. The cc-switch-generated route remains authoritative:
+if an external MCP process omits it, Bridge restarts the process and retries
+the bundled compatible Broker before considering fallback. When `mode=auto`,
+`routeMode=follow-cc-switch` and `allowForkFallback=true`, a route that remains
+unavailable after recovery falls back to an ephemeral Codex `thread/fork` on the
+main session's provider/model. The fallback includes developer instructions and a boundary
 message defining inherited history as reference-only. The user approved retaining
 these native strings on 2026-09-07. The adapter preserves the effective existing
 developer policy and appends the verbatim native side policy, then injects the
@@ -268,8 +272,10 @@ equivalent. Ephemeral threads do not support goals; the server rejects combining
 `ephemeral` with `deferGoalContinuation`. No goal mutation is sent to the parent.
 
 `/btw` without text prepares side without a generation; `/btw text` submits only
-after preparation. With MixAgents, text is sent to an independent Broker agent,
-never to a Codex fork, and `access` is always `read-only`. Scope/cwd/route
+after preparation. With MixAgents, text is sent to an independent Broker agent.
+The auto-mode fallback sends it as ordinary input to a read-only Codex
+`thread/fork`; neither path uses a writable native child. `access` is always
+`read-only`. Scope/cwd/route
 fingerprint are persisted so a Bridge restart can reconnect the same agent.
 Route/provider/model/backend/revision changes replace the old agent with an
 explicit notice. `/btw out` interrupts only that side; `/stop`, `/model`,

@@ -331,7 +331,50 @@ describe('subagent route resolution', () => {
       .rejects.toBeInstanceOf(SubagentUnavailableError);
   });
 
-  it('auto mode fails closed when the selected mapped route is unavailable', async () => {
+  it('auto mode falls back to the main Codex provider when MixAgents startup fails', async () => {
+    const { root, env, config } = await setup();
+    const resolved = await resolveSubagents({
+      subagents: {
+        ...config,
+        mode: 'auto',
+        allowForkFallback: true,
+      },
+      env: {
+        ...env,
+        FAKE_MIXAGENTS_OMIT_TOOL: 'wait_agent',
+      },
+      cwd: root,
+      signal: new AbortController().signal,
+    });
+    expect(resolved).toMatchObject({
+      kind: 'fork',
+      routes: [],
+    });
+    expect(resolved.notice).toContain('主 Codex session');
+    expect(resolved.error).toContain('wait_agent');
+  });
+
+  it('an explicit /btw route never falls back to main Codex', async () => {
+    const { root, env, config } = await setup();
+    await expect(resolveSubagents({
+      subagents: {
+        ...config,
+        mode: 'auto',
+        allowForkFallback: true,
+      },
+      env: {
+        ...env,
+        FAKE_MIXAGENTS_OMIT_TOOL: 'wait_agent',
+      },
+      cwd: root,
+      requestedRoute: 'read-a',
+      signal: new AbortController().signal,
+    })).rejects.toMatchObject({
+      code: 'mixagents-not-configured',
+    });
+  });
+
+  it('auto mode falls back to main Codex when the selected mapped route is unavailable', async () => {
     const { root, env, config } = await setup();
     const ccDir = join(root, 'cc-switch');
     const routeDir = join(root, 'config', 'arg-bridge');
@@ -348,7 +391,7 @@ describe('subagent route resolution', () => {
         'provider-b': { readRoute: 'write-b' },
       },
     }), { mode: 0o600 });
-    await expect(resolveSubagents({
+    const resolved = await resolveSubagents({
       subagents: {
         ...config,
         mode: 'auto',
@@ -357,8 +400,10 @@ describe('subagent route resolution', () => {
       env: { ...env, FAKE_ROUTE_B_MISSING: 'MISSING_PROVIDER_KEY' },
       cwd: root,
       signal: new AbortController().signal,
-    })).rejects.toMatchObject({
-      code: 'route-unavailable',
+    });
+    expect(resolved).toMatchObject({
+      kind: 'fork',
+      error: expect.stringContaining('MISSING_PROVIDER_KEY'),
     });
   });
 

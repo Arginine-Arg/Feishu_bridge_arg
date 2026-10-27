@@ -824,6 +824,7 @@ export class StructuredAdapter implements AgentAdapter {
     if (!backend) throw new Error('MixAgents backend 未初始化');
     const scope = input.options.scopeId ?? input.options.cwd!;
     const cwd = input.options.cwd!;
+    if (resolved.notice) emit(textEvent(`${resolved.notice}\n`));
     if (!body) {
       const existing = this.sideStateFor(scope, cwd);
       emit({
@@ -879,7 +880,6 @@ export class StructuredAdapter implements AgentAdapter {
       if (existing) return;
     }
 
-    if (resolved.notice) emit(textEvent(`${resolved.notice}\n`));
     emit({
       type: 'system',
       model: route.model,
@@ -1666,7 +1666,13 @@ export class StructuredAdapter implements AgentAdapter {
           if (!prompt) { emit(textEvent('已进入 side，请发送正文。')); return; }
         }
         if (!options.liveInputMode || side) (side ? current.sideView : current.view)?.event(textEvent(`\n[user]\n${prompt}\n`));
-        const payload = { ...options, prompt, ...(side ? { liveInputMode: undefined } : {}) };
+        const payload = {
+          ...options,
+          prompt,
+          ...(side
+            ? { liveInputMode: undefined, sandbox: 'read-only' as const }
+            : {}),
+        };
         activeTarget = target;
         try {
           await target.submit(payload, submitEmit, abort.signal);

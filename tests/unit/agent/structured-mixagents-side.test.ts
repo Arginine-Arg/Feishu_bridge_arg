@@ -160,6 +160,70 @@ function resolved(
 }
 
 describe('structured MixAgents /btw', () => {
+  it('uses the main Codex provider through thread/fork when the resolver falls back', async () => {
+    const profileDir = await mkdtemp(join(tmpdir(), 'arg-bridge-side-main-fallback-'));
+    const rpc = new EventEmitter() as EventEmitter & { request: ReturnType<typeof vi.fn> };
+    rpc.request = vi.fn(async () => ({}));
+    const main = new CodexStructuredSession('main-thread', '', rpc as unknown as RpcClient);
+    const side = new CodexStructuredSession(
+      'side-thread',
+      'unix:///tmp/main-provider-side.sock',
+      rpc as unknown as RpcClient,
+    );
+    vi.spyOn(main, 'forkSide').mockResolvedValue(side);
+    const submitted: Array<{ prompt: string; sandbox?: string }> = [];
+    vi.spyOn(side, 'submit').mockImplementation(async (options, emit) => {
+      submitted.push({ prompt: options.prompt, sandbox: options.sandbox });
+      emit({ type: 'text', delta: 'MAIN_PROVIDER_SIDE_OK' });
+      emit({ type: 'done', terminationReason: 'normal' });
+    });
+    vi.spyOn(StructuredView.prototype, 'start').mockResolvedValue();
+    const resolver = vi.fn(async (): Promise<ResolvedSubagents> => ({
+      kind: 'fork',
+      config: { ...subagents, mode: 'auto', routeMode: 'follow-cc-switch', allowForkFallback: true },
+      routes: [],
+      notice: '子代理 provider 不可用，已回退到主 Codex session。',
+      ccSwitch: {
+        currentProviderCodex: 'provider-a',
+        providers: [],
+        settingsPath: '/not-used/settings.json',
+      },
+    }));
+    const adapter = new StructuredAdapter({
+      kind: 'codex',
+      binary: 'not-spawned',
+      profileDir,
+      subagents: { ...subagents, mode: 'auto', routeMode: 'follow-cc-switch', allowForkFallback: true },
+      subagentResolver: resolver,
+    });
+    Reflect.get(adapter, 'sessions').set('scope', {
+      main,
+      cwd: '/workspace',
+      view: new StructuredView(profileDir, 'main'),
+    });
+
+    const events = await drain(adapter.runSide({
+      runId: 'main-fallback',
+      scopeId: 'scope',
+      cwd: '/workspace',
+      prompt: '/btw 现在什么进度了？',
+      liveInputMode: 'side',
+    }));
+    expect(events.filter(event => event.type === 'error')).toEqual([]);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'text',
+      delta: expect.stringContaining('MAIN_PROVIDER_SIDE_OK'),
+    }));
+    expect(main.forkSide).toHaveBeenCalledWith('/workspace');
+    expect(submitted).toEqual([{
+      prompt: '现在什么进度了？',
+      sandbox: 'read-only',
+    }]);
+    await side.close();
+    await main.close();
+    await rm(profileDir, { recursive: true, force: true });
+  });
+
   it('binds a user-issued write directive outside the parent prompt and clears it', async () => {
     const profileDir = await mkdtemp(join(tmpdir(), 'arg-bridge-write-auth-'));
     const workspace = await mkdtemp(join(tmpdir(), 'arg-bridge-write-workspace-'));

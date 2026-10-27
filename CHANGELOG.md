@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.9.2
+
+- Fixed `/btw` when `follow-cc-switch` resolves a provider but MixAgents does
+  not return the generated runtime route. Bridge now keeps the settings-selected
+  provider as the primary path, restarts the MCP runtime, and retries with the
+  bundled `mixagents-broker@0.1.1` entrypoint when an older or stale external
+  runtime ignores the generated configuration.
+- Added a final safety fallback in eligible `mode=auto` profiles: only after
+  the selected MixAgents provider cannot be recovered does `/btw` use a
+  read-only Codex `thread/fork` on the main session's provider/model when
+  `allowForkFallback=true`.
+- The fallback delivers the task as ordinary input, not as native
+  collaboration `agent_message`/`encrypted_content`, so it remains compatible
+  with third-party Responses providers.
+- Manual routes, explicit `/btw --route <id>` and `mode=broker` continue to
+  fail closed without changing provider.
+
 ## 1.9.1
 
 - Added mid-turn Feishu/terminal steering. A normal message sent while a

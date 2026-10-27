@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.9.1",
+  version: "1.9.2",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -14438,9 +14438,10 @@ var WAIT_REQUEST_MS = 12e4;
 var DEFAULT_TOTAL_WAIT_MS = 15 * 6e4;
 var require3 = createRequire2(import.meta.url);
 var MixAgentsBrokerBackend = class {
-  constructor(config, env = process.env, runtime) {
+  constructor(config, env = process.env, runtime, options = {}) {
     this.config = config;
     this.runtime = runtime;
+    this.options = options;
     this.env = env;
     const launch = resolveMixAgentsLaunchConfig(config, env);
     if (!launch) {
@@ -14454,17 +14455,48 @@ var MixAgentsBrokerBackend = class {
   }
   config;
   runtime;
+  options;
   id = "mixagents";
   client;
   launch;
   env;
   timeoutMs;
+  runtimeRecoveryNotice;
   async listRoutes(signal) {
     if (signal.aborted) throw abortError2();
+    this.runtimeRecoveryNotice = void 0;
+    try {
+      const routes = await this.listRoutesOnce(signal);
+      return mergeRuntimeRoutes(routes, this.runtime?.route);
+    } catch (error) {
+      if (!this.runtime?.route || !isRecoverableRuntimeRouteError(error)) throw error;
+      this.resetClient();
+      try {
+        const restarted = await this.listRoutesOnce(signal);
+        const routes = mergeRuntimeRoutes(restarted, this.runtime.route);
+        this.runtimeRecoveryNotice = "MixAgents runtime \u672A\u52A0\u8F7D\u5F53\u524D cc-switch route\uFF0C\u5DF2\u81EA\u52A8\u91CD\u542F Broker\uFF0C\u5E76\u7EE7\u7EED\u4F7F\u7528 settings \u6307\u5B9A\u7684 provider\u3002";
+        return routes;
+      } catch (retryError) {
+        if (!isRecoverableRuntimeRouteError(retryError)) throw retryError;
+        const recoveryLaunch = this.options.recoveryLaunch ?? resolveBundledMixAgentsLaunchConfig();
+        if (!recoveryLaunch || sameLaunch(this.launch, recoveryLaunch)) throw retryError;
+        this.launch = recoveryLaunch;
+        this.resetClient();
+        const compatibleRoutes = await this.listRoutesOnce(signal);
+        const routes = mergeRuntimeRoutes(compatibleRoutes, this.runtime.route);
+        this.runtimeRecoveryNotice = "MixAgents runtime \u672A\u52A0\u8F7D\u5F53\u524D cc-switch route\uFF0C\u5DF2\u5207\u6362\u81F3\u968F arg-bridge \u5B89\u88C5\u7684\u517C\u5BB9 Broker\uFF0C\u5E76\u7EE7\u7EED\u4F7F\u7528 settings \u6307\u5B9A\u7684 provider\u3002";
+        return routes;
+      }
+    }
+  }
+  get recoveryNotice() {
+    return this.runtimeRecoveryNotice;
+  }
+  async listRoutesOnce(signal) {
     const client = await this.ensureClient();
     const result = await client.callTool("routes", {}, { timeoutMs: 3e4, signal });
     const raw = Array.isArray(result.routes) ? result.routes : [];
-    const routes = raw.flatMap((entry) => {
+    return raw.flatMap((entry) => {
       if (!isRecord4(entry)) return [];
       const id = stringValue2(entry.id);
       const provider = stringValue2(entry.provider);
@@ -14489,7 +14521,6 @@ var MixAgentsBrokerBackend = class {
         ...entry.source === "cc-switch" || entry.source === "broker-config" ? { source: entry.source } : {}
       }];
     });
-    return mergeRuntimeRoutes(routes, this.runtime?.route);
   }
   get serverVersion() {
     return this.client?.serverVersion;
@@ -14576,8 +14607,7 @@ var MixAgentsBrokerBackend = class {
     await this.interrupt(agent, signal);
   }
   async closeBackend() {
-    this.client?.close();
-    this.client = void 0;
+    this.resetClient();
   }
   async ensureClient() {
     if (this.client) return this.client;
@@ -14641,7 +14671,21 @@ var MixAgentsBrokerBackend = class {
         { serverVersion }
       );
     }
+    if (this.runtime && isKnownOlderServerVersion(this.client.serverVersion, "0.1.1")) {
+      const serverVersion = this.client.serverVersion;
+      this.client.close();
+      this.client = void 0;
+      throw new SubagentUnavailableError(
+        "mixagents-incompatible",
+        `MixAgents ${serverVersion} \u4E0D\u652F\u6301\u81EA\u52A8 cc-switch runtime route\uFF0C\u81F3\u5C11\u9700\u8981 0.1.1\u3002`,
+        { serverVersion, recovery: "runtime-server" }
+      );
+    }
     return this.client;
+  }
+  resetClient() {
+    this.client?.close();
+    this.client = void 0;
   }
 };
 function validateRuntimeOverrides(runtime) {
@@ -14689,13 +14733,18 @@ function mergeRuntimeRoutes(routes, runtimeRoute) {
     throw new SubagentUnavailableError(
       "route-unavailable",
       `MixAgents \u6CA1\u6709\u8FD4\u56DE cc-switch runtime \u751F\u6210\u7684 route ${runtimeRoute.id}\uFF1B\u4E3A\u907F\u514D\u628A\u4EFB\u52A1\u53D1\u7ED9\u9519\u8BEF\u6A21\u578B\uFF0C\u5DF2\u505C\u6B62 subagent\u3002`,
-      { expectedRoute: runtimeRoute.id, returnedRoutes: routes.map((route) => route.id) }
+      {
+        expectedRoute: runtimeRoute.id,
+        returnedRoutes: routes.map((route) => route.id),
+        recovery: "runtime-route"
+      }
     );
   }
   if (actual.provider !== runtimeRoute.provider || actual.model !== runtimeRoute.model) {
     throw new SubagentUnavailableError(
       "route-unavailable",
-      `MixAgents route ${runtimeRoute.id} \u4E0E cc-switch \u914D\u7F6E\u4E0D\u5339\u914D\uFF1Aexpected=${runtimeRoute.provider}/${runtimeRoute.model} actual=${actual.provider}/${actual.model}`
+      `MixAgents route ${runtimeRoute.id} \u4E0E cc-switch \u914D\u7F6E\u4E0D\u5339\u914D\uFF1Aexpected=${runtimeRoute.provider}/${runtimeRoute.model} actual=${actual.provider}/${actual.model}`,
+      { recovery: "runtime-route" }
     );
   }
   return routes.map((route) => route.id !== runtimeRoute.id ? route : {
@@ -14745,6 +14794,9 @@ function resolveMixAgentsLaunchConfig(config, env = process.env) {
       args: splitArgs(env.MIXAGENTS_BROKER_MCP_ARGS)
     };
   }
+  return resolveBundledMixAgentsLaunchConfig();
+}
+function resolveBundledMixAgentsLaunchConfig() {
   try {
     const server = require3.resolve("mixagents-broker/dist/server.js");
     return {
@@ -14752,8 +14804,8 @@ function resolveMixAgentsLaunchConfig(config, env = process.env) {
       args: [server]
     };
   } catch {
+    return void 0;
   }
-  return void 0;
 }
 function agentFromSnapshot(value, fallback) {
   const agentId = stringValue2(value.agentId);
@@ -14835,6 +14887,28 @@ function splitArgs(value) {
 function errorMessage5(error) {
   return error instanceof Error ? error.message : String(error);
 }
+function isRecoverableRuntimeRouteError(error) {
+  return error instanceof SubagentUnavailableError && (error.code === "mixagents-incompatible" || error.details?.recovery === "runtime-route" || error.details?.recovery === "runtime-server");
+}
+function sameLaunch(left, right) {
+  return left.command === right.command && left.args.length === right.args.length && left.args.every((arg, index) => arg === right.args[index]);
+}
+function isKnownOlderServerVersion(actual, minimum) {
+  if (!actual) return false;
+  const left = numericVersion(actual);
+  const right = numericVersion(minimum);
+  if (!left || !right) return false;
+  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+    const a = left[index] ?? 0;
+    const b = right[index] ?? 0;
+    if (a !== b) return a < b;
+  }
+  return false;
+}
+function numericVersion(value) {
+  const match = value.trim().match(/^(\d+)\.(\d+)\.(\d+)/u);
+  return match ? match.slice(1).map(Number) : void 0;
+}
 
 // src/agent/subagents/registry.ts
 import { homedir as homedir10 } from "os";
@@ -14853,7 +14927,6 @@ async function resolveSubagents(input) {
     return { ...base, kind: "off", routes: [] };
   }
   if (config.mode === "fork") {
-    await assertNativeForkAllowed(input, config, env);
     return { ...base, kind: "fork", routes: [] };
   }
   let backend;
@@ -14888,6 +14961,9 @@ async function resolveSubagents(input) {
       "mixagents-start-failed",
       `MixAgents \u542F\u52A8\u6216\u8DEF\u7531\u8BFB\u53D6\u5931\u8D25\uFF1A${message}`
     );
+    if (canAutoForkFallback(input, config)) {
+      return forkFallback(base, [], message);
+    }
     if (config.routeMode === "follow-cc-switch" && (input.stateDir || input.parentProviderId || config.ccSwitchProviderId)) {
       await backend?.closeBackend?.().catch(() => {
       });
@@ -14898,21 +14974,13 @@ async function resolveSubagents(input) {
       );
     }
     if (config.mode === "broker") throw unavailable;
-    if (!config.allowForkFallback) {
+    if (!config.allowForkFallback || config.routeMode === "manual" || input.requestedRoute) {
       throw new SubagentUnavailableError(
         "mixagents-not-configured",
         `MixAgents \u4E0D\u53EF\u7528\uFF0C\u4E14\u5DF2\u7981\u7528 fork fallback\uFF1A${message}`
       );
     }
-    await assertNativeForkAllowed(input, config, env);
-    log.warn("agent", "subagent-fallback-fork", { reason: message });
-    return {
-      ...base,
-      kind: "fork",
-      routes: [],
-      notice: `MixAgents \u4E0D\u53EF\u7528\uFF0C\u5DF2\u964D\u7EA7\u5230 Codex fork\uFF1A${message}`,
-      error: message
-    };
+    return forkFallback(base, [], message);
   }
   const selection = selectSubagentRoute({
     config,
@@ -14924,6 +14992,11 @@ async function resolveSubagents(input) {
   });
   if (!selection.route) {
     const message = selection.error ?? "\u6CA1\u6709\u53EF\u7528\u7684 MixAgents read route";
+    if (canAutoForkFallback(input, config)) {
+      await backend?.closeBackend?.().catch(() => {
+      });
+      return forkFallback(base, routes, message);
+    }
     if (config.mode === "broker" || config.routeMode === "manual" || input.requestedRoute || config.routeMode === "follow-cc-switch" && (input.stateDir || input.parentProviderId || config.ccSwitchProviderId)) {
       await backend?.closeBackend?.().catch(() => {
       });
@@ -14936,29 +15009,18 @@ async function resolveSubagents(input) {
       });
       throw new SubagentUnavailableError("route-unavailable", message);
     }
-    try {
-      await assertNativeForkAllowed(input, config, env);
-    } catch (error) {
-      await backend?.closeBackend?.().catch(() => {
-      });
-      throw error;
-    }
     await backend.closeBackend?.().catch(() => {
     });
-    log.warn("agent", "subagent-fallback-fork", { reason: message });
-    return {
-      ...base,
-      kind: "fork",
-      routes,
-      notice: `MixAgents \u6CA1\u6709\u53EF\u7528 route\uFF0C\u5DF2\u964D\u7EA7\u5230 Codex fork\uFF1A${message}`,
-      error: message
-    };
+    return forkFallback(base, routes, message);
   }
   if (!selection.route.available) {
     const missing = selection.route.missingEnvironment.length > 0 ? `\uFF08\u7F3A\u5C11\u73AF\u5883\u53D8\u91CF\uFF1A${selection.route.missingEnvironment.join(", ")}\uFF09` : "";
     const message = `MixAgents route ${selection.route.id} \u4E0D\u53EF\u7528${missing}`;
     await backend.closeBackend?.().catch(() => {
     });
+    if (canAutoForkFallback(input, config)) {
+      return forkFallback(base, routes, message);
+    }
     throw new SubagentUnavailableError("route-unavailable", message);
   }
   return {
@@ -14966,7 +15028,21 @@ async function resolveSubagents(input) {
     kind: "mixagents",
     backend,
     route: selection.route,
-    routes
+    routes,
+    ...backend.recoveryNotice ? { notice: backend.recoveryNotice } : {}
+  };
+}
+function canAutoForkFallback(input, config) {
+  return config.mode === "auto" && config.routeMode === "follow-cc-switch" && config.allowForkFallback && !input.requestedRoute;
+}
+function forkFallback(base, routes, reason) {
+  log.warn("agent", "subagent-fallback-main-codex", { reason });
+  return {
+    ...base,
+    kind: "fork",
+    routes,
+    notice: "\u5B50\u4EE3\u7406\u8BBE\u7F6E\u6307\u5B9A\u7684 MixAgents provider \u4E0D\u53EF\u7528\uFF0C\u5DF2\u56DE\u9000\u5230\u4E3B Codex session \u7684 provider/model\uFF08\u53EA\u8BFB thread/fork\uFF09\uFF1A" + reason,
+    error: reason
   };
 }
 function defaultGeneratedRuntimeDir(env) {
@@ -15009,25 +15085,6 @@ function selectSubagentRoute(input) {
 }
 function errorMessage6(error) {
   return error instanceof Error ? error.message : String(error);
-}
-async function assertNativeForkAllowed(input, config, env) {
-  if (!input.stateDir && !input.parentProviderId && !config.ccSwitchProviderId) return;
-  try {
-    const provider = await resolveCurrentCcSwitchCodexProvider({
-      env,
-      ...input.codexHome ? { codexHome: input.codexHome } : {},
-      ...input.parentProviderId ? { parentProviderId: input.parentProviderId } : {},
-      ...config.ccSwitchProviderId ? { providerId: config.ccSwitchProviderId } : {}
-    });
-    if (provider.summary.thirdParty) {
-      throw new SubagentUnavailableError(
-        "route-unavailable",
-        `\u5F53\u524D cc-switch provider ${provider.summary.id} \u662F\u7B2C\u4E09\u65B9 Responses provider\uFF1B\u7981\u6B62 native Codex fork/collaboration fallback\uFF0C\u8BF7\u5148\u4FEE\u590D MixAgents provider \u6216 route\u3002`
-      );
-    }
-  } catch (error) {
-    if (error instanceof SubagentUnavailableError) throw error;
-  }
 }
 
 // src/agent/subagents/broker-tools.ts
@@ -15379,6 +15436,7 @@ var BrokerToolController = class {
     const ccSwitch = await readCcSwitchState(this.env);
     return success(JSON.stringify({
       configured_main_provider: ccSwitch.currentProviderCodex ?? null,
+      runtime_recovery: backend instanceof MixAgentsBrokerBackend ? backend.recoveryNotice ?? null : null,
       routes: visibleRoutes.map((route) => ({
         id: route.id,
         provider: route.provider,
@@ -19015,6 +19073,8 @@ var StructuredAdapter = class {
     if (!backend) throw new Error("MixAgents backend \u672A\u521D\u59CB\u5316");
     const scope = input.options.scopeId ?? input.options.cwd;
     const cwd = input.options.cwd;
+    if (resolved.notice) emit2(textEvent(`${resolved.notice}
+`));
     if (!body) {
       const existing2 = this.sideStateFor(scope, cwd);
       emit2({
@@ -19069,8 +19129,6 @@ var StructuredAdapter = class {
       }
       if (existing) return;
     }
-    if (resolved.notice) emit2(textEvent(`${resolved.notice}
-`));
     emit2({
       type: "system",
       model: route.model,
@@ -19824,7 +19882,11 @@ ${truncateSnapshot(redactDiagnosticText(redactSecrets(manifest)), 8e3)}
 [user]
 ${prompt}
 `));
-        const payload = { ...options, prompt, ...side ? { liveInputMode: void 0 } : {} };
+        const payload = {
+          ...options,
+          prompt,
+          ...side ? { liveInputMode: void 0, sandbox: "read-only" } : {}
+        };
         activeTarget = target;
         try {
           await target.submit(payload, submitEmit, abort.signal);
@@ -35071,7 +35133,7 @@ async function runSettings(options = {}) {
       {
         value: "auto",
         label: "\u81EA\u52A8\uFF08\u63A8\u8350\uFF09",
-        hint: "\u4F18\u5148\u4F7F\u7528 MixAgents\uFF1B\u4E0D\u53EF\u7528\u65F6\u6309\u4E0B\u65B9\u8BBE\u7F6E\u51B3\u5B9A\u662F\u5426\u7528\u672C\u5730 Codex fork"
+        hint: "\u4F18\u5148\u4F7F\u7528\u6240\u9009 provider\uFF1Bruntime \u81EA\u6108\u540E\u4ECD\u4E0D\u53EF\u7528\uFF0C\u624D\u6309\u4E0B\u65B9\u8BBE\u7F6E\u6539\u7528\u4E3B\u4F1A\u8BDD Codex"
       },
       {
         value: "broker",
@@ -35090,7 +35152,7 @@ async function runSettings(options = {}) {
   let allowForkFallback = currentSubagents.allowForkFallback;
   if (selectedMode === "auto") {
     const fallback = await p3.confirm({
-      message: "MixAgents \u6682\u65F6\u4E0D\u53EF\u7528\u65F6\uFF0C\u662F\u5426\u6539\u7528\u672C\u5730 Codex fork\uFF1F",
+      message: "\u6240\u9009\u5B50\u4EE3\u7406 provider \u81EA\u6108\u540E\u4ECD\u4E0D\u53EF\u7528\u65F6\uFF0C\u662F\u5426\u6539\u7528\u4E3B\u4F1A\u8BDD provider \u7684\u53EA\u8BFB Codex fork\uFF1F",
       initialValue: allowForkFallback
     });
     assertPrompt(fallback);

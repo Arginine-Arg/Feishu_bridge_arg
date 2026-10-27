@@ -1,6 +1,10 @@
 # MixAgents subagents, model tools and `cc-switch` routing
 
-Version 1.9.1 makes MixAgents available through three separate paths and adds
+Version 1.9.2 hardens `/btw` runtime recovery so the provider selected in
+settings remains the primary backend. If an external MixAgents server omits
+the current generated route, Bridge restarts it and then retries the bundled
+`mixagents-broker@0.1.1` entrypoint before using any fallback. Version 1.9.1
+makes MixAgents available through three separate paths and adds
 automatic cc-switch provider discovery for workers:
 
 1. the explicit `/btw` side conversation;
@@ -159,9 +163,14 @@ configured in `arg-bridge settings`, in the profile, with
 
 `mode`:
 
-- `auto`: try the automatically resolved cc-switch route first. Use Codex fork
-  only for an official provider when `allowForkFallback` is true. A third-party
-  provider never falls back to native Codex child tools.
+- `auto`: try the subagent-selected cc-switch provider and route first. A
+  missing/mismatched runtime route or a known-older MCP server triggers a
+  bounded runtime restart and, when needed, a retry with the bundled compatible
+  Broker. Only after those recovery attempts fail does `allowForkFallback`
+  permit a read-only `thread/fork` on the main Codex session's provider/model.
+  The fallback receives the task as ordinary user input; it does not use native
+  collaboration/`agent_message` encrypted tasks. This also works when the main
+  session uses a third-party Responses provider.
 - `broker`: require MixAgents. Never fall back silently.
 - `fork`: use the legacy compatibility backend.
 - `off`: disable `/btw` without affecting the main conversation.
@@ -230,7 +239,12 @@ Selection order for each `/btw` or model-visible worker call:
 3. automatically generated route for the selected/current cc-switch provider;
 4. legacy cc-switch provider-ID mapping;
 5. `defaultReadRoute` (or the corresponding write fields);
-6. official-provider-only fork fallback, with a visible notice.
+6. in `mode=auto` + `follow-cc-switch`, a read-only main-provider Codex
+   `thread/fork` fallback when `allowForkFallback=true`, with a visible notice.
+
+The fallback is disabled for `mode=broker`, manual route mode and explicit
+`/btw --route <id>`. Those modes continue to fail closed rather than silently
+switching provider.
 
 All values are re-read for every worker call and every settings/doctor
 invocation.

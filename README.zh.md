@@ -4,7 +4,7 @@
 
 [English README](./README.md)
 
-`1.9.1` 增加长任务中途消息插入和 Bridge-managed native TUI：Codex 任务运行期间的新消息，在 structured 模式下通过 `turn/steer` 进入当前 turn；live 终端模式使用 Codex 原生 Tab 排队机制，不再只能等整轮结束。`arg-bridge native --bridge` 创建带 `arg_bridge.*` dynamic tools 的新父 thread；`arg-bridge native --adopt <thread-id>` 把旧 session 的用户/助手文本安全迁移到新的 Bridge-managed thread，并明确显示旧、新 thread ID。普通 `arg-bridge native` 仍保持原生 Codex 行为。`1.8.1` 引入了自动 cc-switch provider、模型、endpoint 和凭据解析。
+`1.9.2` 加固 `/btw` provider 选择：Bridge 会先修复未加载当前配置的 MixAgents runtime，必要时切换到随包安装的兼容 Broker，继续使用 settings 指定的 cc-switch provider；只有该 provider 仍无法运行时，符合条件的 `auto` profile 才使用主 session provider/model 的只读 Codex `thread/fork` 作为最终保险。`1.9.1` 增加长任务中途消息插入和 Bridge-managed native TUI：Codex 任务运行期间的新消息，在 structured 模式下通过 `turn/steer` 进入当前 turn；live 终端模式使用 Codex 原生 Tab 排队机制，不再只能等整轮结束。`arg-bridge native --bridge` 创建带 `arg_bridge.*` dynamic tools 的新父 thread；`arg-bridge native --adopt <thread-id>` 把旧 session 的用户/助手文本安全迁移到新的 Bridge-managed thread，并明确显示旧、新 thread ID。普通 `arg-bridge native` 仍保持原生 Codex 行为。`1.8.1` 引入了自动 cc-switch provider、模型、endpoint 和凭据解析。
 
 `1.6.7` 引入 provider-aware Codex resume，`1.7.0` 增加 idle 边界重绑。`1.9.1` 收紧重连语义：附着已有 native 或 structured thread 时，保留该 thread 记录的 provider/model，不会因为 cc-switch 后来切换了 route 而静默改路。
 
@@ -60,7 +60,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.9.1
+sh /tmp/install-arg-bridge.sh --version 1.9.2
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.9.1"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.9.2"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.9.1`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.9.2`。
 
 ### 4. Node 或 npm 全局目录错误
 
@@ -256,7 +256,7 @@ arg-bridge profile export <name> --include-secrets --yes
 
 ### MixAgents 模型工具、`/btw`、`cc-switch`、MCP 与 Project RSI
 
-MixAgents 是可选依赖。默认 `follow-cc-switch` 会从当前 cc-switch provider 自动生成 Broker route、模型、Base URL 和凭据；不需要手写 `broker-routes.json`，也不需要手工设置 `MIXAGENTS_BROKER_CREDENTIALS_JSON`。第三方 provider 不允许 native fork/collaboration fallback；官方 provider 仍可按显式设置降级。父模型的自动 Broker 工具不会把 native Codex child 冒充成 worker。新建 Bridge-managed Codex thread 会携带 `arg_bridge` dynamic-tool namespace，并设置 `features.multi_agent_v2.disable_native_tools=true`。0.164.0 的真实链路证据见 [structured Broker smoke](./docs/smoke-structured-broker-e2e-0.164.0.json)。
+MixAgents 是可选依赖。默认 `follow-cc-switch` 会从当前 cc-switch provider 自动生成 Broker route、模型、Base URL 和凭据；不需要手写 `broker-routes.json`，也不需要手工设置 `MIXAGENTS_BROKER_CREDENTIALS_JSON`。settings 指定的 provider 始终是 `/btw` 的首选：旧的外部 MCP runtime 如果漏掉当前生成的 route，Bridge 会先重启它，再改用随包安装的 `mixagents-broker@0.1.1` 兼容入口复核。只有上述自愈仍失败时，符合条件的 `mode=auto` profile 且 `allowForkFallback=true` 才会回退到主 session provider/model 的只读 Codex `thread/fork`；任务以普通输入发送，不走 native collaboration 的 encrypted content。manual route、显式 `/btw --route` 和 `mode=broker` 仍 fail closed。父模型的自动 Broker 工具不会把 native Codex child 冒充成 worker。新建 Bridge-managed Codex thread 会携带 `arg_bridge` dynamic-tool namespace，并设置 `features.multi_agent_v2.disable_native_tools=true`。0.164.0 的真实链路证据见 [structured Broker smoke](./docs/smoke-structured-broker-e2e-0.164.0.json)。
 
 公开 npm 包 `mixagents-broker` 是 optional dependency，Bridge 通过稳定的 package entry 自动解析，不扫描 plugin cache；显式 MCP command/profile 配置仍优先。
 
@@ -352,7 +352,7 @@ Project RSI 与 MixAgents、历史 Task RSI 是三个不同层次。Bridge 只�
 | `/sendfile <绝对路径>` | 仅管理员：直接回复发送当前工作目录、bridge 媒体缓存或显式允许目录内的普通文件，不调用 agent |
 | `/config` | 调整展示偏好、访问控制和 lark-cli 身份策略 |
 | `/model` | 选择模型；Codex 直接使用 CLI 原生模型/reasoning 选项，并把结果同步到当前 profile。`/codex model` 等价于 `/codex /model`。 |
-| `/btw [--route <id>] [<内容>]` | 开启或复用独立 read-only side agent。使用 Broker agent（不是 Codex fork），每次调用从当前 cc-switch provider 重新解析 route；第三方 provider 失败时 fail closed，官方 provider 才可按设置降级。`/btw out` 只关闭 side。飞书内 `/codex /btw ...` 等价。 |
+| `/btw [--route <id>] [<内容>]` | 开启或复用独立 read-only side agent。优先使用子代理设置指定的 cc-switch provider；`auto` 模式可回退到主 session provider 的只读 Codex `thread/fork`，manual route 和显式 `--route` 永不回退。`/btw out` 只关闭 side。飞书内 `/codex /btw ...` 等价。 |
 | `/session [status\|live\|turn]` | 查看终端执行状态。tmux/live 为默认模式；`turn` 仅作为兼容回退 |
 | `/tmux list [socket]` | 仅管理员：列出本机所有存活的 Codex/Claude tmux pane，包含工作目录、agent 类型、已识别 thread、共享 App Server endpoint 和 attach 命令。可选 `-S <绝对 socket 路径>` 或 `-L <名称>` 只扫描一个 tmux server；普通 shell 不会列出 |
 | `/tmux bind <编号\|pane id\|socket::pane id>` | 仅管理员：把当前 chat/topic scope 绑定到列表中的 pane。带有共享 Codex endpoint 的 pane 走 structured 转发，普通 Codex/Claude pane 回退到 live 转发。编号只在最近一次 `/tmux list` 结果内有效 |

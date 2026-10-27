@@ -42,6 +42,11 @@ export interface MixAgentsRuntimeOverrides {
   route?: SubagentRoute;
 }
 
+export interface MixAgentsBrokerBackendOptions {
+  /** Test seam; production resolves the bundled compatible MCP entrypoint. */
+  recoveryLaunch?: MixAgentsLaunchConfig;
+}
+
 /**
  * Optional MixAgents Broker backend over its official STDIO MCP server.
  *
@@ -53,14 +58,16 @@ export interface MixAgentsRuntimeOverrides {
 export class MixAgentsBrokerBackend implements SubagentBackend {
   readonly id = 'mixagents' as const;
   private client?: McpStdioClient;
-  private readonly launch: MixAgentsLaunchConfig;
+  private launch: MixAgentsLaunchConfig;
   private readonly env: NodeJS.ProcessEnv;
   private readonly timeoutMs: number;
+  private runtimeRecoveryNotice?: string;
 
   constructor(
     private readonly config: SubagentConfig,
     env: NodeJS.ProcessEnv = process.env,
     private readonly runtime?: MixAgentsRuntimeOverrides,
+    private readonly options: MixAgentsBrokerBackendOptions = {},
   ) {
     this.env = env;
     const launch = resolveMixAgentsLaunchConfig(config, env);
@@ -77,10 +84,51 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
 
   async listRoutes(signal: AbortSignal): Promise<SubagentRoute[]> {
     if (signal.aborted) throw abortError();
+    this.runtimeRecoveryNotice = undefined;
+    try {
+      const routes = await this.listRoutesOnce(signal);
+      return mergeRuntimeRoutes(routes, this.runtime?.route);
+    } catch (error) {
+      if (!this.runtime?.route || !isRecoverableRuntimeRouteError(error)) throw error;
+
+      // A long-lived or externally configured MCP process can survive with an
+      // older environment snapshot. Restart it before treating the selected
+      // cc-switch provider as unavailable.
+      this.resetClient();
+      try {
+        const restarted = await this.listRoutesOnce(signal);
+        const routes = mergeRuntimeRoutes(restarted, this.runtime.route);
+        this.runtimeRecoveryNotice =
+          'MixAgents runtime 未加载当前 cc-switch route，已自动重启 Broker，并继续使用 settings 指定的 provider。';
+        return routes;
+      } catch (retryError) {
+        if (!isRecoverableRuntimeRouteError(retryError)) throw retryError;
+        const recoveryLaunch = this.options.recoveryLaunch ?? resolveBundledMixAgentsLaunchConfig();
+        if (!recoveryLaunch || sameLaunch(this.launch, recoveryLaunch)) throw retryError;
+
+        // Explicit/profile MCP commands remain the first choice. If that
+        // server still ignores the generated runtime config, use the exact
+        // version shipped with arg-bridge rather than changing provider.
+        this.launch = recoveryLaunch;
+        this.resetClient();
+        const compatibleRoutes = await this.listRoutesOnce(signal);
+        const routes = mergeRuntimeRoutes(compatibleRoutes, this.runtime.route);
+        this.runtimeRecoveryNotice =
+          'MixAgents runtime 未加载当前 cc-switch route，已切换至随 arg-bridge 安装的兼容 Broker，并继续使用 settings 指定的 provider。';
+        return routes;
+      }
+    }
+  }
+
+  get recoveryNotice(): string | undefined {
+    return this.runtimeRecoveryNotice;
+  }
+
+  private async listRoutesOnce(signal: AbortSignal): Promise<SubagentRoute[]> {
     const client = await this.ensureClient();
     const result = await client.callTool('routes', {}, { timeoutMs: 30_000, signal });
     const raw = Array.isArray(result.routes) ? result.routes : [];
-    const routes = raw.flatMap((entry): SubagentRoute[] => {
+    return raw.flatMap((entry): SubagentRoute[] => {
       if (!isRecord(entry)) return [];
       const id = stringValue(entry.id);
       const provider = stringValue(entry.provider);
@@ -113,7 +161,6 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
           : {}),
       }];
     });
-    return mergeRuntimeRoutes(routes, this.runtime?.route);
   }
 
   get serverVersion(): string | undefined {
@@ -229,8 +276,7 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
   }
 
   async closeBackend(): Promise<void> {
-    this.client?.close();
-    this.client = undefined;
+    this.resetClient();
   }
 
   private async ensureClient(): Promise<McpStdioClient> {
@@ -296,7 +342,25 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
         { serverVersion },
       );
     }
+    if (
+      this.runtime &&
+      isKnownOlderServerVersion(this.client.serverVersion, '0.1.1')
+    ) {
+      const serverVersion = this.client.serverVersion;
+      this.client.close();
+      this.client = undefined;
+      throw new SubagentUnavailableError(
+        'mixagents-incompatible',
+        `MixAgents ${serverVersion} 不支持自动 cc-switch runtime route，至少需要 0.1.1。`,
+        { serverVersion, recovery: 'runtime-server' },
+      );
+    }
     return this.client;
+  }
+
+  private resetClient(): void {
+    this.client?.close();
+    this.client = undefined;
   }
 }
 
@@ -357,7 +421,11 @@ export function mergeRuntimeRoutes(
       'route-unavailable',
       `MixAgents 没有返回 cc-switch runtime 生成的 route ${runtimeRoute.id}；` +
         '为避免把任务发给错误模型，已停止 subagent。',
-      { expectedRoute: runtimeRoute.id, returnedRoutes: routes.map(route => route.id) },
+      {
+        expectedRoute: runtimeRoute.id,
+        returnedRoutes: routes.map(route => route.id),
+        recovery: 'runtime-route',
+      },
     );
   }
   if (
@@ -369,6 +437,7 @@ export function mergeRuntimeRoutes(
       `MixAgents route ${runtimeRoute.id} 与 cc-switch 配置不匹配：` +
         `expected=${runtimeRoute.provider}/${runtimeRoute.model} ` +
         `actual=${actual.provider}/${actual.model}`,
+      { recovery: 'runtime-route' },
     );
   }
   return routes.map(route => route.id !== runtimeRoute.id
@@ -437,6 +506,11 @@ export function resolveMixAgentsLaunchConfig(
       args: splitArgs(env.MIXAGENTS_BROKER_MCP_ARGS),
     };
   }
+  return resolveBundledMixAgentsLaunchConfig();
+}
+
+/** Stable package entrypoint shipped as arg-bridge's optional dependency. */
+export function resolveBundledMixAgentsLaunchConfig(): MixAgentsLaunchConfig | undefined {
   try {
     const server = require.resolve('mixagents-broker/dist/server.js');
     return {
@@ -446,8 +520,8 @@ export function resolveMixAgentsLaunchConfig(
   } catch {
     // The public package is optional; explicit configuration remains the
     // fallback when the runtime did not install it.
+    return undefined;
   }
-  return undefined;
 }
 
 export function applyMixAgentsConfig(
@@ -565,4 +639,35 @@ function splitArgs(value: string | undefined): string[] {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isRecoverableRuntimeRouteError(error: unknown): boolean {
+  return error instanceof SubagentUnavailableError &&
+    (error.code === 'mixagents-incompatible' ||
+      error.details?.recovery === 'runtime-route' ||
+      error.details?.recovery === 'runtime-server');
+}
+
+function sameLaunch(left: MixAgentsLaunchConfig, right: MixAgentsLaunchConfig): boolean {
+  return left.command === right.command &&
+    left.args.length === right.args.length &&
+    left.args.every((arg, index) => arg === right.args[index]);
+}
+
+function isKnownOlderServerVersion(actual: string | undefined, minimum: string): boolean {
+  if (!actual) return false;
+  const left = numericVersion(actual);
+  const right = numericVersion(minimum);
+  if (!left || !right) return false;
+  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+    const a = left[index] ?? 0;
+    const b = right[index] ?? 0;
+    if (a !== b) return a < b;
+  }
+  return false;
+}
+
+function numericVersion(value: string): number[] | undefined {
+  const match = value.trim().match(/^(\d+)\.(\d+)\.(\d+)/u);
+  return match ? match.slice(1).map(Number) : undefined;
 }

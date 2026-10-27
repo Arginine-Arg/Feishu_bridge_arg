@@ -106,7 +106,7 @@ sqliteRuntime('auto-builds Broker route and credentials from the current cc-swit
   const proxyState = JSON.parse(await readFile(setup.brokerState, 'utf8'));
   expect(proxyState.proxyEnvironmentNames).not.toContain('HTTPS_PROXY');
 
-  await expect(resolveSubagents({
+  const explicitFork = await resolveSubagents({
     subagents: {
       ...config,
       mode: 'fork',
@@ -119,9 +119,10 @@ sqliteRuntime('auto-builds Broker route and credentials from the current cc-swit
     codexHome: setup.codexHome,
     codexBin: '/opt/codex',
     signal,
-  })).rejects.toMatchObject({
-    code: 'route-unavailable',
-    message: expect.stringContaining('native Codex fork'),
+  });
+  expect(explicitFork).toMatchObject({
+    kind: 'fork',
+    routes: [],
   });
 
   await setCurrentProvider(setup, 'other');
@@ -195,6 +196,124 @@ sqliteRuntime('auto-builds Broker route and credentials from the current cc-swit
   const generatedConfig = await readFile(generatedConfigPath, 'utf8');
   expect(generatedConfig).toContain('https://b.example.test/v1');
   expect(generatedConfig).not.toContain(setup.secondSecret);
+});
+
+sqliteRuntime('switches a stale external Broker to the bundled runtime without changing the selected cc-switch provider', async () => {
+  const setup = await setupProviders();
+  const config: SubagentConfig = {
+    ...DEFAULT_SUBAGENT_CONFIG,
+    mode: 'auto',
+    routeMode: 'follow-cc-switch',
+    allowForkFallback: true,
+    mixagents: {
+      mcpCommand: process.execPath,
+      mcpArgs: [fixture],
+    },
+  };
+  const resolved = await resolveSubagents({
+    subagents: config,
+    env: {
+      ...setup.env,
+      FAKE_MIXAGENTS_OMIT_GENERATED_ROUTE: '1',
+    },
+    access: 'read-only',
+    cwd: setup.workspace,
+    stateDir: setup.stateDir,
+    codexHome: setup.codexHome,
+    codexBin: '/opt/codex',
+    signal: AbortSignal.timeout(10_000),
+  });
+  try {
+    expect(resolved.kind).toBe('mixagents');
+    expect(resolved.route).toMatchObject({
+      provider: 'deepseek',
+      model: 'deepseek-flash',
+      source: 'cc-switch',
+      ccSwitchProviderId: 'default',
+    });
+    expect(resolved.notice).toContain('随 arg-bridge 安装的兼容 Broker');
+    expect(resolved.error).toBeUndefined();
+  } finally {
+    await resolved.backend?.closeBackend?.();
+  }
+});
+
+sqliteRuntime('restarts the Broker runtime and keeps the selected cc-switch provider when a route was not loaded once', async () => {
+  const setup = await setupProviders();
+  const config: SubagentConfig = {
+    ...DEFAULT_SUBAGENT_CONFIG,
+    mode: 'broker',
+    routeMode: 'follow-cc-switch',
+    allowForkFallback: false,
+    mixagents: {
+      mcpCommand: process.execPath,
+      mcpArgs: [fixture],
+    },
+  };
+  const resolved = await resolveSubagents({
+    subagents: config,
+    env: {
+      ...setup.env,
+      FAKE_MIXAGENTS_OMIT_GENERATED_ROUTE_ONCE: '1',
+    },
+    access: 'read-only',
+    cwd: setup.workspace,
+    stateDir: setup.stateDir,
+    codexHome: setup.codexHome,
+    codexBin: '/opt/codex',
+    signal: AbortSignal.timeout(10_000),
+  });
+  try {
+    expect(resolved.kind).toBe('mixagents');
+    expect(resolved.route).toMatchObject({
+      provider: 'deepseek',
+      model: 'deepseek-flash',
+      source: 'cc-switch',
+      ccSwitchProviderId: 'default',
+    });
+    expect(resolved.notice).toContain('已自动重启 Broker');
+    const state = JSON.parse(await readFile(setup.brokerState, 'utf8'));
+    expect(state.processStarts).toBe(2);
+  } finally {
+    await resolved.backend?.closeBackend?.();
+  }
+});
+
+sqliteRuntime('replaces a known-older MixAgents server with the bundled runtime', async () => {
+  const setup = await setupProviders();
+  const config: SubagentConfig = {
+    ...DEFAULT_SUBAGENT_CONFIG,
+    mode: 'broker',
+    routeMode: 'follow-cc-switch',
+    allowForkFallback: false,
+    mixagents: {
+      mcpCommand: process.execPath,
+      mcpArgs: [fixture],
+    },
+  };
+  const resolved = await resolveSubagents({
+    subagents: config,
+    env: {
+      ...setup.env,
+      FAKE_MIXAGENTS_SERVER_VERSION: '0.1.0',
+    },
+    access: 'read-only',
+    cwd: setup.workspace,
+    stateDir: setup.stateDir,
+    codexHome: setup.codexHome,
+    codexBin: '/opt/codex',
+    signal: AbortSignal.timeout(10_000),
+  });
+  try {
+    expect(resolved.kind).toBe('mixagents');
+    expect(resolved.route).toMatchObject({
+      source: 'cc-switch',
+      ccSwitchProviderId: 'default',
+    });
+    expect(resolved.notice).toContain('随 arg-bridge 安装的兼容 Broker');
+  } finally {
+    await resolved.backend?.closeBackend?.();
+  }
 });
 
 async function setupProviders() {

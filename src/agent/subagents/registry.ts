@@ -8,7 +8,6 @@ import { readCcSwitchState, type CcSwitchState } from '../../integrations/cc-swi
 import {
   CcSwitchProviderError,
   materializeCcSwitchBrokerRuntime,
-  resolveCurrentCcSwitchCodexProvider,
 } from '../../integrations/cc-switch-provider';
 import { log } from '../../core/logger';
 import {
@@ -70,7 +69,6 @@ export async function resolveSubagents(input: ResolveSubagentInput): Promise<Res
     return { ...base, kind: 'off', routes: [] };
   }
   if (config.mode === 'fork') {
-    await assertNativeForkAllowed(input, config, env);
     return { ...base, kind: 'fork', routes: [] };
   }
 
@@ -110,6 +108,9 @@ export async function resolveSubagents(input: ResolveSubagentInput): Promise<Res
           'mixagents-start-failed',
           `MixAgents 启动或路由读取失败：${message}`,
         );
+    if (canAutoForkFallback(input, config)) {
+      return forkFallback(base, [], message);
+    }
     if (
       config.routeMode === 'follow-cc-switch' &&
       (input.stateDir || input.parentProviderId || config.ccSwitchProviderId)
@@ -122,21 +123,17 @@ export async function resolveSubagents(input: ResolveSubagentInput): Promise<Res
       );
     }
     if (config.mode === 'broker') throw unavailable;
-    if (!config.allowForkFallback) {
+    if (
+      !config.allowForkFallback ||
+      config.routeMode === 'manual' ||
+      input.requestedRoute
+    ) {
       throw new SubagentUnavailableError(
         'mixagents-not-configured',
         `MixAgents 不可用，且已禁用 fork fallback：${message}`,
       );
     }
-    await assertNativeForkAllowed(input, config, env);
-    log.warn('agent', 'subagent-fallback-fork', { reason: message });
-    return {
-      ...base,
-      kind: 'fork',
-      routes: [],
-      notice: `MixAgents 不可用，已降级到 Codex fork：${message}`,
-      error: message,
-    };
+    return forkFallback(base, [], message);
   }
 
   const selection = selectSubagentRoute({
@@ -149,6 +146,10 @@ export async function resolveSubagents(input: ResolveSubagentInput): Promise<Res
   });
   if (!selection.route) {
     const message = selection.error ?? '没有可用的 MixAgents read route';
+    if (canAutoForkFallback(input, config)) {
+      await backend?.closeBackend?.().catch(() => {});
+      return forkFallback(base, routes, message);
+    }
     if (
       config.mode === 'broker' ||
       config.routeMode === 'manual' ||
@@ -165,21 +166,8 @@ export async function resolveSubagents(input: ResolveSubagentInput): Promise<Res
       await backend?.closeBackend?.().catch(() => {});
       throw new SubagentUnavailableError('route-unavailable', message);
     }
-    try {
-      await assertNativeForkAllowed(input, config, env);
-    } catch (error) {
-      await backend?.closeBackend?.().catch(() => {});
-      throw error;
-    }
     await backend.closeBackend?.().catch(() => {});
-    log.warn('agent', 'subagent-fallback-fork', { reason: message });
-    return {
-      ...base,
-      kind: 'fork',
-      routes,
-      notice: `MixAgents 没有可用 route，已降级到 Codex fork：${message}`,
-      error: message,
-    };
+    return forkFallback(base, routes, message);
   }
   if (!selection.route.available) {
     const missing = selection.route.missingEnvironment.length > 0
@@ -187,6 +175,9 @@ export async function resolveSubagents(input: ResolveSubagentInput): Promise<Res
       : '';
     const message = `MixAgents route ${selection.route.id} 不可用${missing}`;
     await backend.closeBackend?.().catch(() => {});
+    if (canAutoForkFallback(input, config)) {
+      return forkFallback(base, routes, message);
+    }
     throw new SubagentUnavailableError('route-unavailable', message);
   }
   return {
@@ -195,6 +186,36 @@ export async function resolveSubagents(input: ResolveSubagentInput): Promise<Res
     backend,
     route: selection.route,
     routes,
+    ...(backend.recoveryNotice ? { notice: backend.recoveryNotice } : {}),
+  };
+}
+
+function canAutoForkFallback(
+  input: ResolveSubagentInput,
+  config: SubagentConfig,
+): boolean {
+  return (
+    config.mode === 'auto' &&
+    config.routeMode === 'follow-cc-switch' &&
+    config.allowForkFallback &&
+    !input.requestedRoute
+  );
+}
+
+function forkFallback(
+  base: Pick<ResolvedSubagents, 'config' | 'ccSwitch' | 'routeMap'>,
+  routes: SubagentRoute[],
+  reason: string,
+): ResolvedSubagents {
+  log.warn('agent', 'subagent-fallback-main-codex', { reason });
+  return {
+    ...base,
+    kind: 'fork',
+    routes,
+    notice:
+      '子代理设置指定的 MixAgents provider 不可用，已回退到主 Codex session 的 provider/model（只读 thread/fork）：' +
+      reason,
+    error: reason,
   };
 }
 
@@ -264,35 +285,4 @@ export function selectSubagentRoute(input: {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-async function assertNativeForkAllowed(
-  input: ResolveSubagentInput,
-  config: SubagentConfig,
-  env: NodeJS.ProcessEnv,
-): Promise<void> {
-  // A Bridge-managed third-party session must never silently fall back to a
-  // native child: the child task is encoded as agent_message/encrypted_content
-  // for some Responses-compatible providers. If cc-switch metadata is not
-  // readable, explicit fork mode remains available as a user-selected mode.
-  if (!input.stateDir && !input.parentProviderId && !config.ccSwitchProviderId) return;
-  try {
-    const provider = await resolveCurrentCcSwitchCodexProvider({
-      env,
-      ...(input.codexHome ? { codexHome: input.codexHome } : {}),
-      ...(input.parentProviderId ? { parentProviderId: input.parentProviderId } : {}),
-      ...(config.ccSwitchProviderId ? { providerId: config.ccSwitchProviderId } : {}),
-    });
-    if (provider.summary.thirdParty) {
-      throw new SubagentUnavailableError(
-        'route-unavailable',
-        `当前 cc-switch provider ${provider.summary.id} 是第三方 Responses provider；` +
-          '禁止 native Codex fork/collaboration fallback，请先修复 MixAgents provider 或 route。',
-      );
-    }
-  } catch (error) {
-    if (error instanceof SubagentUnavailableError) throw error;
-    // Missing cc-switch metadata is reported by the normal provider preflight;
-    // an explicit fork request should not be turned into an unrelated failure.
-  }
 }

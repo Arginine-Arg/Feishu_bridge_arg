@@ -131,7 +131,7 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
       {
         value: 'auto',
         label: '自动（推荐）',
-        hint: '优先使用 MixAgents；不可用时按下方设置决定是否用本地 Codex fork',
+        hint: '优先使用所选 provider；runtime 自愈后仍不可用，才按下方设置改用主会话 Codex',
       },
       {
         value: 'broker',
@@ -150,7 +150,7 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
   let allowForkFallback = currentSubagents.allowForkFallback;
   if (selectedMode === 'auto') {
     const fallback = await p.confirm({
-      message: 'MixAgents 暂时不可用时，是否改用本地 Codex fork？',
+      message: '所选子代理 provider 自愈后仍不可用时，是否改用主会话 provider 的只读 Codex fork？',
       initialValue: allowForkFallback,
     });
     assertPrompt(fallback);

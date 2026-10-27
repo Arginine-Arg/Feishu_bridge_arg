@@ -506,6 +506,9 @@ export class BrokerToolController implements BrokerToolHost {
     const ccSwitch = await readCcSwitchState(this.env);
     return success(JSON.stringify({
       configured_main_provider: ccSwitch.currentProviderCodex ?? null,
+      runtime_recovery: backend instanceof MixAgentsBrokerBackend
+        ? backend.recoveryNotice ?? null
+        : null,
       routes: visibleRoutes.map(route => ({
         id: route.id,
         provider: route.provider,

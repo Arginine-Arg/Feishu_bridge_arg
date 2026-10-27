@@ -4,7 +4,7 @@ A lightweight bot that bridges Feishu / Lark messenger with your local Claude Co
 
 [中文 README](./README.zh.md)
 
-Version 1.9.1 adds mid-turn Feishu steering and a Bridge-managed native TUI path: messages sent while a Codex task is running use `turn/steer` for the structured backend or Codex's native Tab-to-queue composer for a live terminal. `arg-bridge native --bridge` creates a new parent thread with `arg_bridge.*` dynamic tools, and `arg-bridge native --adopt <thread-id>` safely migrates old user/assistant text into a new Bridge-managed thread with a visible old/new ID pair. Ordinary `arg-bridge native` remains vanilla Codex. Version 1.8.1 introduced automatic cc-switch provider, model, endpoint and credential resolution for Broker workers.
+Version 1.9.2 hardens `/btw` provider selection: Bridge first repairs a stale MixAgents runtime or switches to its bundled compatible Broker so the settings-selected cc-switch provider remains in use. Eligible auto-mode profiles retain a final read-only Codex `thread/fork` safety fallback to the main session's provider/model only when the selected provider still cannot run. Version 1.9.1 adds mid-turn Feishu steering and a Bridge-managed native TUI path: messages sent while a Codex task is running use `turn/steer` for the structured backend or Codex's native Tab-to-queue composer for a live terminal. `arg-bridge native --bridge` creates a new parent thread with `arg_bridge.*` dynamic tools, and `arg-bridge native --adopt <thread-id>` safely migrates old user/assistant text into a new Bridge-managed thread with a visible old/new ID pair. Ordinary `arg-bridge native` remains vanilla Codex. Version 1.8.1 introduced automatic cc-switch provider, model, endpoint and credential resolution for Broker workers.
 
 Version 1.6.7 introduced provider-aware Codex resume, and 1.7.0 added idle-boundary rebinding. Version 1.9.1 narrows reattachment semantics: reconnecting to an existing native or structured thread preserves the provider/model recorded by that thread instead of silently following a newly selected cc-switch route.
 
@@ -60,7 +60,7 @@ Install a pinned release or use a writable custom npm prefix when required:
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.9.1
+sh /tmp/install-arg-bridge.sh --version 1.9.2
 # Example for a machine without permission to write npm's configured global prefix:
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ Release tarballs are preferred. If a Git install is required, keep both compatib
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.9.1"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.9.2"
 ```
 
-`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.9.1`.
+`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.9.2`.
 
 ### 4. Node or npm global-prefix errors
 
@@ -256,7 +256,7 @@ If a profile was created with the wrong agent kind, stop or unregister any match
 
 ### MixAgents model tools, `/btw`, `cc-switch`, MCP and Project RSI
 
-MixAgents is optional. The default `follow-cc-switch` flow reads the current cc-switch provider and automatically generates the Broker route, model, base URL, and credential. Users do not need a hand-written `broker-routes.json` or a manual `MIXAGENTS_BROKER_CREDENTIALS_JSON`; third-party providers never fall back to native fork/collaboration. New Bridge-managed Codex threads receive the requested `arg_bridge` dynamic-tool namespace and set `features.multi_agent_v2.disable_native_tools=true`. The exact 0.164.0 trace is recorded in [the structured Broker smoke](./docs/smoke-structured-broker-e2e-0.164.0.json).
+MixAgents is optional. The default `follow-cc-switch` flow reads the current cc-switch provider and automatically generates the Broker route, model, base URL, and credential. Users do not need a hand-written `broker-routes.json` or a manual `MIXAGENTS_BROKER_CREDENTIALS_JSON`. The settings-selected provider is always the primary `/btw` path: if a stale external MCP runtime omits the generated route, Bridge restarts it and then retries the bundled `mixagents-broker@0.1.1` entrypoint before declaring the route unavailable. Only after that recovery fails can eligible `mode=auto` profiles use a read-only Codex `thread/fork` on the main session's provider/model when `allowForkFallback=true`; the task is passed as ordinary input, not native collaboration encrypted content. Manual routes, explicit `/btw --route` and `mode=broker` remain fail closed. New Bridge-managed Codex threads receive the requested `arg_bridge` dynamic-tool namespace and set `features.multi_agent_v2.disable_native_tools=true`. The exact 0.164.0 trace is recorded in [the structured Broker smoke](./docs/smoke-structured-broker-e2e-0.164.0.json).
 
 The public `mixagents-broker` npm package is an optional dependency and is resolved through its stable package entry, not a plugin-cache path. Explicit MCP command/profile overrides still take priority.
 
@@ -356,7 +356,7 @@ See [MixAgents subagents](./docs/mixagents-subagents.md), [Bridge-managed native
 | `/sendfile <absolute-path>` | Admin-only: reply with a regular file from the current workspace, bridge media cache, or an explicitly allowed outbound directory, without invoking the agent |
 | `/config` | Adjust presentation preferences, access settings, and lark-cli identity policy |
 | `/model` | Choose the model; Codex uses its native model/reasoning picker and syncs the result to the active profile. `/codex model` is a shorthand for `/codex /model`. |
-| `/btw [--route <id>] [<text>]` | Open or reuse an independent read-only side agent. This is a Broker agent (not a Codex fork), and the route is re-resolved from the current cc-switch provider on every use. Third-party provider failures fail closed; only official providers may use the configured fallback. `/btw out` closes only the side. `/codex /btw ...` is equivalent in Feishu. |
+| `/btw [--route <id>] [<text>]` | Open or reuse an independent read-only side agent. The subagent-selected cc-switch provider is tried first. In `auto` mode it may fall back to the main session's provider through read-only Codex `thread/fork`; manual routes and explicit `--route` never fall back. `/btw out` closes only the side. `/codex /btw ...` is equivalent in Feishu. |
 | `/session [status\|live\|turn]` | Inspect terminal execution. tmux/live is the default; `turn` remains a legacy compatibility fallback |
 | `/tmux list [socket]` | Admin-only: list every live Codex/Claude tmux pane on this host, including working directory, agent kind, adopted thread, shared App Server endpoint, and attach command. Optional `-S <absolute socket path>` or `-L <socket name>` selects one tmux server; plain shells are never listed |
 | `/tmux bind <number\|pane id\|socket::pane id>` | Admin-only: bind the current chat/topic scope to a listed pane. A pane with a shared Codex endpoint is driven through structured transport; a plain Codex/Claude pane falls back to live transport. `/tmux list` numbers are only valid for the most recent listing |

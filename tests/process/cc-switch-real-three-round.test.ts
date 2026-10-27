@@ -6,6 +6,7 @@ import {
   BrokerToolController,
 } from '../../src/agent/subagents/broker-tools';
 import { redactSecrets } from '../../src/agent/subagents/mcp-client';
+import { resolveSubagents } from '../../src/agent/subagents/registry';
 import { materializeCcSwitchBrokerRuntime } from '../../src/integrations/cc-switch-provider';
 import {
   DEFAULT_SUBAGENT_CONFIG,
@@ -29,6 +30,28 @@ real('uses the current cc-switch provider for a real three-round Broker worker',
     modelTools: true,
   };
   const signal = AbortSignal.timeout(600_000);
+  const sideResolution = await resolveSubagents({
+    subagents: config,
+    env,
+    cwd,
+    stateDir,
+    codexHome,
+    ...(process.env.ARG_BRIDGE_CODEX_BIN?.trim()
+      ? { codexBin: process.env.ARG_BRIDGE_CODEX_BIN.trim() }
+      : {}),
+    signal,
+  });
+  try {
+    expect(sideResolution.kind, sideResolution.error).toBe('mixagents');
+    expect(sideResolution.route).toMatchObject({
+      source: 'cc-switch',
+      provider: expect.any(String),
+      model: expect.any(String),
+    });
+    expect(sideResolution.error).toBeUndefined();
+  } finally {
+    await sideResolution.backend?.closeBackend?.();
+  }
   const controller = new BrokerToolController({
     threadId: 'real-cc-switch-thread',
     cwd,

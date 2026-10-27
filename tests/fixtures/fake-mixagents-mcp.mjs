@@ -26,6 +26,7 @@ let state = {
   agents: {},
   nextAgent: 1,
   nextTurn: 1,
+  processStarts: 0,
   routes: [
     {
       id: 'read-a',
@@ -62,7 +63,15 @@ try {
 } catch {
   // First run.
 }
-if (generatedBrokerConfig?.routes) {
+state.processStarts = Number(state.processStarts ?? 0) + 1;
+const omitGeneratedOnce =
+  process.env.FAKE_MIXAGENTS_OMIT_GENERATED_ROUTE_ONCE === '1' &&
+  state.processStarts === 1;
+if (
+  generatedBrokerConfig?.routes &&
+  process.env.FAKE_MIXAGENTS_OMIT_GENERATED_ROUTE !== '1' &&
+  !omitGeneratedOnce
+) {
   state.routes = Object.entries(generatedBrokerConfig.routes).map(([id, route]) => ({
     id,
     description: route.description ?? id,
@@ -200,7 +209,10 @@ input.on('line', line => {
     result(request.id, {
       protocolVersion: '2025-11-25',
       capabilities: { tools: {} },
-      serverInfo: { name: 'fake-mixagents-broker', version: '0.1.1-test' },
+      serverInfo: {
+        name: 'fake-mixagents-broker',
+        version: process.env.FAKE_MIXAGENTS_SERVER_VERSION ?? '0.1.1-test',
+      },
     });
     return;
   }
