@@ -147,6 +147,33 @@ describe('RunExecutor', () => {
     await collect(first.subscribe());
   });
 
+  it('accepts /btw side work while the main run remains active', async () => {
+    const h = await createHarness({
+      events: [
+        [{ type: 'text', delta: 'main still running' }, { type: 'done', terminationReason: 'normal' }],
+        [{ type: 'text', delta: 'side answer' }, { type: 'done', terminationReason: 'normal' }],
+      ],
+      poolCap: 1,
+    });
+    const main = await h.executor.submit({
+      scopeId: 'scope-1',
+      policy: policy(h.tmp.workspace, { prompt: 'long main task' }),
+    });
+    const side = await h.executor.submit({
+      scopeId: 'scope-1',
+      policy: policy(h.tmp.workspace, { prompt: '/btw current progress?' }),
+      sessionMode: 'live',
+      liveInputMode: 'side',
+    });
+
+    expect(h.activeRuns.get('scope-1')?.run).toBe(main.run);
+    expect(h.activeRuns.getSide('scope-1')?.run).toBe(side.run);
+    expect(h.agent.sideRunOptions).toHaveLength(1);
+    expect(main.handle.interrupted).toBe(false);
+
+    await Promise.all([collect(main.subscribe()), collect(side.subscribe())]);
+  });
+
   it('accepts new submissions after reconnect drain is released', async () => {
     const h = await createHarness({
       events: [{ type: 'done', terminationReason: 'normal' }],

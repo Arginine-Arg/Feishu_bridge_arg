@@ -175,6 +175,29 @@ describe('markdown stream startup failures', () => {
     await expect.poll(() => agent.runCalls, { timeout: 3_000 }).toBe(2);
   });
 
+  it('queues a native slash command instead of cancelling an active live task', async () => {
+    const agent = new SteerableHangingAgent();
+    const h = await createHarness({ agent });
+    h.profileConfig.preferences = {
+      ...(h.profileConfig.preferences ?? {}),
+      agentSessionMode: 'live',
+      messageReply: 'text',
+      messageReplyMigrated: true,
+    };
+    h.controls.profileConfig.preferences = h.profileConfig.preferences;
+    h.controls.cfg.preferences = h.profileConfig.preferences;
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_command_start', 'start a long task'));
+    await agent.started.promise;
+    await h.channel.handlers.message?.(message('om_command_goal', '/goal follow up after the task'));
+
+    expect(agent.runCalls).toBe(1);
+    agent.finish();
+    await expect.poll(() => agent.runCalls, { timeout: 3_000 }).toBe(2);
+    agent.finish();
+  });
+
   it.each(['markdown', 'card'] as const)(
     'delivers an oversized academic answer completely in %s mode',
     async (messageReply) => {

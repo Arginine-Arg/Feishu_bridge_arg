@@ -249,6 +249,7 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
     agent: SideAgent,
     message: string,
     signal: AbortSignal,
+    timeoutMs = DEFAULT_TOTAL_WAIT_MS,
   ): Promise<SideAgentResult> {
     const client = await this.ensureClient();
     try {
@@ -259,7 +260,7 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
     } catch (error) {
       throw translateToolError(error, agent.cwd);
     }
-    return this.wait(agent, signal);
+    return this.wait(agent, signal, timeoutMs);
   }
 
   async interrupt(agent: SideAgent, signal: AbortSignal): Promise<void> {

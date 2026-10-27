@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.9.4",
+  version: "1.9.5",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -14598,7 +14598,7 @@ var MixAgentsBrokerBackend = class {
     }
     return { status: "timeout", error: "\u5B50\u4EE3\u7406\u7B49\u5F85\u8D85\u65F6" };
   }
-  async send(agent, message, signal) {
+  async send(agent, message, signal, timeoutMs = DEFAULT_TOTAL_WAIT_MS) {
     const client = await this.ensureClient();
     try {
       await client.callTool("send", {
@@ -14608,7 +14608,7 @@ var MixAgentsBrokerBackend = class {
     } catch (error) {
       throw translateToolError(error, agent.cwd);
     }
-    return this.wait(agent, signal);
+    return this.wait(agent, signal, timeoutMs);
   }
   async interrupt(agent, signal) {
     if (signal.aborted) throw abortError2();
@@ -15332,7 +15332,12 @@ var BrokerToolController = class {
       target.error = void 0;
       target.updatedAt = Date.now();
       await this.persist();
-      const result = await resolved.backend.send(target.agent, delivery, signal);
+      const result = await resolved.backend.send(
+        target.agent,
+        delivery,
+        signal,
+        config.workerTimeoutMs
+      );
       target.queuedMessages = [];
       this.applyResult(target, result);
       await this.persist();
@@ -19159,6 +19164,7 @@ var StructuredAdapter = class {
       return;
     }
     let existing = this.sideStateFor(scope, cwd);
+    const workerTimeoutMs = resolved.config.workerTimeoutMs;
     const changeReason = existing ? routeChangeReason(existing, route, cwd) : void 0;
     if (existing && changeReason) {
       emit2(textEvent(`side route/workspace \u5DF2\u53D8\u5316\uFF08${changeReason}\uFF09\uFF1B\u6B63\u5728\u7ED3\u675F\u65E7 MixAgents agent ${existing.agent.agentId}\uFF0C\u968F\u540E\u521B\u5EFA\u65B0 agent\u3002`));
@@ -19184,7 +19190,7 @@ var StructuredAdapter = class {
       emit2(textEvent(`\u590D\u7528 MixAgents side agent ${existing.agent.agentId}\uFF08route=${existing.route.id}\uFF09\u3002
 `));
       try {
-        const result = await backend.send(existing.agent, body, signal);
+        const result = await backend.send(existing.agent, body, signal, workerTimeoutMs);
         await this.applyMixagentsResult(existing, result, emit2);
       } catch (error) {
         if (signal.aborted) {
@@ -19229,7 +19235,7 @@ var StructuredAdapter = class {
     this.mixagentsSides.set(`${scope}\0${cwd}`, state);
     await this.saveMixagentsSides();
     try {
-      const result = await backend.wait(agent, signal);
+      const result = await backend.wait(agent, signal, workerTimeoutMs);
       await this.applyMixagentsResult(state, result, emit2);
     } catch (error) {
       if (signal.aborted) {
@@ -19250,7 +19256,7 @@ var StructuredAdapter = class {
         state.updatedAt = Date.now();
         this.mixagentsSides.set(`${scope}\0${cwd}`, state);
         await this.saveMixagentsSides();
-        const result = await backend.wait(replacement, signal);
+        const result = await backend.wait(replacement, signal, workerTimeoutMs);
         await this.applyMixagentsResult(state, result, emit2);
         return;
       }
@@ -20051,6 +20057,12 @@ ${prompt}
         abort.abort();
       },
       steer: async (request) => {
+        if (this.providerIsThirdParty) {
+          return {
+            status: "unavailable",
+            reason: "third-party Responses provider uses next-turn queueing instead of turn/steer"
+          };
+        }
         if (side || terminal || detached || abort.signal.aborted || options.liveInputMode || !(activeTarget instanceof CodexStructuredSession)) {
           return { status: "unavailable", reason: "active target is not a steerable Codex turn" };
         }
@@ -25779,6 +25791,12 @@ function liveInputModeForMessage(msg) {
   const mode = msg.raw[LIVE_INPUT_MODE_RAW_KEY];
   return mode === "command" || mode === "control" || mode === "side" || mode === "side-exit" ? mode : void 0;
 }
+function effectiveRunIdleTimeoutMs(configured, liveInputMode) {
+  return liveInputMode === "side" || liveInputMode === "side-exit" ? void 0 : configured;
+}
+function effectiveLiveInputMode(routedMode, nativeMode) {
+  return routedMode ?? nativeMode;
+}
 function contentWithoutLeadingMention(content, mentionedBot) {
   if (!mentionedBot) return content;
   const match = /^\s*@[^\s/]+\s+(\/[\s\S]*)$/u.exec(content);
@@ -31061,8 +31079,10 @@ async function intakeMessage(deps) {
     if (nativeInputMode === "side" || nativeInputMode === "side-exit") {
       log.info("intake", "native-side-coexists-with-main", { scope, inputMode: nativeInputMode });
     } else {
-      activeRuns.advanceStopGeneration(scope);
-      activeRuns.interrupt(scope);
+      log.info("intake", "native-command-deferred-until-idle", {
+        scope,
+        command: agentMsg.content.trim().slice(0, 120)
+      });
     }
   }
   const priorityLiveInput = priorityLiveControl || priorityNativeCommand;
@@ -31634,7 +31654,7 @@ async function runAgentBatch(deps) {
     ...nativeCommand && nativeInputMode ? { inputMode: nativeInputMode } : {}
   }) : void 0;
   if (stopRequested("route")) return;
-  const liveInputMode = bridgeRoute?.inputMode;
+  const liveInputMode = effectiveLiveInputMode(bridgeRoute?.inputMode, nativeInputMode);
   const prompt = bridgeRoute?.stdin ?? structuredPrompt;
   log.info("prompt", "built", {
     promptChars: prompt.length,
@@ -31912,7 +31932,11 @@ ${delta}`.slice(-64e3);
     interactionSends.push(promise);
   };
   const scopeOverride = sessions.getIdleTimeoutMinutes(scope);
-  const idleTimeoutMs = scopeOverride !== void 0 ? scopeOverride > 0 ? scopeOverride * 6e4 : void 0 : getRunIdleTimeoutMs(controls.cfg);
+  const configuredIdleTimeoutMs = scopeOverride !== void 0 ? scopeOverride > 0 ? scopeOverride * 6e4 : void 0 : getRunIdleTimeoutMs(controls.cfg);
+  const idleTimeoutMs = effectiveRunIdleTimeoutMs(
+    configuredIdleTimeoutMs,
+    liveInputMode
+  );
   if (idleTimeoutMs) {
     log.info("flush", "idle-watchdog", { idleTimeoutMs });
   }

@@ -51,6 +51,28 @@ export function liveInputModeForMessage(msg: NormalizedMessage): LiveInputMode |
 }
 
 /**
+ * Broker side operations have their own worker timeout. A conversational idle
+ * watchdog would terminate a healthy side request that is waiting silently for
+ * a provider response.
+ */
+export function effectiveRunIdleTimeoutMs(
+  configured: number | undefined,
+  liveInputMode: LiveInputMode | undefined,
+): number | undefined {
+  return liveInputMode === 'side' || liveInputMode === 'side-exit'
+    ? undefined
+    : configured;
+}
+
+/** Preserve the native side marker if a bridge router omits inputMode. */
+export function effectiveLiveInputMode(
+  routedMode: LiveInputMode | undefined,
+  nativeMode: LiveInputMode | undefined,
+): LiveInputMode | undefined {
+  return routedMode ?? nativeMode;
+}
+
+/**
  * Group messages can still carry a leading `@bot` token when the platform did
  * not match the mention to the bot identity (for example a missing bot
  * `open_id`, or a client that inserted the mention as plain text). Such a

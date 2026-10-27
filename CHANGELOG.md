@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.9.5
+
+- Fixed `/btw` coexistence with an active main run. The side marker is now
+  preserved as the final authority if a bridge route omits `inputMode`, so
+  `/btw` cannot regress into a competing main run and report
+  `run-already-active`.
+- Broker side turns now use `subagents.workerTimeoutMs` instead of the generic
+  conversational idle watchdog. A provider request that is legitimately silent
+  no longer appears as an immediate `0 分钟无响应` termination.
+- Native slash commands sent while a live task is running are queued for the
+  next idle boundary instead of cancelling the active task.
+- Third-party structured Responses providers no longer use `turn/steer`; user
+  messages queue for the next turn, avoiding provider-specific interruption
+  behavior. Official providers retain native steering.
+- Added regressions for main-plus-side concurrency, side worker timeout
+  propagation, and non-cancelling command/message intake.
+
 ## 1.9.4
 
 - Fixed selected-provider credential precedence for both `/btw` and

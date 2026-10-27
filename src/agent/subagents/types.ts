@@ -77,7 +77,12 @@ export interface SubagentBackend {
   listRoutes(signal: AbortSignal): Promise<SubagentRoute[]>;
   createOrReuse(input: SideAgentInput): Promise<SideAgent>;
   wait(agent: SideAgent, signal: AbortSignal, timeoutMs?: number): Promise<SideAgentResult>;
-  send(agent: SideAgent, message: string, signal: AbortSignal): Promise<SideAgentResult>;
+  send(
+    agent: SideAgent,
+    message: string,
+    signal: AbortSignal,
+    timeoutMs?: number,
+  ): Promise<SideAgentResult>;
   interrupt(agent: SideAgent, signal: AbortSignal): Promise<void>;
   close(agent: SideAgent, signal: AbortSignal): Promise<void>;
   closeBackend?(): Promise<void>;

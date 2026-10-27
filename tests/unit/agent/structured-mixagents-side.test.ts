@@ -69,6 +69,8 @@ class FakeBackend implements SubagentBackend {
   readonly id = 'mixagents' as const;
   readonly spawns: SideAgentInput[] = [];
   readonly sends: Array<{ agent: SideAgent; message: string; signal?: AbortSignal }> = [];
+  readonly waitTimeouts: Array<number | undefined> = [];
+  readonly sendTimeouts: Array<number | undefined> = [];
   readonly interruptions: string[] = [];
   readonly closes: string[] = [];
   sendNotFoundOnce = false;
@@ -97,7 +99,12 @@ class FakeBackend implements SubagentBackend {
     };
   }
 
-  async wait(agent: SideAgent, signal: AbortSignal): Promise<SideAgentResult> {
+  async wait(
+    agent: SideAgent,
+    signal: AbortSignal,
+    timeoutMs?: number,
+  ): Promise<SideAgentResult> {
+    this.waitTimeouts.push(timeoutMs);
     if (this.waitResult) return this.waitResult;
     if (this.hangWaits) {
       await new Promise<void>((_resolve, reject) => {
@@ -110,7 +117,13 @@ class FakeBackend implements SubagentBackend {
     return { status: 'completed', text: `completed:${agent.agentId}` };
   }
 
-  async send(agent: SideAgent, message: string, signal?: AbortSignal): Promise<SideAgentResult> {
+  async send(
+    agent: SideAgent,
+    message: string,
+    signal?: AbortSignal,
+    timeoutMs?: number,
+  ): Promise<SideAgentResult> {
+    this.sendTimeouts.push(timeoutMs);
     if (this.sendNotFoundOnce) {
       this.sendNotFoundOnce = false;
       throw new SubagentAgentNotFoundError(agent.agentId);
@@ -160,6 +173,45 @@ function resolved(
 }
 
 describe('structured MixAgents /btw', () => {
+  it('queues next-turn input for third-party structured providers instead of using turn/steer', async () => {
+    const profileDir = await mkdtemp(join(tmpdir(), 'arg-bridge-third-party-steer-'));
+    const main = session();
+    const submit = vi.spyOn(main, 'submit').mockImplementation(async (_options, _emit, signal) => {
+      await new Promise<void>((_resolve, reject) => {
+        signal.addEventListener('abort', () => {
+          reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+        }, { once: true });
+      });
+    });
+    const adapter = new StructuredAdapter({
+      kind: 'codex',
+      binary: 'not-spawned',
+      profileDir,
+    });
+    Reflect.set(adapter, 'providerIsThirdParty', true);
+    Reflect.get(adapter, 'sessions').set('scope', {
+      main,
+      cwd: '/workspace',
+      view: new StructuredView(profileDir, 'main'),
+    });
+
+    const run = adapter.run({
+      runId: 'third-party-steer',
+      scopeId: 'scope',
+      cwd: '/workspace',
+      prompt: 'long provider task',
+    });
+    await vi.waitFor(() => expect(submit).toHaveBeenCalled());
+    await expect(run.steer?.({ text: 'next-turn input' })).resolves.toMatchObject({
+      status: 'unavailable',
+      reason: expect.stringContaining('next-turn queueing'),
+    });
+    await run.stop({ force: true });
+    await drain(run);
+    await main.close();
+    await rm(profileDir, { recursive: true, force: true });
+  });
+
   it('reloads a Broker marker written after the daemon started', async () => {
     const profileDir = await mkdtemp(join(tmpdir(), 'arg-bridge-marker-hot-reload-'));
     const adapter = new StructuredAdapter({
@@ -332,6 +384,7 @@ describe('structured MixAgents /btw', () => {
     expect(backend.spawns[0]!.signal).toBeInstanceOf(AbortSignal);
     expect(backend.spawns[0]!.task).not.toContain('sk-super-secret-value');
     expect(backend.spawns[0]!.task).toContain('[REDACTED]');
+    expect(backend.waitTimeouts[0]).toBe(subagents.workerTimeoutMs);
 
     const second = await drain(adapter.runSide({
       runId: 'side-2',
@@ -344,6 +397,7 @@ describe('structured MixAgents /btw', () => {
     expect(backend.sends).toHaveLength(1);
     expect(backend.sends[0]!.agent.agentId).toBe('agent-1');
     expect(backend.sends[0]!.signal).toBeInstanceOf(AbortSignal);
+    expect(backend.sendTimeouts[0]).toBe(subagents.workerTimeoutMs);
 
     activeRoute = routeB;
     resolver.mockImplementation(async () => resolved(activeRoute, backend));

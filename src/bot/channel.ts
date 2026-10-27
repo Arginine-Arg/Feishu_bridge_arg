@@ -103,6 +103,8 @@ import { InboundMessageLedger } from './inbound-message-ledger';
 import { RunEventGate, SerializedDelivery } from './run-delivery';
 import {
   contentWithoutLeadingMention,
+  effectiveLiveInputMode,
+  effectiveRunIdleTimeoutMs,
   isForceLiveAgentCommandMessage,
   isNativeAgentCommandMessage,
   liveInputModeForMessage,
@@ -1314,8 +1316,14 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
       // its EventFanout listener and makes the pursuing goal appear to stop.
       log.info('intake', 'native-side-coexists-with-main', { scope, inputMode: nativeInputMode });
     } else {
-      activeRuns.advanceStopGeneration(scope);
-      activeRuns.interrupt(scope);
+      // A native slash command arriving during a live main task must retain
+      // native composer semantics: queue it for the next idle boundary rather
+      // than cancelling the task merely to type the command. Explicit
+      // `/stop` is handled by the bridge lifecycle path before this branch.
+      log.info('intake', 'native-command-deferred-until-idle', {
+        scope,
+        command: agentMsg.content.trim().slice(0, 120),
+      });
     }
   }
   const priorityLiveInput = priorityLiveControl || priorityNativeCommand;
@@ -2174,7 +2182,10 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       })
     : undefined;
   if (stopRequested('route')) return;
-  const liveInputMode = bridgeRoute?.inputMode;
+  // The native marker is authoritative. BridgeAgent normally preserves it, but
+  // a classifier/adapter regression must not turn `/btw` into a competing main
+  // run that collides with the scope reservation.
+  const liveInputMode = effectiveLiveInputMode(bridgeRoute?.inputMode, nativeInputMode);
   const prompt = bridgeRoute?.stdin ?? structuredPrompt;
   log.info('prompt', 'built', {
     promptChars: prompt.length,
@@ -2532,12 +2543,20 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   // Resolve idle-timeout for this run: scope override (on SessionEntry) wins
   // over global default (preferences). 0 / undefined = no watchdog.
   const scopeOverride = sessions.getIdleTimeoutMinutes(scope);
-  const idleTimeoutMs =
+  const configuredIdleTimeoutMs =
     scopeOverride !== undefined
       ? scopeOverride > 0
         ? scopeOverride * 60_000
         : undefined
       : getRunIdleTimeoutMs(controls.cfg);
+  // A Broker `/btw` worker can legitimately spend minutes inside a provider
+  // request without emitting stream events. It has its own
+  // subagents.workerTimeoutMs; applying the conversational idle watchdog here
+  // killed healthy side workers after the first quiet period.
+  const idleTimeoutMs = effectiveRunIdleTimeoutMs(
+    configuredIdleTimeoutMs,
+    liveInputMode,
+  );
   if (idleTimeoutMs) {
     log.info('flush', 'idle-watchdog', { idleTimeoutMs });
   }

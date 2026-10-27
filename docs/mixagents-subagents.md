@@ -261,6 +261,14 @@ The same override applies to `/btw`, model-visible Broker tools, native Bridge
 workers and RSI reviewers. Credential values remain limited to the MCP child
 environment and are never written to Broker route files, worker mappings or
 logs.
+
+### Side concurrency and timeout
+
+`/btw` is a concurrent side operation, not a second main turn. It remains
+native-side marked even if a bridge route omits its `inputMode`. The generic
+conversation idle watchdog does not apply to Broker side turns; they use the
+profile's `subagents.workerTimeoutMs` and remain observable until the Broker
+returns completed, failed, interrupted or timed out.
 No route decision is cached until process restart.
 
 ## Credential ownership

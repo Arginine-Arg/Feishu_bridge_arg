@@ -847,6 +847,7 @@ export class StructuredAdapter implements AgentAdapter {
     }
 
     let existing = this.sideStateFor(scope, cwd);
+    const workerTimeoutMs = resolved.config.workerTimeoutMs;
     const changeReason = existing ? routeChangeReason(existing, route, cwd) : undefined;
     if (existing && changeReason) {
       emit(textEvent(`side route/workspace 已变化（${changeReason}）；正在结束旧 MixAgents agent ${existing.agent.agentId}，随后创建新 agent。`));
@@ -870,7 +871,7 @@ export class StructuredAdapter implements AgentAdapter {
       });
       emit(textEvent(`复用 MixAgents side agent ${existing.agent.agentId}（route=${existing.route.id}）。\n`));
       try {
-        const result = await backend.send(existing.agent, body, signal);
+        const result = await backend.send(existing.agent, body, signal, workerTimeoutMs);
         await this.applyMixagentsResult(existing, result, emit);
       } catch (error) {
         if (signal.aborted) {
@@ -914,7 +915,7 @@ export class StructuredAdapter implements AgentAdapter {
     this.mixagentsSides.set(`${scope}\0${cwd}`, state);
     await this.saveMixagentsSides();
     try {
-      const result = await backend.wait(agent, signal);
+      const result = await backend.wait(agent, signal, workerTimeoutMs);
       await this.applyMixagentsResult(state, result, emit);
     } catch (error) {
       if (signal.aborted) {
@@ -934,7 +935,7 @@ export class StructuredAdapter implements AgentAdapter {
         state.updatedAt = Date.now();
         this.mixagentsSides.set(`${scope}\0${cwd}`, state);
         await this.saveMixagentsSides();
-        const result = await backend.wait(replacement, signal);
+        const result = await backend.wait(replacement, signal, workerTimeoutMs);
         await this.applyMixagentsResult(state, result, emit);
         return;
       }
@@ -1775,6 +1776,12 @@ export class StructuredAdapter implements AgentAdapter {
     return { runId: options.runId, events,
       stop: async () => { abort.abort(); },
       steer: async (request: AgentSteerRequest): Promise<AgentSteerResult> => {
+        if (this.providerIsThirdParty) {
+          return {
+            status: 'unavailable',
+            reason: 'third-party Responses provider uses next-turn queueing instead of turn/steer',
+          };
+        }
         if (
           side ||
           terminal ||

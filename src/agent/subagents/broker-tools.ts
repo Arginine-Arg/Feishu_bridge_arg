@@ -368,7 +368,12 @@ export class BrokerToolController implements BrokerToolHost {
       target.error = undefined;
       target.updatedAt = Date.now();
       await this.persist();
-      const result = await resolved.backend.send(target.agent, delivery, signal);
+      const result = await resolved.backend.send(
+        target.agent,
+        delivery,
+        signal,
+        config.workerTimeoutMs,
+      );
       target.queuedMessages = [];
       this.applyResult(target, result);
       await this.persist();
