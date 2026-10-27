@@ -248,6 +248,19 @@ switching provider.
 
 All values are re-read for every worker call and every settings/doctor
 invocation.
+
+### Selected-provider credential precedence
+
+Version 1.9.4 applies the credentials resolved from the selected cc-switch
+provider directly to the Broker MCP child environment. This is required because
+MixAgents 0.1.1 only fills credential variables that are absent; an inherited
+`OPENAI_API_KEY` from the main Codex session would otherwise win over the key
+selected for `/btw` or an `arg_bridge.*` worker.
+
+The same override applies to `/btw`, model-visible Broker tools, native Bridge
+workers and RSI reviewers. Credential values remain limited to the MCP child
+environment and are never written to Broker route files, worker mappings or
+logs.
 No route decision is cached until process restart.
 
 ## Credential ownership

@@ -306,6 +306,7 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
       if (this.runtime) {
         childEnv.MIXAGENTS_BROKER_CONFIG = this.runtime.brokerConfigPath;
         childEnv.MIXAGENTS_BROKER_CREDENTIALS_JSON = JSON.stringify(this.runtime.credentials);
+        applyRuntimeCredentialOverrides(childEnv, this.runtime.credentials);
         if (this.runtime.route?.tags.includes('third-party')) {
           stripLoopbackProxyEnvironment(childEnv);
         }
@@ -380,6 +381,25 @@ function validateRuntimeOverrides(runtime: MixAgentsRuntimeOverrides): void {
       );
     }
   }
+}
+
+/**
+ * MixAgents 0.1.1 only fills credentials that are absent from its inherited
+ * environment. That lets a main-session OPENAI_API_KEY win over the key
+ * resolved for the selected subagent provider. Apply the selected credentials
+ * explicitly so both `/btw` and model-visible workers use the same snapshot.
+ */
+export function applyRuntimeCredentialOverrides(
+  target: NodeJS.ProcessEnv,
+  credentials: Record<string, string>,
+): NodeJS.ProcessEnv {
+  for (const [name, value] of Object.entries(credentials)) {
+    for (const existing of Object.keys(target)) {
+      if (existing.toLowerCase() === name.toLowerCase()) delete target[existing];
+    }
+    target[name] = value;
+  }
+  return target;
 }
 
 function stripLoopbackProxyEnvironment(env: NodeJS.ProcessEnv): void {

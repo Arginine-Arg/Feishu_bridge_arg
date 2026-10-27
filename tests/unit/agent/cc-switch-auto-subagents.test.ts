@@ -1,4 +1,5 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -6,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, expect, it } from 'vitest';
 import { resolveSubagents } from '../../../src/agent/subagents/registry';
 import { MixAgentsBrokerBackend } from '../../../src/agent/subagents/mixagents';
+import { BrokerToolController } from '../../../src/agent/subagents/broker-tools';
 import {
   materializeCcSwitchBrokerRuntime,
   resolveCurrentCcSwitchCodexProvider,
@@ -316,6 +318,112 @@ sqliteRuntime('replaces a known-older MixAgents server with the bundled runtime'
   }
 });
 
+sqliteRuntime('overrides an inherited main key with the selected cc-switch key for /btw', async () => {
+  const setup = await setupProviders();
+  const wrongParentKey = 'sk-wrong-inherited-main-key';
+  const config: SubagentConfig = {
+    ...DEFAULT_SUBAGENT_CONFIG,
+    mode: 'broker',
+    routeMode: 'follow-cc-switch',
+    allowForkFallback: false,
+    mixagents: {
+      mcpCommand: process.execPath,
+      mcpArgs: [fixture],
+    },
+  };
+  const signal = AbortSignal.timeout(10_000);
+  const resolved = await resolveSubagents({
+    subagents: config,
+    env: {
+      ...setup.env,
+      OPENAI_API_KEY: wrongParentKey,
+    },
+    cwd: setup.workspace,
+    stateDir: setup.stateDir,
+    codexHome: setup.codexHome,
+    codexBin: '/opt/codex',
+    signal,
+  });
+  try {
+    expect(resolved.kind).toBe('mixagents');
+    const agent = await resolved.backend!.createOrReuse({
+      route: resolved.route!,
+      task: 'selected provider credential check',
+      cwd: setup.workspace,
+      scope: 'credential-override-btw',
+      access: 'read-only',
+      signal,
+    });
+    await expect(resolved.backend!.wait(agent, signal)).resolves.toMatchObject({
+      status: 'completed',
+    });
+    const state = JSON.parse(await readFile(setup.brokerState, 'utf8'));
+    expect(state.credentialFingerprints.OPENAI_API_KEY).toBe(secretFingerprint(setup.firstSecret));
+    expect(state.credentialFingerprints.OPENAI_API_KEY).not.toBe(secretFingerprint(wrongParentKey));
+  } finally {
+    await resolved.backend?.closeBackend?.();
+  }
+});
+
+sqliteRuntime('overrides an inherited main key for model-visible subagent tools', async () => {
+  const setup = await setupProviders();
+  const wrongParentKey = 'sk-wrong-inherited-subagent-key';
+  const env = {
+    ...setup.env,
+    OPENAI_API_KEY: wrongParentKey,
+  };
+  const config: SubagentConfig = {
+    ...DEFAULT_SUBAGENT_CONFIG,
+    mode: 'broker',
+    routeMode: 'follow-cc-switch',
+    allowForkFallback: false,
+    mixagents: {
+      mcpCommand: process.execPath,
+      mcpArgs: [fixture],
+    },
+  };
+  const controller = new BrokerToolController({
+    threadId: 'credential-override-subagents',
+    cwd: setup.workspace,
+    scope: 'credential-override-subagents',
+    stateFile: join(setup.stateDir, 'broker-workers-credential-override.json'),
+    env,
+    getConfig: async () => config,
+    runtimeResolver: async () => {
+      const generated = await materializeCcSwitchBrokerRuntime({
+        env,
+        cwd: setup.workspace,
+        codexHome: setup.codexHome,
+        codexBin: '/opt/codex',
+        stateDir: setup.stateDir,
+      });
+      return {
+        brokerConfigPath: generated.brokerConfigPath,
+        credentials: generated.credentials,
+        fingerprint: generated.fingerprint,
+        route: generated.route,
+      };
+    },
+  });
+  try {
+    const spawned = await controller.call('spawn_agent', {
+      name: 'credential-check',
+      task: 'dynamic-tool selected provider credential check',
+    }, AbortSignal.timeout(10_000));
+    expect(spawned.success, spawned.text).toBe(true);
+    const waited = await controller.call('wait_agent', {
+      logical_names: ['credential-check'],
+      timeout_ms: 5_000,
+    }, AbortSignal.timeout(10_000));
+    expect(waited.success, waited.text).toBe(true);
+    const state = JSON.parse(await readFile(setup.brokerState, 'utf8'));
+    expect(state.credentialFingerprints.OPENAI_API_KEY).toBe(secretFingerprint(setup.firstSecret));
+    expect(state.credentialFingerprints.OPENAI_API_KEY).not.toBe(secretFingerprint(wrongParentKey));
+  } finally {
+    await controller.close();
+  }
+});
+
 async function setupProviders() {
   const root = await mkdtemp(join(tmpdir(), 'arg-bridge-auto-cc-switch-'));
   temporary.push(root);
@@ -382,6 +490,10 @@ async function setupProviders() {
       FAKE_MIXAGENTS_STATE: brokerState,
     },
   };
+}
+
+function secretFingerprint(value: string): string {
+  return createHash('sha256').update(value).digest('hex').slice(0, 16);
 }
 
 async function setCurrentProvider(

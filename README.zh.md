@@ -4,7 +4,7 @@
 
 [English README](./README.md)
 
-`1.9.3` 修复 Bridge-managed native 恢复链路：writer ownership 检查前会统一 canonical endpoint，App Server socket 改用稳定的 XDG runtime/state 目录而不再依赖临时 `TMPDIR`，重复 `--adopt` 会复用已有迁移而不会继续创建新 thread，运行中的 Bridge daemon 也能立即加载新写入的 Broker marker，无需重启。退出 TUI 后会打印持久的 `arg-bridge native --bridge <thread-id>` 重连命令。`1.9.2` 继续保留 settings 指定子代理 provider 优先，并在 runtime 自愈后才考虑主 provider 的只读 fallback；`1.9.1` 增加长任务中途消息插入和 Bridge-managed native TUI。
+`1.9.4` 修复子代理凭据优先级：`/btw`、`arg_bridge.*` 模型工具、native Bridge worker 和 RSI reviewer 现在都会显式使用 settings 选中 cc-switch provider 的 key，不再让父环境中主 session 的 `OPENAI_API_KEY` 在 MixAgents 内覆盖正确 key。`1.9.3` 修复 Bridge-managed native 恢复、稳定 App Server socket 和 adopt 幂等；`1.9.2` 保留 settings 指定子代理 provider 优先；`1.9.1` 增加中途消息插入和 Bridge-managed native TUI。
 
 `1.6.7` 引入 provider-aware Codex resume，`1.7.0` 增加 idle 边界重绑。`1.9.1` 收紧重连语义：附着已有 native 或 structured thread 时，保留该 thread 记录的 provider/model，不会因为 cc-switch 后来切换了 route 而静默改路。
 
@@ -60,7 +60,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.9.3
+sh /tmp/install-arg-bridge.sh --version 1.9.4
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.9.3"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.9.4"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.9.3`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.9.4`。
 
 ### 4. Node 或 npm 全局目录错误
 

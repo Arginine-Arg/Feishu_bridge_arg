@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.9.3",
+  version: "1.9.4",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -14648,6 +14648,7 @@ var MixAgentsBrokerBackend = class {
       if (this.runtime) {
         childEnv.MIXAGENTS_BROKER_CONFIG = this.runtime.brokerConfigPath;
         childEnv.MIXAGENTS_BROKER_CREDENTIALS_JSON = JSON.stringify(this.runtime.credentials);
+        applyRuntimeCredentialOverrides(childEnv, this.runtime.credentials);
         if (this.runtime.route?.tags.includes("third-party")) {
           stripLoopbackProxyEnvironment(childEnv);
         }
@@ -14717,6 +14718,15 @@ function validateRuntimeOverrides(runtime) {
       );
     }
   }
+}
+function applyRuntimeCredentialOverrides(target, credentials) {
+  for (const [name, value] of Object.entries(credentials)) {
+    for (const existing of Object.keys(target)) {
+      if (existing.toLowerCase() === name.toLowerCase()) delete target[existing];
+    }
+    target[name] = value;
+  }
+  return target;
 }
 function stripLoopbackProxyEnvironment(env) {
   for (const key of [

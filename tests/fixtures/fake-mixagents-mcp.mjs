@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { dirname } from 'node:path';
 import readline from 'node:readline';
 
@@ -14,11 +15,21 @@ if (generatedBrokerConfigPath) {
   generatedBrokerConfig = JSON.parse(await readFile(generatedBrokerConfigPath, 'utf8'));
 }
 let credentialNames = [];
+let credentialFingerprints = {};
 try {
   const credentials = JSON.parse(process.env.MIXAGENTS_BROKER_CREDENTIALS_JSON ?? '{}');
   credentialNames = Object.keys(credentials);
+  credentialFingerprints = Object.fromEntries(
+    credentialNames
+      .filter(name => typeof process.env[name] === 'string' && process.env[name])
+      .map(name => [
+        name,
+        createHash('sha256').update(process.env[name]).digest('hex').slice(0, 16),
+      ]),
+  );
 } catch {
   credentialNames = [];
+  credentialFingerprints = {};
 }
 
 let state = {
@@ -92,6 +103,7 @@ state.lastCredentialProvider = process.env.MIXAGENTS_CREDENTIAL_PROVIDER ?? null
 state.lastCredentialSource = process.env.MIXAGENTS_CREDENTIAL_SOURCE ?? null;
 state.brokerConfigPath = generatedBrokerConfigPath ?? null;
 state.credentialNames = credentialNames;
+state.credentialFingerprints = credentialFingerprints;
 state.proxyEnvironmentNames = Object.keys(process.env)
   .filter(name => /^(?:http|https|all)_proxy$/iu.test(name) && process.env[name])
   .sort();

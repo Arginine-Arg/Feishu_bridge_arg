@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.9.4
+
+- Fixed selected-provider credential precedence for both `/btw` and
+  model-visible `arg_bridge.*` subagent tools. An inherited main-session
+  `OPENAI_API_KEY` could win inside MixAgents 0.1.1 because that runtime only
+  filled missing credential variables; Bridge now explicitly applies the
+  credentials resolved from the selected cc-switch provider to the Broker MCP
+  child environment.
+- Added regression coverage that starts with a deliberately wrong inherited
+  key and verifies the Broker process receives the selected provider key for
+  both the `/btw` resolver and BrokerToolController paths.
+- Added a real three-round `halflong_ds` acceptance with the normal main key
+  still present in the parent environment. The worker retained
+  `ORBIT-731` across all three turns.
+
 ## 1.9.3
 
 - Fixed `arg-bridge native <thread-id>` falsely reporting multiple owners when
