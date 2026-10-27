@@ -36,7 +36,10 @@ import {
   createNativeBridgeSession,
   findLoadedThreadHost,
 } from '../../agent/structured/native-bridge';
-import { resolveAppServerSocketPath } from '../../agent/structured/socket-security';
+import {
+  canonicalAppServerEndpoints,
+  resolveAppServerSocketPath,
+} from '../../agent/structured/socket-security';
 
 /** Run as an ordinary foreground shell command. The caller's shell (and its
  * Clash/Conda environment) survives both normal exit and Ctrl-C. */
@@ -89,11 +92,14 @@ export async function runNative(
     try {
       if (bridge.mode === 'adopted') {
         console.log(
-          `Bridge-managed migration: ${bridge.oldThreadId} -> ${bridge.threadId}`,
+          `${bridge.reusedAdoption ? 'Bridge-managed migration already exists' : 'Bridge-managed migration'}: ` +
+            `${bridge.oldThreadId} -> ${bridge.threadId}`,
         );
-        console.log(
-          'Codex 0.164 thread/resume does not accept dynamicTools; the old text history was copied into this new Bridge thread.',
-        );
+        if (!bridge.reusedAdoption) {
+          console.log(
+            'Codex 0.164 thread/resume does not accept dynamicTools; the old text history was copied into this new Bridge thread.',
+          );
+        }
       } else {
         console.log(`Bridge-managed Codex thread: ${bridge.threadId}`);
       }
@@ -108,6 +114,9 @@ export async function runNative(
       await waitChild(child);
     } finally {
       await bridge.close();
+      console.log(
+        `Durable reconnect: arg-bridge native --bridge ${bridge.threadId} --profile ${profileName}`,
+      );
     }
     return;
   }
@@ -158,10 +167,15 @@ export async function runNative(
     return;
   }
   const discoveredHost = await findLoadedThreadHost(paths.profileDir, thread, env);
-  const existing = discoveredHost
-    ? []
-    : listStructuredTmuxPanes().filter(pane => pane.structured.threadId === thread && pane.structured.endpoint);
-  const candidates = new Set(existing.map(pane => pane.structured.endpoint!));
+  const candidates = new Set<string>();
+  if (discoveredHost) candidates.add(discoveredHost.endpoint);
+  if (!discoveredHost) {
+    for (const pane of listStructuredTmuxPanes()) {
+      if (pane.structured.threadId === thread && pane.structured.endpoint) {
+        candidates.add(pane.structured.endpoint);
+      }
+    }
+  }
   for (const file of [join(paths.profileDir, 'structured', 'tmux-bindings.json'), join(paths.profileDir, 'preferred-panes.json')]) {
     try {
       const stored = JSON.parse(await readFile(file, 'utf8'));
@@ -171,9 +185,15 @@ export async function runNative(
       }
     } catch { /* no prior binding */ }
   }
-  const endpoints: string[] = discoveredHost ? [discoveredHost.endpoint] : [];
-  for (const endpoint of candidates) {
-    if (!endpoint.startsWith('unix:///')) continue;
+  const canonicalCandidates = await canonicalAppServerEndpoints(candidates);
+  const discoveredEndpoint = discoveredHost
+    ? (await canonicalAppServerEndpoints([discoveredHost.endpoint]))[0]
+    : undefined;
+  const endpoints = new Set<string>();
+  const selectedDiscoveredEndpoint = discoveredEndpoint ?? discoveredHost?.endpoint;
+  if (selectedDiscoveredEndpoint) endpoints.add(selectedDiscoveredEndpoint);
+  for (const endpoint of canonicalCandidates) {
+    if (endpoint === selectedDiscoveredEndpoint) continue;
     let observer: RpcClient | undefined;
     try {
       const socketPath = await resolveAppServerSocketPath(endpoint.slice('unix://'.length));
@@ -182,15 +202,23 @@ export async function runNative(
       });
       await observer.initialize();
       const loaded = await observer.request('thread/loaded/list', {});
-      if (loaded.data?.includes(thread)) endpoints.push(`unix://${socketPath}`);
+      if (loaded.data?.includes(thread)) endpoints.add(`unix://${socketPath}`);
     } catch { /* stale endpoint; never retry a mutation here */ }
     finally { observer?.close(); }
   }
-  if (endpoints.length > 1) throw new Error('Multiple endpoints own this thread; no new writer was started.');
-  const host = discoveredHost ?? (endpoints[0]
+  const uniqueEndpoints = [...endpoints];
+  if (uniqueEndpoints.length > 1) {
+    discoveredHost?.rpc.close();
+    throw new Error(
+      `Multiple App Server endpoints own thread ${thread}: ${uniqueEndpoints.join(', ')}; ` +
+        'no new writer was started.',
+    );
+  }
+  const selectedEndpoint = uniqueEndpoints[0];
+  const host = discoveredHost ?? (selectedEndpoint
     ? {
-        endpoint: endpoints[0],
-        rpc: await RpcClient.connect(`ws+unix://${endpoints[0].slice('unix://'.length)}:/`, {
+        endpoint: selectedEndpoint,
+        rpc: await RpcClient.connect(`ws+unix://${selectedEndpoint.slice('unix://'.length)}:/`, {
           codexHome: env.CODEX_HOME,
         }),
       }
@@ -208,9 +236,9 @@ export async function runNative(
         },
         ...(runtimeIdentity ? { runtimeIdentity } : {}),
       }));
-  const startedHost = !discoveredHost && !endpoints[0];
+  const startedHost = !discoveredHost && !selectedEndpoint;
   try {
-    if (!discoveredHost && endpoints[0]) await host.rpc.initialize();
+    if (!discoveredHost && selectedEndpoint) await host.rpc.initialize();
     const result = await resumeCodexThread(
       host.rpc,
       { threadId: thread, excludeTurns: true, cwd },
@@ -223,6 +251,7 @@ export async function runNative(
     console.log(`Shared Codex thread: ${id}`);
     const child = spawnProcess(binary, codexRemoteResumeArgs(host.endpoint, id), { cwd, env, stdio: 'inherit' });
     await waitChild(child);
+    console.log(`Durable reconnect: arg-bridge native ${id} --profile ${profileName}`);
   } finally {
     await releaseCodexThreadWriter(host.rpc, thread);
     host.rpc.close();

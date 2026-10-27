@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { homedir } from 'node:os';
+import { isAbsolute, join } from 'node:path';
 import { writeFileAtomic } from '../../platform/atomic-write';
 
 /**
@@ -62,8 +62,12 @@ export function codexHostRuntimeDirectory(
   profileDir: string,
   scope: string,
   cwd: string,
-  uid: number | undefined = process.getuid?.(),
+  options: {
+    env?: NodeJS.ProcessEnv;
+    uid?: number;
+  } = {},
 ): string {
+  const uid = options.uid ?? process.getuid?.();
   const hash = createHash('sha256')
     .update(profileDir)
     .update('\0')
@@ -72,7 +76,21 @@ export function codexHostRuntimeDirectory(
     .update(cwd)
     .digest('hex')
     .slice(0, 20);
-  return join(tmpdir(), `argbridge-rpc-${uid ?? 'user'}-${hash}`);
+  const runtimeRoot = absoluteEnvPath(options.env?.XDG_RUNTIME_DIR)
+    ?? absoluteEnvPath(options.env?.XDG_STATE_HOME)
+    ?? join(homedir(), '.local', 'state');
+  // Keep this suffix short: Unix-domain socket paths are limited to roughly
+  // 107 bytes, including the trailing `/server.sock`.
+  const suffix = `ab-${uid ?? 'u'}-${hash}`;
+  const preferred = join(runtimeRoot, suffix);
+  return Buffer.byteLength(join(preferred, 'server.sock')) <= 100
+    ? preferred
+    : join('/tmp', suffix);
+}
+
+function absoluteEnvPath(value: string | undefined): string | undefined {
+  const candidate = value?.trim();
+  return candidate && isAbsolute(candidate) ? candidate : undefined;
 }
 
 export function ownerDirectory(profileDir: string): string {

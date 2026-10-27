@@ -106,7 +106,12 @@ async function connectCodexHostInternal(
   attempt: number,
 ): Promise<{ rpc: RpcClient; endpoint: string }> {
   if (process.platform === 'win32') throw new Error('Codex structured shared-terminal backend currently requires Unix sockets; keep terminal transport on Windows');
-  const directory = codexHostRuntimeDirectory(options.profileDir, options.scope, options.cwd);
+  const directory = codexHostRuntimeDirectory(
+    options.profileDir,
+    options.scope,
+    options.cwd,
+    { env: options.env },
+  );
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const stat = await lstat(directory);
   if (stat.isSymbolicLink() || !stat.isDirectory() || (process.getuid && stat.uid !== process.getuid())) throw new Error('Unsafe structured runtime directory');

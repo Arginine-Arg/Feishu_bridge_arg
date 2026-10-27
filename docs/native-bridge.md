@@ -1,7 +1,7 @@
 # Bridge-managed native TUI
 
-Version 1.9.1 adds an explicit Bridge-managed native path without changing the
-meaning of ordinary `arg-bridge native`.
+Version 1.9.3 hardens the Bridge-managed native path added in 1.9.1 without
+changing the meaning of ordinary `arg-bridge native`.
 
 ## Commands
 
@@ -36,6 +36,11 @@ The command prints both IDs:
 ```text
 Bridge-managed migration: <old-thread-id> -> <new-thread-id>
 ```
+
+Repeating the same `--adopt` is idempotent after 1.9.3: the newest existing
+marker for that source thread is resumed instead of allocating another target
+thread. The marker is also reloaded by a running Bridge daemon on a cache miss,
+so `/tmux bind` can use the adopted thread without restarting the daemon.
 
 ## Why the ID changes
 
@@ -123,10 +128,23 @@ it does not silently change the route of the reconnected conversation. An
 explicit caller override still wins, while a missing historical provider is
 reported rather than replaced automatically.
 
-The printed reconnect command points at the resolved App Server socket, not at
-a temporary side router. If the short path was a symlink, Codex may print the
-canonical target under `/tmp/codex-daemon-<uid>/`; that target remains valid for
-the lifetime of the owning daemon.
+Bridge App Servers use a stable runtime directory below
+`$XDG_RUNTIME_DIR/ab-<uid>-<hash>` when available, then XDG state. They no
+longer use disposable `TMPDIR` locations such as
+`/run/user/<uid>/mihomo-tmp`. A short `/tmp` path is used only when the
+preferred socket would exceed the Unix socket length limit.
+
+The TUI may print a raw reconnect command pointing at the resolved App Server
+socket. That command remains valid only while the owning daemon and socket
+exist. Bridge also prints the durable command after the TUI exits:
+
+```bash
+arg-bridge native --bridge <thread-id> --profile <profile>
+```
+
+Use the thread ID command after daemon exit or machine/runtime cleanup. It
+attaches to a live writer when one exists and cold-resumes persisted history
+otherwise.
 
 `thread/unsubscribe` releases this client's subscription without interrupting
 the turn. Bridge never deletes writer-lock files and never kills an owner merely

@@ -160,6 +160,33 @@ function resolved(
 }
 
 describe('structured MixAgents /btw', () => {
+  it('reloads a Broker marker written after the daemon started', async () => {
+    const profileDir = await mkdtemp(join(tmpdir(), 'arg-bridge-marker-hot-reload-'));
+    const adapter = new StructuredAdapter({
+      kind: 'codex',
+      binary: 'not-spawned',
+      profileDir,
+    });
+    await mkdir(join(profileDir, 'structured'), { recursive: true });
+    await writeFile(join(profileDir, 'structured', 'broker-threads.json'), JSON.stringify({
+      version: 1,
+      threads: {
+        'adopted-after-start': {
+          version: 1,
+          namespace: 'arg_bridge',
+          createdAt: Date.now(),
+          adoptedFrom: 'legacy-thread',
+        },
+      },
+    }));
+
+    const hasBrokerTools = Reflect.get(adapter, 'hasBrokerTools') as
+      (threadId: string, namespace: string) => boolean;
+    expect(hasBrokerTools.call(adapter, 'adopted-after-start', 'arg_bridge')).toBe(true);
+    expect(hasBrokerTools.call(adapter, 'not-adopted', 'arg_bridge')).toBe(false);
+    await rm(profileDir, { recursive: true, force: true });
+  });
+
   it('uses the main Codex provider through thread/fork when the resolver falls back', async () => {
     const profileDir = await mkdtemp(join(tmpdir(), 'arg-bridge-side-main-fallback-'));
     const rpc = new EventEmitter() as EventEmitter & { request: ReturnType<typeof vi.fn> };

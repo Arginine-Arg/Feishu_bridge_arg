@@ -38,6 +38,31 @@ export async function resolveAppServerSocketPath(candidate: string): Promise<str
   return resolvedPath;
 }
 
+/**
+ * Canonicalize Unix App Server endpoints before ownership checks. Bindings,
+ * writer-lock discovery and tmux metadata can describe the same socket through
+ * different symlinked paths; those are one endpoint, not competing writers.
+ */
+export async function canonicalAppServerEndpoints(
+  candidates: Iterable<string>,
+): Promise<string[]> {
+  const endpoints: string[] = [];
+  const seen = new Set<string>();
+  for (const candidate of candidates) {
+    if (!candidate.startsWith('unix:///')) continue;
+    try {
+      const socketPath = await resolveAppServerSocketPath(candidate.slice('unix://'.length));
+      const endpoint = `unix://${socketPath}`;
+      if (seen.has(endpoint)) continue;
+      seen.add(endpoint);
+      endpoints.push(endpoint);
+    } catch {
+      // A stale tmux/binding advertisement grants no ownership.
+    }
+  }
+  return endpoints;
+}
+
 async function assertOwnedParents(target: string): Promise<void> {
   let current = join(target, '..');
   for (let level = 0; level < MAX_SOCKET_PARENT_LEVELS; level += 1) {

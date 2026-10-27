@@ -85,6 +85,8 @@ export interface NativeBridgeSession {
   mode: 'new' | 'adopted' | 'attached';
   threadId: string;
   oldThreadId?: string;
+  /** True when --adopt resolves an intact marker instead of creating a thread. */
+  reusedAdoption?: boolean;
   endpoint: string;
   env: NodeJS.ProcessEnv;
   cwd: string;
@@ -179,29 +181,35 @@ export async function createNativeBridgeSession(
 
   const namespace = config.toolNamespace || DEFAULT_BROKER_TOOL_NAMESPACE;
   const markerPath = join(input.profileDir, 'structured', 'broker-threads.json');
-  const existingThread = input.threadId?.trim();
+  const requestedThread = input.threadId?.trim();
   const adoptThread = input.adoptThreadId?.trim();
+  const adoptedMarker = adoptThread
+    ? await findAdoptedThreadMarker(markerPath, adoptThread, namespace)
+    : undefined;
+  const existingThread = requestedThread ?? adoptedMarker?.threadId;
 
-  if (existingThread) {
-    const marker = await readThreadMarker(markerPath, existingThread);
+  if (requestedThread) {
+    const marker = await readThreadMarker(markerPath, requestedThread);
     if (!marker || marker.namespace !== namespace) {
       throw new Error(
-        `thread ${existingThread} 没有匹配的 Bridge Broker marker。` +
+        `thread ${requestedThread} 没有匹配的 Bridge Broker marker。` +
           '请使用 --adopt 做安全迁移；不能伪造 marker。',
       );
     }
   }
 
-  let host = await findLoadedThreadHost(
-    input.profileDir,
-    existingThread ?? adoptThread,
-    env,
-  );
+  let host = existingThread
+    ? await findLoadedThreadHost(input.profileDir, existingThread, env)
+    : undefined;
+  if (!host && adoptThread) {
+    host = await findLoadedThreadHost(input.profileDir, adoptThread, env);
+  }
   const nativeScope = `native-bridge:${input.profileName}:${input.cwd}`;
   const nativeHostDirectory = codexHostRuntimeDirectory(
     input.profileDir,
     nativeScope,
     input.cwd,
+    { env },
   );
   let ownsHost = false;
   if (!host) {
@@ -228,6 +236,7 @@ export async function createNativeBridgeSession(
   let markerThreadId: string | undefined;
   let oldThreadId: string | undefined;
   let mode: NativeBridgeSession['mode'] = 'new';
+  let reusedAdoption = false;
   let controller: BrokerToolController | undefined;
   let session: CodexStructuredSession | undefined;
   const owned = ownsHost;
@@ -250,10 +259,14 @@ export async function createNativeBridgeSession(
         { preserveProviderModel: true },
       );
       markerThreadId = existingThread;
-      mode = 'attached';
+      mode = adoptedMarker ? 'adopted' : 'attached';
+      if (adoptedMarker) {
+        oldThreadId = adoptThread;
+        reusedAdoption = true;
+      }
     }
 
-    if (mode !== 'attached' && adoptThread) {
+    if (!markerThreadId && adoptThread) {
       const old = await readIdleThread(rpc, adoptThread);
       const history = extractAssistantHistory(old);
       if (history.items.length === 0) {
@@ -276,7 +289,7 @@ export async function createNativeBridgeSession(
         items: history.items,
       });
       await materializeBridgeThread(rpc, markerThreadId, adoptThread);
-    } else if (mode !== 'attached') {
+    } else if (!markerThreadId) {
       markerThreadId = await startBridgeThread(rpc, {
         cwd: input.cwd,
         config,
@@ -337,12 +350,15 @@ export async function createNativeBridgeSession(
     if (!preflight.success) {
       throw new Error(`Bridge Broker preflight 失败：${preflight.text}`);
     }
-    await writeThreadMarker(markerPath, markerThreadId, namespace, oldThreadId);
+    if (!reusedAdoption) {
+      await writeThreadMarker(markerPath, markerThreadId, namespace, oldThreadId);
+    }
     session = new CodexStructuredSession(markerThreadId, endpoint, rpc, controller);
     return {
       mode,
       threadId: markerThreadId,
       ...(oldThreadId ? { oldThreadId } : {}),
+      ...(reusedAdoption ? { reusedAdoption: true } : {}),
       endpoint,
       env,
       cwd: input.cwd,
@@ -595,6 +611,49 @@ interface ThreadMarker {
   namespace: string;
   createdAt: number;
   adoptedFrom?: string;
+}
+
+export interface AdoptedThreadMarker {
+  threadId: string;
+  createdAt: number;
+}
+
+/**
+ * `--adopt` is idempotent: a second invocation must continue the existing
+ * Bridge-managed migration instead of manufacturing another thread.
+ */
+export async function findAdoptedThreadMarker(
+  path: string,
+  adoptedFrom: string,
+  namespace: string,
+): Promise<AdoptedThreadMarker | undefined> {
+  try {
+    const parsed = JSON.parse(await readFile(path, 'utf8')) as {
+      version?: number;
+      threads?: Record<string, ThreadMarker>;
+    };
+    if (parsed.version !== 1 || !parsed.threads || typeof parsed.threads !== 'object') {
+      return undefined;
+    }
+    return Object.entries(parsed.threads)
+      .flatMap(([threadId, marker]): AdoptedThreadMarker[] => {
+        if (
+          !threadId ||
+          marker?.version !== BROKER_TOOL_VERSION ||
+          marker.namespace !== namespace ||
+          marker.adoptedFrom !== adoptedFrom
+        ) return [];
+        return [{
+          threadId,
+          createdAt: Number.isFinite(marker.createdAt) ? marker.createdAt : 0,
+        }];
+      })
+      .sort((left, right) =>
+        right.createdAt - left.createdAt || right.threadId.localeCompare(left.threadId)
+      )[0];
+  } catch {
+    return undefined;
+  }
 }
 
 async function readThreadMarker(

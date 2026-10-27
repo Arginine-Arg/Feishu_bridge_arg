@@ -31,7 +31,16 @@ describe('draining App Server recovery', () => {
 
     // Pre-start the broken server exactly where the bridge will look: the
     // socket answers connections but rejects every request as "draining".
-    const directory = codexHostRuntimeDirectory(profileDir, 'scope-draining', cwd);
+    const env = {
+      PATH: process.env.PATH,
+      XDG_RUNTIME_DIR: dir,
+    };
+    const directory = codexHostRuntimeDirectory(
+      profileDir,
+      'scope-draining',
+      cwd,
+      { env },
+    );
     await mkdir(directory, { recursive: true, mode: 0o700 });
     const broken = require('node:child_process').spawn(
       binary,
@@ -48,7 +57,7 @@ describe('draining App Server recovery', () => {
       profileDir,
       scope: 'scope-draining',
       cwd,
-      env: { PATH: process.env.PATH },
+      env,
       fingerprint: { credentials: {}, networkMode: 'inherit' },
     });
 

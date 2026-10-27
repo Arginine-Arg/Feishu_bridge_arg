@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.9.2",
+  version: "1.9.3",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -5618,14 +5618,22 @@ async function runCapture(cmd, args, timeoutMs, env) {
 import { createHash } from "crypto";
 import { readFileSync as readFileSync2, readdirSync, readlinkSync, realpathSync, statSync } from "fs";
 import { mkdir as mkdir13, readFile as readFile11, readdir as readdir4, rm as rm11, writeFile as writeFile8 } from "fs/promises";
-import { tmpdir as tmpdir2 } from "os";
-import { join as join16 } from "path";
+import { homedir as homedir5 } from "os";
+import { isAbsolute as isAbsolute2, join as join16 } from "path";
 function registryFile(profileDir) {
   return join16(profileDir, "structured", "app-server-registry.json");
 }
-function codexHostRuntimeDirectory(profileDir, scope, cwd, uid = process.getuid?.()) {
+function codexHostRuntimeDirectory(profileDir, scope, cwd, options = {}) {
+  const uid = options.uid ?? process.getuid?.();
   const hash = createHash("sha256").update(profileDir).update("\0").update(scope).update("\0").update(cwd).digest("hex").slice(0, 20);
-  return join16(tmpdir2(), `argbridge-rpc-${uid ?? "user"}-${hash}`);
+  const runtimeRoot = absoluteEnvPath(options.env?.XDG_RUNTIME_DIR) ?? absoluteEnvPath(options.env?.XDG_STATE_HOME) ?? join16(homedir5(), ".local", "state");
+  const suffix = `ab-${uid ?? "u"}-${hash}`;
+  const preferred = join16(runtimeRoot, suffix);
+  return Buffer.byteLength(join16(preferred, "server.sock")) <= 100 ? preferred : join16("/tmp", suffix);
+}
+function absoluteEnvPath(value) {
+  const candidate = value?.trim();
+  return candidate && isAbsolute2(candidate) ? candidate : void 0;
 }
 function ownerDirectory(profileDir) {
   return join16(profileDir, "structured", "app-server-owners");
@@ -6164,7 +6172,7 @@ import os from "os";
 import { createInterface as createInterface8 } from "readline";
 
 // src/agent/claude/adapter.ts
-import { tmpdir as tmpdir3 } from "os";
+import { tmpdir as tmpdir2 } from "os";
 import { join as join20 } from "path";
 import { createInterface as createInterface3 } from "readline";
 
@@ -6210,8 +6218,8 @@ import { dirname as dirname15, join as join19, resolve as resolve3 } from "path"
 // src/agent/codex/credentials.ts
 import { readFileSync as readFileSync3 } from "fs";
 import { readFile as readFile12 } from "fs/promises";
-import { homedir as homedir5 } from "os";
-import { isAbsolute as isAbsolute2, join as join17 } from "path";
+import { homedir as homedir6 } from "os";
+import { isAbsolute as isAbsolute3, join as join17 } from "path";
 var OFFICIAL_PROVIDER_IDS = /* @__PURE__ */ new Set(["openai", "codex"]);
 var DEFAULT_THIRD_PARTY_ENV_KEY = "OPENAI_API_KEY";
 var OFFICIAL_HOSTS = /* @__PURE__ */ new Set([
@@ -6334,9 +6342,9 @@ function isOfficialBaseUrl(baseUrl) {
     return false;
   }
 }
-function defaultCodexHome(env = process.env, home = homedir5()) {
+function defaultCodexHome(env = process.env, home = homedir6()) {
   const configured = nonEmpty2(env.CODEX_HOME);
-  if (configured) return isAbsolute2(configured) ? configured : join17(home, configured);
+  if (configured) return isAbsolute3(configured) ? configured : join17(home, configured);
   return home ? join17(home, ".codex") : void 0;
 }
 async function readCodexConfigSummary(configPath) {
@@ -7328,7 +7336,7 @@ import {
   readdirSync as readdirSync2,
   unlinkSync as unlinkSync2
 } from "fs";
-import { basename as basename4, dirname as dirname14, isAbsolute as isAbsolute3, join as join18, resolve as resolve2 } from "path";
+import { basename as basename4, dirname as dirname14, isAbsolute as isAbsolute4, join as join18, resolve as resolve2 } from "path";
 var BINDINGS_FILE = "tmux-bindings.json";
 var MANAGED_TERMINALS_FILE = "tmux-managed-terminals.json";
 var MAX_TMUX_TAIL_CHARS = 12e3;
@@ -7624,7 +7632,7 @@ var TmuxBindingController = class {
 };
 function defaultTmuxSocketPath(env = process.env) {
   const current = env.TMUX?.split(",")[0];
-  if (current && isAbsolute3(current)) return current;
+  if (current && isAbsolute4(current)) return current;
   const uid = typeof process.getuid === "function" ? process.getuid() : 0;
   return join18(env.TMUX_TMPDIR || "/tmp", `tmux-${uid}`, "default");
 }
@@ -7649,7 +7657,7 @@ function discoverTmuxSockets() {
   const found = /* @__PURE__ */ new Set();
   found.add(defaultTmuxSocketPath());
   const current = process.env.TMUX?.split(",")[0];
-  if (current && isAbsolute3(current)) found.add(current);
+  if (current && isAbsolute4(current)) found.add(current);
   if (process.platform === "linux") {
     try {
       const standardDir2 = dirname14(defaultTmuxSocketPath({ ...process.env, TMUX: void 0 }));
@@ -7684,7 +7692,7 @@ function tmuxServerAlive(socketPath) {
   return result.status === 0;
 }
 function isSafeTmuxSocket(path) {
-  if (!isAbsolute3(path)) return false;
+  if (!isAbsolute4(path)) return false;
   try {
     const info = lstatSync(path);
     if (info.isSymbolicLink() || !info.isSocket()) return false;
@@ -7781,7 +7789,7 @@ ${tail.slice(-MAX_TMUX_TAIL_CHARS)}`;
 }
 function resolveSocketSelector(selector) {
   const trimmed = selector.trim();
-  if (isAbsolute3(trimmed)) return trimmed;
+  if (isAbsolute4(trimmed)) return trimmed;
   if (/^[A-Za-z0-9_.-]+$/.test(trimmed)) {
     return join18(dirname14(defaultTmuxSocketPath({ ...process.env, TMUX: void 0 })), trimmed);
   }
@@ -11793,7 +11801,7 @@ var ClaudeAdapter = class {
     this.liveTerminalBackend = opts.liveTerminalBackend;
     this.liveIdleMs = opts.liveIdleMs;
     this.network = opts.network;
-    const profileStateDir = opts.profileStateDir ?? join20(tmpdir3(), `arg-bridge-${process.pid}-claude`);
+    const profileStateDir = opts.profileStateDir ?? join20(tmpdir2(), `arg-bridge-${process.pid}-claude`);
     this.tmuxBindings = new TmuxBindingController(
       profileStateDir,
       opts.larkChannel?.profile ?? "claude",
@@ -12169,14 +12177,14 @@ var SpawnFailed = class extends Error {
 
 // src/agent/bundled-skill.ts
 import { copyFile as copyFile2, mkdir as mkdir14, readFile as readFile13 } from "fs/promises";
-import { homedir as homedir6 } from "os";
+import { homedir as homedir7 } from "os";
 import { dirname as dirname16, join as join21 } from "path";
 import { fileURLToPath } from "url";
 var SKILL_NAME = "arg-bridge-sendfile";
 async function ensureBundledCodexSkill(codexHome) {
   const source = await bundledSkillSource();
   if (!source) return;
-  const root = codexHome ?? process.env.CODEX_HOME ?? join21(homedir6(), ".codex");
+  const root = codexHome ?? process.env.CODEX_HOME ?? join21(homedir7(), ".codex");
   const target = join21(root, "skills", SKILL_NAME, "SKILL.md");
   try {
     const sourceContent = await readFile13(source, "utf8");
@@ -13017,7 +13025,7 @@ function artifactDeliveryEnv(artifact) {
 import { createHash as createHash10, randomUUID as randomUUID3 } from "crypto";
 import { readFile as readFile20, mkdir as mkdir21, lstat as lstat6, realpath as realpath8, stat as stat8 } from "fs/promises";
 import { readFileSync as readFileSync10 } from "fs";
-import { tmpdir as tmpdir5 } from "os";
+import { tmpdir as tmpdir4 } from "os";
 import { join as join34, resolve as resolve7 } from "path";
 
 // src/agent/structured/host.ts
@@ -13177,7 +13185,12 @@ async function connectCodexHost(options) {
 }
 async function connectCodexHostInternal(options, attempt) {
   if (process.platform === "win32") throw new Error("Codex structured shared-terminal backend currently requires Unix sockets; keep terminal transport on Windows");
-  const directory = codexHostRuntimeDirectory(options.profileDir, options.scope, options.cwd);
+  const directory = codexHostRuntimeDirectory(
+    options.profileDir,
+    options.scope,
+    options.cwd,
+    { env: options.env }
+  );
   await mkdir15(directory, { recursive: true, mode: 448 });
   const stat11 = await lstat(directory);
   if (stat11.isSymbolicLink() || !stat11.isDirectory() || process.getuid && stat11.uid !== process.getuid()) throw new Error("Unsafe structured runtime directory");
@@ -13331,11 +13344,11 @@ async function findStaleHost(profileDir, directory, binary, fingerprint) {
 
 // src/integrations/cc-switch.ts
 import { readFile as readFile14 } from "fs/promises";
-import { homedir as homedir7 } from "os";
+import { homedir as homedir8 } from "os";
 import { join as join25 } from "path";
 async function readCcSwitchState(env = process.env, options = {}) {
   const settingsPath = join25(
-    env.CC_SWITCH_HOME?.trim() || join25(homedir7(), ".cc-switch"),
+    env.CC_SWITCH_HOME?.trim() || join25(homedir8(), ".cc-switch"),
     "settings.json"
   );
   let currentProviderCodex;
@@ -13362,7 +13375,7 @@ async function readCcSwitchState(env = process.env, options = {}) {
 }
 async function readCcSwitchCurrentProvider(env = process.env) {
   const settingsPath = join25(
-    env.CC_SWITCH_HOME?.trim() || join25(homedir7(), ".cc-switch"),
+    env.CC_SWITCH_HOME?.trim() || join25(homedir8(), ".cc-switch"),
     "settings.json"
   );
   try {
@@ -13433,7 +13446,7 @@ import { createHash as createHash4 } from "crypto";
 import { readFileSync as readFileSync6 } from "fs";
 import { chmod as chmod6, mkdir as mkdir16, readFile as readFile15, realpath as realpath4 } from "fs/promises";
 import { createRequire } from "module";
-import { homedir as homedir8 } from "os";
+import { homedir as homedir9 } from "os";
 import { join as join26, parse, resolve as resolve4 } from "path";
 var DEFAULT_CODEX_ENV_KEY = "OPENAI_API_KEY";
 var MAX_DB_ROW_BYTES = 8 * 1024 * 1024;
@@ -13449,7 +13462,7 @@ var CcSwitchProviderError = class extends Error {
   details;
 };
 function ccSwitchPaths(env = process.env) {
-  const root = resolve4(env.CC_SWITCH_HOME?.trim() || join26(homedir8(), ".cc-switch"));
+  const root = resolve4(env.CC_SWITCH_HOME?.trim() || join26(homedir9(), ".cc-switch"));
   return {
     root,
     settingsPath: join26(root, "settings.json"),
@@ -13670,7 +13683,7 @@ async function materializeCcSwitchBrokerRuntime(input) {
     source: "cc-switch"
   };
   const workspaceRoot = await realpath4(input.cwd).catch(() => resolve4(input.cwd));
-  if (!workspaceRoot || workspaceRoot === parse(workspaceRoot).root || workspaceRoot === resolve4(homedir8())) {
+  if (!workspaceRoot || workspaceRoot === parse(workspaceRoot).root || workspaceRoot === resolve4(homedir9())) {
     throw new CcSwitchProviderError(
       "workspace-invalid",
       "Broker workspace \u4E0D\u80FD\u662F\u6587\u4EF6\u7CFB\u7EDF\u6839\u76EE\u5F55\u6216\u7528\u6237 home\uFF1B\u8BF7\u5728\u5177\u4F53\u9879\u76EE\u76EE\u5F55\u4E2D\u542F\u52A8\u5B50\u4EE3\u7406"
@@ -14103,10 +14116,10 @@ function isRecord3(value) {
 
 // src/integrations/broker-routes.ts
 import { chmod as chmod7, mkdir as mkdir17, readFile as readFile16 } from "fs/promises";
-import { homedir as homedir9 } from "os";
+import { homedir as homedir10 } from "os";
 import { dirname as dirname17, join as join27 } from "path";
 function brokerRoutesPath(env = process.env) {
-  const configHome = env.XDG_CONFIG_HOME?.trim() || join27(homedir9(), ".config");
+  const configHome = env.XDG_CONFIG_HOME?.trim() || join27(homedir10(), ".config");
   return join27(configHome, "arg-bridge", "broker-routes.json");
 }
 async function loadBrokerRouteMap(env = process.env) {
@@ -14199,7 +14212,7 @@ function errorMessage4(error) {
 
 // src/agent/subagents/mixagents.ts
 import { createRequire as createRequire2 } from "module";
-import { isAbsolute as isAbsolute4 } from "path";
+import { isAbsolute as isAbsolute5 } from "path";
 
 // src/agent/subagents/mcp-client.ts
 import { createInterface as createInterface5 } from "readline";
@@ -14689,7 +14702,7 @@ var MixAgentsBrokerBackend = class {
   }
 };
 function validateRuntimeOverrides(runtime) {
-  if (!isAbsolute4(runtime.brokerConfigPath) || !runtime.fingerprint.trim()) {
+  if (!isAbsolute5(runtime.brokerConfigPath) || !runtime.fingerprint.trim()) {
     throw new SubagentUnavailableError(
       "mixagents-not-configured",
       "\u81EA\u52A8 cc-switch Broker runtime \u914D\u7F6E\u65E0\u6548"
@@ -14911,7 +14924,7 @@ function numericVersion(value) {
 }
 
 // src/agent/subagents/registry.ts
-import { homedir as homedir10 } from "os";
+import { homedir as homedir11 } from "os";
 import { join as join28 } from "path";
 async function resolveSubagents(input) {
   const env = input.env ?? process.env;
@@ -15046,7 +15059,7 @@ function forkFallback(base, routes, reason) {
   };
 }
 function defaultGeneratedRuntimeDir(env) {
-  const stateHome = env.XDG_STATE_HOME?.trim() || join28(homedir10(), ".local", "state");
+  const stateHome = env.XDG_STATE_HOME?.trim() || join28(homedir11(), ".local", "state");
   return join28(stateHome, "arg-bridge", "cc-switch-runtime");
 }
 function selectSubagentRoute(input) {
@@ -15091,7 +15104,7 @@ function errorMessage6(error) {
 import { createHash as createHash6 } from "crypto";
 import { readFileSync as readFileSync7 } from "fs";
 import { lstat as lstat2, realpath as realpath5 } from "fs/promises";
-import { isAbsolute as isAbsolute5, parse as parse2, relative } from "path";
+import { isAbsolute as isAbsolute6, parse as parse2, relative } from "path";
 var BROKER_TOOL_VERSION = 1;
 var DEFAULT_BROKER_TOOL_NAMESPACE = "arg_bridge";
 var MAX_TASK_BYTES = 128 * 1024;
@@ -15234,7 +15247,7 @@ var BrokerToolController = class {
     if (access3 === "read-only") {
       const parentWorkspace = await canonicalWorkspace(void 0, this.options.cwd);
       const rel = relative(parentWorkspace, workspace);
-      if (rel.startsWith("..") || isAbsolute5(rel)) {
+      if (rel.startsWith("..") || isAbsolute6(rel)) {
         throw new SubagentUnavailableError(
           "workspace-denied",
           "read-only workers may only access the parent workspace or a subdirectory of it."
@@ -15914,7 +15927,7 @@ function parseAccess(value) {
 }
 async function canonicalWorkspace(requested, fallback) {
   const value = requested ?? fallback;
-  if (!isAbsolute5(value)) throw new Error("workspace must be an absolute path");
+  if (!isAbsolute6(value)) throw new Error("workspace must be an absolute path");
   const canonical = await realpath5(value).catch(() => void 0);
   if (!canonical) throw new Error(`workspace does not exist: ${value}`);
   const info = await lstat2(canonical);
@@ -16002,8 +16015,8 @@ function readStateFile(path) {
 // src/integrations/project-rsi.ts
 import { createHash as createHash7 } from "crypto";
 import { lstat as lstat3, mkdtemp, readFile as readFile17, readdir as readdir5, realpath as realpath6, rm as rm13, stat as stat6, writeFile as writeFile9, mkdir as mkdir18 } from "fs/promises";
-import { homedir as homedir11, tmpdir as tmpdir4 } from "os";
-import { dirname as dirname18, isAbsolute as isAbsolute6, join as join29, parse as parse3, relative as relative2, resolve as resolve5 } from "path";
+import { homedir as homedir12, tmpdir as tmpdir3 } from "os";
+import { dirname as dirname18, isAbsolute as isAbsolute7, join as join29, parse as parse3, relative as relative2, resolve as resolve5 } from "path";
 var CONFIG_RELATIVE_PATH = join29(".project-rsi", "config.json");
 var EVIDENCE_RELATIVE_PATH = join29(".agent", "rsi");
 var MAX_CONFIG_BYTES = 256 * 1024;
@@ -16203,7 +16216,7 @@ async function runUpstreamRsi(project, task, config, context, signal) {
     };
   }
   if (signal?.aborted) throw abortError3();
-  const tempDir = await mkdtemp(join29(tmpdir4(), "arg-bridge-rsi-run-"));
+  const tempDir = await mkdtemp(join29(tmpdir3(), "arg-bridge-rsi-run-"));
   const requestPath = join29(tempDir, "request.json");
   await writeFile9(requestPath, `${JSON.stringify({
     version: 1,
@@ -16285,10 +16298,10 @@ async function readProject(root, configPath) {
 async function canonicalSafeProjectRoot(input) {
   if (!input.trim()) return void 0;
   const candidate = resolve5(input);
-  if (!isAbsolute6(candidate) || candidate === parse3(candidate).root) return void 0;
+  if (!isAbsolute7(candidate) || candidate === parse3(candidate).root) return void 0;
   const canonical = await realpath6(candidate).catch(() => void 0);
   if (!canonical) return void 0;
-  const home = resolve5(homedir11());
+  const home = resolve5(homedir12());
   if (canonical === home || canonical === parse3(canonical).root) return void 0;
   if (dirname18(canonical) === parse3(canonical).root) return void 0;
   const info = await lstat3(canonical);
@@ -16421,7 +16434,7 @@ async function isRegularFile(path) {
 }
 function isWithin(root, candidate) {
   const rel = relative2(root, candidate);
-  return rel === "" || !rel.startsWith("..") && !isAbsolute6(rel);
+  return rel === "" || !rel.startsWith("..") && !isAbsolute7(rel);
 }
 function safeError2(error) {
   return redactSecrets(error instanceof Error ? error.message : String(error));
@@ -17563,6 +17576,22 @@ async function resolveAppServerSocketPath(candidate) {
   }
   return resolvedPath;
 }
+async function canonicalAppServerEndpoints(candidates) {
+  const endpoints = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const candidate of candidates) {
+    if (!candidate.startsWith("unix:///")) continue;
+    try {
+      const socketPath = await resolveAppServerSocketPath(candidate.slice("unix://".length));
+      const endpoint = `unix://${socketPath}`;
+      if (seen.has(endpoint)) continue;
+      seen.add(endpoint);
+      endpoints.push(endpoint);
+    } catch {
+    }
+  }
+  return endpoints;
+}
 async function assertOwnedParents(target) {
   let current = join30(target, "..");
   for (let level = 0; level < MAX_SOCKET_PARENT_LEVELS; level += 1) {
@@ -17825,26 +17854,28 @@ async function createNativeBridgeSession(input) {
   }
   const namespace = config.toolNamespace || DEFAULT_BROKER_TOOL_NAMESPACE;
   const markerPath = join32(input.profileDir, "structured", "broker-threads.json");
-  const existingThread = input.threadId?.trim();
+  const requestedThread = input.threadId?.trim();
   const adoptThread = input.adoptThreadId?.trim();
-  if (existingThread) {
-    const marker = await readThreadMarker(markerPath, existingThread);
+  const adoptedMarker = adoptThread ? await findAdoptedThreadMarker(markerPath, adoptThread, namespace) : void 0;
+  const existingThread = requestedThread ?? adoptedMarker?.threadId;
+  if (requestedThread) {
+    const marker = await readThreadMarker(markerPath, requestedThread);
     if (!marker || marker.namespace !== namespace) {
       throw new Error(
-        `thread ${existingThread} \u6CA1\u6709\u5339\u914D\u7684 Bridge Broker marker\u3002\u8BF7\u4F7F\u7528 --adopt \u505A\u5B89\u5168\u8FC1\u79FB\uFF1B\u4E0D\u80FD\u4F2A\u9020 marker\u3002`
+        `thread ${requestedThread} \u6CA1\u6709\u5339\u914D\u7684 Bridge Broker marker\u3002\u8BF7\u4F7F\u7528 --adopt \u505A\u5B89\u5168\u8FC1\u79FB\uFF1B\u4E0D\u80FD\u4F2A\u9020 marker\u3002`
       );
     }
   }
-  let host = await findLoadedThreadHost(
-    input.profileDir,
-    existingThread ?? adoptThread,
-    env
-  );
+  let host = existingThread ? await findLoadedThreadHost(input.profileDir, existingThread, env) : void 0;
+  if (!host && adoptThread) {
+    host = await findLoadedThreadHost(input.profileDir, adoptThread, env);
+  }
   const nativeScope = `native-bridge:${input.profileName}:${input.cwd}`;
   const nativeHostDirectory = codexHostRuntimeDirectory(
     input.profileDir,
     nativeScope,
-    input.cwd
+    input.cwd,
+    { env }
   );
   let ownsHost = false;
   if (!host) {
@@ -17870,6 +17901,7 @@ async function createNativeBridgeSession(input) {
   let markerThreadId;
   let oldThreadId;
   let mode = "new";
+  let reusedAdoption = false;
   let controller;
   let session;
   const owned = ownsHost;
@@ -17893,9 +17925,13 @@ async function createNativeBridgeSession(input) {
         { preserveProviderModel: true }
       );
       markerThreadId = existingThread;
-      mode = "attached";
+      mode = adoptedMarker ? "adopted" : "attached";
+      if (adoptedMarker) {
+        oldThreadId = adoptThread;
+        reusedAdoption = true;
+      }
     }
-    if (mode !== "attached" && adoptThread) {
+    if (!markerThreadId && adoptThread) {
       const old = await readIdleThread(rpc, adoptThread);
       const history = extractAssistantHistory(old);
       if (history.items.length === 0) {
@@ -17918,7 +17954,7 @@ async function createNativeBridgeSession(input) {
         items: history.items
       });
       await materializeBridgeThread(rpc, markerThreadId, adoptThread);
-    } else if (mode !== "attached") {
+    } else if (!markerThreadId) {
       markerThreadId = await startBridgeThread(rpc, {
         cwd: input.cwd,
         config,
@@ -17972,12 +18008,15 @@ async function createNativeBridgeSession(input) {
     if (!preflight.success) {
       throw new Error(`Bridge Broker preflight \u5931\u8D25\uFF1A${preflight.text}`);
     }
-    await writeThreadMarker(markerPath, markerThreadId, namespace, oldThreadId);
+    if (!reusedAdoption) {
+      await writeThreadMarker(markerPath, markerThreadId, namespace, oldThreadId);
+    }
     session = new CodexStructuredSession(markerThreadId, endpoint, rpc, controller);
     return {
       mode,
       threadId: markerThreadId,
       ...oldThreadId ? { oldThreadId } : {},
+      ...reusedAdoption ? { reusedAdoption: true } : {},
       endpoint,
       env,
       cwd: input.cwd,
@@ -18160,6 +18199,25 @@ async function probeLoadedEndpoints(socketPaths, threadId, env) {
     rpc?.close();
   }
   return loaded;
+}
+async function findAdoptedThreadMarker(path, adoptedFrom, namespace) {
+  try {
+    const parsed = JSON.parse(await readFile19(path, "utf8"));
+    if (parsed.version !== 1 || !parsed.threads || typeof parsed.threads !== "object") {
+      return void 0;
+    }
+    return Object.entries(parsed.threads).flatMap(([threadId, marker]) => {
+      if (!threadId || marker?.version !== BROKER_TOOL_VERSION || marker.namespace !== namespace || marker.adoptedFrom !== adoptedFrom) return [];
+      return [{
+        threadId,
+        createdAt: Number.isFinite(marker.createdAt) ? marker.createdAt : 0
+      }];
+    }).sort(
+      (left, right) => right.createdAt - left.createdAt || right.threadId.localeCompare(left.threadId)
+    )[0];
+  } catch {
+    return void 0;
+  }
 }
 async function readThreadMarker(path, threadId) {
   try {
@@ -18931,6 +18989,7 @@ var StructuredAdapter = class {
     };
   }
   loadBrokerThreads() {
+    this.brokerThreads.clear();
     try {
       const parsed = JSON.parse(readFileSync10(this.brokerThreadsFile, "utf8"));
       if (parsed.version !== 1) return;
@@ -18955,7 +19014,11 @@ var StructuredAdapter = class {
     );
   }
   hasBrokerTools(threadId, namespace) {
-    const marker = this.brokerThreads.get(threadId);
+    let marker = this.brokerThreads.get(threadId);
+    if (!marker || marker.version !== BROKER_TOOL_VERSION || marker.namespace !== namespace) {
+      this.loadBrokerThreads();
+      marker = this.brokerThreads.get(threadId);
+    }
     return marker?.version === BROKER_TOOL_VERSION && marker.namespace === namespace;
   }
   async markBrokerThread(threadId, namespace) {
@@ -19992,7 +20055,7 @@ ${prompt}
   }
   makeView(scope) {
     const key = `${this.options.profileDir}\0${scope}`;
-    const directory = join34(tmpdir5(), `ab-view-${process.getuid?.() ?? "user"}-${createHash10("sha256").update(key).digest("hex").slice(0, 12)}`);
+    const directory = join34(tmpdir4(), `ab-view-${process.getuid?.() ?? "user"}-${createHash10("sha256").update(key).digest("hex").slice(0, 12)}`);
     return new StructuredView(directory, key);
   }
   stateFile(scope, cwd) {
@@ -20607,7 +20670,7 @@ var PreferredStructuredAdapter = class {
 // src/bot/channel.ts
 import { createLarkChannel } from "@larksuite/channel";
 import { createHash as createHash16 } from "crypto";
-import { homedir as homedir14 } from "os";
+import { homedir as homedir15 } from "os";
 import { dirname as dirname23, join as join39 } from "path";
 
 // src/agent/bridge-system-prompt.ts
@@ -21005,8 +21068,8 @@ function safeJsonStringify(value) {
 // src/commands/index.ts
 import { randomUUID as randomUUID4 } from "crypto";
 import { lstat as lstat7, readFile as readFile21, realpath as realpath9 } from "fs/promises";
-import { homedir as homedir13 } from "os";
-import { basename as basename7, dirname as dirname20, isAbsolute as isAbsolute7, relative as relative3, sep } from "path";
+import { homedir as homedir14 } from "os";
+import { basename as basename7, dirname as dirname20, isAbsolute as isAbsolute8, relative as relative3, sep } from "path";
 
 // src/card/account-cards.ts
 function maskAppId(id) {
@@ -22990,7 +23053,7 @@ function finalizeIfRunning(state) {
 // src/session/history.ts
 import { createReadStream } from "fs";
 import { readdir as readdir6, stat as stat9 } from "fs/promises";
-import { homedir as homedir12 } from "os";
+import { homedir as homedir13 } from "os";
 import { join as join36 } from "path";
 import { createInterface as createInterface6 } from "readline";
 
@@ -23030,7 +23093,7 @@ function encodeCwd(cwd) {
   return cwd.replace(/[^A-Za-z0-9]/g, "-");
 }
 function claudeProjectDir(cwd) {
-  return join36(homedir12(), ".claude", "projects", encodeCwd(cwd));
+  return join36(homedir13(), ".claude", "projects", encodeCwd(cwd));
 }
 async function listRecentSessions(cwd, limit = 5) {
   const dir = claudeProjectDir(cwd);
@@ -23556,12 +23619,12 @@ function isMessageAuditReject(err) {
   return /not pass the audit/i.test(message);
 }
 function expandTilde(p4) {
-  if (p4 === "~") return homedir13();
-  if (p4.startsWith("~/")) return `${homedir13()}${p4.slice(1)}`;
+  if (p4 === "~") return homedir14();
+  if (p4.startsWith("~/")) return `${homedir14()}${p4.slice(1)}`;
   return p4;
 }
 function isAbsoluteOrTilde(p4) {
-  return isAbsolute7(p4) || p4 === "~" || p4.startsWith("~/");
+  return isAbsolute8(p4) || p4 === "~" || p4.startsWith("~/");
 }
 async function handleSendFile(args, ctx) {
   const input = args.trim();
@@ -23640,7 +23703,7 @@ function sendFileFailureMessage(err) {
 }
 function isPathWithinRoot(path, root) {
   const pathRelative = relative3(root, path);
-  return pathRelative === "" || pathRelative !== ".." && !pathRelative.startsWith(`..${sep}`) && !isAbsolute7(pathRelative);
+  return pathRelative === "" || pathRelative !== ".." && !pathRelative.startsWith(`..${sep}`) && !isAbsolute8(pathRelative);
 }
 function formatByteLimit(bytes) {
   if (bytes >= 1024 * 1024) return `${Math.floor(bytes / (1024 * 1024))} MiB`;
@@ -24434,9 +24497,9 @@ ${fence}`;
 }
 function parseTmuxSocketArgument(parts) {
   if (parts.length === 0) return "";
-  if (parts.length === 1) return isAbsolute7(parts[0]) ? parts[0] : null;
+  if (parts.length === 1) return isAbsolute8(parts[0]) ? parts[0] : null;
   if (parts.length === 2 && parts[0] === "-L") return parts[1];
-  if (parts.length === 2 && parts[0] === "-S") return isAbsolute7(parts[1]) ? parts[1] : null;
+  if (parts.length === 2 && parts[0] === "-S") return isAbsolute8(parts[1]) ? parts[1] : null;
   return null;
 }
 function formatTmuxList(panes, profile2 = "codex") {
@@ -29380,7 +29443,7 @@ async function removeReaction(channel, messageId, reactionId) {
 import { createHash as createHash15, randomBytes as randomBytes5 } from "crypto";
 import { lstat as lstat8, mkdir as mkdir25, readFile as readFile23, realpath as realpath10, rm as rm15 } from "fs/promises";
 import { createServer } from "net";
-import { basename as basename8, dirname as dirname22, isAbsolute as isAbsolute8, relative as relative4, resolve as resolve8, sep as sep2 } from "path";
+import { basename as basename8, dirname as dirname22, isAbsolute as isAbsolute9, relative as relative4, resolve as resolve8, sep as sep2 } from "path";
 var ArtifactBroker = class {
   constructor(socketPath, channel, allowLocalFileRoot, persistentStatePath) {
     this.channel = channel;
@@ -29509,7 +29572,7 @@ var ArtifactBroker = class {
     if (typeof request.path !== "string" || !request.path.trim()) {
       throw new Error("\u8BF7\u63D0\u4F9B\u8981\u53D1\u9001\u7684\u6587\u4EF6\u8DEF\u5F84");
     }
-    if (isAbsolute8(request.path)) throw new Error("\u6587\u4EF6\u8DEF\u5F84\u5FC5\u987B\u76F8\u5BF9\u5F53\u524D\u5DE5\u4F5C\u76EE\u5F55");
+    if (isAbsolute9(request.path)) throw new Error("\u6587\u4EF6\u8DEF\u5F84\u5FC5\u987B\u76F8\u5BF9\u5F53\u524D\u5DE5\u4F5C\u76EE\u5F55");
     if (request.path.split(/[\\/]+/u).some((part) => part === "..")) {
       throw new Error("\u6587\u4EF6\u8DEF\u5F84\u4E0D\u80FD\u5305\u542B ..");
     }
@@ -29585,7 +29648,7 @@ var ArtifactBroker = class {
 };
 function isPathWithinRoot2(path, root) {
   const pathRelative = relative4(root, path);
-  return pathRelative === "" || pathRelative !== ".." && !pathRelative.startsWith(`..${sep2}`) && !isAbsolute8(pathRelative);
+  return pathRelative === "" || pathRelative !== ".." && !pathRelative.startsWith(`..${sep2}`) && !isAbsolute9(pathRelative);
 }
 function artifactBrokerSocketPath(socketPath) {
   if (process.platform !== "win32") return socketPath;
@@ -29602,7 +29665,7 @@ async function findCanonicalAllowedRoot(path, roots) {
 function isPersistentGrant(value) {
   if (!value || typeof value !== "object") return false;
   const grant = value;
-  return grant.persistent === true && typeof grant.token === "string" && /^[A-Za-z0-9_-]{16,200}$/u.test(grant.token) && typeof grant.scope === "string" && grant.scope.length > 0 && typeof grant.chatId === "string" && grant.chatId.length > 0 && typeof grant.replyTo === "string" && grant.replyTo.length > 0 && Array.isArray(grant.allowedRoots) && grant.allowedRoots.every((root) => typeof root === "string" && isAbsolute8(root)) && typeof grant.maxFileBytes === "number" && Number.isSafeInteger(grant.maxFileBytes) && grant.maxFileBytes > 0;
+  return grant.persistent === true && typeof grant.token === "string" && /^[A-Za-z0-9_-]{16,200}$/u.test(grant.token) && typeof grant.scope === "string" && grant.scope.length > 0 && typeof grant.chatId === "string" && grant.chatId.length > 0 && typeof grant.replyTo === "string" && grant.replyTo.length > 0 && Array.isArray(grant.allowedRoots) && grant.allowedRoots.every((root) => typeof root === "string" && isAbsolute9(root)) && typeof grant.maxFileBytes === "number" && Number.isSafeInteger(grant.maxFileBytes) && grant.maxFileBytes > 0;
 }
 function normalizeCaption(value) {
   if (value === void 0) return void 0;
@@ -30174,8 +30237,8 @@ function stringifyArgs(args) {
   }).join(" ");
 }
 function expandHomeDirectory(path) {
-  if (path === "~") return homedir14();
-  return path.startsWith("~/") ? join39(homedir14(), path.slice(2)) : path;
+  if (path === "~") return homedir15();
+  return path.startsWith("~/") ? join39(homedir15(), path.slice(2)) : path;
 }
 async function startChannel(deps) {
   const { cfg, agent, sessions, sessionCatalog, workspaces, controls } = deps;
@@ -34602,11 +34665,13 @@ async function runNative(thread, opts) {
     try {
       if (bridge.mode === "adopted") {
         console.log(
-          `Bridge-managed migration: ${bridge.oldThreadId} -> ${bridge.threadId}`
+          `${bridge.reusedAdoption ? "Bridge-managed migration already exists" : "Bridge-managed migration"}: ${bridge.oldThreadId} -> ${bridge.threadId}`
         );
-        console.log(
-          "Codex 0.164 thread/resume does not accept dynamicTools; the old text history was copied into this new Bridge thread."
-        );
+        if (!bridge.reusedAdoption) {
+          console.log(
+            "Codex 0.164 thread/resume does not accept dynamicTools; the old text history was copied into this new Bridge thread."
+          );
+        }
       } else {
         console.log(`Bridge-managed Codex thread: ${bridge.threadId}`);
       }
@@ -34621,6 +34686,9 @@ async function runNative(thread, opts) {
       await waitChild(child);
     } finally {
       await bridge.close();
+      console.log(
+        `Durable reconnect: arg-bridge native --bridge ${bridge.threadId} --profile ${profileName}`
+      );
     }
     return;
   }
@@ -34661,8 +34729,15 @@ async function runNative(thread, opts) {
     return;
   }
   const discoveredHost = await findLoadedThreadHost(paths2.profileDir, thread, env);
-  const existing = discoveredHost ? [] : listStructuredTmuxPanes().filter((pane) => pane.structured.threadId === thread && pane.structured.endpoint);
-  const candidates = new Set(existing.map((pane) => pane.structured.endpoint));
+  const candidates = /* @__PURE__ */ new Set();
+  if (discoveredHost) candidates.add(discoveredHost.endpoint);
+  if (!discoveredHost) {
+    for (const pane of listStructuredTmuxPanes()) {
+      if (pane.structured.threadId === thread && pane.structured.endpoint) {
+        candidates.add(pane.structured.endpoint);
+      }
+    }
+  }
   for (const file of [join40(paths2.profileDir, "structured", "tmux-bindings.json"), join40(paths2.profileDir, "preferred-panes.json")]) {
     try {
       const stored = JSON.parse(await readFile28(file, "utf8"));
@@ -34673,9 +34748,13 @@ async function runNative(thread, opts) {
     } catch {
     }
   }
-  const endpoints = discoveredHost ? [discoveredHost.endpoint] : [];
-  for (const endpoint of candidates) {
-    if (!endpoint.startsWith("unix:///")) continue;
+  const canonicalCandidates = await canonicalAppServerEndpoints(candidates);
+  const discoveredEndpoint = discoveredHost ? (await canonicalAppServerEndpoints([discoveredHost.endpoint]))[0] : void 0;
+  const endpoints = /* @__PURE__ */ new Set();
+  const selectedDiscoveredEndpoint = discoveredEndpoint ?? discoveredHost?.endpoint;
+  if (selectedDiscoveredEndpoint) endpoints.add(selectedDiscoveredEndpoint);
+  for (const endpoint of canonicalCandidates) {
+    if (endpoint === selectedDiscoveredEndpoint) continue;
     let observer;
     try {
       const socketPath = await resolveAppServerSocketPath(endpoint.slice("unix://".length));
@@ -34684,16 +34763,23 @@ async function runNative(thread, opts) {
       });
       await observer.initialize();
       const loaded = await observer.request("thread/loaded/list", {});
-      if (loaded.data?.includes(thread)) endpoints.push(`unix://${socketPath}`);
+      if (loaded.data?.includes(thread)) endpoints.add(`unix://${socketPath}`);
     } catch {
     } finally {
       observer?.close();
     }
   }
-  if (endpoints.length > 1) throw new Error("Multiple endpoints own this thread; no new writer was started.");
-  const host = discoveredHost ?? (endpoints[0] ? {
-    endpoint: endpoints[0],
-    rpc: await RpcClient.connect(`ws+unix://${endpoints[0].slice("unix://".length)}:/`, {
+  const uniqueEndpoints = [...endpoints];
+  if (uniqueEndpoints.length > 1) {
+    discoveredHost?.rpc.close();
+    throw new Error(
+      `Multiple App Server endpoints own thread ${thread}: ${uniqueEndpoints.join(", ")}; no new writer was started.`
+    );
+  }
+  const selectedEndpoint = uniqueEndpoints[0];
+  const host = discoveredHost ?? (selectedEndpoint ? {
+    endpoint: selectedEndpoint,
+    rpc: await RpcClient.connect(`ws+unix://${selectedEndpoint.slice("unix://".length)}:/`, {
       codexHome: env.CODEX_HOME
     })
   } : await connectCodexHost({
@@ -34710,9 +34796,9 @@ async function runNative(thread, opts) {
     },
     ...runtimeIdentity ? { runtimeIdentity } : {}
   }));
-  const startedHost = !discoveredHost && !endpoints[0];
+  const startedHost = !discoveredHost && !selectedEndpoint;
   try {
-    if (!discoveredHost && endpoints[0]) await host.rpc.initialize();
+    if (!discoveredHost && selectedEndpoint) await host.rpc.initialize();
     const result = await resumeCodexThread(
       host.rpc,
       { threadId: thread, excludeTurns: true, cwd },
@@ -34725,6 +34811,7 @@ async function runNative(thread, opts) {
     console.log(`Shared Codex thread: ${id}`);
     const child = spawnProcess(binary, codexRemoteResumeArgs(host.endpoint, id), { cwd, env, stdio: "inherit" });
     await waitChild(child);
+    console.log(`Durable reconnect: arg-bridge native ${id} --profile ${profileName}`);
   } finally {
     await releaseCodexThreadWriter(host.rpc, thread);
     host.rpc.close();
@@ -34750,12 +34837,12 @@ async function waitChild(child) {
 
 // src/cli/commands/settings.ts
 import { realpath as realpath11 } from "fs/promises";
-import { homedir as homedir16 } from "os";
+import { homedir as homedir17 } from "os";
 import { dirname as dirname26, join as join42, parse as parse4, resolve as resolve9 } from "path";
 import * as p3 from "@clack/prompts";
 
 // src/agent/subagents/diagnostics.ts
-import { homedir as homedir15 } from "os";
+import { homedir as homedir16 } from "os";
 import { basename as basename9, dirname as dirname25, join as join41 } from "path";
 import { readFile as readFile29 } from "fs/promises";
 async function collectSubagentDiagnostics(input) {
@@ -34832,7 +34919,7 @@ async function collectSubagentDiagnostics(input) {
       loaded: Boolean(routeMapState.config),
       ...routeMapState.error ? { error: redactSecrets(routeMapState.error) } : {}
     },
-    brokerConfigPath: env.MIXAGENTS_BROKER_CONFIG?.trim() || join41(env.XDG_CONFIG_HOME?.trim() || join41(homedir15(), ".config"), "mixagents", "broker.json"),
+    brokerConfigPath: env.MIXAGENTS_BROKER_CONFIG?.trim() || join41(env.XDG_CONFIG_HOME?.trim() || join41(homedir16(), ".config"), "mixagents", "broker.json"),
     selectedRoute: { id: null },
     selectedWriteRoute: { id: null },
     readRoutes: [],
@@ -35692,7 +35779,7 @@ async function validatedRsiRoot(input) {
   if (!input || input.includes("\0")) throw new Error("Project RSI root \u65E0\u6548");
   const candidate = await realpath11(resolve9(input)).catch(() => void 0);
   if (!candidate) throw new Error(`Project RSI root \u4E0D\u5B58\u5728\uFF1A${input}`);
-  if (candidate === parse4(candidate).root || candidate === resolve9(homedir16()) || dirname26(candidate) === parse4(candidate).root) {
+  if (candidate === parse4(candidate).root || candidate === resolve9(homedir17()) || dirname26(candidate) === parse4(candidate).root) {
     throw new Error("Project RSI root \u4E0D\u80FD\u662F /\u3001home \u6216\u5BBD\u6CDB\u7236\u76EE\u5F55");
   }
   const project = await discoverProjectRsi(candidate, candidate);

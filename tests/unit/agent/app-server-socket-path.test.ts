@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { resolveAppServerSocketPath } from '../../../src/agent/structured/adapter.js';
+import { canonicalAppServerEndpoints } from '../../../src/agent/structured/socket-security.js';
 
 const cleanups: Array<() => Promise<void>> = [];
 const servers: Server[] = [];
@@ -36,6 +37,22 @@ describe('App Server socket path resolution', () => {
     await symlink(target, link);
 
     await expect(resolveAppServerSocketPath(link)).resolves.toBe(await realpath(target));
+  });
+
+  unixIt('deduplicates symlinked App Server endpoints after canonicalization', async () => {
+    const runtime = await privateDir();
+    const daemon = await privateDir();
+    const target = join(daemon, 'control-socket');
+    await listen(target);
+    const link = join(runtime, 'server.sock');
+    await symlink(target, link);
+
+    const canonical = `unix://${await realpath(target)}`;
+    await expect(canonicalAppServerEndpoints([
+      `unix://${target}`,
+      `unix://${link}`,
+      `unix://${link}`,
+    ])).resolves.toEqual([canonical]);
   });
 
   unixIt('rejects a symlink that points at a regular file', async () => {

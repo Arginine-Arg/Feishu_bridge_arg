@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.9.3
+
+- Fixed `arg-bridge native <thread-id>` falsely reporting multiple owners when
+  writer-lock, tmux and saved-binding metadata named the same Unix socket
+  through different symlinked paths.
+- Moved Codex App Server runtime sockets from disposable `TMPDIR` locations
+  such as `/run/user/<uid>/mihomo-tmp` to stable XDG runtime/state directories,
+  with a short-path fallback for the Unix socket length limit.
+- Added persistent reconnect guidance:
+  `arg-bridge native --bridge <thread-id> --profile <name>`. Raw
+  `codex --remote unix://...` remains valid only while that specific App Server
+  socket exists.
+- `--adopt` is now idempotent. A repeated migration of the same source thread
+  reuses the newest existing Bridge marker instead of creating another thread.
+- The running Bridge daemon now reloads `broker-threads.json` on a marker miss,
+  so a thread created by `arg-bridge native --adopt` can be bound immediately
+  without restarting the daemon.
+
 ## 1.9.2
 
 - Fixed `/btw` when `follow-cc-switch` resolves a provider but MixAgents does

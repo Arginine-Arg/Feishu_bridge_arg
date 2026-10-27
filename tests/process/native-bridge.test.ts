@@ -94,6 +94,7 @@ nativeBridge('registers dynamic tools and safely migrates a legacy thread into a
     ...process.env,
     CODEX_HOME: codexHome,
     OPENAI_API_KEY: 'trace-only-native',
+    XDG_RUNTIME_DIR: join(root, 'runtime'),
     FAKE_MIXAGENTS_STATE: brokerState,
     NO_PROXY: '127.0.0.1,localhost',
     no_proxy: '127.0.0.1,localhost',
@@ -276,6 +277,33 @@ nativeBridge('registers dynamic tools and safely migrates a legacy thread into a
       version: 1,
       adoptedFrom: oldThreadId,
     });
+    const adoptedThreadId = bridge.threadId;
+    const adoptedCreatedAt = adoptedMarker.threads[adoptedThreadId].createdAt;
+    await bridge.close();
+    bridge = undefined;
+
+    bridge = await createNativeBridgeSession({
+      profileName: 'codex',
+      profileDir,
+      cwd: workspace,
+      config: profile,
+      env,
+      binary: 'codex',
+      codexHome,
+      sandbox: 'read-only',
+      adoptThreadId: oldThreadId,
+    });
+    expect(bridge).toMatchObject({
+      mode: 'adopted',
+      threadId: adoptedThreadId,
+      oldThreadId,
+      reusedAdoption: true,
+    });
+    const repeatedMarker = JSON.parse(await readFile(
+      join(profileDir, 'structured', 'broker-threads.json'),
+      'utf8',
+    ));
+    expect(repeatedMarker.threads[adoptedThreadId].createdAt).toBe(adoptedCreatedAt);
   } finally {
     await bridge?.close();
     await new Promise<void>(resolve => provider.close(() => resolve()));

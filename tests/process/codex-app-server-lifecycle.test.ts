@@ -59,6 +59,7 @@ describe('Codex App Server lifecycle', () => {
       PATH: process.env.PATH,
       CODEX_HOME: fixture.codexHome,
       OPENAI_API_KEY: 'sk-first',
+      XDG_RUNTIME_DIR: fixture.dir,
     };
     const fingerprint = (): CodexHostEnvironmentFingerprint => ({
       credentials: fingerprintCredentialEnv({ OPENAI_API_KEY: env.OPENAI_API_KEY }),
@@ -75,7 +76,12 @@ describe('Codex App Server lifecycle', () => {
       env,
       fingerprint: fingerprint(),
     }).catch(async (error) => {
-      const directory = codexHostRuntimeDirectory(fixture.dir, 'scope-reuse', cwd);
+      const directory = codexHostRuntimeDirectory(
+        fixture.dir,
+        'scope-reuse',
+        cwd,
+        { env },
+      );
       const log = await readFile(join(directory, 'server.log'), 'utf8').catch(() => '(no log)');
       throw new Error(`${(error as Error).message}\n--- server.log ---\n${log}`);
     });
@@ -116,7 +122,9 @@ describe('Codex App Server lifecycle', () => {
     expect(pids[1]).not.toBe(firstPid);
     // The registry points at the runtime directory; the endpoint adds /server.sock.
     const registry = await readHostRegistry(fixture.dir);
-    expect(replaced.endpoint).toBe(`unix://${codexHostRuntimeDirectory(fixture.dir, 'scope-reuse', cwd)}/server.sock`);
+    expect(replaced.endpoint).toBe(
+      `unix://${codexHostRuntimeDirectory(fixture.dir, 'scope-reuse', cwd, { env })}/server.sock`,
+    );
     expect(registry.filter((host) => processAlive(host.pid)).map((host) => host.pid)).toEqual([pids[1]]);
     replaced.rpc.close();
 
@@ -127,14 +135,24 @@ describe('Codex App Server lifecycle', () => {
 
   unixIt('keeps a detached server while another owner is alive', async () => {
     const fixture = await createAppServerFixture();
-    const directory = codexHostRuntimeDirectory(fixture.dir, 'scope-shared', fixture.dir);
+    const env = {
+      PATH: process.env.PATH,
+      CODEX_HOME: fixture.codexHome,
+      XDG_RUNTIME_DIR: fixture.dir,
+    };
+    const directory = codexHostRuntimeDirectory(
+      fixture.dir,
+      'scope-shared',
+      fixture.dir,
+      { env },
+    );
     await recordOwner(fixture.dir, otherOwnerPid);
     const host = await connectCodexHost({
       binary: fixture.binary,
       profileDir: fixture.dir,
       scope: 'scope-shared',
       cwd: fixture.dir,
-      env: { PATH: process.env.PATH, CODEX_HOME: fixture.codexHome },
+      env,
       fingerprint: {
         credentials: {},
         networkMode: 'inherit',

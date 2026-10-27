@@ -649,6 +649,7 @@ export class StructuredAdapter implements AgentAdapter {
     };
   }
   private loadBrokerThreads(): void {
+    this.brokerThreads.clear();
     try {
       const parsed = JSON.parse(readFileSync(this.brokerThreadsFile, 'utf8')) as {
         version?: number;
@@ -676,7 +677,14 @@ export class StructuredAdapter implements AgentAdapter {
     );
   }
   private hasBrokerTools(threadId: string, namespace: string): boolean {
-    const marker = this.brokerThreads.get(threadId);
+    let marker = this.brokerThreads.get(threadId);
+    if (!marker || marker.version !== BROKER_TOOL_VERSION || marker.namespace !== namespace) {
+      // `arg-bridge native --adopt` may write this marker after the Bridge
+      // daemon has already loaded the in-memory map. Retry from disk before
+      // rejecting a newly adopted thread as a legacy native thread.
+      this.loadBrokerThreads();
+      marker = this.brokerThreads.get(threadId);
+    }
     return marker?.version === BROKER_TOOL_VERSION && marker.namespace === namespace;
   }
   private async markBrokerThread(threadId: string, namespace: string): Promise<void> {
