@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -17,16 +17,25 @@ it('streams and completes a real worker through the vendored MixAgents MCP serve
     const codexHome = join(root, 'codex-home');
     const dataDir = join(root, 'data');
     const brokerConfig = join(root, 'broker.json');
-    const fakeCodex = join(root, 'fake-codex.mjs');
+    const fakeCodex = join(
+      root,
+      process.platform === 'win32' ? 'fake-codex.cmd' : 'fake-codex',
+    );
     await Promise.all([
       mkdir(workspace, { recursive: true }),
       mkdir(codexHome, { recursive: true }),
     ]);
-    await writeFile(fakeCodex, [
-      '#!/usr/bin/env node',
-      `await import(${JSON.stringify(pathToFileURL(fakeCodexSource).href)});`,
-      '',
-    ].join('\n'), { mode: 0o700 });
+    await writeFile(
+      fakeCodex,
+      process.platform === 'win32'
+        ? `@echo off\r\n"${process.execPath}" "${fakeCodexSource}" %*\r\n`
+        : [
+            '#!/usr/bin/env node',
+            `await import(${JSON.stringify(pathToFileURL(fakeCodexSource).href)});`,
+            '',
+          ].join('\n'),
+      { mode: 0o700 },
+    );
     await chmod(fakeCodex, 0o700);
     await writeFile(brokerConfig, JSON.stringify({
       defaultRoute: 'fake-read',
@@ -112,18 +121,19 @@ it('streams and completes a real worker through the vendored MixAgents MCP serve
         access: 'read-only',
       });
       const progress: SideAgentProgress[] = [];
+      const canonicalWorkspace = await realpath(workspace);
       await expect(backend.wait(agent, signal, undefined, event => {
         progress.push(event);
       })).resolves.toMatchObject({
         status: 'completed',
-        text: `cwd:${workspace}`,
+        text: `cwd:${canonicalWorkspace}`,
       });
       expect(
         progress
           .filter(event => event.type === 'text')
           .map(event => event.text)
           .join(''),
-      ).toBe(`cwd:${workspace}`);
+      ).toBe(`cwd:${canonicalWorkspace}`);
       await backend.close(agent, signal);
     } finally {
       await backend.closeBackend();

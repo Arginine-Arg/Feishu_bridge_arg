@@ -71,7 +71,7 @@ describe('MixAgentsBrokerBackend', () => {
       command: process.execPath,
     });
     expect(launch?.args[0]).toContain('mixagents-broker');
-    expect(launch?.args[0]?.endsWith('/dist/server.js')).toBe(true);
+    expect(launch?.args[0]).toMatch(/[\\/]dist[\\/]server\.js$/u);
   });
 
   it('uses the bundled Broker directly for generated cc-switch runtimes', () => {
