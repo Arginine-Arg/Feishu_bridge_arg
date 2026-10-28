@@ -1,7 +1,9 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   materializeCcSwitchBrokerRuntime,
@@ -9,8 +11,10 @@ import {
 } from '../../../src/integrations/cc-switch-provider';
 
 const sqliteRuntime = Number(process.versions.node.split('.')[0]) >= 22 ? it : it.skip;
+const unixIt = process.platform === 'win32' ? it.skip : it;
 const temporary: string[] = [];
 const require = createRequire(import.meta.url);
+const execFileAsync = promisify(execFile);
 
 afterEach(async () => {
   await Promise.all(temporary.splice(0).map(path => rm(path, { recursive: true, force: true })));
@@ -63,6 +67,41 @@ describe('cc-switch provider resolver', () => {
     const brokerConfig = await readFile(runtime.brokerConfigPath, 'utf8');
     expect(brokerConfig).toContain('https://api.example.test/v1');
     expect(brokerConfig).not.toContain(setup.secret);
+    const broker = JSON.parse(brokerConfig);
+    expect(broker.codexBin).toContain('codex-wrapper');
+    expect(broker.codexBin).not.toBe('/opt/codex');
+  });
+
+  unixIt('disables unsupported web search on the third-party Broker Codex wrapper', async () => {
+    const setup = await sqliteSetup();
+    const fakeCodex = join(setup.root, 'fake-codex.mjs');
+    const argsFile = join(setup.root, 'fake-codex-args.json');
+    await writeFile(fakeCodex, [
+      '#!/usr/bin/env node',
+      "import { writeFileSync } from 'node:fs';",
+      `writeFileSync(${JSON.stringify(argsFile)}, JSON.stringify(process.argv.slice(2)));`,
+      '',
+    ].join('\n'));
+    await chmod(fakeCodex, 0o700);
+    const runtime = await materializeCcSwitchBrokerRuntime({
+      env: setup.env,
+      codexHome: setup.codexHome,
+      cwd: setup.workspace,
+      codexBin: fakeCodex,
+      stateDir: setup.stateDir,
+    });
+    const broker = JSON.parse(await readFile(runtime.brokerConfigPath, 'utf8')) as {
+      codexBin: string;
+    };
+    await execFileAsync(broker.codexBin, ['app-server', '--stdio'], {
+      env: { ...process.env, FAKE_CODEX_ARGS: argsFile },
+    });
+    expect(JSON.parse(await readFile(argsFile, 'utf8'))).toEqual([
+      '-c',
+      'web_search="disabled"',
+      'app-server',
+      '--stdio',
+    ]);
   });
 
   sqliteRuntime('fails closed when the selected provider has no key', async () => {

@@ -399,12 +399,19 @@ export async function materializeCcSwitchBrokerRuntime(input: {
   const dataDir = join(input.stateDir, 'cc-switch', 'mixagents-data');
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
   await chmod(dataDir, 0o700).catch(() => {});
+  const codexBin = summary.thirdParty
+    ? await materializeThirdPartyCodexWrapper({
+        stateDir: input.stateDir,
+        codexBin: input.codexBin,
+        fingerprint: summary.configFingerprint,
+      })
+    : input.codexBin;
   const brokerConfig = {
     version: 1,
     defaultRoute: route.id,
     workspaceRoots: [workspaceRoot],
     dataDir,
-    codexBin: input.codexBin,
+    codexBin,
     routes: {
       [route.id]: {
         description: route.description,
@@ -437,6 +444,58 @@ export async function materializeCcSwitchBrokerRuntime(input: {
     brokerConfigPath: configPath,
     fingerprint: summary.configFingerprint,
   };
+}
+
+async function materializeThirdPartyCodexWrapper(input: {
+  stateDir: string;
+  codexBin: string;
+  fingerprint: string;
+}): Promise<string> {
+  const wrapperDir = join(input.stateDir, 'cc-switch', 'codex-wrapper');
+  await mkdir(wrapperDir, { recursive: true, mode: 0o700 });
+  await chmod(wrapperDir, 0o700).catch(() => {});
+  const name = `third-party-${input.fingerprint.slice(0, 16)}`;
+  const launcherPath = join(wrapperDir, `${name}.mjs`);
+  const launcher = [
+    '#!/usr/bin/env node',
+    "import { spawn } from 'node:child_process';",
+    '',
+    `const codexBin = ${JSON.stringify(input.codexBin)};`,
+    "const child = spawn(codexBin, ['-c', 'web_search=\"disabled\"', ...process.argv.slice(2)], {",
+    '  stdio: "inherit",',
+    '  env: process.env,',
+    '  windowsHide: true,',
+    '});',
+    '',
+    "for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {",
+    '  process.on(signal, () => {',
+    '    if (child.exitCode === null && child.signalCode === null) child.kill(signal);',
+    '  });',
+    '}',
+    'child.once("error", error => {',
+    '  console.error(`arg-bridge Codex wrapper: ${error.message}`);',
+    '  process.exit(127);',
+    '});',
+    'child.once("exit", (code, signal) => {',
+    '  if (signal) {',
+    '    process.kill(process.pid, signal);',
+    '    return;',
+    '  }',
+    '  process.exit(code ?? 1);',
+    '});',
+    '',
+  ].join('\n');
+  await writeFileAtomic(launcherPath, launcher, { mode: 0o700 });
+  await chmod(launcherPath, 0o700).catch(() => {});
+  if (process.platform !== 'win32') return launcherPath;
+
+  const commandPath = join(wrapperDir, `${name}.cmd`);
+  await writeFileAtomic(
+    commandPath,
+    `@echo off\r\n"${process.execPath}" "${launcherPath}" %*\r\n`,
+    { mode: 0o700 },
+  );
+  return commandPath;
 }
 
 export function ccSwitchSummaryFromCatalog(

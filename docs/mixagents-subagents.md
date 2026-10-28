@@ -179,6 +179,12 @@ Explicit `/btw --route <id>` and manual route mode never fall back.
 
 ## Automatic cc-switch provider resolution
 
+For generated third-party cc-switch runtimes, Bridge launches the Broker's
+Codex child with `web_search = "disabled"`. Codex 0.164 otherwise exposes its
+native `web_search` tool even when a custom Responses provider does not support
+it; some compatible gateways answer that request with 503 or leave it hanging.
+Bridge does not change the selected route, provider, model or function tools.
+
 `routeMode: "follow-cc-switch"` is the default and needs no
 `broker-routes.json` file. On every worker operation, Bridge reads the current
 cc-switch provider from SQLite (`~/.cc-switch/cc-switch.db`, with a legacy

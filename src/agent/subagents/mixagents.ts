@@ -1,5 +1,5 @@
 import { createRequire } from 'node:module';
-import { isAbsolute } from 'node:path';
+import { basename, isAbsolute } from 'node:path';
 import type { SubagentConfig, SubagentMixAgentsConfig } from '../../config/profile-schema';
 import { McpStdioClient, McpToolError, redactSecrets } from './mcp-client';
 import {
@@ -70,7 +70,19 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
     private readonly options: MixAgentsBrokerBackendOptions = {},
   ) {
     this.env = env;
-    const launch = resolveMixAgentsLaunchConfig(config, env);
+    const configuredLaunch = resolveMixAgentsLaunchConfig(config, env);
+    // Older settings commonly retained a mixagents-broker-mcp wrapper even
+    // after arg-bridge started generating a 0.1.1 cc-switch runtime. Those
+    // wrappers can load a different broker config, so every /btw would first
+    // fail and then recover through the bundled server. The generated runtime
+    // schema is versioned with the bundled package; use it directly.
+    const bundledLaunch = runtime ? resolveBundledMixAgentsLaunchConfig() : undefined;
+    const launch = configuredLaunch &&
+      bundledLaunch &&
+      isLegacyBrokerWrapper(configuredLaunch) &&
+      !sameLaunch(configuredLaunch, bundledLaunch)
+      ? bundledLaunch
+      : configuredLaunch;
     if (!launch) {
       throw new SubagentUnavailableError(
         'mixagents-not-configured',
@@ -543,6 +555,11 @@ export function resolveBundledMixAgentsLaunchConfig(): MixAgentsLaunchConfig | u
     // fallback when the runtime did not install it.
     return undefined;
   }
+}
+
+function isLegacyBrokerWrapper(launch: MixAgentsLaunchConfig): boolean {
+  const executable = basename(launch.command).toLowerCase().replace(/\.(?:cmd|exe)$/u, '');
+  return executable === 'mixagents-broker' || executable === 'mixagents-broker-mcp';
 }
 
 export function applyMixAgentsConfig(

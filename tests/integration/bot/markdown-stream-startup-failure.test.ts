@@ -198,6 +198,45 @@ describe('markdown stream startup failures', () => {
     agent.finish();
   });
 
+  it('injects /model and /compact directly into an active live Codex turn', async () => {
+    const agent = new SteerableHangingAgent();
+    const sendCommand = vi.fn(async (
+      _scopeId: string,
+      _command: string,
+      _cwd?: string,
+      _stillActive?: () => boolean,
+    ): Promise<boolean> => true);
+    agent.tmux = {
+      list: async () => [],
+      bind: async () => { throw new Error('not used'); },
+      unbind: async () => false,
+      status: async () => ({ state: 'none' as const }),
+      sendCommand,
+    } as never;
+    const h = await createHarness({ agent });
+    h.profileConfig.preferences = {
+      ...(h.profileConfig.preferences ?? {}),
+      agentSessionMode: 'live',
+      messageReply: 'text',
+      messageReplyMigrated: true,
+    };
+    h.controls.profileConfig.preferences = h.profileConfig.preferences;
+    h.controls.cfg.preferences = h.profileConfig.preferences;
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_inject_start', 'start a long task'));
+    await agent.started.promise;
+    await h.channel.handlers.message?.(message('om_inject_model', '/model'));
+    await h.channel.handlers.message?.(message('om_inject_compact', '/compact'));
+
+    expect(sendCommand.mock.calls.map(call => call[1])).toEqual(['/model', '/compact']);
+    expect(agent.runCalls).toBe(1);
+    expect(h.channel.sent).toContainEqual(expect.objectContaining({
+      content: { text: '↪ 已发送到当前 Codex 任务：/model' },
+    }));
+    agent.finish();
+  });
+
   it.each(['markdown', 'card'] as const)(
     'delivers an oversized academic answer completely in %s mode',
     async (messageReply) => {

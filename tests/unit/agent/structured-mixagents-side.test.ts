@@ -73,6 +73,7 @@ class FakeBackend implements SubagentBackend {
   readonly sendTimeouts: Array<number | undefined> = [];
   readonly interruptions: string[] = [];
   readonly closes: string[] = [];
+  backendCloses = 0;
   sendNotFoundOnce = false;
   hangWaits = false;
   waitResult?: SideAgentResult;
@@ -138,6 +139,10 @@ class FakeBackend implements SubagentBackend {
 
   async close(agent: SideAgent): Promise<void> {
     this.closes.push(agent.agentId);
+  }
+
+  async closeBackend(): Promise<void> {
+    this.backendCloses += 1;
   }
 }
 
@@ -469,6 +474,99 @@ describe('structured MixAgents /btw', () => {
       delta: expect.stringContaining('已不存在'),
     }));
     expect(backend.spawns).toHaveLength(2);
+    await main.close();
+    await rm(profileDir, { recursive: true, force: true });
+  });
+
+  it('reuses the backend that owns an existing side and closes only the verification backend', async () => {
+    const profileDir = await mkdtemp(join(tmpdir(), 'arg-bridge-side-backend-reuse-'));
+    const owner = new FakeBackend(() => routeA);
+    const verification = new FakeBackend(() => routeA);
+    const resolver = vi.fn()
+      .mockResolvedValueOnce(resolved(routeA, owner))
+      .mockResolvedValueOnce(resolved(routeA, verification));
+    const main = session();
+    const adapter = new StructuredAdapter({
+      kind: 'codex',
+      binary: 'not-spawned',
+      profileDir,
+      subagents,
+      subagentResolver: resolver,
+    });
+    Reflect.get(adapter, 'sessions').set('scope', {
+      main,
+      cwd: '/workspace',
+      view: new StructuredView(profileDir, 'main'),
+    });
+
+    await drain(adapter.runSide({
+      runId: 'owner',
+      scopeId: 'scope',
+      cwd: '/workspace',
+      prompt: '/btw First task',
+      liveInputMode: 'side',
+    }));
+    const followup = await drain(adapter.runSide({
+      runId: 'verification',
+      scopeId: 'scope',
+      cwd: '/workspace',
+      prompt: '/btw Follow up',
+      liveInputMode: 'side',
+    }));
+
+    expect(followup.filter(event => event.type === 'error')).toEqual([]);
+    expect(owner.spawns).toHaveLength(1);
+    expect(owner.sends).toHaveLength(1);
+    expect(owner.sends[0]?.agent.agentId).toBe('agent-1');
+    expect(verification.spawns).toHaveLength(0);
+    expect(verification.sends).toHaveLength(0);
+    expect(verification.backendCloses).toBe(1);
+    await main.close();
+    await rm(profileDir, { recursive: true, force: true });
+  });
+
+  it('keeps the newly resolved backend alive to recreate a missing agent', async () => {
+    const profileDir = await mkdtemp(join(tmpdir(), 'arg-bridge-side-backend-recreate-'));
+    const owner = new FakeBackend(() => routeA);
+    const replacement = new FakeBackend(() => routeA);
+    const resolver = vi.fn()
+      .mockResolvedValueOnce(resolved(routeA, owner))
+      .mockResolvedValueOnce(resolved(routeA, replacement));
+    const main = session();
+    const adapter = new StructuredAdapter({
+      kind: 'codex',
+      binary: 'not-spawned',
+      profileDir,
+      subagents,
+      subagentResolver: resolver,
+    });
+    Reflect.get(adapter, 'sessions').set('scope', {
+      main,
+      cwd: '/workspace',
+      view: new StructuredView(profileDir, 'main'),
+    });
+
+    await drain(adapter.runSide({
+      runId: 'owner',
+      scopeId: 'scope',
+      cwd: '/workspace',
+      prompt: '/btw First task',
+      liveInputMode: 'side',
+    }));
+    owner.sendNotFoundOnce = true;
+    const events = await drain(adapter.runSide({
+      runId: 'replacement',
+      scopeId: 'scope',
+      cwd: '/workspace',
+      prompt: '/btw Recreate after not_found',
+      liveInputMode: 'side',
+    }));
+
+    expect(events.filter(event => event.type === 'error')).toEqual([]);
+    expect(owner.backendCloses).toBe(1);
+    expect(replacement.backendCloses).toBe(0);
+    expect(replacement.spawns).toHaveLength(1);
+    expect(replacement.spawns[0]?.task).toContain('Recreate after not_found');
     await main.close();
     await rm(profileDir, { recursive: true, force: true });
   });

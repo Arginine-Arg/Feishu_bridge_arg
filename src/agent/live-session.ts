@@ -247,6 +247,18 @@ export class LiveSessionPool {
     return session.sendControlInput(input, stillActive);
   }
 
+  /** Inject a native slash command into the currently active live turn. */
+  async sendCommand(
+    key: string,
+    command: string,
+    _cwd?: string,
+    stillActive: () => boolean = () => true,
+  ): Promise<boolean> {
+    const session = this.sessions.get(key);
+    if (!session) return false;
+    return session.sendActiveCommand(command, stillActive);
+  }
+
   /**
    * Insert a new user message into the currently running native turn. Codex's
    * composer uses Tab to queue a steer while Working; it is delivered at the
@@ -454,6 +466,25 @@ export class LiveTerminalSession {
     // one click cannot interleave with the next click.
     const generation = this.controlInputGeneration;
     const task = this.controlInputTail.then(() => this.sendControlInputNow(input, generation, stillActive));
+    this.controlInputTail = task.then(() => undefined, () => undefined);
+    return task;
+  }
+
+  async sendActiveCommand(
+    input: string,
+    stillActive: () => boolean = () => true,
+  ): Promise<boolean> {
+    const command = input.trim();
+    if (!command.startsWith('/')) return false;
+    const task = this.controlInputTail.then(async () => {
+      if (!stillActive() || this.closed || !this.isAlive()) return false;
+      this.write(`${command}\r`, false, 'text');
+      this.turnLastInputAt = Date.now();
+      log.info('agent-live', 'active-native-command-injected', {
+        command: command.slice(0, 120),
+      });
+      return true;
+    });
     this.controlInputTail = task.then(() => undefined, () => undefined);
     return task;
   }

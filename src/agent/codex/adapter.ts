@@ -159,6 +159,8 @@ export class CodexAdapter implements AgentAdapter {
         };
       },
       sendInput: (scopeId, input, cwd, stillActive) => this.liveSessions.sendInput(scopeId, input, cwd, stillActive),
+      sendCommand: (scopeId, command, cwd, stillActive) =>
+        this.liveSessions.sendCommand(scopeId, command, cwd, stillActive),
       interrupt: (scopeId, cwd, options) => this.tmuxBindings.interrupt(scopeId, cwd, options),
       restoreArtifactDelivery: (scopeId, artifact) =>
         this.tmuxBindings.restoreManagedArtifactDelivery(scopeId, artifact),

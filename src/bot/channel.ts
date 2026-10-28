@@ -1316,10 +1316,42 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
       // its EventFanout listener and makes the pursuing goal appear to stop.
       log.info('intake', 'native-side-coexists-with-main', { scope, inputMode: nativeInputMode });
     } else {
-      // A native slash command arriving during a live main task must retain
-      // native composer semantics: queue it for the next idle boundary rather
-      // than cancelling the task merely to type the command. Explicit
-      // `/stop` is handled by the bridge lifecycle path before this branch.
+      const activeMain = activeRuns.get(scope);
+      const sendCommand = agent.tmux?.sendCommand;
+      if (
+        activeMain &&
+        sendCommand &&
+        !activeMain.interrupted &&
+        !activeMain.stopRequested &&
+        !activeMain.detached
+      ) {
+        const stillActive = (): boolean => activeRuns.get(scope) === activeMain;
+        if (
+          stillActive() &&
+          await sendCommand(
+            scope,
+            agentMsg.content,
+            workspaces.cwdFor(scope) ?? controls.profileConfig.workspaces.default,
+            stillActive,
+          )
+        ) {
+          log.info('intake', 'native-command-injected', {
+            scope,
+            command: agentMsg.content.trim().slice(0, 120),
+          });
+          await channel.send(
+            msg.chatId,
+            { text: `↪ 已发送到当前 Codex 任务：${agentMsg.content.trim()}` },
+            {
+              replyTo: msg.messageId,
+              ...(chatMode === 'topic' && threadId ? { replyInThread: true } : {}),
+            },
+          ).catch(() => {});
+          return;
+        }
+      }
+      // Older/live adapters without active-command injection queue the command
+      // for the next idle boundary instead of cancelling the running task.
       log.info('intake', 'native-command-deferred-until-idle', {
         scope,
         command: agentMsg.content.trim().slice(0, 120),

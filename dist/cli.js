@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.9.5",
+  version: "1.9.6",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -8173,6 +8173,12 @@ var LiveSessionPool = class {
     if (!session) return false;
     return session.sendControlInput(input, stillActive);
   }
+  /** Inject a native slash command into the currently active live turn. */
+  async sendCommand(key, command, _cwd, stillActive = () => true) {
+    const session = this.sessions.get(key);
+    if (!session) return false;
+    return session.sendActiveCommand(command, stillActive);
+  }
   /**
    * Insert a new user message into the currently running native turn. Codex's
    * composer uses Tab to queue a steer while Working; it is delivered at the
@@ -8339,6 +8345,21 @@ var LiveTerminalSession = class {
   async sendControlInput(input, stillActive = () => true) {
     const generation = this.controlInputGeneration;
     const task = this.controlInputTail.then(() => this.sendControlInputNow(input, generation, stillActive));
+    this.controlInputTail = task.then(() => void 0, () => void 0);
+    return task;
+  }
+  async sendActiveCommand(input, stillActive = () => true) {
+    const command = input.trim();
+    if (!command.startsWith("/")) return false;
+    const task = this.controlInputTail.then(async () => {
+      if (!stillActive() || this.closed || !this.isAlive()) return false;
+      this.write(`${command}\r`, false, "text");
+      this.turnLastInputAt = Date.now();
+      log.info("agent-live", "active-native-command-injected", {
+        command: command.slice(0, 120)
+      });
+      return true;
+    });
     this.controlInputTail = task.then(() => void 0, () => void 0);
     return task;
   }
@@ -11846,6 +11867,7 @@ var ClaudeAdapter = class {
         };
       },
       sendInput: (scopeId, input, cwd, stillActive) => this.liveSessions.sendInput(scopeId, input, cwd, stillActive),
+      sendCommand: (scopeId, command, cwd, stillActive) => this.liveSessions.sendCommand(scopeId, command, cwd, stillActive),
       interrupt: (scopeId, cwd, options) => this.tmuxBindings.interrupt(scopeId, cwd, options),
       restoreArtifactDelivery: (scopeId, artifact) => this.tmuxBindings.restoreManagedArtifactDelivery(scopeId, artifact)
     };
@@ -12590,6 +12612,7 @@ var CodexAdapter = class {
         };
       },
       sendInput: (scopeId, input, cwd, stillActive) => this.liveSessions.sendInput(scopeId, input, cwd, stillActive),
+      sendCommand: (scopeId, command, cwd, stillActive) => this.liveSessions.sendCommand(scopeId, command, cwd, stillActive),
       interrupt: (scopeId, cwd, options) => this.tmuxBindings.interrupt(scopeId, cwd, options),
       restoreArtifactDelivery: (scopeId, artifact) => this.tmuxBindings.restoreManagedArtifactDelivery(scopeId, artifact)
     };
@@ -13701,12 +13724,17 @@ async function materializeCcSwitchBrokerRuntime(input) {
   await mkdir16(dataDir, { recursive: true, mode: 448 });
   await chmod6(dataDir, 448).catch(() => {
   });
+  const codexBin = summary.thirdParty ? await materializeThirdPartyCodexWrapper({
+    stateDir: input.stateDir,
+    codexBin: input.codexBin,
+    fingerprint: summary.configFingerprint
+  }) : input.codexBin;
   const brokerConfig = {
     version: 1,
     defaultRoute: route.id,
     workspaceRoots: [workspaceRoot],
     dataDir,
-    codexBin: input.codexBin,
+    codexBin,
     routes: {
       [route.id]: {
         description: route.description,
@@ -13736,6 +13764,56 @@ async function materializeCcSwitchBrokerRuntime(input) {
     brokerConfigPath: configPath,
     fingerprint: summary.configFingerprint
   };
+}
+async function materializeThirdPartyCodexWrapper(input) {
+  const wrapperDir = join26(input.stateDir, "cc-switch", "codex-wrapper");
+  await mkdir16(wrapperDir, { recursive: true, mode: 448 });
+  await chmod6(wrapperDir, 448).catch(() => {
+  });
+  const name = `third-party-${input.fingerprint.slice(0, 16)}`;
+  const launcherPath = join26(wrapperDir, `${name}.mjs`);
+  const launcher = [
+    "#!/usr/bin/env node",
+    "import { spawn } from 'node:child_process';",
+    "",
+    `const codexBin = ${JSON.stringify(input.codexBin)};`,
+    `const child = spawn(codexBin, ['-c', 'web_search="disabled"', ...process.argv.slice(2)], {`,
+    '  stdio: "inherit",',
+    "  env: process.env,",
+    "  windowsHide: true,",
+    "});",
+    "",
+    "for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {",
+    "  process.on(signal, () => {",
+    "    if (child.exitCode === null && child.signalCode === null) child.kill(signal);",
+    "  });",
+    "}",
+    'child.once("error", error => {',
+    "  console.error(`arg-bridge Codex wrapper: ${error.message}`);",
+    "  process.exit(127);",
+    "});",
+    'child.once("exit", (code, signal) => {',
+    "  if (signal) {",
+    "    process.kill(process.pid, signal);",
+    "    return;",
+    "  }",
+    "  process.exit(code ?? 1);",
+    "});",
+    ""
+  ].join("\n");
+  await writeFileAtomic(launcherPath, launcher, { mode: 448 });
+  await chmod6(launcherPath, 448).catch(() => {
+  });
+  if (process.platform !== "win32") return launcherPath;
+  const commandPath = join26(wrapperDir, `${name}.cmd`);
+  await writeFileAtomic(
+    commandPath,
+    `@echo off\r
+"${process.execPath}" "${launcherPath}" %*\r
+`,
+    { mode: 448 }
+  );
+  return commandPath;
 }
 async function readSqliteProviders(databasePath, appType, currentProviderId) {
   const sql = [
@@ -14212,7 +14290,7 @@ function errorMessage4(error) {
 
 // src/agent/subagents/mixagents.ts
 import { createRequire as createRequire2 } from "module";
-import { isAbsolute as isAbsolute5 } from "path";
+import { basename as basename5, isAbsolute as isAbsolute5 } from "path";
 
 // src/agent/subagents/mcp-client.ts
 import { createInterface as createInterface5 } from "readline";
@@ -14456,7 +14534,9 @@ var MixAgentsBrokerBackend = class {
     this.runtime = runtime;
     this.options = options;
     this.env = env;
-    const launch = resolveMixAgentsLaunchConfig(config, env);
+    const configuredLaunch = resolveMixAgentsLaunchConfig(config, env);
+    const bundledLaunch = runtime ? resolveBundledMixAgentsLaunchConfig() : void 0;
+    const launch = configuredLaunch && bundledLaunch && isLegacyBrokerWrapper(configuredLaunch) && !sameLaunch(configuredLaunch, bundledLaunch) ? bundledLaunch : configuredLaunch;
     if (!launch) {
       throw new SubagentUnavailableError(
         "mixagents-not-configured",
@@ -14829,6 +14909,10 @@ function resolveBundledMixAgentsLaunchConfig() {
   } catch {
     return void 0;
   }
+}
+function isLegacyBrokerWrapper(launch) {
+  const executable = basename5(launch.command).toLowerCase().replace(/\.(?:cmd|exe)$/u, "");
+  return executable === "mixagents-broker" || executable === "mixagents-broker-mcp";
 }
 function agentFromSnapshot(value, fallback) {
   const agentId = stringValue2(value.agentId);
@@ -18414,7 +18498,7 @@ ${event.output}
 };
 
 // src/agent/structured/tmux-discovery.ts
-import { basename as basename6, resolve as resolvePath } from "path";
+import { basename as basename7, resolve as resolvePath } from "path";
 import { readFileSync as readFileSync9, readlinkSync as readlinkSync3 } from "fs";
 function listStructuredTmuxPanes(socket) {
   return listTmuxAgentPanes(socket).flatMap((pane) => {
@@ -18449,7 +18533,7 @@ function activeStructuredTmuxPane(socket, sessionName) {
 function parseStructuredAgentArgv(argv, kind) {
   const normalized = argv.map((item) => item.trim()).filter(Boolean);
   const agentIndex = normalized.findIndex((item) => {
-    const name = basename6(item).replace(/\.(?:cmd|exe)$/iu, "").toLowerCase();
+    const name = basename7(item).replace(/\.(?:cmd|exe)$/iu, "").toLowerCase();
     return name === kind;
   });
   if (agentIndex < 0) return void 0;
@@ -18494,7 +18578,7 @@ function processEnvironmentForPidTree(rootPid) {
       }));
       if (!Object.keys(fallback).length) fallback = env;
       const argv = readFileSync9(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
-      if (argv.slice(0, 2).some((arg) => basename6(arg) === "codex")) return env;
+      if (argv.slice(0, 2).some((arg) => basename7(arg) === "codex")) return env;
     } catch {
     }
   }
@@ -19147,8 +19231,8 @@ var StructuredAdapter = class {
   }
   async runMixagentsSide(input) {
     const { current, resolved, route, body, emit: emit2, signal } = input;
-    const backend = resolved.backend;
-    if (!backend) throw new Error("MixAgents backend \u672A\u521D\u59CB\u5316");
+    const resolvedBackend = resolved.backend;
+    if (!resolvedBackend) throw new Error("MixAgents backend \u672A\u521D\u59CB\u5316");
     const scope = input.options.scopeId ?? input.options.cwd;
     const cwd = input.options.cwd;
     if (resolved.notice) emit2(textEvent(`${resolved.notice}
@@ -19180,7 +19264,8 @@ var StructuredAdapter = class {
       current.sideView = void 0;
     }
     if (existing) {
-      existing.backend = backend;
+      const activeBackend = existing.backend ?? resolvedBackend;
+      existing.backend = activeBackend;
       existing.updatedAt = Date.now();
       emit2({
         type: "system",
@@ -19190,7 +19275,7 @@ var StructuredAdapter = class {
       emit2(textEvent(`\u590D\u7528 MixAgents side agent ${existing.agent.agentId}\uFF08route=${existing.route.id}\uFF09\u3002
 `));
       try {
-        const result = await backend.send(existing.agent, body, signal, workerTimeoutMs);
+        const result = await activeBackend.send(existing.agent, body, signal, workerTimeoutMs);
         await this.applyMixagentsResult(existing, result, emit2);
       } catch (error) {
         if (signal.aborted) {
@@ -19199,14 +19284,28 @@ var StructuredAdapter = class {
         if (error instanceof SubagentAgentNotFoundError) {
           emit2(textEvent(`\u65E7 MixAgents agent ${existing.agent.agentId} \u5DF2\u4E0D\u5B58\u5728\uFF1B\u5C06\u521B\u5EFA\u65B0\u7684 side agent\u3002
 `));
+          if (activeBackend !== resolvedBackend) {
+            await activeBackend.closeBackend?.().catch(() => {
+            });
+          }
           this.mixagentsSides.delete(`${scope}\0${cwd}`);
           await this.saveMixagentsSides();
           existing = void 0;
         } else {
+          if (activeBackend !== resolvedBackend) {
+            await resolvedBackend.closeBackend?.().catch(() => {
+            });
+          }
           throw error;
         }
       }
-      if (existing) return;
+      if (existing) {
+        if (activeBackend !== resolvedBackend) {
+          await resolvedBackend.closeBackend?.().catch(() => {
+          });
+        }
+        return;
+      }
     }
     emit2({
       type: "system",
@@ -19215,7 +19314,7 @@ var StructuredAdapter = class {
     });
     emit2(textEvent(`\u521B\u5EFA MixAgents side\uFF1Aroute=${route.id} provider=${route.provider} model=${route.model} access=read-only
 `));
-    const agent = await backend.createOrReuse({
+    const agent = await resolvedBackend.createOrReuse({
       route,
       task: input.task,
       cwd,
@@ -19225,7 +19324,7 @@ var StructuredAdapter = class {
     });
     const state = {
       agent,
-      backend,
+      backend: resolvedBackend,
       route,
       routeFingerprint: subagentRouteFingerprint(route),
       cwd,
@@ -19235,7 +19334,7 @@ var StructuredAdapter = class {
     this.mixagentsSides.set(`${scope}\0${cwd}`, state);
     await this.saveMixagentsSides();
     try {
-      const result = await backend.wait(agent, signal, workerTimeoutMs);
+      const result = await resolvedBackend.wait(agent, signal, workerTimeoutMs);
       await this.applyMixagentsResult(state, result, emit2);
     } catch (error) {
       if (signal.aborted) {
@@ -19244,7 +19343,7 @@ var StructuredAdapter = class {
       if (error instanceof SubagentAgentNotFoundError) {
         emit2(textEvent(`MixAgents agent ${agent.agentId} \u5728\u542F\u52A8\u540E\u6D88\u5931\uFF1B\u6B63\u5728\u81EA\u52A8\u521B\u5EFA\u65B0 agent\u3002
 `));
-        const replacement = await backend.createOrReuse({
+        const replacement = await resolvedBackend.createOrReuse({
           route,
           task: input.task,
           cwd,
@@ -19256,7 +19355,7 @@ var StructuredAdapter = class {
         state.updatedAt = Date.now();
         this.mixagentsSides.set(`${scope}\0${cwd}`, state);
         await this.saveMixagentsSides();
-        const result = await backend.wait(replacement, signal, workerTimeoutMs);
+        const result = await resolvedBackend.wait(replacement, signal, workerTimeoutMs);
         await this.applyMixagentsResult(state, result, emit2);
         return;
       }
@@ -20571,6 +20670,7 @@ var PreferredStructuredAdapter = class {
       tail: (scope, lines, cwd) => this.selected(scope).tmux.tail(scope, lines, cwd),
       diagnostics: (scope, cwd) => this.selected(scope).tmux.diagnostics(scope, cwd),
       sendInput: (scope, input, cwd, active2) => this.selected(scope).tmux.sendInput?.(scope, input, cwd, active2) ?? Promise.resolve(false),
+      sendCommand: (scope, command, cwd, active2) => this.selected(scope).tmux.sendCommand?.(scope, command, cwd, active2) ?? Promise.resolve(false),
       interrupt: (scope, cwd, options) => this.selected(scope).tmux.interrupt(scope, cwd, options)
     };
   }
@@ -21091,7 +21191,7 @@ function safeJsonStringify(value) {
 import { randomUUID as randomUUID4 } from "crypto";
 import { lstat as lstat7, readFile as readFile21, realpath as realpath9 } from "fs/promises";
 import { homedir as homedir14 } from "os";
-import { basename as basename7, dirname as dirname20, isAbsolute as isAbsolute8, relative as relative3, sep } from "path";
+import { basename as basename8, dirname as dirname20, isAbsolute as isAbsolute8, relative as relative3, sep } from "path";
 
 // src/card/account-cards.ts
 function maskAppId(id) {
@@ -23693,13 +23793,13 @@ async function handleSendFile(args, ctx) {
   try {
     await ctx.channel.send(
       ctx.msg.chatId,
-      { file: { source: resolvedPath, fileName: basename7(resolvedPath) } },
+      { file: { source: resolvedPath, fileName: basename8(resolvedPath) } },
       commandReplyOptions(ctx)
     );
     log.info("command", "send-file", {
       profile: ctx.controls.profile,
       size: entry.size,
-      fileName: basename7(resolvedPath)
+      fileName: basename8(resolvedPath)
     });
   } catch (err) {
     log.fail("command", err, { step: "send-file" });
@@ -29471,7 +29571,7 @@ async function removeReaction(channel, messageId, reactionId) {
 import { createHash as createHash15, randomBytes as randomBytes5 } from "crypto";
 import { lstat as lstat8, mkdir as mkdir25, readFile as readFile23, realpath as realpath10, rm as rm15 } from "fs/promises";
 import { createServer } from "net";
-import { basename as basename8, dirname as dirname22, isAbsolute as isAbsolute9, relative as relative4, resolve as resolve8, sep as sep2 } from "path";
+import { basename as basename9, dirname as dirname22, isAbsolute as isAbsolute9, relative as relative4, resolve as resolve8, sep as sep2 } from "path";
 var ArtifactBroker = class {
   constructor(socketPath, channel, allowLocalFileRoot, persistentStatePath) {
     this.channel = channel;
@@ -29620,7 +29720,7 @@ var ArtifactBroker = class {
     const caption = normalizeCaption(request.caption);
     await this.channel.send(
       grant.chatId,
-      { file: { source: resolved, fileName: basename8(resolved) } },
+      { file: { source: resolved, fileName: basename9(resolved) } },
       { replyTo: grant.replyTo, ...grant.replyInThread ? { replyInThread: true } : {} }
     );
     if (caption) {
@@ -29632,10 +29732,10 @@ var ArtifactBroker = class {
     }
     log.info("artifact", "delivered", {
       scope: grant.scope,
-      name: basename8(resolved),
+      name: basename9(resolved),
       size: entry.size
     });
-    return { ok: true, message: `\u5DF2\u53D1\u9001 ${basename8(resolved)}` };
+    return { ok: true, message: `\u5DF2\u53D1\u9001 ${basename9(resolved)}` };
   }
   async loadPersistentGrants() {
     if (!this.persistentStatePath) return;
@@ -31079,6 +31179,32 @@ async function intakeMessage(deps) {
     if (nativeInputMode === "side" || nativeInputMode === "side-exit") {
       log.info("intake", "native-side-coexists-with-main", { scope, inputMode: nativeInputMode });
     } else {
+      const activeMain = activeRuns.get(scope);
+      const sendCommand = agent.tmux?.sendCommand;
+      if (activeMain && sendCommand && !activeMain.interrupted && !activeMain.stopRequested && !activeMain.detached) {
+        const stillActive = () => activeRuns.get(scope) === activeMain;
+        if (stillActive() && await sendCommand(
+          scope,
+          agentMsg.content,
+          workspaces.cwdFor(scope) ?? controls.profileConfig.workspaces.default,
+          stillActive
+        )) {
+          log.info("intake", "native-command-injected", {
+            scope,
+            command: agentMsg.content.trim().slice(0, 120)
+          });
+          await channel.send(
+            msg.chatId,
+            { text: `\u21AA \u5DF2\u53D1\u9001\u5230\u5F53\u524D Codex \u4EFB\u52A1\uFF1A${agentMsg.content.trim()}` },
+            {
+              replyTo: msg.messageId,
+              ...chatMode === "topic" && threadId ? { replyInThread: true } : {}
+            }
+          ).catch(() => {
+          });
+          return;
+        }
+      }
       log.info("intake", "native-command-deferred-until-idle", {
         scope,
         command: agentMsg.content.trim().slice(0, 120)
@@ -34877,7 +35003,7 @@ import * as p3 from "@clack/prompts";
 
 // src/agent/subagents/diagnostics.ts
 import { homedir as homedir16 } from "os";
-import { basename as basename9, dirname as dirname25, join as join41 } from "path";
+import { basename as basename10, dirname as dirname25, join as join41 } from "path";
 import { readFile as readFile29 } from "fs/promises";
 async function collectSubagentDiagnostics(input) {
   const env = input.env ?? process.env;
@@ -34991,7 +35117,7 @@ async function collectSubagentDiagnostics(input) {
     if ("error" in providerResolution) {
       return {
         ...base,
-        launchCommand: basename9(launch.command),
+        launchCommand: basename10(launch.command),
         mcpStart: "not-configured",
         mcp: {
           status: "unavailable",
@@ -35003,7 +35129,7 @@ async function collectSubagentDiagnostics(input) {
     if (!input.stateDir) {
       return {
         ...base,
-        launchCommand: basename9(launch.command),
+        launchCommand: basename10(launch.command),
         mcpStart: "not-configured",
         mcp: {
           status: "unavailable",
@@ -35030,7 +35156,7 @@ async function collectSubagentDiagnostics(input) {
     } catch (error) {
       return {
         ...base,
-        launchCommand: basename9(launch.command),
+        launchCommand: basename10(launch.command),
         mcpStart: "not-configured",
         mcp: {
           status: "unavailable",
@@ -35060,7 +35186,7 @@ async function collectSubagentDiagnostics(input) {
     return {
       ...base,
       ...brokerRuntime ? { brokerConfigPath: brokerRuntime.brokerConfigPath } : {},
-      launchCommand: basename9(launch.command),
+      launchCommand: basename10(launch.command),
       ...backend.serverVersion ? { packageVersion: backend.serverVersion } : {},
       toolContract: "compatible",
       mcpStart: "started",
@@ -35107,7 +35233,7 @@ async function collectSubagentDiagnostics(input) {
   } catch (error) {
     return {
       ...base,
-      launchCommand: basename9(launch.command),
+      launchCommand: basename10(launch.command),
       ...backend.serverVersion ? { packageVersion: backend.serverVersion } : {},
       toolContract: error instanceof SubagentUnavailableError && error.code === "mixagents-incompatible" ? "incompatible" : "unknown",
       mcpStart: error instanceof SubagentUnavailableError && error.code === "mixagents-incompatible" ? "started" : error instanceof SubagentUnavailableError && error.code === "mixagents-start-failed" ? "failed" : "not-configured",
@@ -36184,7 +36310,7 @@ import {
   readdir as readdir8,
   writeFile as writeFile10
 } from "fs/promises";
-import { basename as basename10, dirname as dirname27, join as join44 } from "path";
+import { basename as basename11, dirname as dirname27, join as join44 } from "path";
 import { fileURLToPath as fileURLToPath2 } from "url";
 var POC_MARKERS = [
   "ARG_BRIDGE_LOCAL_POC_MANAGED",
@@ -36390,7 +36516,7 @@ function normalizeSideMap(input) {
 }
 async function findOriginalBackup(path) {
   const names = await readdir8(dirname27(path)).catch(() => []);
-  const stem = basename10(path);
+  const stem = basename11(path);
   const candidates = names.filter(
     (name) => [
       `${stem}.orig`,

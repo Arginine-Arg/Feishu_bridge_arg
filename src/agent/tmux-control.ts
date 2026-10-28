@@ -84,6 +84,13 @@ export interface AgentTmuxControl {
     cwd?: string,
     stillActive?: () => boolean,
   ): Promise<boolean>;
+  /** Inject a native slash command without interrupting the active turn. */
+  sendCommand?(
+    scopeId: string,
+    command: string,
+    cwd?: string,
+    stillActive?: () => boolean,
+  ): Promise<boolean>;
   /** Sends one guarded Ctrl-C to a durable terminal when no live handle exists. */
   interrupt?(scopeId: string, cwd?: string, options?: TmuxInterruptOptions): Promise<boolean>;
   /** Restores a persistent artifact grant to one bridge-managed tmux session. */

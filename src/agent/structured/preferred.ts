@@ -75,6 +75,8 @@ export class PreferredStructuredAdapter implements AgentAdapter {
       tail: (scope, lines, cwd) => this.selected(scope).tmux!.tail!(scope, lines, cwd),
       diagnostics: (scope, cwd) => this.selected(scope).tmux!.diagnostics!(scope, cwd),
       sendInput: (scope, input, cwd, active) => this.selected(scope).tmux!.sendInput?.(scope, input, cwd, active) ?? Promise.resolve(false),
+      sendCommand: (scope, command, cwd, active) =>
+        this.selected(scope).tmux!.sendCommand?.(scope, command, cwd, active) ?? Promise.resolve(false),
       interrupt: (scope, cwd, options) => this.selected(scope).tmux!.interrupt!(scope, cwd, options),
     };
   }

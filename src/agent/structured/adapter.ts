@@ -828,8 +828,8 @@ export class StructuredAdapter implements AgentAdapter {
     signal: AbortSignal;
   }): Promise<void> {
     const { current, resolved, route, body, emit, signal } = input;
-    const backend = resolved.backend;
-    if (!backend) throw new Error('MixAgents backend 未初始化');
+    const resolvedBackend = resolved.backend;
+    if (!resolvedBackend) throw new Error('MixAgents backend 未初始化');
     const scope = input.options.scopeId ?? input.options.cwd!;
     const cwd = input.options.cwd!;
     if (resolved.notice) emit(textEvent(`${resolved.notice}\n`));
@@ -862,7 +862,8 @@ export class StructuredAdapter implements AgentAdapter {
     }
 
     if (existing) {
-      existing.backend = backend;
+      const activeBackend = existing.backend ?? resolvedBackend;
+      existing.backend = activeBackend;
       existing.updatedAt = Date.now();
       emit({
         type: 'system',
@@ -871,7 +872,7 @@ export class StructuredAdapter implements AgentAdapter {
       });
       emit(textEvent(`复用 MixAgents side agent ${existing.agent.agentId}（route=${existing.route.id}）。\n`));
       try {
-        const result = await backend.send(existing.agent, body, signal, workerTimeoutMs);
+        const result = await activeBackend.send(existing.agent, body, signal, workerTimeoutMs);
         await this.applyMixagentsResult(existing, result, emit);
       } catch (error) {
         if (signal.aborted) {
@@ -879,14 +880,29 @@ export class StructuredAdapter implements AgentAdapter {
         }
         if (error instanceof SubagentAgentNotFoundError) {
           emit(textEvent(`旧 MixAgents agent ${existing.agent.agentId} 已不存在；将创建新的 side agent。\n`));
+          if (activeBackend !== resolvedBackend) {
+            await activeBackend.closeBackend?.().catch(() => {});
+          }
           this.mixagentsSides.delete(`${scope}\0${cwd}`);
           await this.saveMixagentsSides();
           existing = undefined;
         } else {
+          if (activeBackend !== resolvedBackend) {
+            await resolvedBackend.closeBackend?.().catch(() => {});
+          }
           throw error;
         }
       }
-      if (existing) return;
+      if (existing) {
+        // The newly resolved backend was only needed to verify the current
+        // route. Keep the original Broker process that owns the worker's
+        // runtime; opening a second process for the same agent causes an
+        // active-writer collision on the next follow-up.
+        if (activeBackend !== resolvedBackend) {
+          await resolvedBackend.closeBackend?.().catch(() => {});
+        }
+        return;
+      }
     }
 
     emit({
@@ -895,7 +911,7 @@ export class StructuredAdapter implements AgentAdapter {
       sideConversation: 'entered',
     });
     emit(textEvent(`创建 MixAgents side：route=${route.id} provider=${route.provider} model=${route.model} access=read-only\n`));
-    const agent = await backend.createOrReuse({
+    const agent = await resolvedBackend.createOrReuse({
       route,
       task: input.task,
       cwd,
@@ -905,7 +921,7 @@ export class StructuredAdapter implements AgentAdapter {
     });
     const state: MixAgentsSideState = {
       agent,
-      backend,
+      backend: resolvedBackend,
       route,
       routeFingerprint: subagentRouteFingerprint(route),
       cwd,
@@ -915,7 +931,7 @@ export class StructuredAdapter implements AgentAdapter {
     this.mixagentsSides.set(`${scope}\0${cwd}`, state);
     await this.saveMixagentsSides();
     try {
-      const result = await backend.wait(agent, signal, workerTimeoutMs);
+      const result = await resolvedBackend.wait(agent, signal, workerTimeoutMs);
       await this.applyMixagentsResult(state, result, emit);
     } catch (error) {
       if (signal.aborted) {
@@ -923,7 +939,7 @@ export class StructuredAdapter implements AgentAdapter {
       }
       if (error instanceof SubagentAgentNotFoundError) {
         emit(textEvent(`MixAgents agent ${agent.agentId} 在启动后消失；正在自动创建新 agent。\n`));
-        const replacement = await backend.createOrReuse({
+        const replacement = await resolvedBackend.createOrReuse({
           route,
           task: input.task,
           cwd,
@@ -935,7 +951,7 @@ export class StructuredAdapter implements AgentAdapter {
         state.updatedAt = Date.now();
         this.mixagentsSides.set(`${scope}\0${cwd}`, state);
         await this.saveMixagentsSides();
-        const result = await backend.wait(replacement, signal, workerTimeoutMs);
+        const result = await resolvedBackend.wait(replacement, signal, workerTimeoutMs);
         await this.applyMixagentsResult(state, result, emit);
         return;
       }

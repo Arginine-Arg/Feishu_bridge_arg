@@ -1,7 +1,12 @@
+import { EventEmitter } from 'node:events';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, it } from 'vitest';
+import { StructuredAdapter } from '../../src/agent/structured/adapter';
+import { CodexStructuredSession } from '../../src/agent/structured/codex';
+import type { RpcClient } from '../../src/agent/structured/rpc';
+import { StructuredView } from '../../src/agent/structured/view';
 import {
   BrokerToolController,
 } from '../../src/agent/subagents/broker-tools';
@@ -12,6 +17,7 @@ import {
   DEFAULT_SUBAGENT_CONFIG,
   type SubagentConfig,
 } from '../../src/config/profile-schema';
+import type { AgentEvent, AgentRun } from '../../src/agent/types';
 
 const real = process.env.ARG_BRIDGE_REAL_CC_SWITCH_E2E === '1' ? it : it.skip;
 
@@ -25,7 +31,7 @@ real('uses the current cc-switch provider for a real three-round Broker worker',
     ...DEFAULT_SUBAGENT_CONFIG,
     mode: 'broker',
     routeMode: 'follow-cc-switch',
-    ccSwitchProviderId: null,
+    ccSwitchProviderId: process.env.ARG_BRIDGE_REAL_CC_SWITCH_PROVIDER_ID?.trim() || null,
     allowForkFallback: false,
     modelTools: true,
   };
@@ -66,6 +72,9 @@ real('uses the current cc-switch provider for a real three-round Broker worker',
         codexHome,
         codexBin: process.env.ARG_BRIDGE_CODEX_BIN?.trim() || 'codex',
         stateDir,
+        ...(config.ccSwitchProviderId
+          ? { providerId: config.ccSwitchProviderId }
+          : {}),
       });
       return {
         brokerConfigPath: generated.brokerConfigPath,
@@ -132,3 +141,90 @@ real('uses the current cc-switch provider for a real three-round Broker worker',
     });
   }
 }, 650_000);
+
+real('routes consecutive /btw turns through the selected real cc-switch provider', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'arg-bridge-real-cc-switch-btw-'));
+  const cwd = process.cwd();
+  const profileDir = join(root, 'profile');
+  const stateDir = join(profileDir, 'structured');
+  const codexHome = process.env.CODEX_HOME ?? join(process.env.HOME ?? root, '.codex');
+  const env = { ...process.env };
+  const providerId = process.env.ARG_BRIDGE_REAL_CC_SWITCH_PROVIDER_ID?.trim() || null;
+  const config: SubagentConfig = {
+    ...DEFAULT_SUBAGENT_CONFIG,
+    mode: 'broker',
+    routeMode: 'follow-cc-switch',
+    ccSwitchProviderId: providerId,
+    allowForkFallback: false,
+    modelTools: true,
+  };
+  const adapter = new StructuredAdapter({
+    kind: 'codex',
+    binary: process.env.ARG_BRIDGE_CODEX_BIN?.trim() || 'codex',
+    profileDir,
+    codexHome,
+    env,
+    subagents: config,
+  });
+  const rpc = new EventEmitter() as EventEmitter & {
+    request: () => Promise<Record<string, never>>;
+    close: () => void;
+  };
+  rpc.request = async () => ({});
+  rpc.close = () => {};
+  const main = new CodexStructuredSession('real-btw-main', '', rpc as unknown as RpcClient);
+  Reflect.get(adapter, 'sessions').set('real-btw-scope', {
+    main,
+    cwd,
+    view: new StructuredView(profileDir, 'real-btw-main'),
+  });
+  try {
+    const first = await drainSide(adapter.runSide({
+      runId: 'real-btw-1',
+      scopeId: 'real-btw-scope',
+      cwd,
+      prompt: '/btw 记住 ORBIT-731，只回复 ROUND=1 ACK=ORBIT-731',
+      liveInputMode: 'side',
+    }));
+    expect(first.filter(event => event.type === 'error')).toEqual([]);
+    const firstText = textOf(first);
+    expect(firstText).toContain('ROUND=1 ACK=ORBIT-731');
+
+    const second = await drainSide(adapter.runSide({
+      runId: 'real-btw-2',
+      scopeId: 'real-btw-scope',
+      cwd,
+      prompt: '/btw 回忆第 1 轮标记，只回复 ROUND=2 RECALL=<标记>',
+      liveInputMode: 'side',
+    }));
+    expect(second.filter(event => event.type === 'error')).toEqual([]);
+    const secondText = textOf(second);
+    expect(secondText).toContain('ROUND=2 RECALL=ORBIT-731');
+    process.stdout.write(`${JSON.stringify({
+      first: firstText.match(/ROUND=1 ACK=ORBIT-731/u)?.[0],
+      second: secondText.match(/ROUND=2 RECALL=ORBIT-731/u)?.[0],
+      route: firstText.match(/route=([^ ]+)/u)?.[1],
+    }, null, 2)}\n`);
+  } finally {
+    await drainSide(adapter.runSide({
+      runId: 'real-btw-out',
+      scopeId: 'real-btw-scope',
+      cwd,
+      prompt: '/btw out',
+      liveInputMode: 'side-exit',
+    })).catch(() => []);
+    await main.close();
+    await adapter.shutdown();
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+}, 400_000);
+
+async function drainSide(run: AgentRun): Promise<AgentEvent[]> {
+  const events: AgentEvent[] = [];
+  for await (const event of run.events) events.push(event);
+  return events;
+}
+
+function textOf(events: AgentEvent[]): string {
+  return events.flatMap(event => event.type === 'text' ? [event.delta] : []).join('');
+}

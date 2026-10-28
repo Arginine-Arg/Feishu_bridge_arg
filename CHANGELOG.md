@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.9.6
+
+- Fixed repeated `/btw` follow-ups failing with `already has an active writer`.
+  A changed route is still validated on every request, but an unchanged side
+  agent uses the Broker backend that owns its live worker. The temporary
+  verification backend is closed, and an `agent_not_found` recovery keeps the
+  replacement backend alive long enough to recreate the worker.
+- Generated cc-switch runtimes now bypass legacy
+  `mixagents-broker-mcp`/`mixagents-broker` wrappers and start the bundled
+  compatible Broker directly. This removes the repeated runtime-recovery
+  message without changing the selected provider, model or credential.
+- Third-party Broker workers now launch Codex with
+  `web_search = "disabled"`. Codex 0.164 otherwise sends a native
+  `web_search` tool even for custom Responses providers; halfapi rejected
+  those requests as 503/timeout while the same model and key succeeded with
+  ordinary Codex tool definitions.
+- Native `/model`, `/compact` and similar commands are injected directly into
+  the active live Codex terminal, matching Codex composer behavior instead of
+  waiting for the current task to finish. Adapters without active-command
+  injection retain the queue-only fallback.
+- Added regressions for same-route backend reuse, `agent_not_found` recreation,
+  old wrapper selection and direct native-command injection.
+
 ## 1.9.5
 
 - Fixed `/btw` coexistence with an active main run. The side marker is now
