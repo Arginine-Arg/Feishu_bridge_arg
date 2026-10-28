@@ -4,7 +4,7 @@ A lightweight bot that bridges Feishu / Lark messenger with your local Claude Co
 
 [中文 README](./README.zh.md)
 
-Version 1.11.0 bundles a source-auditable MixAgents Broker fork and adds `events-v1` progress streaming to `/btw`: model text deltas and safe tool lifecycle updates arrive through bounded cursor/long-poll events while the terminal mailbox remains authoritative. Older external brokers fall back to visible heartbeats. The vendored build replaces the npm optional dependency and includes upstream commit, MIT license and third-party provenance. Version 1.10.1 removed the remaining legacy wrapper fallback warning and made timeout/interrupted sides rotate safely. Version 1.10.0 added explicit one-task workspace-write support.
+Version 1.11.1 makes `sideTimeoutMs` a soft waiting notice and automatically continues `/btw` across `workerTimeoutMs` wait windows, so a long answer returns through the original run without requiring another question. `/btw result` remains available for retained timeout state after Bridge interruption or old-version recovery, without replaying the task; `/btw out` explicitly interrupts/discards it. Version 1.11.0 bundled a source-auditable MixAgents Broker fork with `events-v1` text/tool progress streaming while keeping the terminal mailbox authoritative.
 
 Version 1.6.7 introduced provider-aware Codex resume, and 1.7.0 added idle-boundary rebinding. Version 1.9.1 narrows reattachment semantics: reconnecting to an existing native or structured thread preserves the provider/model recorded by that thread instead of silently following a newly selected cc-switch route.
 
@@ -60,7 +60,7 @@ Install a pinned release or use a writable custom npm prefix when required:
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.11.0
+sh /tmp/install-arg-bridge.sh --version 1.11.1
 # Example for a machine without permission to write npm's configured global prefix:
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ Release tarballs are preferred. If a Git install is required, keep both compatib
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.11.0"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.11.1"
 ```
 
-`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.11.0`.
+`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.11.1`.
 
 ### 4. Node or npm global-prefix errors
 
@@ -359,7 +359,7 @@ See [MixAgents subagents](./docs/mixagents-subagents.md), [Bridge-managed native
 | `/sendfile <absolute-path>` | Admin-only: reply with a regular file from the current workspace, bridge media cache, or an explicitly allowed outbound directory, without invoking the agent |
 | `/config` | Adjust presentation preferences, access settings, and lark-cli identity policy |
 | `/model` | Choose the model; Codex uses its native model/reasoning picker and syncs the result to the active profile. `/codex model` is a shorthand for `/codex /model`. |
-| `/btw [--route <id>] [<text>]` | Open or reuse an independent side agent; access is read-only by default. The bundled Broker streams text deltas and safe tool lifecycle progress via `events-v1`; final mailbox results remain authoritative. Use `/btw --write --workspace <canonical-path> <task>` for one explicitly authorized workspace-write turn when the profile allows write workers. Read-only `auto` mode may fall back to the main session's provider through Codex `thread/fork`; write tasks, manual routes and explicit `--route` never fall back. `/btw out` closes only the side. |
+| `/btw [--route <id>] [<text>]` | Open or reuse an independent side agent; access is read-only by default. The bundled Broker streams text deltas and safe tool lifecycle progress via `events-v1`; final mailbox results remain authoritative. `sideTimeoutMs` is a soft notice and each `workerTimeoutMs` wait window automatically continues until completion or explicit `/btw out`. `/btw result` is a recovery command for retained timeout state and never resends the task. Write tasks use `/btw --write --workspace <canonical-path> <task>` and never fall back to Codex fork. |
 | `/session [status\|live\|turn]` | Inspect terminal execution. tmux/live is the default; `turn` remains a legacy compatibility fallback |
 | `/tmux list [socket]` | Admin-only: list every live Codex/Claude tmux pane on this host, including working directory, agent kind, adopted thread, shared App Server endpoint, and attach command. Optional `-S <absolute socket path>` or `-L <socket name>` selects one tmux server; plain shells are never listed |
 | `/tmux bind <number\|pane id\|socket::pane id>` | Admin-only: bind the current chat/topic scope to a listed pane. A pane with a shared Codex endpoint is driven through structured transport; a plain Codex/Claude pane falls back to live transport. `/tmux list` numbers are only valid for the most recent listing |

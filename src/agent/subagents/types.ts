@@ -56,9 +56,9 @@ export interface SideAgentResult {
 }
 
 export type SideAgentProgress =
-  | { type: 'text'; text: string; itemId?: string }
-  | { type: 'tool_started'; tool: string; itemId?: string }
-  | { type: 'tool_completed'; tool: string; itemId?: string }
+  | { type: 'text'; text: string; itemId?: string; cursor?: number }
+  | { type: 'tool_started'; tool: string; itemId?: string; cursor?: number }
+  | { type: 'tool_completed'; tool: string; itemId?: string; cursor?: number }
   | { type: 'notice'; text: string };
 
 export type SideAgentProgressHandler = (event: SideAgentProgress) => void;
@@ -89,6 +89,7 @@ export interface SubagentBackend {
     signal: AbortSignal,
     timeoutMs?: number,
     onProgress?: SideAgentProgressHandler,
+    cursor?: number,
   ): Promise<SideAgentResult>;
   send(
     agent: SideAgent,

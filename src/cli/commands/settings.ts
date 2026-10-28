@@ -430,20 +430,20 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
     assertPrompt(concurrencyText);
     maxConcurrentWorkers = boundedIntegerInput(concurrencyText, 1, 32, '最大并发子代理数');
     const timeoutText = await p.text({
-      message: '单个子代理最长运行时间（分钟）',
+      message: '单个 worker 等待窗口（分钟；/btw 会自动续等）',
       initialValue: String(workerTimeoutMs / 60_000),
     });
     assertPrompt(timeoutText);
     workerTimeoutMs = Math.round(
-      boundedNumberInput(timeoutText, 0.5, 1440, '子代理超时分钟数') * 60_000,
+      boundedNumberInput(timeoutText, 0.5, 1440, '子代理等待窗口分钟数') * 60_000,
     );
     const sideTimeoutText = await p.text({
-      message: '/btw 单轮最长等待时间（秒）',
+      message: '/btw 超过多少秒后提示“仍在后台运行”？（秒）',
       initialValue: String(sideTimeoutMs / 1_000),
     });
     assertPrompt(sideTimeoutText);
     sideTimeoutMs = Math.round(
-      boundedNumberInput(sideTimeoutText, 15, 1800, '/btw 单轮等待秒数') * 1_000,
+      boundedNumberInput(sideTimeoutText, 15, 1800, '/btw 快速等待提示秒数') * 1_000,
     );
     const sideEffort = await p.select<SubagentConfig['sideReasoningEffort']>({
       message: '/btw 的推理速度',
@@ -588,8 +588,8 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
       : webSearch === 'native'
         ? '强制原生'
         : '关闭'}`,
-    `/btw 只读速度：reasoning=${sideReasoningEffort} timeout=${sideTimeoutMs / 1_000}s；` +
-    '--write 使用 workerTimeoutMs 和 provider 默认 reasoning',
+    `/btw 只读：reasoning=${sideReasoningEffort} fast-notice=${sideTimeoutMs / 1_000}s；` +
+    `每 ${workerTimeoutMs / 60_000} 分钟等待窗口自动续等；/btw out 取消，/btw result 用于异常恢复`,
     `项目证据校验：${rsiMode === 'off' ? '关闭' : '自动（只对已初始化项目）'}`,
     advanced ? '高级参数：已展开编辑' : '高级参数：保持原值',
   ].join('\n'), '步骤 5 / 5 · 保存前确认');

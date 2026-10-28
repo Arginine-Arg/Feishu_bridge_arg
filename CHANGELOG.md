@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.11.1
+
+- `sideTimeoutMs` is now a soft waiting notice instead of a hard cancellation.
+  A read-only `/btw` automatically starts another wait window after
+  `workerTimeoutMs`, so a long answer can still finish and return through the
+  original side run without a user command.
+- Added `/btw result` as a recovery path for retained timeout state after an
+  old-version timeout, Bridge interruption, or other abnormal recovery. It
+  resumes progress from the persisted event cursor and does not resend the task.
+- An explicitly retained timeout side is not silently replaced. A new normal
+  `/btw` requires `/btw result` to collect it or `/btw out` to explicitly
+  interrupt/discard it.
+- Timeout diagnostics and `/status` now show side status and cursor explicitly.
+
 ## 1.11.0
 
 - Vendors a source-auditable MixAgents Broker 0.1.1 fork under

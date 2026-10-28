@@ -123,7 +123,7 @@ export interface SubagentConfig {
   toolNamespace: string;
   maxConcurrentWorkers: number;
   workerTimeoutMs: number;
-  /** Fast, independent budget for conversational /btw side turns. */
+  /** When to tell the user that a read-only /btw side is still running. */
   sideTimeoutMs: number;
   /**
    * Reasoning effort for interactive /btw side turns. Automatic workers keep

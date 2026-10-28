@@ -236,6 +236,7 @@ export function helpCard(agentName = 'Agent'): object {
         '- `/model` — 选择模型；Codex 使用 CLI 原生模型和 reasoning 选项并同步到 profile',
         '- `/btw <内容>` — 只读 side conversation；`/codex /btw <内容>` 等价',
         '- `/btw --write --workspace <canonical 路径> <任务>` — 显式授权一次 workspace-write（需在 settings 高级参数启用）',
+        '- `/btw result` — 收取后台 side 在软等待提示或硬等待结束后产生的迟到结果；`/btw out` 才会中断并丢弃',
         '- `/status` — 当前状态',
         '- `/session` — 查看或切换后台 agent session 模式',
         '- `/tmux list [socket]|bind <编号或 pane id>|status|attach|tail [N]|unbind|release` — 管理员管理 tmux；`list` 显示共享 endpoint 与 structured 命令，`tail` 默认显示当前 pane 末尾 27 行',

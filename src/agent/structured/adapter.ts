@@ -101,6 +101,7 @@ const shellQuote = (value: string): string => `'${value.replace(/'/g, `'\\''`)}'
 const LEGACY_RESUME_TIMEOUT_MS = 180_000;
 const LEGACY_RESUME_PROBE_TIMEOUT_MS = 5_000;
 const LEGACY_RESUME_RECONCILE_MS = 180_000;
+const SIDE_RESULT_POLL_MS = 30_000;
 
 /**
  * A saved/bound endpoint whose socket no longer exists or cannot be reached.
@@ -212,9 +213,6 @@ function routeChangeReason(
   cwd: string,
   access: 'read-only' | 'workspace-write',
 ): string | undefined {
-  if (state.agent.status === 'timeout' || state.agent.status === 'interrupted') {
-    return `previous turn ${state.agent.status} (${state.agent.agentId})`;
-  }
   if (state.cwd !== cwd) return `workspace ${state.cwd} → ${cwd}`;
   if (state.agent.access !== access) {
     return `access ${state.agent.access} → ${access}`;
@@ -434,6 +432,8 @@ interface MixAgentsSideState {
   backend?: SubagentBackend;
   route: SubagentRoute;
   routeFingerprint: string;
+  /** Last progress callback consumed by this Bridge. */
+  progressCursor?: number;
   /** Stable scope/cwd key; worker cwd can be an explicitly authorized child. */
   scopeCwd?: string;
   cwd: string;
@@ -679,6 +679,7 @@ export class StructuredAdapter implements AgentAdapter {
           agent: side.agent,
           route: side.route,
           routeFingerprint: side.routeFingerprint ?? subagentRouteFingerprint(side.route),
+          ...(side.progressCursor !== undefined ? { progressCursor: side.progressCursor } : {}),
           ...(side.scopeCwd ? { scopeCwd: side.scopeCwd } : {}),
           cwd: side.cwd,
           scope: side.scope,
@@ -696,6 +697,7 @@ export class StructuredAdapter implements AgentAdapter {
           agent: side.agent,
           route: side.route,
           routeFingerprint: side.routeFingerprint,
+          ...(side.progressCursor !== undefined ? { progressCursor: side.progressCursor } : {}),
           ...(side.scopeCwd ? { scopeCwd: side.scopeCwd } : {}),
           cwd: side.cwd,
           scope: side.scope,
@@ -923,6 +925,82 @@ export class StructuredAdapter implements AgentAdapter {
       body,
     ].join('\n');
   }
+  private async collectLateMixagentsResult(input: {
+    scope: string;
+    cwd: string;
+    emit(event: AgentEvent): void;
+    signal: AbortSignal;
+  }): Promise<void> {
+    const state = this.sideStateFor(input.scope, input.cwd) ??
+      this.mixagentsSideForScope(input.scope);
+    if (!state) {
+      input.emit(textEvent('当前没有可收取结果的 MixAgents side。'));
+      return;
+    }
+    const backend = state.backend ?? await this.mixagentsBackendFor(state.cwd, state);
+    if (!backend) {
+      throw new Error('MixAgents side 的 backend 当前不可用；无法收取迟到结果。');
+    }
+    input.emit(textEvent(
+      `正在检查 MixAgents side ${state.agent.agentId} 的 result mailbox` +
+      `（cursor=${state.progressCursor ?? 0}）。\n`,
+    ));
+    const streamedProgress: { text: string; cursor?: number } = {
+      text: '',
+      ...(state.progressCursor !== undefined
+        ? { cursor: state.progressCursor }
+        : {}),
+    };
+    try {
+      const result = await this.withMixagentsHeartbeat(
+        input.emit,
+        state.route,
+        state.agent.access,
+        streamedProgress,
+        undefined,
+        onProgress => backend.wait(
+          state.agent,
+          input.signal,
+          SIDE_RESULT_POLL_MS,
+          onProgress,
+          state.progressCursor ?? 0,
+        ),
+      );
+      state.progressCursor = streamedProgress.cursor ?? state.progressCursor;
+      state.updatedAt = Date.now();
+      if (result.status === 'timeout') {
+        state.agent.status = 'timeout';
+        await this.saveMixagentsSides();
+        input.emit(textEvent(
+          'MixAgents worker 仍没有终态结果；side 继续保留。' +
+          '稍后再次发送 /btw result 即可从当前 cursor 继续收取，/btw out 可明确中断。\n',
+        ));
+        return;
+      }
+      await this.applyMixagentsResult(
+        state,
+        result,
+        input.emit,
+        SIDE_RESULT_POLL_MS,
+        'workerTimeoutMs',
+        streamedProgress.text,
+      );
+      this.mixagentsSides.delete(`${state.scope}\0${state.scopeCwd ?? state.cwd}`);
+      await this.saveMixagentsSides();
+      await backend.closeBackend?.().catch(() => {});
+    } catch (error) {
+      if (error instanceof SubagentAgentNotFoundError) {
+        input.emit(textEvent(
+          `MixAgents agent ${state.agent.agentId} 已不存在，无法恢复迟到结果。\n`,
+        ));
+        this.mixagentsSides.delete(`${state.scope}\0${state.scopeCwd ?? state.cwd}`);
+        await this.saveMixagentsSides();
+        await backend.closeBackend?.().catch(() => {});
+        return;
+      }
+      throw error;
+    }
+  }
   private async runMixagentsSide(input: {
     current: ScopeSession;
     options: AgentRunOptions;
@@ -951,12 +1029,11 @@ export class StructuredAdapter implements AgentAdapter {
     if (!resolvedBackend) throw new Error('MixAgents backend 未初始化');
     const scope = input.options.scopeId ?? input.options.cwd!;
     const scopeCwd = input.options.cwd!;
-    const turnTimeoutMs = access === 'workspace-write'
-      ? resolved.config.workerTimeoutMs
-      : resolved.config.sideTimeoutMs;
-    const timeoutSetting = access === 'workspace-write'
-      ? 'workerTimeoutMs'
-      : 'sideTimeoutMs';
+    const softBudgetMs = access === 'read-only'
+      ? resolved.config.sideTimeoutMs
+      : undefined;
+    const turnTimeoutMs = resolved.config.workerTimeoutMs;
+    const timeoutSetting = 'workerTimeoutMs';
     if (resolved.notice) emit(textEvent(`${resolved.notice}\n`));
     if (!body) {
       const existing = this.sideStateFor(scope, scopeCwd);
@@ -1001,7 +1078,12 @@ export class StructuredAdapter implements AgentAdapter {
         `复用 MixAgents side agent ${existing.agent.agentId}` +
         `（route=${existing.route.id} access=${existing.agent.access} workspace=${existing.cwd}）。\n`,
       ));
-      const streamedProgress = { text: '' };
+      const streamedProgress: { text: string; cursor?: number } = {
+        text: '',
+        ...(existing.progressCursor !== undefined
+          ? { cursor: existing.progressCursor }
+          : {}),
+      };
       try {
         let result: SideAgentResult;
         if (access === 'workspace-write') {
@@ -1027,12 +1109,16 @@ export class StructuredAdapter implements AgentAdapter {
               route,
               access,
               streamedProgress,
-              onProgress => activeBackend.wait(
-                validated,
+              softBudgetMs,
+              async onProgress => this.waitMixagentsUntilTerminal({
+                backend: activeBackend,
+                agent: validated,
                 signal,
-                turnTimeoutMs,
+                timeoutMs: turnTimeoutMs,
+                emit,
+                streamedProgress,
                 onProgress,
-              ),
+              }),
             );
           } else {
             result = await this.withMixagentsHeartbeat(
@@ -1040,13 +1126,26 @@ export class StructuredAdapter implements AgentAdapter {
               route,
               access,
               streamedProgress,
-              onProgress => activeBackend.send(
-                validated,
-                input.task,
-                signal,
-                turnTimeoutMs,
-                onProgress,
-              ),
+              softBudgetMs,
+              async onProgress => {
+                const sent = await activeBackend.send(
+                  validated,
+                  input.task,
+                  signal,
+                  turnTimeoutMs,
+                  onProgress,
+                );
+                return this.waitMixagentsUntilTerminal({
+                  backend: activeBackend,
+                  agent: validated,
+                  signal,
+                  timeoutMs: turnTimeoutMs,
+                  emit,
+                  streamedProgress,
+                  onProgress,
+                  initial: sent,
+                });
+              },
             );
           }
         } else {
@@ -1056,18 +1155,29 @@ export class StructuredAdapter implements AgentAdapter {
             route,
             access,
             streamedProgress,
-            onProgress => activeBackend.send(
-              agent,
-              body,
-              signal,
-              turnTimeoutMs,
-              onProgress,
-            ),
+            softBudgetMs,
+            async onProgress => {
+              const sent = await activeBackend.send(
+                agent,
+                body,
+                signal,
+                turnTimeoutMs,
+                onProgress,
+              );
+              return this.waitMixagentsUntilTerminal({
+                backend: activeBackend,
+                agent,
+                signal,
+                timeoutMs: turnTimeoutMs,
+                emit,
+                streamedProgress,
+                onProgress,
+                initial: sent,
+              });
+            },
           );
         }
-        if (result.status === 'timeout') {
-          await activeBackend.interrupt(existing.agent, AbortSignal.timeout(30_000)).catch(() => {});
-        }
+        existing.progressCursor = streamedProgress.cursor ?? existing.progressCursor;
         await this.applyMixagentsResult(
           existing,
           result,
@@ -1139,23 +1249,25 @@ export class StructuredAdapter implements AgentAdapter {
     };
     this.mixagentsSides.set(`${scope}\0${scopeCwd}`, state);
     await this.saveMixagentsSides();
-    const streamedProgress = { text: '' };
+    const streamedProgress: { text: string; cursor?: number } = { text: '' };
     try {
       const result = await this.withMixagentsHeartbeat(
         emit,
         route,
         access,
         streamedProgress,
-        onProgress => resolvedBackend.wait(
+        softBudgetMs,
+        async onProgress => this.waitMixagentsUntilTerminal({
+          backend: resolvedBackend,
           agent,
           signal,
-          turnTimeoutMs,
+          timeoutMs: turnTimeoutMs,
+          emit,
+          streamedProgress,
           onProgress,
-        ),
+        }),
       );
-      if (result.status === 'timeout') {
-        await resolvedBackend.interrupt(agent, AbortSignal.timeout(30_000)).catch(() => {});
-      }
+      state.progressCursor = streamedProgress.cursor ?? state.progressCursor;
       await this.applyMixagentsResult(
         state,
         result,
@@ -1185,22 +1297,24 @@ export class StructuredAdapter implements AgentAdapter {
         state.updatedAt = Date.now();
         this.mixagentsSides.set(`${scope}\0${scopeCwd}`, state);
         await this.saveMixagentsSides();
-        const replacementProgress = { text: '' };
+        const replacementProgress: { text: string; cursor?: number } = { text: '' };
         const result = await this.withMixagentsHeartbeat(
           emit,
           route,
           access,
           replacementProgress,
-          onProgress => resolvedBackend.wait(
-            replacement,
+          softBudgetMs,
+          async onProgress => this.waitMixagentsUntilTerminal({
+            backend: resolvedBackend,
+            agent: replacement,
             signal,
-            turnTimeoutMs,
+            timeoutMs: turnTimeoutMs,
+            emit,
+            streamedProgress: replacementProgress,
             onProgress,
-          ),
+          }),
         );
-        if (result.status === 'timeout') {
-          await resolvedBackend.interrupt(replacement, AbortSignal.timeout(30_000)).catch(() => {});
-        }
+        state.progressCursor = replacementProgress.cursor ?? state.progressCursor;
         await this.applyMixagentsResult(
           state,
           result,
@@ -1218,21 +1332,25 @@ export class StructuredAdapter implements AgentAdapter {
     emit: (event: AgentEvent) => void,
     route: SubagentRoute,
     access: 'read-only' | 'workspace-write',
-    streamedProgress: { text: string },
+    streamedProgress: { text: string; cursor?: number },
+    softBudgetMs: number | undefined,
     operation: (onProgress: (progress: SideAgentProgress) => void) => Promise<T>,
   ): Promise<T> {
     const heartbeatMs = this.options.sideHeartbeatMs ?? 15_000;
     const startedAt = Date.now();
     let lastActivityAt = startedAt;
+    let softBudgetNoticeSent = softBudgetMs === undefined;
     const onProgress = (progress: SideAgentProgress): void => {
       lastActivityAt = Date.now();
       if (progress.type === 'text') {
+        if (progress.cursor !== undefined) streamedProgress.cursor = progress.cursor;
         const text = redactSecrets(progress.text);
         streamedProgress.text = `${streamedProgress.text}${text}`.slice(-50_000);
         emit(textEvent(text));
         return;
       }
       if (progress.type === 'tool_started') {
+        if (progress.cursor !== undefined) streamedProgress.cursor = progress.cursor;
         emit({
           type: 'tool_use',
           id: progress.itemId ?? `side-tool-${progress.tool}`,
@@ -1242,6 +1360,7 @@ export class StructuredAdapter implements AgentAdapter {
         return;
       }
       if (progress.type === 'tool_completed') {
+        if (progress.cursor !== undefined) streamedProgress.cursor = progress.cursor;
         emit({
           type: 'tool_result',
           id: progress.itemId ?? `side-tool-${progress.tool}`,
@@ -1254,6 +1373,20 @@ export class StructuredAdapter implements AgentAdapter {
     };
     const timer = heartbeatMs > 0
       ? setInterval(() => {
+          const elapsedMs = Date.now() - startedAt;
+          if (
+            !softBudgetNoticeSent &&
+            softBudgetMs !== undefined &&
+            elapsedMs >= softBudgetMs
+          ) {
+            softBudgetNoticeSent = true;
+            emit(textEvent(
+              `⏳ MixAgents side 已超过 ${Math.max(1, Math.round(softBudgetMs / 1_000))} 秒快速等待提示；` +
+              'worker 仍在后台继续，最终结果会继续通过本 side 返回。' +
+              '硬上限由 workerTimeoutMs 控制，无需重新提问。\n',
+            ));
+            return;
+          }
           if (Date.now() - lastActivityAt < heartbeatMs) return;
           const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1_000));
           emit(textEvent(
@@ -1268,6 +1401,34 @@ export class StructuredAdapter implements AgentAdapter {
     } finally {
       if (timer) clearInterval(timer);
     }
+  }
+  private async waitMixagentsUntilTerminal(input: {
+    backend: SubagentBackend;
+    agent: SideAgent;
+    signal: AbortSignal;
+    timeoutMs: number;
+    emit(event: AgentEvent): void;
+    streamedProgress: { text: string; cursor?: number };
+    onProgress: (progress: SideAgentProgress) => void;
+    initial?: SideAgentResult;
+  }): Promise<SideAgentResult> {
+    let result = input.initial;
+    while (!result || result.status === 'timeout') {
+      if (result?.status === 'timeout') {
+        input.emit(textEvent(
+          `当前 MixAgents 等待窗口（${Math.round(input.timeoutMs / 60_000)} 分钟）结束，` +
+          'worker 仍在运行；Bridge 将自动继续等待，无需重新提问或发送 /btw result。\n',
+        ));
+      }
+      result = await input.backend.wait(
+        input.agent,
+        input.signal,
+        input.timeoutMs,
+        input.onProgress,
+        input.streamedProgress.cursor ?? 0,
+      );
+    }
+    return result;
   }
   private async interruptAbortedMixagentsSide(state: MixAgentsSideState): Promise<void> {
     const backend = state.backend;
@@ -1313,10 +1474,10 @@ export class StructuredAdapter implements AgentAdapter {
       emit({
         type: 'error',
         message:
-          `MixAgents side ${timeoutMs ? `${Math.round(timeoutMs / 1_000)} 秒` : ''}超出等待预算；` +
-          'Bridge 已停止等待并请求中断，但远端 provider 工作可能稍后完成。' +
-          `请切换到更快的 provider/route，或在设置中调整 ${timeoutSetting}；` +
-          '下一条 /btw 会创建新的 side，不会复用本次超时上下文。',
+          `MixAgents side ${timeoutMs ? `${Math.round(timeoutMs / 1_000)} 秒` : ''}达到硬等待上限；` +
+          'Bridge 停止等待但保留 worker 和 mailbox。' +
+          '迟到结果可用 /btw result 收取；/btw out 会明确中断并丢弃该 side。' +
+          `也可在设置中调整 ${timeoutSetting}。`,
         terminationReason: 'timeout',
       });
       return;
@@ -1836,7 +1997,8 @@ export class StructuredAdapter implements AgentAdapter {
       return [textEvent(
         `MixAgents side：agentId=${mixagents.agent.agentId} route=${mixagents.route.id} ` +
           `provider=${mixagents.route.provider} model=${mixagents.route.model}` +
-          ` access=${mixagents.agent.access} workspace=${mixagents.cwd}`,
+          ` access=${mixagents.agent.access} workspace=${mixagents.cwd}` +
+          ` status=${mixagents.agent.status} cursor=${mixagents.progressCursor ?? 0}`,
       )];
     }
     const requestId = /^\/answer\s+(\S+)/.exec(input)?.[1];
@@ -1919,6 +2081,24 @@ export class StructuredAdapter implements AgentAdapter {
         }
         const current = await this.session(options);
         if (abort.signal.aborted) return;
+        if (side && /^\/btw\s+result\s*$/iu.test(options.prompt.trim())) {
+          await this.collectLateMixagentsResult({
+            scope,
+            cwd: options.cwd!,
+            emit,
+            signal: abort.signal,
+          });
+          return;
+        }
+        if (side) {
+          const pendingTimeout = this.sideStateFor(scope, options.cwd!);
+          if (pendingTimeout?.agent.status === 'timeout') {
+            throw new Error(
+              `上一个 MixAgents side 仍在后台保留（agentId=${pendingTimeout.agent.agentId}）。` +
+              '请先用 /btw result 收取迟到结果，或用 /btw out 明确中断后开始新 side。',
+            );
+          }
+        }
         if (
           writeAuthorization &&
           current.main instanceof CodexStructuredSession
@@ -1939,7 +2119,8 @@ export class StructuredAdapter implements AgentAdapter {
           emit(textEvent(
             `MixAgents side：agentId=${activeMixagents.agent.agentId} route=${activeMixagents.route.id} ` +
             `provider=${activeMixagents.route.provider} model=${activeMixagents.route.model}` +
-            ` access=${activeMixagents.agent.access} workspace=${activeMixagents.cwd}`,
+            ` access=${activeMixagents.agent.access} workspace=${activeMixagents.cwd}` +
+            ` status=${activeMixagents.agent.status} cursor=${activeMixagents.progressCursor ?? 0}`,
           ));
           return;
         }

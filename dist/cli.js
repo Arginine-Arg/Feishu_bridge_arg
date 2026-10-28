@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.11.0",
+  version: "1.11.1",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -51,8 +51,8 @@ var package_default = {
     build: "pnpm build:broker && tsup",
     "build:broker": "tsc -p vendor/mixagents-broker/tsconfig.json",
     typecheck: "tsc --noEmit && tsc --noEmit -p vendor/mixagents-broker/tsconfig.json",
-    test: "pnpm build:broker && vitest run && node --test vendor/mixagents-broker/test/broker.test.mjs vendor/mixagents-broker/test/mcp.test.mjs vendor/mixagents-broker/test/release.test.mjs",
-    "test:broker": "pnpm build:broker && node --test vendor/mixagents-broker/test/broker.test.mjs vendor/mixagents-broker/test/mcp.test.mjs vendor/mixagents-broker/test/release.test.mjs",
+    test: "pnpm build:broker && vitest run && node scripts/run-vendored-broker-tests.mjs",
+    "test:broker": "pnpm build:broker && node scripts/run-vendored-broker-tests.mjs",
     "test:unit": "vitest run tests/unit --passWithNoTests",
     "test:integration": "vitest run tests/integration --passWithNoTests",
     "test:process": "vitest run tests/process --passWithNoTests",
@@ -14764,8 +14764,8 @@ var MixAgentsBrokerBackend = class {
     });
     return agent;
   }
-  async wait(agent, signal, timeoutMs = DEFAULT_TOTAL_WAIT_MS, onProgress) {
-    return this.waitInternal(agent, signal, timeoutMs, onProgress, 0);
+  async wait(agent, signal, timeoutMs = DEFAULT_TOTAL_WAIT_MS, onProgress, cursor = 0) {
+    return this.waitInternal(agent, signal, timeoutMs, onProgress, cursor);
   }
   async waitInternal(agent, signal, timeoutMs, onProgress, initialCursor) {
     const client = await this.ensureClient();
@@ -14972,14 +14972,22 @@ var MixAgentsBrokerBackend = class {
       const type = stringValue2(raw.type);
       const itemId = stringValue2(raw.itemId);
       if (type === "text_delta" && typeof raw.text === "string" && raw.text) {
-        onProgress({ type: "text", text: raw.text, ...itemId ? { itemId } : {} });
+        const cursor = numberValue2(raw.seq);
+        onProgress({
+          type: "text",
+          text: raw.text,
+          ...itemId ? { itemId } : {},
+          ...cursor !== void 0 ? { cursor } : {}
+        });
       } else if (type === "tool_started" || type === "tool_completed") {
         const tool = stringValue2(raw.tool);
         if (tool) {
+          const cursor = numberValue2(raw.seq);
           onProgress({
             type,
             tool,
-            ...itemId ? { itemId } : {}
+            ...itemId ? { itemId } : {},
+            ...cursor !== void 0 ? { cursor } : {}
           });
         }
       }
@@ -18887,6 +18895,7 @@ var shellQuote3 = (value) => `'${value.replace(/'/g, `'\\''`)}'`;
 var LEGACY_RESUME_TIMEOUT_MS = 18e4;
 var LEGACY_RESUME_PROBE_TIMEOUT_MS = 5e3;
 var LEGACY_RESUME_RECONCILE_MS = 18e4;
+var SIDE_RESULT_POLL_MS = 3e4;
 var StaleStructuredEndpointError = class extends Error {
   constructor(endpoint, cause) {
     super(`\u7ED3\u6784\u5316 App Server \u5DF2\u4E0D\u5728\uFF1A${endpoint}`);
@@ -18970,9 +18979,6 @@ function parseWriteAuthorizationPrompt(prompt) {
   };
 }
 function routeChangeReason(state, route, cwd, access3) {
-  if (state.agent.status === "timeout" || state.agent.status === "interrupted") {
-    return `previous turn ${state.agent.status} (${state.agent.agentId})`;
-  }
   if (state.cwd !== cwd) return `workspace ${state.cwd} \u2192 ${cwd}`;
   if (state.agent.access !== access3) {
     return `access ${state.agent.access} \u2192 ${access3}`;
@@ -19328,6 +19334,7 @@ var StructuredAdapter = class {
           agent: side.agent,
           route: side.route,
           routeFingerprint: side.routeFingerprint ?? subagentRouteFingerprint(side.route),
+          ...side.progressCursor !== void 0 ? { progressCursor: side.progressCursor } : {},
           ...side.scopeCwd ? { scopeCwd: side.scopeCwd } : {},
           cwd: side.cwd,
           scope: side.scope,
@@ -19346,6 +19353,7 @@ var StructuredAdapter = class {
           agent: side.agent,
           route: side.route,
           routeFingerprint: side.routeFingerprint,
+          ...side.progressCursor !== void 0 ? { progressCursor: side.progressCursor } : {},
           ...side.scopeCwd ? { scopeCwd: side.scopeCwd } : {},
           cwd: side.cwd,
           scope: side.scope,
@@ -19536,6 +19544,76 @@ var StructuredAdapter = class {
       body
     ].join("\n");
   }
+  async collectLateMixagentsResult(input) {
+    const state = this.sideStateFor(input.scope, input.cwd) ?? this.mixagentsSideForScope(input.scope);
+    if (!state) {
+      input.emit(textEvent("\u5F53\u524D\u6CA1\u6709\u53EF\u6536\u53D6\u7ED3\u679C\u7684 MixAgents side\u3002"));
+      return;
+    }
+    const backend = state.backend ?? await this.mixagentsBackendFor(state.cwd, state);
+    if (!backend) {
+      throw new Error("MixAgents side \u7684 backend \u5F53\u524D\u4E0D\u53EF\u7528\uFF1B\u65E0\u6CD5\u6536\u53D6\u8FDF\u5230\u7ED3\u679C\u3002");
+    }
+    input.emit(textEvent(
+      `\u6B63\u5728\u68C0\u67E5 MixAgents side ${state.agent.agentId} \u7684 result mailbox\uFF08cursor=${state.progressCursor ?? 0}\uFF09\u3002
+`
+    ));
+    const streamedProgress = {
+      text: "",
+      ...state.progressCursor !== void 0 ? { cursor: state.progressCursor } : {}
+    };
+    try {
+      const result = await this.withMixagentsHeartbeat(
+        input.emit,
+        state.route,
+        state.agent.access,
+        streamedProgress,
+        void 0,
+        (onProgress) => backend.wait(
+          state.agent,
+          input.signal,
+          SIDE_RESULT_POLL_MS,
+          onProgress,
+          state.progressCursor ?? 0
+        )
+      );
+      state.progressCursor = streamedProgress.cursor ?? state.progressCursor;
+      state.updatedAt = Date.now();
+      if (result.status === "timeout") {
+        state.agent.status = "timeout";
+        await this.saveMixagentsSides();
+        input.emit(textEvent(
+          "MixAgents worker \u4ECD\u6CA1\u6709\u7EC8\u6001\u7ED3\u679C\uFF1Bside \u7EE7\u7EED\u4FDD\u7559\u3002\u7A0D\u540E\u518D\u6B21\u53D1\u9001 /btw result \u5373\u53EF\u4ECE\u5F53\u524D cursor \u7EE7\u7EED\u6536\u53D6\uFF0C/btw out \u53EF\u660E\u786E\u4E2D\u65AD\u3002\n"
+        ));
+        return;
+      }
+      await this.applyMixagentsResult(
+        state,
+        result,
+        input.emit,
+        SIDE_RESULT_POLL_MS,
+        "workerTimeoutMs",
+        streamedProgress.text
+      );
+      this.mixagentsSides.delete(`${state.scope}\0${state.scopeCwd ?? state.cwd}`);
+      await this.saveMixagentsSides();
+      await backend.closeBackend?.().catch(() => {
+      });
+    } catch (error) {
+      if (error instanceof SubagentAgentNotFoundError) {
+        input.emit(textEvent(
+          `MixAgents agent ${state.agent.agentId} \u5DF2\u4E0D\u5B58\u5728\uFF0C\u65E0\u6CD5\u6062\u590D\u8FDF\u5230\u7ED3\u679C\u3002
+`
+        ));
+        this.mixagentsSides.delete(`${state.scope}\0${state.scopeCwd ?? state.cwd}`);
+        await this.saveMixagentsSides();
+        await backend.closeBackend?.().catch(() => {
+        });
+        return;
+      }
+      throw error;
+    }
+  }
   async runMixagentsSide(input) {
     const {
       current,
@@ -19552,8 +19630,9 @@ var StructuredAdapter = class {
     if (!resolvedBackend) throw new Error("MixAgents backend \u672A\u521D\u59CB\u5316");
     const scope = input.options.scopeId ?? input.options.cwd;
     const scopeCwd = input.options.cwd;
-    const turnTimeoutMs = access3 === "workspace-write" ? resolved.config.workerTimeoutMs : resolved.config.sideTimeoutMs;
-    const timeoutSetting = access3 === "workspace-write" ? "workerTimeoutMs" : "sideTimeoutMs";
+    const softBudgetMs = access3 === "read-only" ? resolved.config.sideTimeoutMs : void 0;
+    const turnTimeoutMs = resolved.config.workerTimeoutMs;
+    const timeoutSetting = "workerTimeoutMs";
     if (resolved.notice) emit2(textEvent(`${resolved.notice}
 `));
     if (!body) {
@@ -19594,7 +19673,10 @@ var StructuredAdapter = class {
         `\u590D\u7528 MixAgents side agent ${existing.agent.agentId}\uFF08route=${existing.route.id} access=${existing.agent.access} workspace=${existing.cwd}\uFF09\u3002
 `
       ));
-      const streamedProgress2 = { text: "" };
+      const streamedProgress2 = {
+        text: "",
+        ...existing.progressCursor !== void 0 ? { cursor: existing.progressCursor } : {}
+      };
       try {
         let result;
         if (access3 === "workspace-write") {
@@ -19617,12 +19699,16 @@ var StructuredAdapter = class {
               route,
               access3,
               streamedProgress2,
-              (onProgress) => activeBackend.wait(
-                validated,
+              softBudgetMs,
+              async (onProgress) => this.waitMixagentsUntilTerminal({
+                backend: activeBackend,
+                agent: validated,
                 signal,
-                turnTimeoutMs,
+                timeoutMs: turnTimeoutMs,
+                emit: emit2,
+                streamedProgress: streamedProgress2,
                 onProgress
-              )
+              })
             );
           } else {
             result = await this.withMixagentsHeartbeat(
@@ -19630,13 +19716,26 @@ var StructuredAdapter = class {
               route,
               access3,
               streamedProgress2,
-              (onProgress) => activeBackend.send(
-                validated,
-                input.task,
-                signal,
-                turnTimeoutMs,
-                onProgress
-              )
+              softBudgetMs,
+              async (onProgress) => {
+                const sent = await activeBackend.send(
+                  validated,
+                  input.task,
+                  signal,
+                  turnTimeoutMs,
+                  onProgress
+                );
+                return this.waitMixagentsUntilTerminal({
+                  backend: activeBackend,
+                  agent: validated,
+                  signal,
+                  timeoutMs: turnTimeoutMs,
+                  emit: emit2,
+                  streamedProgress: streamedProgress2,
+                  onProgress,
+                  initial: sent
+                });
+              }
             );
           }
         } else {
@@ -19646,19 +19745,29 @@ var StructuredAdapter = class {
             route,
             access3,
             streamedProgress2,
-            (onProgress) => activeBackend.send(
-              agent2,
-              body,
-              signal,
-              turnTimeoutMs,
-              onProgress
-            )
+            softBudgetMs,
+            async (onProgress) => {
+              const sent = await activeBackend.send(
+                agent2,
+                body,
+                signal,
+                turnTimeoutMs,
+                onProgress
+              );
+              return this.waitMixagentsUntilTerminal({
+                backend: activeBackend,
+                agent: agent2,
+                signal,
+                timeoutMs: turnTimeoutMs,
+                emit: emit2,
+                streamedProgress: streamedProgress2,
+                onProgress,
+                initial: sent
+              });
+            }
           );
         }
-        if (result.status === "timeout") {
-          await activeBackend.interrupt(existing.agent, AbortSignal.timeout(3e4)).catch(() => {
-          });
-        }
+        existing.progressCursor = streamedProgress2.cursor ?? existing.progressCursor;
         await this.applyMixagentsResult(
           existing,
           result,
@@ -19734,17 +19843,18 @@ var StructuredAdapter = class {
         route,
         access3,
         streamedProgress,
-        (onProgress) => resolvedBackend.wait(
+        softBudgetMs,
+        async (onProgress) => this.waitMixagentsUntilTerminal({
+          backend: resolvedBackend,
           agent,
           signal,
-          turnTimeoutMs,
+          timeoutMs: turnTimeoutMs,
+          emit: emit2,
+          streamedProgress,
           onProgress
-        )
+        })
       );
-      if (result.status === "timeout") {
-        await resolvedBackend.interrupt(agent, AbortSignal.timeout(3e4)).catch(() => {
-        });
-      }
+      state.progressCursor = streamedProgress.cursor ?? state.progressCursor;
       await this.applyMixagentsResult(
         state,
         result,
@@ -19779,17 +19889,18 @@ var StructuredAdapter = class {
           route,
           access3,
           replacementProgress,
-          (onProgress) => resolvedBackend.wait(
-            replacement,
+          softBudgetMs,
+          async (onProgress) => this.waitMixagentsUntilTerminal({
+            backend: resolvedBackend,
+            agent: replacement,
             signal,
-            turnTimeoutMs,
+            timeoutMs: turnTimeoutMs,
+            emit: emit2,
+            streamedProgress: replacementProgress,
             onProgress
-          )
+          })
         );
-        if (result.status === "timeout") {
-          await resolvedBackend.interrupt(replacement, AbortSignal.timeout(3e4)).catch(() => {
-          });
-        }
+        state.progressCursor = replacementProgress.cursor ?? state.progressCursor;
         await this.applyMixagentsResult(
           state,
           result,
@@ -19803,19 +19914,22 @@ var StructuredAdapter = class {
       throw error;
     }
   }
-  async withMixagentsHeartbeat(emit2, route, access3, streamedProgress, operation) {
+  async withMixagentsHeartbeat(emit2, route, access3, streamedProgress, softBudgetMs, operation) {
     const heartbeatMs = this.options.sideHeartbeatMs ?? 15e3;
     const startedAt = Date.now();
     let lastActivityAt = startedAt;
+    let softBudgetNoticeSent = softBudgetMs === void 0;
     const onProgress = (progress) => {
       lastActivityAt = Date.now();
       if (progress.type === "text") {
+        if (progress.cursor !== void 0) streamedProgress.cursor = progress.cursor;
         const text2 = redactSecrets(progress.text);
         streamedProgress.text = `${streamedProgress.text}${text2}`.slice(-5e4);
         emit2(textEvent(text2));
         return;
       }
       if (progress.type === "tool_started") {
+        if (progress.cursor !== void 0) streamedProgress.cursor = progress.cursor;
         emit2({
           type: "tool_use",
           id: progress.itemId ?? `side-tool-${progress.tool}`,
@@ -19825,6 +19939,7 @@ var StructuredAdapter = class {
         return;
       }
       if (progress.type === "tool_completed") {
+        if (progress.cursor !== void 0) streamedProgress.cursor = progress.cursor;
         emit2({
           type: "tool_result",
           id: progress.itemId ?? `side-tool-${progress.tool}`,
@@ -19837,6 +19952,15 @@ var StructuredAdapter = class {
 `));
     };
     const timer = heartbeatMs > 0 ? setInterval(() => {
+      const elapsedMs = Date.now() - startedAt;
+      if (!softBudgetNoticeSent && softBudgetMs !== void 0 && elapsedMs >= softBudgetMs) {
+        softBudgetNoticeSent = true;
+        emit2(textEvent(
+          `\u23F3 MixAgents side \u5DF2\u8D85\u8FC7 ${Math.max(1, Math.round(softBudgetMs / 1e3))} \u79D2\u5FEB\u901F\u7B49\u5F85\u63D0\u793A\uFF1Bworker \u4ECD\u5728\u540E\u53F0\u7EE7\u7EED\uFF0C\u6700\u7EC8\u7ED3\u679C\u4F1A\u7EE7\u7EED\u901A\u8FC7\u672C side \u8FD4\u56DE\u3002\u786C\u4E0A\u9650\u7531 workerTimeoutMs \u63A7\u5236\uFF0C\u65E0\u9700\u91CD\u65B0\u63D0\u95EE\u3002
+`
+        ));
+        return;
+      }
       if (Date.now() - lastActivityAt < heartbeatMs) return;
       const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1e3));
       emit2(textEvent(
@@ -19850,6 +19974,25 @@ var StructuredAdapter = class {
     } finally {
       if (timer) clearInterval(timer);
     }
+  }
+  async waitMixagentsUntilTerminal(input) {
+    let result = input.initial;
+    while (!result || result.status === "timeout") {
+      if (result?.status === "timeout") {
+        input.emit(textEvent(
+          `\u5F53\u524D MixAgents \u7B49\u5F85\u7A97\u53E3\uFF08${Math.round(input.timeoutMs / 6e4)} \u5206\u949F\uFF09\u7ED3\u675F\uFF0Cworker \u4ECD\u5728\u8FD0\u884C\uFF1BBridge \u5C06\u81EA\u52A8\u7EE7\u7EED\u7B49\u5F85\uFF0C\u65E0\u9700\u91CD\u65B0\u63D0\u95EE\u6216\u53D1\u9001 /btw result\u3002
+`
+        ));
+      }
+      result = await input.backend.wait(
+        input.agent,
+        input.signal,
+        input.timeoutMs,
+        input.onProgress,
+        input.streamedProgress.cursor ?? 0
+      );
+    }
+    return result;
   }
   async interruptAbortedMixagentsSide(state) {
     const backend = state.backend;
@@ -19889,7 +20032,7 @@ ${finalText}`));
     if (result.status === "timeout") {
       emit2({
         type: "error",
-        message: `MixAgents side ${timeoutMs ? `${Math.round(timeoutMs / 1e3)} \u79D2` : ""}\u8D85\u51FA\u7B49\u5F85\u9884\u7B97\uFF1BBridge \u5DF2\u505C\u6B62\u7B49\u5F85\u5E76\u8BF7\u6C42\u4E2D\u65AD\uFF0C\u4F46\u8FDC\u7AEF provider \u5DE5\u4F5C\u53EF\u80FD\u7A0D\u540E\u5B8C\u6210\u3002\u8BF7\u5207\u6362\u5230\u66F4\u5FEB\u7684 provider/route\uFF0C\u6216\u5728\u8BBE\u7F6E\u4E2D\u8C03\u6574 ${timeoutSetting}\uFF1B\u4E0B\u4E00\u6761 /btw \u4F1A\u521B\u5EFA\u65B0\u7684 side\uFF0C\u4E0D\u4F1A\u590D\u7528\u672C\u6B21\u8D85\u65F6\u4E0A\u4E0B\u6587\u3002`,
+        message: `MixAgents side ${timeoutMs ? `${Math.round(timeoutMs / 1e3)} \u79D2` : ""}\u8FBE\u5230\u786C\u7B49\u5F85\u4E0A\u9650\uFF1BBridge \u505C\u6B62\u7B49\u5F85\u4F46\u4FDD\u7559 worker \u548C mailbox\u3002\u8FDF\u5230\u7ED3\u679C\u53EF\u7528 /btw result \u6536\u53D6\uFF1B/btw out \u4F1A\u660E\u786E\u4E2D\u65AD\u5E76\u4E22\u5F03\u8BE5 side\u3002\u4E5F\u53EF\u5728\u8BBE\u7F6E\u4E2D\u8C03\u6574 ${timeoutSetting}\u3002`,
         terminationReason: "timeout"
       });
       return;
@@ -20364,7 +20507,7 @@ ${truncateSnapshot(redactDiagnosticText(redactSecrets(manifest)), 8e3)}
     const mixagents = this.mixagentsSideForScope(scope);
     if (mixagents && !isMainScopedNativeCommand(input) && /^\/status(?:\s|$)/iu.test(input.trim())) {
       return [textEvent(
-        `MixAgents side\uFF1AagentId=${mixagents.agent.agentId} route=${mixagents.route.id} provider=${mixagents.route.provider} model=${mixagents.route.model} access=${mixagents.agent.access} workspace=${mixagents.cwd}`
+        `MixAgents side\uFF1AagentId=${mixagents.agent.agentId} route=${mixagents.route.id} provider=${mixagents.route.provider} model=${mixagents.route.model} access=${mixagents.agent.access} workspace=${mixagents.cwd} status=${mixagents.agent.status} cursor=${mixagents.progressCursor ?? 0}`
       )];
     }
     const requestId = /^\/answer\s+(\S+)/.exec(input)?.[1];
@@ -20446,6 +20589,23 @@ ${truncateSnapshot(redactDiagnosticText(redactSecrets(manifest)), 8e3)}
         }
         const current = await this.session(options);
         if (abort.signal.aborted) return;
+        if (side && /^\/btw\s+result\s*$/iu.test(options.prompt.trim())) {
+          await this.collectLateMixagentsResult({
+            scope,
+            cwd: options.cwd,
+            emit: emit2,
+            signal: abort.signal
+          });
+          return;
+        }
+        if (side) {
+          const pendingTimeout = this.sideStateFor(scope, options.cwd);
+          if (pendingTimeout?.agent.status === "timeout") {
+            throw new Error(
+              `\u4E0A\u4E00\u4E2A MixAgents side \u4ECD\u5728\u540E\u53F0\u4FDD\u7559\uFF08agentId=${pendingTimeout.agent.agentId}\uFF09\u3002\u8BF7\u5148\u7528 /btw result \u6536\u53D6\u8FDF\u5230\u7ED3\u679C\uFF0C\u6216\u7528 /btw out \u660E\u786E\u4E2D\u65AD\u540E\u5F00\u59CB\u65B0 side\u3002`
+            );
+          }
+        }
         if (writeAuthorization && current.main instanceof CodexStructuredSession) {
           current.main.setBrokerWriteAuthorization(writeAuthorization);
           authorizedMain = current.main;
@@ -20457,7 +20617,7 @@ ${truncateSnapshot(redactDiagnosticText(redactSecrets(manifest)), 8e3)}
         const activeMixagents = this.mixagentsSideForScope(scope);
         if (!side && options.liveInputMode === "command" && activeMixagents && /^\/status(?:\s|$)/iu.test(options.prompt.trim())) {
           emit2(textEvent(
-            `MixAgents side\uFF1AagentId=${activeMixagents.agent.agentId} route=${activeMixagents.route.id} provider=${activeMixagents.route.provider} model=${activeMixagents.route.model} access=${activeMixagents.agent.access} workspace=${activeMixagents.cwd}`
+            `MixAgents side\uFF1AagentId=${activeMixagents.agent.agentId} route=${activeMixagents.route.id} provider=${activeMixagents.route.provider} model=${activeMixagents.route.model} access=${activeMixagents.agent.access} workspace=${activeMixagents.cwd} status=${activeMixagents.agent.status} cursor=${activeMixagents.progressCursor ?? 0}`
           ));
           return;
         }
@@ -22574,6 +22734,7 @@ function helpCard(agentName = "Agent") {
         "- `/model` \u2014 \u9009\u62E9\u6A21\u578B\uFF1BCodex \u4F7F\u7528 CLI \u539F\u751F\u6A21\u578B\u548C reasoning \u9009\u9879\u5E76\u540C\u6B65\u5230 profile",
         "- `/btw <\u5185\u5BB9>` \u2014 \u53EA\u8BFB side conversation\uFF1B`/codex /btw <\u5185\u5BB9>` \u7B49\u4EF7",
         "- `/btw --write --workspace <canonical \u8DEF\u5F84> <\u4EFB\u52A1>` \u2014 \u663E\u5F0F\u6388\u6743\u4E00\u6B21 workspace-write\uFF08\u9700\u5728 settings \u9AD8\u7EA7\u53C2\u6570\u542F\u7528\uFF09",
+        "- `/btw result` \u2014 \u6536\u53D6\u540E\u53F0 side \u5728\u8F6F\u7B49\u5F85\u63D0\u793A\u6216\u786C\u7B49\u5F85\u7ED3\u675F\u540E\u4EA7\u751F\u7684\u8FDF\u5230\u7ED3\u679C\uFF1B`/btw out` \u624D\u4F1A\u4E2D\u65AD\u5E76\u4E22\u5F03",
         "- `/status` \u2014 \u5F53\u524D\u72B6\u6001",
         "- `/session` \u2014 \u67E5\u770B\u6216\u5207\u6362\u540E\u53F0 agent session \u6A21\u5F0F",
         "- `/tmux list [socket]|bind <\u7F16\u53F7\u6216 pane id>|status|attach|tail [N]|unbind|release` \u2014 \u7BA1\u7406\u5458\u7BA1\u7406 tmux\uFF1B`list` \u663E\u793A\u5171\u4EAB endpoint \u4E0E structured \u547D\u4EE4\uFF0C`tail` \u9ED8\u8BA4\u663E\u793A\u5F53\u524D pane \u672B\u5C3E 27 \u884C",
@@ -36184,20 +36345,20 @@ async function runSettings(options = {}) {
     assertPrompt(concurrencyText);
     maxConcurrentWorkers = boundedIntegerInput(concurrencyText, 1, 32, "\u6700\u5927\u5E76\u53D1\u5B50\u4EE3\u7406\u6570");
     const timeoutText = await p3.text({
-      message: "\u5355\u4E2A\u5B50\u4EE3\u7406\u6700\u957F\u8FD0\u884C\u65F6\u95F4\uFF08\u5206\u949F\uFF09",
+      message: "\u5355\u4E2A worker \u7B49\u5F85\u7A97\u53E3\uFF08\u5206\u949F\uFF1B/btw \u4F1A\u81EA\u52A8\u7EED\u7B49\uFF09",
       initialValue: String(workerTimeoutMs / 6e4)
     });
     assertPrompt(timeoutText);
     workerTimeoutMs = Math.round(
-      boundedNumberInput(timeoutText, 0.5, 1440, "\u5B50\u4EE3\u7406\u8D85\u65F6\u5206\u949F\u6570") * 6e4
+      boundedNumberInput(timeoutText, 0.5, 1440, "\u5B50\u4EE3\u7406\u7B49\u5F85\u7A97\u53E3\u5206\u949F\u6570") * 6e4
     );
     const sideTimeoutText = await p3.text({
-      message: "/btw \u5355\u8F6E\u6700\u957F\u7B49\u5F85\u65F6\u95F4\uFF08\u79D2\uFF09",
+      message: "/btw \u8D85\u8FC7\u591A\u5C11\u79D2\u540E\u63D0\u793A\u201C\u4ECD\u5728\u540E\u53F0\u8FD0\u884C\u201D\uFF1F\uFF08\u79D2\uFF09",
       initialValue: String(sideTimeoutMs / 1e3)
     });
     assertPrompt(sideTimeoutText);
     sideTimeoutMs = Math.round(
-      boundedNumberInput(sideTimeoutText, 15, 1800, "/btw \u5355\u8F6E\u7B49\u5F85\u79D2\u6570") * 1e3
+      boundedNumberInput(sideTimeoutText, 15, 1800, "/btw \u5FEB\u901F\u7B49\u5F85\u63D0\u793A\u79D2\u6570") * 1e3
     );
     const sideEffort = await p3.select({
       message: "/btw \u7684\u63A8\u7406\u901F\u5EA6",
@@ -36313,7 +36474,7 @@ async function runSettings(options = {}) {
     `\u5B50\u4EE3\u7406\u7EBF\u8DEF\uFF1A${routeText}`,
     `Key\uFF1A${credentialText}`,
     `\u5B50\u4EE3\u7406 Web Search\uFF1A${webSearch === "auto" ? `\u6309 provider \u80FD\u529B\uFF08\u5F53\u524D ${diagnostics.webSearch.effective}\uFF09` : webSearch === "native" ? "\u5F3A\u5236\u539F\u751F" : "\u5173\u95ED"}`,
-    `/btw \u53EA\u8BFB\u901F\u5EA6\uFF1Areasoning=${sideReasoningEffort} timeout=${sideTimeoutMs / 1e3}s\uFF1B--write \u4F7F\u7528 workerTimeoutMs \u548C provider \u9ED8\u8BA4 reasoning`,
+    `/btw \u53EA\u8BFB\uFF1Areasoning=${sideReasoningEffort} fast-notice=${sideTimeoutMs / 1e3}s\uFF1B\u6BCF ${workerTimeoutMs / 6e4} \u5206\u949F\u7B49\u5F85\u7A97\u53E3\u81EA\u52A8\u7EED\u7B49\uFF1B/btw out \u53D6\u6D88\uFF0C/btw result \u7528\u4E8E\u5F02\u5E38\u6062\u590D`,
     `\u9879\u76EE\u8BC1\u636E\u6821\u9A8C\uFF1A${rsiMode === "off" ? "\u5173\u95ED" : "\u81EA\u52A8\uFF08\u53EA\u5BF9\u5DF2\u521D\u59CB\u5316\u9879\u76EE\uFF09"}`,
     advanced ? "\u9AD8\u7EA7\u53C2\u6570\uFF1A\u5DF2\u5C55\u5F00\u7F16\u8F91" : "\u9AD8\u7EA7\u53C2\u6570\uFF1A\u4FDD\u6301\u539F\u503C"
   ].join("\n"), "\u6B65\u9AA4 5 / 5 \xB7 \u4FDD\u5B58\u524D\u786E\u8BA4");

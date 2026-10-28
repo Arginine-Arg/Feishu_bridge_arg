@@ -250,8 +250,9 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
     signal: AbortSignal,
     timeoutMs = DEFAULT_TOTAL_WAIT_MS,
     onProgress?: SideAgentProgressHandler,
+    cursor = 0,
   ): Promise<SideAgentResult> {
-    return this.waitInternal(agent, signal, timeoutMs, onProgress, 0);
+    return this.waitInternal(agent, signal, timeoutMs, onProgress, cursor);
   }
 
   private async waitInternal(
@@ -488,14 +489,22 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
       const type = stringValue(raw.type);
       const itemId = stringValue(raw.itemId);
       if (type === 'text_delta' && typeof raw.text === 'string' && raw.text) {
-        onProgress({ type: 'text', text: raw.text, ...(itemId ? { itemId } : {}) });
+        const cursor = numberValue(raw.seq);
+        onProgress({
+          type: 'text',
+          text: raw.text,
+          ...(itemId ? { itemId } : {}),
+          ...(cursor !== undefined ? { cursor } : {}),
+        });
       } else if (type === 'tool_started' || type === 'tool_completed') {
         const tool = stringValue(raw.tool);
         if (tool) {
+          const cursor = numberValue(raw.seq);
           onProgress({
             type,
             tool,
             ...(itemId ? { itemId } : {}),
+            ...(cursor !== undefined ? { cursor } : {}),
           });
         }
       }

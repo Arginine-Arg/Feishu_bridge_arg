@@ -85,6 +85,7 @@ class FakeBackend implements SubagentBackend {
   readonly spawns: SideAgentInput[] = [];
   readonly sends: Array<{ agent: SideAgent; message: string; signal?: AbortSignal }> = [];
   readonly waitTimeouts: Array<number | undefined> = [];
+  readonly waitCursors: Array<number | undefined> = [];
   readonly sendTimeouts: Array<number | undefined> = [];
   readonly interruptions: string[] = [];
   readonly closes: string[] = [];
@@ -92,6 +93,7 @@ class FakeBackend implements SubagentBackend {
   sendNotFoundOnce = false;
   hangWaits = false;
   waitResult?: SideAgentResult;
+  waitResults: SideAgentResult[] = [];
   waitProgress: SideAgentProgress[] = [];
 
   constructor(private readonly route: () => SubagentRoute) {}
@@ -140,9 +142,23 @@ class FakeBackend implements SubagentBackend {
     signal: AbortSignal,
     timeoutMs?: number,
     onProgress?: (event: SideAgentProgress) => void,
+    cursor?: number,
   ): Promise<SideAgentResult> {
     this.waitTimeouts.push(timeoutMs);
-    for (const event of this.waitProgress) onProgress?.(event);
+    this.waitCursors.push(cursor);
+    for (const event of this.waitProgress) {
+      if (
+        event.type !== 'notice' &&
+        event.cursor !== undefined &&
+        cursor !== undefined &&
+        event.cursor <= cursor
+      ) {
+        continue;
+      }
+      onProgress?.(event);
+    }
+    const queued = this.waitResults.shift();
+    if (queued) return queued;
     if (this.waitResult) return this.waitResult;
     if (this.hangWaits) {
       await new Promise<void>((_resolve, reject) => {
@@ -431,7 +447,7 @@ describe('structured MixAgents /btw', () => {
     expect(backend.spawns[0]!.task).toContain(
       'do not start new long-running calculations or broad filesystem scans',
     );
-    expect(backend.waitTimeouts[0]).toBe(subagents.sideTimeoutMs);
+    expect(backend.waitTimeouts[0]).toBe(subagents.workerTimeoutMs);
 
     const second = await drain(adapter.runSide({
       runId: 'side-2',
@@ -444,7 +460,7 @@ describe('structured MixAgents /btw', () => {
     expect(backend.sends).toHaveLength(1);
     expect(backend.sends[0]!.agent.agentId).toBe('agent-1');
     expect(backend.sends[0]!.signal).toBeInstanceOf(AbortSignal);
-    expect(backend.sendTimeouts[0]).toBe(subagents.sideTimeoutMs);
+    expect(backend.sendTimeouts[0]).toBe(subagents.workerTimeoutMs);
 
     activeRoute = routeB;
     resolver.mockImplementation(async () => resolved(activeRoute, backend));
@@ -1006,21 +1022,32 @@ describe('structured MixAgents /btw', () => {
     await rm(profileDir, { recursive: true, force: true });
   });
 
-  it('stops a timed-out side and directs the user to change route or budget', async () => {
+  it('automatically continues across wait windows and returns the late result', async () => {
     const profileDir = await mkdtemp(join(tmpdir(), 'arg-bridge-side-timeout-'));
     const backend = new FakeBackend(() => routeA);
-    backend.waitResult = { status: 'timeout', error: 'upstream timeout' };
+    backend.waitProgress = [
+      { type: 'text', text: 'partial progress', cursor: 7 },
+    ];
+    backend.waitResults = [
+      { status: 'timeout', error: 'first wait window ended' },
+      { status: 'completed', text: 'late result' },
+    ];
+    const timeoutConfig = {
+      ...subagents,
+      sideTimeoutMs: 45_000,
+      workerTimeoutMs: 45_000,
+    };
     const resolver = vi.fn(async () => resolved(
       routeA,
       backend,
-      { ...subagents, sideTimeoutMs: 45_000 },
+      timeoutConfig,
     ));
     const main = session();
     const adapter = new StructuredAdapter({
       kind: 'codex',
       binary: 'not-spawned',
       profileDir,
-      subagents: { ...subagents, sideTimeoutMs: 45_000 },
+      subagents: timeoutConfig,
       subagentResolver: resolver,
     });
     Reflect.get(adapter, 'sessions').set('scope', {
@@ -1036,33 +1063,85 @@ describe('structured MixAgents /btw', () => {
       prompt: '/btw This route is too slow',
       liveInputMode: 'side',
     }));
+    expect(events.filter(event => event.type === 'error')).toEqual([]);
     expect(events).toContainEqual(expect.objectContaining({
-      type: 'error',
-      terminationReason: 'timeout',
-      message: expect.stringContaining('切换到更快的 provider/route'),
+      type: 'text',
+      delta: expect.stringContaining('自动继续等待'),
     }));
     expect(events).toContainEqual(expect.objectContaining({
-      type: 'error',
-      message: expect.stringContaining('45 秒'),
+      type: 'text',
+      delta: expect.stringContaining('late result'),
     }));
-    expect(events).toContainEqual(expect.objectContaining({
-      type: 'error',
-      message: expect.stringContaining('远端 provider 工作可能稍后完成'),
-    }));
-    expect(backend.interruptions).toContain('agent-1');
+    expect(backend.interruptions).toEqual([]);
+    expect(backend.waitCursors).toEqual([0, 7]);
+  });
 
-    backend.waitResult = undefined;
-    const followup = await drain(adapter.runSide({
+  it('recovers a retained hard-timeout side with /btw result', async () => {
+    const profileDir = await mkdtemp(join(tmpdir(), 'arg-bridge-side-result-'));
+    const backend = new FakeBackend(() => routeA);
+    backend.waitResult = { status: 'completed', text: 'late result' };
+    const main = session();
+    const adapter = new StructuredAdapter({
+      kind: 'codex',
+      binary: 'not-spawned',
+      profileDir,
+      subagents,
+      subagentResolver: vi.fn(async () => resolved(routeA, backend)),
+    });
+    Reflect.get(adapter, 'sessions').set('scope', {
+      main,
+      cwd: '/workspace',
+      view: new StructuredView(profileDir, 'main'),
+    });
+    Reflect.get(adapter, 'mixagentsSides').set('scope\0/workspace', {
+      agent: {
+        agentId: 'agent-timeout',
+        route: routeA.id,
+        provider: routeA.provider,
+        model: routeA.model,
+        access: 'read-only',
+        cwd: '/workspace',
+        scope: 'scope',
+        backendId: 'mixagents',
+        status: 'timeout',
+        createdAt: Date.now(),
+      },
+      backend,
+      route: routeA,
+      routeFingerprint: 'timeout-route',
+      progressCursor: 7,
+      scopeCwd: '/workspace',
+      cwd: '/workspace',
+      scope: 'scope',
+      updatedAt: Date.now(),
+    });
+
+    const blocked = await drain(adapter.runSide({
       runId: 'side-after-timeout',
       scopeId: 'scope',
       cwd: '/workspace',
-      prompt: '/btw Start a clean side after the timeout',
+      prompt: '/btw Do not silently replace the timed-out side',
       liveInputMode: 'side',
     }));
-    expect(followup.filter(event => event.type === 'error')).toEqual([]);
-    expect(backend.spawns).toHaveLength(2);
+    expect(blocked).toContainEqual(expect.objectContaining({
+      type: 'error',
+      message: expect.stringContaining('/btw result'),
+    }));
+    expect(backend.spawns).toHaveLength(0);
     expect(backend.sends).toHaveLength(0);
-    expect(backend.closes).toContain('agent-1');
+
+    const collected = await drain(adapter.runSide({
+      runId: 'side-result',
+      scopeId: 'scope',
+      cwd: '/workspace',
+      prompt: '/btw result',
+      liveInputMode: 'side',
+    }));
+    expect(collected).toContainEqual(expect.objectContaining({
+      type: 'text',
+      delta: 'late result',
+    }));
+    expect(backend.waitCursors.at(-1)).toBe(7);
 
     await main.close();
     await rm(profileDir, { recursive: true, force: true });
@@ -1073,12 +1152,17 @@ describe('structured MixAgents /btw', () => {
     const backend = new FakeBackend(() => routeA);
     backend.hangWaits = true;
     const main = session();
+    const softBudgetConfig = {
+      ...subagents,
+      sideTimeoutMs: 20,
+      workerTimeoutMs: 1_000,
+    };
     const adapter = new StructuredAdapter({
       kind: 'codex',
       binary: 'not-spawned',
       profileDir,
-      subagents,
-      subagentResolver: vi.fn(async () => resolved(routeA, backend)),
+      subagents: softBudgetConfig,
+      subagentResolver: vi.fn(async () => resolved(routeA, backend, softBudgetConfig)),
       sideHeartbeatMs: 10,
     });
     Reflect.get(adapter, 'sessions').set('scope', {
@@ -1095,7 +1179,7 @@ describe('structured MixAgents /btw', () => {
       liveInputMode: 'side',
     });
     await vi.waitFor(() => expect(backend.spawns).toHaveLength(1));
-    await new Promise(resolve => setTimeout(resolve, 35));
+    await new Promise(resolve => setTimeout(resolve, 45));
     await run.stop();
     const events = await drain(run);
     expect(events).toContainEqual(expect.objectContaining({
@@ -1106,6 +1190,13 @@ describe('structured MixAgents /btw', () => {
       type: 'text',
       delta: expect.stringContaining('当前没有可转发的新进度'),
     }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'text',
+      delta: expect.stringContaining('快速等待提示'),
+    }));
+    expect(events.some(event =>
+      event.type === 'error' && event.terminationReason === 'timeout'
+    )).toBe(false);
     await main.close();
     await rm(profileDir, { recursive: true, force: true });
   });
@@ -1251,9 +1342,9 @@ describe('structured MixAgents /btw', () => {
       access: 'read-only',
     });
     expect(backend.waitTimeouts).toEqual([
-      subagents.sideTimeoutMs,
       subagents.workerTimeoutMs,
-      subagents.sideTimeoutMs,
+      subagents.workerTimeoutMs,
+      subagents.workerTimeoutMs,
     ]);
     expect(backend.closes).toContain('agent-2');
     await main.close();

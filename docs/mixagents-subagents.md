@@ -298,24 +298,27 @@ logs.
 ### Side concurrency and timeout
 
 `/btw` is a concurrent side operation, not a second main turn. It remains
-native-side marked even if a bridge route omits its `inputMode`. Conversational
-side turns use `subagents.sideTimeoutMs` (default 90 seconds) and
-`subagents.sideReasoningEffort` (default `low`). Explicitly authorized write
-turns are treated as Codex-like workers instead: they use the longer
-`subagents.workerTimeoutMs` budget and the provider's normal reasoning effort.
-Model-visible workers use the same worker policy.
+native-side marked even if a bridge route omits its `inputMode`. Read-only side
+turns use `subagents.sideReasoningEffort` (default `low`).
+`subagents.sideTimeoutMs` (default 90 seconds) is a **soft waiting notice**, not
+a hard cancellation. After it elapses, Bridge says the worker is still running.
+Each `subagents.workerTimeoutMs` wait window automatically rolls into another
+window while the worker remains active and the user has not issued `/btw out`.
+Explicitly authorized write turns use the provider's normal reasoning effort
+and the same continuing wait policy.
 
 The side runtime also limits Codex request/stream retries so a temporarily
 unavailable provider fails quickly instead of appearing to think indefinitely.
 With the vendored `events-v1` Broker, Bridge forwards model text deltas and safe
 tool lifecycle updates as they arrive. `wait_agent` remains authoritative for
 the final text/error. With an older external Broker, Bridge falls back to a
-liveness heartbeat every 15 seconds. When the side budget expires, Bridge stops
-waiting and requests an interrupt; remote provider work may continue. The error
-directs the user to a faster provider/route or the configured
-`sideTimeoutMs`/`workerTimeoutMs` budget. The request is not replayed on the
-main model. A timed-out or interrupted side is rotated on the next `/btw`
-instead of receiving a new message into uncertain remote work.
+liveness heartbeat every 15 seconds. When one `workerTimeoutMs` window ends
+without a terminal result, Bridge emits a continuation notice and waits again
+from the persisted event cursor. `/btw out` explicitly requests interruption
+and discards the side. `/btw result` recovers retained timeout state left by an
+older version, Bridge interruption or another abnormal recovery path. A normal
+new `/btw` does not silently replace such a retained side; it asks the user to
+collect or discard it first.
 
 ## Credential ownership
 

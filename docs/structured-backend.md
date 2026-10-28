@@ -280,6 +280,10 @@ compatible write route. Write tasks require MixAgents and never use fork
 fallback. The vendored MixAgents Broker streams text deltas and safe tool
 lifecycle events through `events-v1`; terminal mailbox text/errors remain
 authoritative. Older Brokers fall back to heartbeat-only progress.
+`sideTimeoutMs` is a soft notice; each `workerTimeoutMs` wait window
+automatically continues until the worker terminates or `/btw out` is issued.
+`/btw result` recovers retained timeout state from interrupted or older runs by
+resuming the persisted cursor.
 Scope/cwd/route fingerprint are persisted so a Bridge restart can reconnect the
 same agent.
 Route/provider/model/backend/revision changes replace the old agent with an
