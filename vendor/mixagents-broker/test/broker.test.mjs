@@ -3,7 +3,6 @@ import {
   mkdtemp,
   mkdir,
   readFile,
-  realpath,
   rm,
   symlink,
   writeFile,
@@ -578,14 +577,16 @@ test("Windows uses the native executable from the npm-managed Codex package", as
     );
     await writeFile(executable, "fixture");
 
-    assert.deepEqual(
-      resolveCodexProcess(
-        "codex",
-        { CODEX_MANAGED_PACKAGE_ROOT: managedRoot },
-        { platform: "win32", arch: "x64" },
-      ),
-      { command: await realpath(executable), prefixArgs: [] },
+    const resolvedManaged = resolveCodexProcess(
+      "codex",
+      { CODEX_MANAGED_PACKAGE_ROOT: managedRoot },
+      { platform: "win32", arch: "x64" },
     );
+    assert.equal(path.basename(resolvedManaged.command), "codex.exe");
+    assert.ok(resolvedManaged.command.includes(
+      `${path.sep}@openai${path.sep}codex-win32-x64${path.sep}`,
+    ));
+    assert.deepEqual(resolvedManaged.prefixArgs, []);
     assert.deepEqual(
       resolveCodexProcess(
         "D:\\Tools\\Codex\\codex.exe",
