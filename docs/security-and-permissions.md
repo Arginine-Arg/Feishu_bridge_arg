@@ -59,15 +59,25 @@ override for a verified provider; `disabled` always removes the native tool.
 Unsupported or unknown capability never changes provider, credentials, route or
 model automatically. If web access is required, the user must select a provider
 that declares support. Doctor reports the declared and effective states.
-`/btw` remains read-only and uses a separate fast timeout; web-search policy
-cannot upgrade workspace or sandbox access.
+Read-only `/btw` uses a separate fast timeout. Web-search policy cannot upgrade
+workspace or sandbox access; an explicit write task follows the separate grant
+and timeout rules below.
 
 ## `/btw` permissions
 
-- Every `/btw` requests `read-only`.
-- The main profile's sandbox does not upgrade side access.
-- `workspace-write` requires an exact task and exact canonical workspace
-  authorization at the call site.
+- `/btw` defaults to `read-only`; the main profile's sandbox never upgrades side
+  access.
+- A user may explicitly authorize one write task:
+
+  ```text
+  /btw --write --workspace /canonical/project <task>
+  ```
+
+- The profile must enable write workers, the selected write/auto route must
+  support `workspace-write`, and the canonical workspace must be the current
+  project or one of its descendants.
+- The grant is task-scoped and is not reused by the next `/btw`. A later
+  read-only request closes the write-capable worker before continuing.
 - Broker must authorize the canonical `cwd` through configured
   `workspaceRoots`; Bridge declines interactive MCP elicitation.
 - `workspaceRoots` must never contain `/`, `$HOME`, a disk root, or an
@@ -105,7 +115,9 @@ write access:
 
 The directive is consumed outside the model prompt. A model cannot self-grant
 write access by forging fields inside `spawn_agent` or `followup_task`.
-`/btw` always remains read-only.
+`/btw` defaults to read-only and permits workspace-write only through the exact
+`--write --workspace <canonical-path>` grant described above. It never uses a
+Codex fork fallback for a write task.
 
 ## Native collaboration boundary
 

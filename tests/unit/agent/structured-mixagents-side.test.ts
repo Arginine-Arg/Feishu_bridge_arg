@@ -9,6 +9,7 @@ import { CodexStructuredSession } from '../../../src/agent/structured/codex';
 import { StructuredView } from '../../../src/agent/structured/view';
 import type { RpcClient } from '../../../src/agent/structured/rpc';
 import {
+  SubagentUnavailableError,
   SubagentAgentNotFoundError,
   type SideAgent,
   type SideAgentInput,
@@ -68,6 +69,16 @@ const routeB: SubagentRoute = {
   tags: ['review'],
 };
 
+const routeWrite: SubagentRoute = {
+  id: 'route-write',
+  provider: 'provider-write',
+  model: 'model-write',
+  maxAccess: 'workspace-write',
+  available: true,
+  missingEnvironment: [],
+  tags: ['write'],
+};
+
 class FakeBackend implements SubagentBackend {
   readonly id = 'mixagents' as const;
   readonly spawns: SideAgentInput[] = [];
@@ -88,6 +99,25 @@ class FakeBackend implements SubagentBackend {
   }
 
   async createOrReuse(input: SideAgentInput): Promise<SideAgent> {
+    if (
+      input.access !== 'read-only' &&
+      (!input.writeAuthorization ||
+        input.writeAuthorization.workspace !== input.cwd ||
+        input.writeAuthorization.task !== input.task)
+    ) {
+      throw new SubagentUnavailableError(
+        'write-not-authorized',
+        'write task authorization is required',
+      );
+    }
+    if (
+      input.existing &&
+      input.existing.route === input.route.id &&
+      input.existing.cwd === input.cwd &&
+      input.existing.access === input.access
+    ) {
+      return input.existing;
+    }
     this.spawns.push(input);
     return {
       agentId: `agent-${this.spawns.length}`,
@@ -1010,4 +1040,432 @@ describe('structured MixAgents /btw', () => {
     await main.close();
     await rm(profileDir, { recursive: true, force: true });
   });
+
+  it('allows one explicitly authorized workspace-write /btw task and recreates the read side', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'arg-bridge-side-write-'));
+    const workspace = join(root, 'project');
+    await mkdir(workspace, { recursive: true });
+    const profileDir = join(profileDirFor(root), 'state');
+    await mkdir(profileDir, { recursive: true });
+    const backend = new FakeBackend(() => routeA);
+    const resolver = vi.fn(async input => resolved(
+      input.access === 'workspace-write' ? routeWrite : routeA,
+      backend,
+      {
+        ...subagents,
+        allowWriteWorkers: true,
+        writeRoute: routeWrite.id,
+      },
+    ));
+    const main = session();
+    const adapter = new StructuredAdapter({
+      kind: 'codex',
+      binary: 'not-spawned',
+      profileDir,
+      subagents: {
+        ...subagents,
+        allowWriteWorkers: true,
+        writeRoute: routeWrite.id,
+      },
+      subagentResolver: resolver,
+    });
+    Reflect.get(adapter, 'sessions').set('scope', {
+      main,
+      cwd: workspace,
+      view: new StructuredView(profileDir, 'main'),
+    });
+
+    await drain(adapter.runSide({
+      runId: 'read-first',
+      scopeId: 'scope',
+      cwd: workspace,
+      prompt: '/btw Inspect the change',
+      liveInputMode: 'side',
+    }));
+    const writeEvents = await drain(adapter.runSide({
+      runId: 'write',
+      scopeId: 'scope',
+      cwd: workspace,
+      prompt: `/btw --write --route ${routeWrite.id} --workspace "${workspace}" Implement the change`,
+      liveInputMode: 'side',
+    }));
+
+    expect(writeEvents.filter(event => event.type === 'error')).toEqual([]);
+    expect(writeEvents.some(event =>
+      event.type === 'text' && event.delta.includes('access=workspace-write')
+    )).toBe(true);
+    expect(backend.spawns).toHaveLength(2);
+    expect(backend.spawns[1]).toMatchObject({
+      route: routeWrite,
+      cwd: workspace,
+      access: 'workspace-write',
+      writeAuthorization: {
+        workspace,
+        task: expect.stringContaining('Implement the change'),
+      },
+    });
+    expect(resolver.mock.calls[1]?.[0]).toMatchObject({
+      access: 'workspace-write',
+      requestedRoute: routeWrite.id,
+      runtimeRole: 'worker',
+    });
+    expect(backend.closes).toContain('agent-1');
+
+    await drain(adapter.runSide({
+      runId: 'read-again',
+      scopeId: 'scope',
+      cwd: workspace,
+      prompt: '/btw Review the result without writing',
+      liveInputMode: 'side',
+    }));
+    expect(backend.spawns).toHaveLength(3);
+    expect(backend.spawns[2]).toMatchObject({
+      route: routeA,
+      access: 'read-only',
+    });
+    expect(backend.waitTimeouts).toEqual([
+      subagents.sideTimeoutMs,
+      subagents.workerTimeoutMs,
+      subagents.sideTimeoutMs,
+    ]);
+    expect(backend.closes).toContain('agent-2');
+    await main.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it('requires an explicit workspace for a write /btw task', async () => {
+    const profileDir = await mkdtemp(join(tmpdir(), 'arg-bridge-side-write-missing-'));
+    const backend = new FakeBackend(() => routeWrite);
+    const resolver = vi.fn(async () => resolved(
+      routeWrite,
+      backend,
+      { ...subagents, allowWriteWorkers: true, writeRoute: routeWrite.id },
+    ));
+    const main = session();
+    const adapter = new StructuredAdapter({
+      kind: 'codex',
+      binary: 'not-spawned',
+      profileDir,
+      subagents: { ...subagents, allowWriteWorkers: true, writeRoute: routeWrite.id },
+      subagentResolver: resolver,
+    });
+    Reflect.get(adapter, 'sessions').set('scope', {
+      main,
+      cwd: '/workspace',
+      view: new StructuredView(profileDir, 'main'),
+    });
+
+    const events = await drain(adapter.runSide({
+      runId: 'write-missing',
+      scopeId: 'scope',
+      cwd: '/workspace',
+      prompt: '/btw --write Implement this',
+      liveInputMode: 'side',
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'error',
+      message: expect.stringContaining('--workspace'),
+    }));
+    expect(resolver).not.toHaveBeenCalled();
+    expect(backend.spawns).toHaveLength(0);
+    await main.close();
+    await rm(profileDir, { recursive: true, force: true });
+  });
+
+  it('requires the write task body in the same authorized command', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'arg-bridge-side-write-empty-'));
+    const workspace = join(root, 'project');
+    const profileDir = join(root, 'profile');
+    await Promise.all([
+      mkdir(workspace, { recursive: true }),
+      mkdir(profileDir, { recursive: true }),
+    ]);
+    const backend = new FakeBackend(() => routeWrite);
+    const resolver = vi.fn(async () => resolved(
+      routeWrite,
+      backend,
+      { ...subagents, allowWriteWorkers: true, writeRoute: routeWrite.id },
+    ));
+    const main = session();
+    const adapter = new StructuredAdapter({
+      kind: 'codex',
+      binary: 'not-spawned',
+      profileDir,
+      subagents: { ...subagents, allowWriteWorkers: true, writeRoute: routeWrite.id },
+      subagentResolver: resolver,
+    });
+    Reflect.get(adapter, 'sessions').set('scope', {
+      main,
+      cwd: workspace,
+      view: new StructuredView(profileDir, 'main'),
+    });
+
+    const events = await drain(adapter.runSide({
+      runId: 'write-empty',
+      scopeId: 'scope',
+      cwd: workspace,
+      prompt: `/btw --write --workspace "${workspace}"`,
+      liveInputMode: 'side',
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'error',
+      message: expect.stringContaining('任务正文必须与授权写在同一条命令中'),
+    }));
+    expect(resolver).not.toHaveBeenCalled();
+    expect(backend.spawns).toHaveLength(0);
+    await main.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it('does not upgrade /btw without profile write-worker enablement', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'arg-bridge-side-write-disabled-'));
+    const workspace = join(root, 'project');
+    const profileDir = join(root, 'profile');
+    await mkdir(workspace, { recursive: true });
+    await mkdir(profileDir, { recursive: true });
+    const backend = new FakeBackend(() => routeWrite);
+    const resolver = vi.fn(async () => resolved(routeWrite, backend));
+    const main = session();
+    const adapter = new StructuredAdapter({
+      kind: 'codex',
+      binary: 'not-spawned',
+      profileDir,
+      subagents,
+      subagentResolver: resolver,
+    });
+    Reflect.get(adapter, 'sessions').set('scope', {
+      main,
+      cwd: workspace,
+      view: new StructuredView(profileDir, 'main'),
+    });
+
+    const events = await drain(adapter.runSide({
+      runId: 'write-disabled',
+      scopeId: 'scope',
+      cwd: workspace,
+      prompt: `/btw --write --workspace "${workspace}" Implement this`,
+      liveInputMode: 'side',
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'error',
+      message: expect.stringContaining('未在 profile 中启用'),
+    }));
+    expect(resolver).not.toHaveBeenCalled();
+    expect(backend.spawns).toHaveLength(0);
+    await main.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it('rejects a write workspace outside the current project', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'arg-bridge-side-write-outside-'));
+    const workspace = join(root, 'project');
+    const outside = join(root, 'outside');
+    const profileDir = join(root, 'profile');
+    await Promise.all([
+      mkdir(workspace, { recursive: true }),
+      mkdir(outside, { recursive: true }),
+      mkdir(profileDir, { recursive: true }),
+    ]);
+    const backend = new FakeBackend(() => routeWrite);
+    const resolver = vi.fn(async () => resolved(
+      routeWrite,
+      backend,
+      { ...subagents, allowWriteWorkers: true, writeRoute: routeWrite.id },
+    ));
+    const main = session();
+    const adapter = new StructuredAdapter({
+      kind: 'codex',
+      binary: 'not-spawned',
+      profileDir,
+      subagents: { ...subagents, allowWriteWorkers: true, writeRoute: routeWrite.id },
+      subagentResolver: resolver,
+    });
+    Reflect.get(adapter, 'sessions').set('scope', {
+      main,
+      cwd: workspace,
+      view: new StructuredView(profileDir, 'main'),
+    });
+
+    const events = await drain(adapter.runSide({
+      runId: 'write-outside',
+      scopeId: 'scope',
+      cwd: workspace,
+      prompt: `/btw --write --workspace "${outside}" Implement this`,
+      liveInputMode: 'side',
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'error',
+      message: expect.stringContaining('只能访问当前 workspace 或其子目录'),
+    }));
+    expect(resolver).not.toHaveBeenCalled();
+    expect(backend.spawns).toHaveLength(0);
+    await main.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it('never routes a write /btw through Codex fork fallback', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'arg-bridge-side-write-fork-'));
+    const workspace = join(root, 'project');
+    const profileDir = join(root, 'profile');
+    await Promise.all([
+      mkdir(workspace, { recursive: true }),
+      mkdir(profileDir, { recursive: true }),
+    ]);
+    const config: SubagentConfig = {
+      ...subagents,
+      mode: 'fork',
+      allowWriteWorkers: true,
+      writeRoute: routeWrite.id,
+    };
+    const backend = new FakeBackend(() => routeWrite);
+    const forkResolution: ResolvedSubagents = {
+      ...resolved(routeWrite, backend, config),
+      kind: 'fork',
+      backend: undefined,
+      route: undefined,
+    };
+    const main = session();
+    const adapter = new StructuredAdapter({
+      kind: 'codex',
+      binary: 'not-spawned',
+      profileDir,
+      subagents: config,
+      subagentResolver: vi.fn(async () => forkResolution),
+    });
+    Reflect.get(adapter, 'sessions').set('scope', {
+      main,
+      cwd: workspace,
+      view: new StructuredView(profileDir, 'main'),
+    });
+
+    const events = await drain(adapter.runSide({
+      runId: 'write-fork',
+      scopeId: 'scope',
+      cwd: workspace,
+      prompt: `/btw --write --workspace "${workspace}" Implement this`,
+      liveInputMode: 'side',
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'error',
+      message: expect.stringContaining('不允许通过 Codex fork fallback'),
+    }));
+    expect(backend.spawns).toHaveLength(0);
+    await main.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it('revalidates write authorization before reusing an existing writer', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'arg-bridge-side-write-revalidate-'));
+    const workspace = join(root, 'project');
+    const profileDir = join(root, 'profile');
+    await Promise.all([
+      mkdir(workspace, { recursive: true }),
+      mkdir(profileDir, { recursive: true }),
+    ]);
+    const config: SubagentConfig = {
+      ...subagents,
+      allowWriteWorkers: true,
+      writeRoute: routeWrite.id,
+    };
+    const backend = new FakeBackend(() => routeWrite);
+    const main = session();
+    const adapter = new StructuredAdapter({
+      kind: 'codex',
+      binary: 'not-spawned',
+      profileDir,
+      subagents: config,
+      subagentResolver: vi.fn(async () => resolved(routeWrite, backend, config)),
+    });
+    Reflect.get(adapter, 'sessions').set('scope', {
+      main,
+      cwd: workspace,
+      view: new StructuredView(profileDir, 'main'),
+    });
+
+    await drain(adapter.runSide({
+      runId: 'write-authorized',
+      scopeId: 'scope',
+      cwd: workspace,
+      prompt: `/btw --write --workspace "${workspace}" First authorized task`,
+      liveInputMode: 'side',
+    }));
+    expect(backend.spawns).toHaveLength(1);
+
+    const current = Reflect.get(adapter, 'sessions').get('scope');
+    const runMixagentsSide = Reflect.get(adapter, 'runMixagentsSide') as (
+      input: Record<string, unknown>,
+    ) => Promise<void>;
+    const task = 'Second task without a fresh authorization';
+    await expect(runMixagentsSide.call(adapter, {
+      current,
+      options: { scopeId: 'scope', cwd: workspace },
+      resolved: resolved(routeWrite, backend, config),
+      task,
+      body: task,
+      workspace,
+      access: 'workspace-write',
+      route: routeWrite,
+      emit: () => {},
+      signal: new AbortController().signal,
+    })).rejects.toMatchObject({
+      name: 'SubagentUnavailableError',
+      code: 'write-not-authorized',
+    });
+    expect(backend.spawns).toHaveLength(1);
+    expect(backend.sends).toHaveLength(0);
+
+    await main.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it('reports the current side access and workspace in /status', async () => {
+    const profileDir = await mkdtemp(join(tmpdir(), 'arg-bridge-side-write-status-'));
+    const workspace = join(profileDir, 'project');
+    await mkdir(workspace, { recursive: true });
+    const main = session();
+    const adapter = new StructuredAdapter({
+      kind: 'codex',
+      binary: 'not-spawned',
+      profileDir,
+    });
+    Reflect.get(adapter, 'sessions').set('scope', {
+      main,
+      cwd: workspace,
+      view: new StructuredView(profileDir, 'main'),
+    });
+    Reflect.get(adapter, 'mixagentsSides').set(`scope\0${workspace}`, {
+      agent: {
+        agentId: 'agent-write',
+        route: routeWrite.id,
+        provider: routeWrite.provider,
+        model: routeWrite.model,
+        access: 'workspace-write',
+        cwd: workspace,
+        scope: 'scope',
+        backendId: 'mixagents',
+        status: 'running',
+        createdAt: Date.now(),
+      },
+      route: routeWrite,
+      routeFingerprint: 'write-fingerprint',
+      scopeCwd: workspace,
+      cwd: workspace,
+      scope: 'scope',
+      updatedAt: Date.now(),
+    });
+
+    const events = await adapter.structuredControl('scope', '/status');
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'text',
+      delta: expect.stringContaining(
+        `access=workspace-write workspace=${workspace}`,
+      ),
+    }));
+    await main.close();
+    await rm(profileDir, { recursive: true, force: true });
+  });
 });
+
+function profileDirFor(root: string): string {
+  return join(root, 'profile');
+}

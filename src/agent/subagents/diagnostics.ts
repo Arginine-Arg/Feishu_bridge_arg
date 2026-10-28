@@ -440,7 +440,7 @@ export async function collectSubagentDiagnostics(input: {
           model: route.model,
           access: 'workspace-write' as const,
           available: route.available,
-          notice: '不用于 /btw；必须由用户针对具体任务和 workspace 逐次授权',
+          notice: '可用于 /btw --write；必须由用户针对具体任务和 workspace 逐次授权',
         })),
     };
   } catch (error) {

@@ -16,7 +16,7 @@ export interface SubagentRoute {
   description?: string;
   provider: string;
   model: string;
-  /** Maximum access the route allows; `/btw` still requests read-only. */
+  /** Maximum access the route allows; `/btw` requests read-only unless explicitly authorized. */
   maxAccess: SubagentAccess;
   available: boolean;
   missingEnvironment: string[];

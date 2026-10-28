@@ -508,7 +508,7 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
           ...availableWriteRoutes.map(route => ({
             value: route.id,
             label: `${route.provider} / ${route.model}`,
-            hint: `${route.id} · 需要逐任务授权`,
+            hint: `${route.id} · /btw 需要 --write --workspace 逐任务授权`,
           })),
         ],
       });
@@ -588,7 +588,8 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
       : webSearch === 'native'
         ? '强制原生'
         : '关闭'}`,
-    `/btw 速度：reasoning=${sideReasoningEffort} timeout=${sideTimeoutMs / 1_000}s`,
+    `/btw 只读速度：reasoning=${sideReasoningEffort} timeout=${sideTimeoutMs / 1_000}s；` +
+    '--write 使用 workerTimeoutMs 和 provider 默认 reasoning',
     `项目证据校验：${rsiMode === 'off' ? '关闭' : '自动（只对已初始化项目）'}`,
     advanced ? '高级参数：已展开编辑' : '高级参数：保持原值',
   ].join('\n'), '步骤 5 / 5 · 保存前确认');
@@ -815,7 +816,8 @@ function formatSnapshot(snapshot: SettingsSnapshot): string {
     : ['- (none)'];
   const writeLines = diagnostics.writeRoutes.length > 0
     ? diagnostics.writeRoutes.map(route =>
-        `- ${route.id}: ${route.provider}/${route.model} access=workspace-write（不用于 /btw，需逐任务授权）`
+        `- ${route.id}: ${route.provider}/${route.model} access=workspace-write` +
+        '（/btw 需 --write --workspace 逐任务授权）'
       )
     : ['- (none)'];
   return [

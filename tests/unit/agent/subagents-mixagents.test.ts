@@ -186,7 +186,8 @@ describe('MixAgentsBrokerBackend', () => {
     const { root, config, env } = await setup();
     const backend = new MixAgentsBrokerBackend(config, env);
     try {
-      const [route] = await backend.listRoutes(new AbortController().signal);
+      const routes = await backend.listRoutes(new AbortController().signal);
+      const route = routes.find(item => item.maxAccess === 'workspace-write');
       await expect(backend.createOrReuse({
         route: route!,
         task: 'Edit a file',
@@ -197,6 +198,31 @@ describe('MixAgentsBrokerBackend', () => {
       })).rejects.toMatchObject({
         name: 'SubagentUnavailableError',
         code: 'write-not-authorized',
+      });
+    } finally {
+      await backend.closeBackend();
+    }
+  });
+
+  it('rejects workspace-write when the selected route is read-only', async () => {
+    const { root, config, env } = await setup();
+    const backend = new MixAgentsBrokerBackend(config, env);
+    try {
+      const [route] = await backend.listRoutes(new AbortController().signal);
+      await expect(backend.createOrReuse({
+        route: route!,
+        task: 'Edit a file',
+        cwd: root,
+        scope: 'scope-read-route',
+        access: 'workspace-write',
+        writeAuthorization: {
+          workspace: root,
+          task: 'Edit a file',
+        },
+        signal: new AbortController().signal,
+      })).rejects.toMatchObject({
+        name: 'SubagentUnavailableError',
+        code: 'route-unavailable',
       });
     } finally {
       await backend.closeBackend();
@@ -411,6 +437,47 @@ describe('subagent route resolution', () => {
     });
     expect(resolved.notice).toContain('主 Codex session');
     expect(resolved.error).toContain('wait_agent');
+  });
+
+  it('never forks a workspace-write side request', async () => {
+    const { root, env, config } = await setup();
+    await expect(resolveSubagents({
+      subagents: {
+        ...config,
+        mode: 'auto',
+        allowWriteWorkers: true,
+        writeRoute: 'write-b',
+        allowForkFallback: true,
+      },
+      env: {
+        ...env,
+        FAKE_MIXAGENTS_OMIT_TOOL: 'wait_agent',
+      },
+      cwd: root,
+      access: 'workspace-write',
+      signal: new AbortController().signal,
+    })).rejects.toMatchObject({
+      code: 'mixagents-not-configured',
+    });
+  });
+
+  it('never resolves workspace-write through explicit fork mode', async () => {
+    const { root, env, config } = await setup();
+    await expect(resolveSubagents({
+      subagents: {
+        ...config,
+        mode: 'fork',
+        allowWriteWorkers: true,
+        writeRoute: 'write-b',
+      },
+      env,
+      cwd: root,
+      access: 'workspace-write',
+      signal: new AbortController().signal,
+    })).rejects.toMatchObject({
+      code: 'write-not-authorized',
+      message: expect.stringContaining('不允许通过 Codex fork fallback'),
+    });
   });
 
   it('an explicit /btw route never falls back to main Codex', async () => {

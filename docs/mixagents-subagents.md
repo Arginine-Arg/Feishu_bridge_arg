@@ -294,16 +294,18 @@ logs.
 `/btw` is a concurrent side operation, not a second main turn. It remains
 native-side marked even if a bridge route omits its `inputMode`. Conversational
 side turns use `subagents.sideTimeoutMs` (default 90 seconds) and
-`subagents.sideReasoningEffort` (default `low`). Model-visible workers keep the
-longer `subagents.workerTimeoutMs` budget and the provider's normal reasoning
-effort.
+`subagents.sideReasoningEffort` (default `low`). Explicitly authorized write
+turns are treated as Codex-like workers instead: they use the longer
+`subagents.workerTimeoutMs` budget and the provider's normal reasoning effort.
+Model-visible workers use the same worker policy.
 
 The side runtime also limits Codex request/stream retries so a temporarily
 unavailable provider fails quickly instead of appearing to think indefinitely.
 When the side budget expires, Bridge interrupts the worker and tells the user to
-switch to a faster provider/route or increase `sideTimeoutMs`. It does not
-replay the request on the main model. No route decision is cached until process
-restart.
+switch to a faster provider/route or increase the timeout setting named in the
+error (`sideTimeoutMs` for read-only side turns or `workerTimeoutMs` for write
+workers). It does not replay the request on the main model. No route decision
+is cached until process restart.
 
 ## Credential ownership
 
@@ -339,9 +341,16 @@ The cross-repository dependency is therefore explicit:
 
 ## `/btw` lifecycle
 
-The default access is always `read-only`. A larger main-session sandbox never
-upgrades `/btw`. `workspace-write` requires exact per-task and per-workspace
-authorization and is not currently offered by the `/btw` UX.
+The default access is `read-only`. A larger main-session sandbox never upgrades
+`/btw`. A single task may use explicit write access:
+
+```text
+/btw --write --workspace /canonical/project <task>
+```
+
+This requires `allowWriteWorkers=true`, a compatible write route, and a
+canonical workspace equal to or below the current project. The next `/btw`
+without the flags returns to read-only and replaces the write-capable agent.
 
 First `/btw <text>`:
 
@@ -352,7 +361,8 @@ First `/btw <text>`:
 4. Spawn a MixAgents agent with `access: "read-only"`.
 5. Save agent ID, policy-free route identity, provider, model, scope, cwd, and
    route fingerprint in `structured/subagent-sides.json`.
-6. Wait for the first turn using an AbortSignal and `sideTimeoutMs`.
+6. Wait for the first turn using an AbortSignal and either `sideTimeoutMs`
+   (read-only) or `workerTimeoutMs` (explicit write).
 
 Later `/btw`:
 
@@ -395,7 +405,9 @@ larger sandbox.
 Missing or mismatched authorization fails before `spawn_agent` reaches MCP.
 The authorization directive is stripped before the parent model sees the task;
 model-controlled dynamic-tool arguments cannot self-grant write access.
-`/btw` remains read-only regardless of these settings.
+For `/btw`, the equivalent grant is the explicit
+`--write --workspace <canonical-path>` pair. A write worker is revalidated
+before every reused turn and is closed when the next `/btw` requests read-only.
 
 ## Provider switching boundary
 
@@ -462,7 +474,8 @@ Settings and plain doctor are non-paid, non-mutating diagnostics. They:
 - show missing environment-variable names only;
 - show read and write route wiring separately;
 - show Broker dynamic tools, native shadow policy, concurrency and timeouts;
-- mark workspace-write routes as excluded from `/btw` and gated per task;
+- mark workspace-write routes as available to explicit `/btw --write` tasks and
+  gated by the exact workspace/task authorization;
 - show MixAgents launch/tool-contract/credential/generation status separately;
 - show configured versus running main providers;
 - show Project RSI initialization, validator, reviewer requirement and bounded

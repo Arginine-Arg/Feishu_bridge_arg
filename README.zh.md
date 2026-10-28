@@ -4,7 +4,7 @@
 
 [English README](./README.md)
 
-`1.9.9` 修复 `/btw` 超时显示：agent timeout 现在显示真实 90 秒或用户配置的预算，不再误显示成 `0 分钟无响应`；由 cc-switch 自动生成的 runtime 也会立即绕过 `.js`/`.mjs`/node 形式的旧 MixAgents 包装入口。`1.9.8` 增加 provider Web Search 能力策略和低 reasoning、有限重试的 `/btw` 快速运行时；`1.9.7` 修正 Node 20 CI；`1.9.6` 修复 `/btw` 的 active writer、缺失 worker 重建和兼容 Broker 选择；`/model`、`/compact` 等原生命令会直接注入正在运行的 Codex 终端。`1.9.5` 增加主任务与 `/btw` 并行及独立 worker timeout；`1.9.4` 修复选中 provider 的凭据优先级；`1.9.3` 修复 native 恢复、稳定 socket 和 adopt 幂等。
+`1.10.0` 为 `/btw` 增加显式单任务写权限：`/btw --write --workspace <项目 canonical 路径> <任务>`。写权限必须同时满足 profile 已启用写子代理、存在兼容 write route、用户明确指定任务和 workspace；下一条未带授权参数的 `/btw` 会自动回到只读。`1.9.9` 修复 `/btw` 超时显示和旧 MixAgents 包装入口；`1.9.8` 增加 provider Web Search 能力策略和快速 `/btw`；`1.9.6` 修复 active writer 和 worker 重建；`/model`、`/compact` 等原生命令会直接注入正在运行的 Codex 终端。
 
 `1.6.7` 引入 provider-aware Codex resume，`1.7.0` 增加 idle 边界重绑。`1.9.1` 收紧重连语义：附着已有 native 或 structured thread 时，保留该 thread 记录的 provider/model，不会因为 cc-switch 后来切换了 route 而静默改路。
 
@@ -60,7 +60,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.9.9
+sh /tmp/install-arg-bridge.sh --version 1.10.0
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.9.9"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.10.0"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.9.9`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.10.0`。
 
 ### 4. Node 或 npm 全局目录错误
 
@@ -352,7 +352,7 @@ Project RSI 与 MixAgents、历史 Task RSI 是三个不同层次。Bridge 只�
 | `/sendfile <绝对路径>` | 仅管理员：直接回复发送当前工作目录、bridge 媒体缓存或显式允许目录内的普通文件，不调用 agent |
 | `/config` | 调整展示偏好、访问控制和 lark-cli 身份策略 |
 | `/model` | 选择模型；Codex 直接使用 CLI 原生模型/reasoning 选项，并把结果同步到当前 profile。`/codex model` 等价于 `/codex /model`。 |
-| `/btw [--route <id>] [<内容>]` | 开启或复用独立 read-only side agent。优先使用子代理设置指定的 cc-switch provider；`auto` 模式可回退到主 session provider 的只读 Codex `thread/fork`，manual route 和显式 `--route` 永不回退。`/btw out` 只关闭 side。飞书内 `/codex /btw ...` 等价。 |
+| `/btw [--route <id>] [<内容>]` | 开启或复用独立 side agent，默认只读。profile 允许写 worker 时，可用 `/btw --write --workspace <canonical 路径> <任务>` 显式授权一次 workspace-write。优先使用子代理设置指定的 cc-switch provider；只读 `auto` 模式可回退到主 session provider 的 Codex `thread/fork`，写任务、manual route 和显式 `--route` 永不回退。`/btw out` 只关闭 side。飞书内 `/codex /btw ...` 等价。 |
 | `/session [status\|live\|turn]` | 查看终端执行状态。tmux/live 为默认模式；`turn` 仅作为兼容回退 |
 | `/tmux list [socket]` | 仅管理员：列出本机所有存活的 Codex/Claude tmux pane，包含工作目录、agent 类型、已识别 thread、共享 App Server endpoint 和 attach 命令。可选 `-S <绝对 socket 路径>` 或 `-L <名称>` 只扫描一个 tmux server；普通 shell 不会列出 |
 | `/tmux bind <编号\|pane id\|socket::pane id>` | 仅管理员：把当前 chat/topic scope 绑定到列表中的 pane。带有共享 Codex endpoint 的 pane 走 structured 转发，普通 Codex/Claude pane 回退到 live 转发。编号只在最近一次 `/tmux list` 结果内有效 |

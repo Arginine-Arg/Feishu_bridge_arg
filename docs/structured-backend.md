@@ -179,7 +179,7 @@ for Claude remote-service transport, not a verified local attach replacement.
 | `/status` | thread metadata and Bridge diagnostics | SDK session/model/phase and Bridge diagnostics |
 | `/goal` | native get/set/pause/resume/clear, with goal relay spanning turns | unsupported; no imitation goal loop |
 | `/stop` | pause active goal and interrupt the exact turn | SDK interrupt |
-| `/btw` | independently routed MixAgents read-only agent; explicit Codex fork fallback | MixAgents read-only side through the same backend; Codex-specific fork is unavailable |
+| `/btw` | independently routed MixAgents agent; read-only by default, with explicit one-task workspace-write; read-only Codex fork fallback | MixAgents side through the same backend; Codex-specific fork is unavailable |
 
 Other slash commands are not forwarded to the model as ordinary task text when
 unsupported. The stable terminal backend remains available for its full native
@@ -273,10 +273,12 @@ equivalent. Ephemeral threads do not support goals; the server rejects combining
 
 `/btw` without text prepares side without a generation; `/btw text` submits only
 after preparation. With MixAgents, text is sent to an independent Broker agent.
-The auto-mode fallback sends it as ordinary input to a read-only Codex
-`thread/fork`; neither path uses a writable native child. `access` is always
-`read-only`. Scope/cwd/route
-fingerprint are persisted so a Bridge restart can reconnect the same agent.
+For a read-only task, the auto-mode fallback sends ordinary input to a read-only
+Codex `thread/fork`. Access is `read-only` unless the user supplies
+`/btw --write --workspace <canonical-path> <task>` and the profile enables a
+compatible write route. Write tasks require MixAgents and never use fork
+fallback. Scope/cwd/route fingerprint are persisted so a Bridge restart can
+reconnect the same agent.
 Route/provider/model/backend/revision changes replace the old agent with an
 explicit notice. `/btw out` interrupts only that side; `/stop`, `/model`,
 `/goal`, and `/compact` stay main-scoped.

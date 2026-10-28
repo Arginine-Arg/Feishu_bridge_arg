@@ -29,7 +29,7 @@ export interface ResolveSubagentInput {
   cwd: string;
   /** Explicit per-command route (highest priority). */
   requestedRoute?: string;
-  /** Access requested for the worker. /btw always supplies read-only. */
+  /** Access requested for the worker. /btw supplies read-only unless --write is authorized. */
   access?: SubagentAccess;
   /** Profile-scoped structured state directory for generated runtime files. */
   stateDir?: string;
@@ -67,10 +67,22 @@ export async function resolveSubagents(input: ResolveSubagentInput): Promise<Res
     ccSwitch,
     ...(routeState.config ? { routeMap: routeState.config } : {}),
   };
+  if (input.access === 'workspace-write' && !config.allowWriteWorkers) {
+    throw new SubagentUnavailableError(
+      'write-not-authorized',
+      'workspace-write 子代理未在 profile 中启用；/btw 默认只读。',
+    );
+  }
   if (!config.enabled || config.mode === 'off') {
     return { ...base, kind: 'off', routes: [] };
   }
   if (config.mode === 'fork') {
+    if (input.access === 'workspace-write') {
+      throw new SubagentUnavailableError(
+        'write-not-authorized',
+        'workspace-write 子代理只能使用 Broker；不允许通过 Codex fork fallback 获得写权限。',
+      );
+    }
     return { ...base, kind: 'fork', routes: [] };
   }
 
@@ -133,7 +145,8 @@ export async function resolveSubagents(input: ResolveSubagentInput): Promise<Res
     if (
       !config.allowForkFallback ||
       config.routeMode === 'manual' ||
-      input.requestedRoute
+      input.requestedRoute ||
+      (input.access ?? 'read-only') === 'workspace-write'
     ) {
       throw new SubagentUnavailableError(
         'mixagents-not-configured',
@@ -202,6 +215,7 @@ function canAutoForkFallback(
   config: SubagentConfig,
 ): boolean {
   return (
+    (input.access ?? 'read-only') === 'read-only' &&
     config.mode === 'auto' &&
     config.routeMode === 'follow-cc-switch' &&
     config.allowForkFallback &&

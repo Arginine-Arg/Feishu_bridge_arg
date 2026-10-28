@@ -195,6 +195,12 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
 
   async createOrReuse(input: SideAgentInput): Promise<SideAgent> {
     if (input.access !== 'read-only') {
+      if (input.route.maxAccess !== 'workspace-write') {
+        throw new SubagentUnavailableError(
+          'route-unavailable',
+          `MixAgents route ${input.route.id} 不支持 workspace-write。`,
+        );
+      }
       const authorization = input.writeAuthorization;
       if (
         !authorization ||

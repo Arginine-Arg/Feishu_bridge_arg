@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.10.0
+
+- `/btw` now supports explicit one-task workspace-write authorization:
+  `/btw --write --workspace <canonical-project> <task>`. Both the profile's
+  write-worker setting and a compatible write route are required.
+- Write permission never persists across side tasks. A later `/btw` without
+  `--write --workspace` closes the write-capable worker and returns to
+  read-only. Missing, unrelated or broad workspaces fail closed.
+- The side worker prompt and lifecycle now distinguish read-only review from an
+  explicitly authorized write task instead of always calling itself read-only.
+- Explicit write turns use the normal `workerTimeoutMs` budget and provider
+  reasoning settings; the 90-second low-reasoning fast path remains specific to
+  read-only conversational `/btw` turns.
+- `/btw` keeps the Codex-like tools available inside read-only mode and adds the
+  same explicit per-task write path for cases that need file changes.
+
 ## 1.9.9
 
 - Agent timeouts now render as actionable errors with the real timeout message.

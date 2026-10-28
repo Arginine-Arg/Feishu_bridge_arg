@@ -4,7 +4,7 @@ A lightweight bot that bridges Feishu / Lark messenger with your local Claude Co
 
 [中文 README](./README.zh.md)
 
-Version 1.9.9 fixes `/btw` timeout reporting: agent timeouts show the real 90-second or configured budget instead of `0 分钟无响应`, and generated cc-switch runtimes bypass `.js`/`.mjs`/node-based legacy MixAgents wrappers immediately. Version 1.9.8 added provider capability policy for web search and a dedicated low-reasoning fast `/btw` runtime with bounded retries. Version 1.9.7 corrected the Node 20 CI gate. Version 1.9.6 fixed repeated `/btw` follow-ups by preserving the owning Broker backend and recreating missing workers safely. Native `/model`, `/compact` and similar commands are injected directly into the active Codex terminal without cancelling the task. Version 1.9.5 added concurrent main-task and `/btw` execution with dedicated worker timeouts. Version 1.9.4 fixes selected-provider credential precedence across `/btw`, model tools, native workers and RSI reviewers. Version 1.9.3 repairs Bridge-managed native resume, stable App Server sockets and idempotent adoption.
+Version 1.10.0 adds explicit one-task workspace-write support to `/btw` with `/btw --write --workspace <canonical-project> <task>`. Write capability requires profile enablement, a compatible write route, and the exact user-issued task/workspace grant; it never persists into the next side request. Version 1.9.9 fixed `/btw` timeout reporting and legacy MixAgents wrapper recovery. Version 1.9.8 added provider capability policy for web search and a fast low-reasoning `/btw` runtime. Native `/model`, `/compact` and similar commands are injected directly into the active Codex terminal without cancelling the task. Version 1.9.6 fixed repeated `/btw` follow-ups and active-writer collisions. Version 1.9.4 fixes selected-provider credential precedence across `/btw`, model tools, native workers and RSI reviewers.
 
 Version 1.6.7 introduced provider-aware Codex resume, and 1.7.0 added idle-boundary rebinding. Version 1.9.1 narrows reattachment semantics: reconnecting to an existing native or structured thread preserves the provider/model recorded by that thread instead of silently following a newly selected cc-switch route.
 
@@ -60,7 +60,7 @@ Install a pinned release or use a writable custom npm prefix when required:
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.9.9
+sh /tmp/install-arg-bridge.sh --version 1.10.0
 # Example for a machine without permission to write npm's configured global prefix:
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ Release tarballs are preferred. If a Git install is required, keep both compatib
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.9.9"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.10.0"
 ```
 
-`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.9.9`.
+`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.10.0`.
 
 ### 4. Node or npm global-prefix errors
 
@@ -356,7 +356,7 @@ See [MixAgents subagents](./docs/mixagents-subagents.md), [Bridge-managed native
 | `/sendfile <absolute-path>` | Admin-only: reply with a regular file from the current workspace, bridge media cache, or an explicitly allowed outbound directory, without invoking the agent |
 | `/config` | Adjust presentation preferences, access settings, and lark-cli identity policy |
 | `/model` | Choose the model; Codex uses its native model/reasoning picker and syncs the result to the active profile. `/codex model` is a shorthand for `/codex /model`. |
-| `/btw [--route <id>] [<text>]` | Open or reuse an independent read-only side agent. The subagent-selected cc-switch provider is tried first. In `auto` mode it may fall back to the main session's provider through read-only Codex `thread/fork`; manual routes and explicit `--route` never fall back. `/btw out` closes only the side. `/codex /btw ...` is equivalent in Feishu. |
+| `/btw [--route <id>] [<text>]` | Open or reuse an independent side agent; access is read-only by default. Use `/btw --write --workspace <canonical-path> <task>` for one explicitly authorized workspace-write turn when the profile allows write workers. The subagent-selected cc-switch provider is tried first. Read-only `auto` mode may fall back to the main session's provider through Codex `thread/fork`; write tasks, manual routes and explicit `--route` never fall back. `/btw out` closes only the side. `/codex /btw ...` is equivalent in Feishu. |
 | `/session [status\|live\|turn]` | Inspect terminal execution. tmux/live is the default; `turn` remains a legacy compatibility fallback |
 | `/tmux list [socket]` | Admin-only: list every live Codex/Claude tmux pane on this host, including working directory, agent kind, adopted thread, shared App Server endpoint, and attach command. Optional `-S <absolute socket path>` or `-L <socket name>` selects one tmux server; plain shells are never listed |
 | `/tmux bind <number\|pane id\|socket::pane id>` | Admin-only: bind the current chat/topic scope to a listed pane. A pane with a shared Codex endpoint is driven through structured transport; a plain Codex/Claude pane falls back to live transport. `/tmux list` numbers are only valid for the most recent listing |
