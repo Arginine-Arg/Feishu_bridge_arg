@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -576,7 +584,7 @@ test("Windows uses the native executable from the npm-managed Codex package", as
         { CODEX_MANAGED_PACKAGE_ROOT: managedRoot },
         { platform: "win32", arch: "x64" },
       ),
-      { command: executable, prefixArgs: [] },
+      { command: await realpath(executable), prefixArgs: [] },
     );
     assert.deepEqual(
       resolveCodexProcess(
