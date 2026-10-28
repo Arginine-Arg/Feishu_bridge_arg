@@ -211,6 +211,9 @@ function routeChangeReason(
   cwd: string,
   access: 'read-only' | 'workspace-write',
 ): string | undefined {
+  if (state.agent.status === 'timeout' || state.agent.status === 'interrupted') {
+    return `previous turn ${state.agent.status} (${state.agent.agentId})`;
+  }
   if (state.cwd !== cwd) return `workspace ${state.cwd} → ${cwd}`;
   if (state.agent.access !== access) {
     return `access ${state.agent.access} → ${access}`;
@@ -447,6 +450,8 @@ export interface StructuredAdapterOptions {
   profile?: string;
   env?: NodeJS.ProcessEnv;
   subagentResolver?: typeof resolveSubagents;
+  /** Liveness-only progress while the Broker mailbox has no token stream. */
+  sideHeartbeatMs?: number;
 }
 
 export class StructuredAdapter implements AgentAdapter {
@@ -902,6 +907,8 @@ export class StructuredAdapter implements AgentAdapter {
       : [
           'You are an independent read-only side reviewer.',
           'Do not modify files, start persistent services, or perform external side effects.',
+          'For progress or status questions, inspect existing artifacts and receipts only; do not start new long-running calculations or broad filesystem scans.',
+          'If work is incomplete, report the current evidence and missing pieces instead of trying to finish the whole task yourself.',
         ];
     if (!config.includeProgressSnapshot) return [...policy, '', body].join('\n');
     return [
@@ -1013,21 +1020,37 @@ export class StructuredAdapter implements AgentAdapter {
             existing.agent = validated;
             existing.updatedAt = Date.now();
             await this.saveMixagentsSides();
-            result = await activeBackend.wait(validated, signal, turnTimeoutMs);
+            result = await this.withMixagentsHeartbeat(
+              emit,
+              route,
+              access,
+              () => activeBackend.wait(validated, signal, turnTimeoutMs),
+            );
           } else {
-            result = await activeBackend.send(
-              validated,
-              input.task,
-              signal,
-              turnTimeoutMs,
+            result = await this.withMixagentsHeartbeat(
+              emit,
+              route,
+              access,
+              () => activeBackend.send(
+                validated,
+                input.task,
+                signal,
+                turnTimeoutMs,
+              ),
             );
           }
         } else {
-          result = await activeBackend.send(
-            existing.agent,
-            body,
-            signal,
-            turnTimeoutMs,
+          const agent = existing.agent;
+          result = await this.withMixagentsHeartbeat(
+            emit,
+            route,
+            access,
+            () => activeBackend.send(
+              agent,
+              body,
+              signal,
+              turnTimeoutMs,
+            ),
           );
         }
         if (result.status === 'timeout') {
@@ -1104,7 +1127,12 @@ export class StructuredAdapter implements AgentAdapter {
     this.mixagentsSides.set(`${scope}\0${scopeCwd}`, state);
     await this.saveMixagentsSides();
     try {
-      const result = await resolvedBackend.wait(agent, signal, turnTimeoutMs);
+      const result = await this.withMixagentsHeartbeat(
+        emit,
+        route,
+        access,
+        () => resolvedBackend.wait(agent, signal, turnTimeoutMs),
+      );
       if (result.status === 'timeout') {
         await resolvedBackend.interrupt(agent, AbortSignal.timeout(30_000)).catch(() => {});
       }
@@ -1136,7 +1164,12 @@ export class StructuredAdapter implements AgentAdapter {
         state.updatedAt = Date.now();
         this.mixagentsSides.set(`${scope}\0${scopeCwd}`, state);
         await this.saveMixagentsSides();
-        const result = await resolvedBackend.wait(replacement, signal, turnTimeoutMs);
+        const result = await this.withMixagentsHeartbeat(
+          emit,
+          route,
+          access,
+          () => resolvedBackend.wait(replacement, signal, turnTimeoutMs),
+        );
         if (result.status === 'timeout') {
           await resolvedBackend.interrupt(replacement, AbortSignal.timeout(30_000)).catch(() => {});
         }
@@ -1150,6 +1183,30 @@ export class StructuredAdapter implements AgentAdapter {
         return;
       }
       throw error;
+    }
+  }
+  private async withMixagentsHeartbeat<T>(
+    emit: (event: AgentEvent) => void,
+    route: SubagentRoute,
+    access: 'read-only' | 'workspace-write',
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const heartbeatMs = this.options.sideHeartbeatMs ?? 15_000;
+    const startedAt = Date.now();
+    const timer = heartbeatMs > 0
+      ? setInterval(() => {
+          const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1_000));
+          emit(textEvent(
+            `⏳ MixAgents side 已等待 ${elapsedSeconds} 秒（route=${route.id} access=${access}）；` +
+            '当前 Broker MCP 只提供终态 mailbox，暂无 token 流可转发。\n',
+          ));
+        }, heartbeatMs)
+      : undefined;
+    timer?.unref?.();
+    try {
+      return await operation();
+    } finally {
+      if (timer) clearInterval(timer);
     }
   }
   private async interruptAbortedMixagentsSide(state: MixAgentsSideState): Promise<void> {
@@ -1183,8 +1240,10 @@ export class StructuredAdapter implements AgentAdapter {
       emit({
         type: 'error',
         message:
-          `MixAgents side ${timeoutMs ? `${Math.round(timeoutMs / 1_000)} 秒` : ''}超时，worker 已停止。` +
-          `请切换到更快的 provider/route，或在设置中调整 ${timeoutSetting}；本次请求不会自动换模型重放。`,
+          `MixAgents side ${timeoutMs ? `${Math.round(timeoutMs / 1_000)} 秒` : ''}超出等待预算；` +
+          'Bridge 已停止等待并请求中断，但远端 provider 工作可能稍后完成。' +
+          `请切换到更快的 provider/route，或在设置中调整 ${timeoutSetting}；` +
+          '下一条 /btw 会创建新的 side，不会复用本次超时上下文。',
         terminationReason: 'timeout',
       });
       return;

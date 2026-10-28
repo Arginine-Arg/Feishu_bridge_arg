@@ -422,6 +422,9 @@ describe('structured MixAgents /btw', () => {
     expect(backend.spawns[0]!.signal).toBeInstanceOf(AbortSignal);
     expect(backend.spawns[0]!.task).not.toContain('sk-super-secret-value');
     expect(backend.spawns[0]!.task).toContain('[REDACTED]');
+    expect(backend.spawns[0]!.task).toContain(
+      'do not start new long-running calculations or broad filesystem scans',
+    );
     expect(backend.waitTimeouts[0]).toBe(subagents.sideTimeoutMs);
 
     const second = await drain(adapter.runSide({
@@ -1036,7 +1039,67 @@ describe('structured MixAgents /btw', () => {
       type: 'error',
       message: expect.stringContaining('45 秒'),
     }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'error',
+      message: expect.stringContaining('远端 provider 工作可能稍后完成'),
+    }));
     expect(backend.interruptions).toContain('agent-1');
+
+    backend.waitResult = undefined;
+    const followup = await drain(adapter.runSide({
+      runId: 'side-after-timeout',
+      scopeId: 'scope',
+      cwd: '/workspace',
+      prompt: '/btw Start a clean side after the timeout',
+      liveInputMode: 'side',
+    }));
+    expect(followup.filter(event => event.type === 'error')).toEqual([]);
+    expect(backend.spawns).toHaveLength(2);
+    expect(backend.sends).toHaveLength(0);
+    expect(backend.closes).toContain('agent-1');
+
+    await main.close();
+    await rm(profileDir, { recursive: true, force: true });
+  });
+
+  it('emits liveness heartbeats while waiting for the Broker mailbox', async () => {
+    const profileDir = await mkdtemp(join(tmpdir(), 'arg-bridge-side-heartbeat-'));
+    const backend = new FakeBackend(() => routeA);
+    backend.hangWaits = true;
+    const main = session();
+    const adapter = new StructuredAdapter({
+      kind: 'codex',
+      binary: 'not-spawned',
+      profileDir,
+      subagents,
+      subagentResolver: vi.fn(async () => resolved(routeA, backend)),
+      sideHeartbeatMs: 10,
+    });
+    Reflect.get(adapter, 'sessions').set('scope', {
+      main,
+      cwd: '/workspace',
+      view: new StructuredView(profileDir, 'main'),
+    });
+
+    const run = adapter.runSide({
+      runId: 'side-heartbeat',
+      scopeId: 'scope',
+      cwd: '/workspace',
+      prompt: '/btw Report status while the worker is slow',
+      liveInputMode: 'side',
+    });
+    await vi.waitFor(() => expect(backend.spawns).toHaveLength(1));
+    await new Promise(resolve => setTimeout(resolve, 35));
+    await run.stop();
+    const events = await drain(run);
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'text',
+      delta: expect.stringContaining('MixAgents side 已等待'),
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'text',
+      delta: expect.stringContaining('只提供终态 mailbox'),
+    }));
     await main.close();
     await rm(profileDir, { recursive: true, force: true });
   });

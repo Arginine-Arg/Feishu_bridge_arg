@@ -4,7 +4,7 @@ A lightweight bot that bridges Feishu / Lark messenger with your local Claude Co
 
 [中文 README](./README.zh.md)
 
-Version 1.10.0 adds explicit one-task workspace-write support to `/btw` with `/btw --write --workspace <canonical-project> <task>`. Write capability requires profile enablement, a compatible write route, and the exact user-issued task/workspace grant; it never persists into the next side request. Version 1.9.9 fixed `/btw` timeout reporting and legacy MixAgents wrapper recovery. Version 1.9.8 added provider capability policy for web search and a fast low-reasoning `/btw` runtime. Native `/model`, `/compact` and similar commands are injected directly into the active Codex terminal without cancelling the task. Version 1.9.6 fixed repeated `/btw` follow-ups and active-writer collisions. Version 1.9.4 fixes selected-provider credential precedence across `/btw`, model tools, native workers and RSI reviewers.
+Version 1.10.1 fixes the remaining legacy `arg-bridge-mixagents-mcp` runtime fallback warning, adds visible `/btw` liveness heartbeats, and prevents timed-out or interrupted side turns from being reused implicitly. Version 1.10.0 added explicit one-task workspace-write support to `/btw` with `/btw --write --workspace <canonical-project> <task>`. Write capability requires profile enablement, a compatible write route, and the exact user-issued task/workspace grant; it never persists into the next side request. Version 1.9.9 fixed `/btw` timeout reporting. Version 1.9.8 added provider capability policy for web search and a fast low-reasoning `/btw` runtime.
 
 Version 1.6.7 introduced provider-aware Codex resume, and 1.7.0 added idle-boundary rebinding. Version 1.9.1 narrows reattachment semantics: reconnecting to an existing native or structured thread preserves the provider/model recorded by that thread instead of silently following a newly selected cc-switch route.
 
@@ -60,7 +60,7 @@ Install a pinned release or use a writable custom npm prefix when required:
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.10.0
+sh /tmp/install-arg-bridge.sh --version 1.10.1
 # Example for a machine without permission to write npm's configured global prefix:
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ Release tarballs are preferred. If a Git install is required, keep both compatib
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.10.0"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.10.1"
 ```
 
-`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.10.0`.
+`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.10.1`.
 
 ### 4. Node or npm global-prefix errors
 

@@ -574,7 +574,7 @@ function isGeneratedRuntimeBrokerLaunch(launch: MixAgentsLaunchConfig): boolean 
     .map(value => basename(value).toLowerCase())
     .filter(Boolean);
   return candidates.some(value =>
-    /^mixagents-broker(?:-mcp)?(?:\.(?:mjs|cjs|js|cmd|exe))?$/u.test(value)
+    /^(?:mixagents-broker(?:-mcp)?|arg-bridge-mixagents-(?:mcp|broker(?:-mcp)?))(?:\.(?:mjs|cjs|js|cmd|exe))?$/u.test(value)
   );
 }
 

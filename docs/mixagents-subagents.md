@@ -301,11 +301,14 @@ Model-visible workers use the same worker policy.
 
 The side runtime also limits Codex request/stream retries so a temporarily
 unavailable provider fails quickly instead of appearing to think indefinitely.
-When the side budget expires, Bridge interrupts the worker and tells the user to
-switch to a faster provider/route or increase the timeout setting named in the
-error (`sideTimeoutMs` for read-only side turns or `workerTimeoutMs` for write
-workers). It does not replay the request on the main model. No route decision
-is cached until process restart.
+Bridge emits a liveness heartbeat every 15 seconds while it waits for the
+Broker's terminal mailbox. This is not token-level streaming: the current MCP
+contract exposes final output only. When the side budget expires, Bridge stops
+waiting and requests an interrupt; remote provider work may continue. The error
+directs the user to a faster provider/route or the configured
+`sideTimeoutMs`/`workerTimeoutMs` budget. The request is not replayed on the
+main model. A timed-out or interrupted side is rotated on the next `/btw`
+instead of receiving a new message into uncertain remote work.
 
 ## Credential ownership
 

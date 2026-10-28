@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.10.1
+
+- Recognizes the legacy `arg-bridge-mixagents-mcp` wrapper as a generated
+  cc-switch runtime wrapper. Generated routes now launch the bundled Broker
+  directly instead of probing the incompatible wrapper and showing a fallback
+  warning on every `/btw`.
+- Emits a visible liveness heartbeat every 15 seconds while waiting for a
+  MixAgents side mailbox. The Broker MCP currently exposes only terminal
+  mailbox results, not token deltas.
+- Timeout and interrupted side turns are no longer implicitly reused. The next
+  `/btw` closes the uncertain agent and creates a clean side instead of steering
+  a new message into work that may still be running remotely.
+- Timeout text now distinguishes Bridge stopping its wait and requesting an
+  interrupt from the provider actually stopping all remote work.
+
 ## 1.10.0
 
 - `/btw` now supports explicit one-task workspace-write authorization:

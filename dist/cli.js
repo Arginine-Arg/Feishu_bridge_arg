@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.10.0",
+  version: "1.10.1",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -15015,7 +15015,7 @@ function resolveBundledMixAgentsLaunchConfig() {
 function isGeneratedRuntimeBrokerLaunch(launch) {
   const candidates = [launch.command, ...launch.args].map((value) => basename5(value).toLowerCase()).filter(Boolean);
   return candidates.some(
-    (value) => /^mixagents-broker(?:-mcp)?(?:\.(?:mjs|cjs|js|cmd|exe))?$/u.test(value)
+    (value) => /^(?:mixagents-broker(?:-mcp)?|arg-bridge-mixagents-(?:mcp|broker(?:-mcp)?))(?:\.(?:mjs|cjs|js|cmd|exe))?$/u.test(value)
   );
 }
 function agentFromSnapshot(value, fallback) {
@@ -18866,6 +18866,9 @@ function parseWriteAuthorizationPrompt(prompt) {
   };
 }
 function routeChangeReason(state, route, cwd, access3) {
+  if (state.agent.status === "timeout" || state.agent.status === "interrupted") {
+    return `previous turn ${state.agent.status} (${state.agent.agentId})`;
+  }
   if (state.cwd !== cwd) return `workspace ${state.cwd} \u2192 ${cwd}`;
   if (state.agent.access !== access3) {
     return `access ${state.agent.access} \u2192 ${access3}`;
@@ -19413,7 +19416,9 @@ var StructuredAdapter = class {
       "Make only changes needed for this explicit task. Do not start persistent services or perform unrelated external side effects."
     ] : [
       "You are an independent read-only side reviewer.",
-      "Do not modify files, start persistent services, or perform external side effects."
+      "Do not modify files, start persistent services, or perform external side effects.",
+      "For progress or status questions, inspect existing artifacts and receipts only; do not start new long-running calculations or broad filesystem scans.",
+      "If work is incomplete, report the current evidence and missing pieces instead of trying to finish the whole task yourself."
     ];
     if (!config.includeProgressSnapshot) return [...policy, "", body].join("\n");
     return [
@@ -19502,21 +19507,37 @@ var StructuredAdapter = class {
             existing.agent = validated;
             existing.updatedAt = Date.now();
             await this.saveMixagentsSides();
-            result = await activeBackend.wait(validated, signal, turnTimeoutMs);
+            result = await this.withMixagentsHeartbeat(
+              emit2,
+              route,
+              access3,
+              () => activeBackend.wait(validated, signal, turnTimeoutMs)
+            );
           } else {
-            result = await activeBackend.send(
-              validated,
-              input.task,
-              signal,
-              turnTimeoutMs
+            result = await this.withMixagentsHeartbeat(
+              emit2,
+              route,
+              access3,
+              () => activeBackend.send(
+                validated,
+                input.task,
+                signal,
+                turnTimeoutMs
+              )
             );
           }
         } else {
-          result = await activeBackend.send(
-            existing.agent,
-            body,
-            signal,
-            turnTimeoutMs
+          const agent2 = existing.agent;
+          result = await this.withMixagentsHeartbeat(
+            emit2,
+            route,
+            access3,
+            () => activeBackend.send(
+              agent2,
+              body,
+              signal,
+              turnTimeoutMs
+            )
           );
         }
         if (result.status === "timeout") {
@@ -19591,7 +19612,12 @@ var StructuredAdapter = class {
     this.mixagentsSides.set(`${scope}\0${scopeCwd}`, state);
     await this.saveMixagentsSides();
     try {
-      const result = await resolvedBackend.wait(agent, signal, turnTimeoutMs);
+      const result = await this.withMixagentsHeartbeat(
+        emit2,
+        route,
+        access3,
+        () => resolvedBackend.wait(agent, signal, turnTimeoutMs)
+      );
       if (result.status === "timeout") {
         await resolvedBackend.interrupt(agent, AbortSignal.timeout(3e4)).catch(() => {
         });
@@ -19623,7 +19649,12 @@ var StructuredAdapter = class {
         state.updatedAt = Date.now();
         this.mixagentsSides.set(`${scope}\0${scopeCwd}`, state);
         await this.saveMixagentsSides();
-        const result = await resolvedBackend.wait(replacement, signal, turnTimeoutMs);
+        const result = await this.withMixagentsHeartbeat(
+          emit2,
+          route,
+          access3,
+          () => resolvedBackend.wait(replacement, signal, turnTimeoutMs)
+        );
         if (result.status === "timeout") {
           await resolvedBackend.interrupt(replacement, AbortSignal.timeout(3e4)).catch(() => {
           });
@@ -19638,6 +19669,23 @@ var StructuredAdapter = class {
         return;
       }
       throw error;
+    }
+  }
+  async withMixagentsHeartbeat(emit2, route, access3, operation) {
+    const heartbeatMs = this.options.sideHeartbeatMs ?? 15e3;
+    const startedAt = Date.now();
+    const timer = heartbeatMs > 0 ? setInterval(() => {
+      const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1e3));
+      emit2(textEvent(
+        `\u23F3 MixAgents side \u5DF2\u7B49\u5F85 ${elapsedSeconds} \u79D2\uFF08route=${route.id} access=${access3}\uFF09\uFF1B\u5F53\u524D Broker MCP \u53EA\u63D0\u4F9B\u7EC8\u6001 mailbox\uFF0C\u6682\u65E0 token \u6D41\u53EF\u8F6C\u53D1\u3002
+`
+      ));
+    }, heartbeatMs) : void 0;
+    timer?.unref?.();
+    try {
+      return await operation();
+    } finally {
+      if (timer) clearInterval(timer);
     }
   }
   async interruptAbortedMixagentsSide(state) {
@@ -19666,7 +19714,7 @@ var StructuredAdapter = class {
     if (result.status === "timeout") {
       emit2({
         type: "error",
-        message: `MixAgents side ${timeoutMs ? `${Math.round(timeoutMs / 1e3)} \u79D2` : ""}\u8D85\u65F6\uFF0Cworker \u5DF2\u505C\u6B62\u3002\u8BF7\u5207\u6362\u5230\u66F4\u5FEB\u7684 provider/route\uFF0C\u6216\u5728\u8BBE\u7F6E\u4E2D\u8C03\u6574 ${timeoutSetting}\uFF1B\u672C\u6B21\u8BF7\u6C42\u4E0D\u4F1A\u81EA\u52A8\u6362\u6A21\u578B\u91CD\u653E\u3002`,
+        message: `MixAgents side ${timeoutMs ? `${Math.round(timeoutMs / 1e3)} \u79D2` : ""}\u8D85\u51FA\u7B49\u5F85\u9884\u7B97\uFF1BBridge \u5DF2\u505C\u6B62\u7B49\u5F85\u5E76\u8BF7\u6C42\u4E2D\u65AD\uFF0C\u4F46\u8FDC\u7AEF provider \u5DE5\u4F5C\u53EF\u80FD\u7A0D\u540E\u5B8C\u6210\u3002\u8BF7\u5207\u6362\u5230\u66F4\u5FEB\u7684 provider/route\uFF0C\u6216\u5728\u8BBE\u7F6E\u4E2D\u8C03\u6574 ${timeoutSetting}\uFF1B\u4E0B\u4E00\u6761 /btw \u4F1A\u521B\u5EFA\u65B0\u7684 side\uFF0C\u4E0D\u4F1A\u590D\u7528\u672C\u6B21\u8D85\u65F6\u4E0A\u4E0B\u6587\u3002`,
         terminationReason: "timeout"
       });
       return;

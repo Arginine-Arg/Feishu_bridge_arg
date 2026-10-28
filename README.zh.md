@@ -4,7 +4,7 @@
 
 [English README](./README.md)
 
-`1.10.0` 为 `/btw` 增加显式单任务写权限：`/btw --write --workspace <项目 canonical 路径> <任务>`。写权限必须同时满足 profile 已启用写子代理、存在兼容 write route、用户明确指定任务和 workspace；下一条未带授权参数的 `/btw` 会自动回到只读。`1.9.9` 修复 `/btw` 超时显示和旧 MixAgents 包装入口；`1.9.8` 增加 provider Web Search 能力策略和快速 `/btw`；`1.9.6` 修复 active writer 和 worker 重建；`/model`、`/compact` 等原生命令会直接注入正在运行的 Codex 终端。
+`1.10.1` 修复旧 `arg-bridge-mixagents-mcp` wrapper 导致的重复 runtime fallback 警告，为 `/btw` 增加可见心跳，并禁止超时或中断的 side 被下一轮隐式复用。`1.10.0` 为 `/btw` 增加显式单任务写权限：`/btw --write --workspace <项目 canonical 路径> <任务>`。写权限必须同时满足 profile 已启用写子代理、存在兼容 write route、用户明确指定任务和 workspace。`1.9.9` 修复 `/btw` 超时显示；`1.9.8` 增加 provider Web Search 能力策略和快速 `/btw`。
 
 `1.6.7` 引入 provider-aware Codex resume，`1.7.0` 增加 idle 边界重绑。`1.9.1` 收紧重连语义：附着已有 native 或 structured thread 时，保留该 thread 记录的 provider/model，不会因为 cc-switch 后来切换了 route 而静默改路。
 
@@ -60,7 +60,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.10.0
+sh /tmp/install-arg-bridge.sh --version 1.10.1
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.10.0"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.10.1"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.10.0`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.10.1`。
 
 ### 4. Node 或 npm 全局目录错误
 
