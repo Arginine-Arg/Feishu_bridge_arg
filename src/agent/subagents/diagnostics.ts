@@ -54,6 +54,10 @@ export interface SubagentDiagnostics {
   launchConfigured: boolean;
   launchCommand?: string;
   packageVersion?: string;
+  progress: {
+    mode: 'events-v1' | 'heartbeat-only' | 'unknown';
+    tool?: 'read_agent_events';
+  };
   toolContract: 'compatible' | 'incompatible' | 'unknown';
   mcpStart: 'not-configured' | 'started' | 'failed';
   credentials: {
@@ -220,6 +224,7 @@ export async function collectSubagentDiagnostics(input: {
       reason: 'no generated cc-switch runtime has been inspected',
     },
     launchConfigured: Boolean(resolveMixAgentsLaunchConfig(input.config, env)),
+    progress: { mode: 'unknown' },
     toolContract: 'unknown',
     mcpStart: 'not-configured',
     credentials: describeCredentialState(
@@ -386,6 +391,9 @@ export async function collectSubagentDiagnostics(input: {
         : {}),
       launchCommand: basename(launch.command),
       ...(backend.serverVersion ? { packageVersion: backend.serverVersion } : {}),
+      progress: backend.progressEventsEnabled
+        ? { mode: 'events-v1', tool: 'read_agent_events' }
+        : { mode: 'heartbeat-only' },
       toolContract: 'compatible',
       mcpStart: 'started',
       mcp: { status: 'available' },

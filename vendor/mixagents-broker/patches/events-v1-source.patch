@@ -1,0 +1,465 @@
+--- a/packages/broker/src/app-server.ts	2026-09-04 15:28:13.000000000 +0800
++++ b/packages/broker/src/app-server.ts	2026-10-28 20:13:04.055627529 +0800
+@@ -9,6 +9,8 @@
+ import { JsonLinePeer, JsonRpcRemoteError } from "./jsonrpc.js";
+ import type {
+   Access,
++  AgentEvent,
++  AgentEventsResult,
+   AgentSnapshot,
+   PendingInteraction,
+   ProcessSpec,
+@@ -21,6 +23,8 @@
+ const RUNTIME_METADATA_FILE = "runtime.json";
+ const RUNTIME_CONFIG_FILE = "config.toml";
+ const AGENT_PREFIX = "broker";
++const MAX_AGENT_EVENTS = 4_096;
++const MAX_AGENT_EVENT_TEXT_CHARS = 1_000_000;
+ 
+ interface RuntimeSpec {
+   metadata: RuntimeMetadata;
+@@ -37,12 +41,34 @@
+   error?: string;
+   ignoredTurnIds: Set<string>;
+   interactions: PendingInteraction[];
++  events: AgentEvent[];
++  nextEventSeq: number;
++  eventTextChars: number;
++  droppedThrough: number;
++  deltasByTurn: Set<string>;
+ }
+ 
+ function isRecord(value: unknown): value is Record<string, unknown> {
+   return typeof value === "object" && value !== null && !Array.isArray(value);
+ }
+ 
++function toolNameFromItem(item: Record<string, unknown>): string | undefined {
++  const type = item.type;
++  if (
++    typeof type !== "string" ||
++    type === "agentMessage" ||
++    type === "reasoning" ||
++    type === "userMessage"
++  ) {
++    return undefined;
++  }
++  return type;
++}
++
++function itemIdFrom(item: Record<string, unknown>): string | undefined {
++  return typeof item.id === "string" ? item.id : undefined;
++}
++
+ function environmentValue(
+   environment: NodeJS.ProcessEnv,
+   name: string,
+@@ -352,6 +378,27 @@
+     this.emit("update");
+   }
+ 
++  #appendEvent(
++    agent: InternalAgent,
++    event: Omit<AgentEvent, "seq">,
++  ): void {
++    const stored: AgentEvent = { ...event, seq: agent.nextEventSeq++ };
++    agent.events.push(stored);
++    agent.eventTextChars += stored.text?.length ?? 0;
++    while (
++      agent.events.length > MAX_AGENT_EVENTS ||
++      agent.eventTextChars > MAX_AGENT_EVENT_TEXT_CHARS
++    ) {
++      const removed = agent.events.shift();
++      if (!removed) {
++        break;
++      }
++      agent.droppedThrough = removed.seq;
++      agent.eventTextChars -= removed.text?.length ?? 0;
++    }
++    this.#updated();
++  }
++
+   async start(): Promise<void> {
+     if (this.#peer) {
+       return;
+@@ -530,6 +577,11 @@
+       status: "starting",
+       ignoredTurnIds: new Set(),
+       interactions: [],
++      events: [],
++      nextEventSeq: 1,
++      eventTextChars: 0,
++      droppedThrough: 0,
++      deltasByTurn: new Set(),
+     };
+     this.#agents.set(thread.id, agent);
+     this.#updated();
+@@ -580,6 +632,11 @@
+         status: statusFromTurn(latest),
+         ignoredTurnIds: new Set(),
+         interactions: [],
++        events: [],
++        nextEventSeq: 1,
++        eventTextChars: 0,
++        droppedThrough: 0,
++        deltasByTurn: new Set(),
+       };
+       if (latest?.status === "inProgress") {
+         agent.activeTurnId = latest.id;
+@@ -605,6 +662,11 @@
+           status: "not_found",
+           ignoredTurnIds: new Set(),
+           interactions: [],
++          events: [],
++          nextEventSeq: 1,
++          eventTextChars: 0,
++          droppedThrough: 0,
++          deltasByTurn: new Set(),
+         };
+         this.#agents.set(threadId, missing);
+         return missing;
+@@ -677,6 +739,8 @@
+       model: this.route.model,
+       backend: "app_server",
+       status: agent.status,
++      eventCursor: agent.events.at(-1)?.seq ?? 0,
++      eventStream: "events-v1",
+     };
+     if (agent.output !== undefined && agent.status === "completed") {
+       snapshot.output = agent.output;
+@@ -687,6 +751,74 @@
+     return snapshot;
+   }
+ 
++  async readEvents(
++    threadId: string,
++    afterCursor: number,
++    maxEvents: number,
++    waitMs: number,
++    signal?: AbortSignal,
++  ): Promise<AgentEventsResult> {
++    const agent = await this.recover(threadId);
++    const deadline = Date.now() + waitMs;
++    while (true) {
++      const page = this.#eventPage(agent, afterCursor, maxEvents);
++      if (page.events.length > 0 || page.done || waitMs <= 0 || Date.now() >= deadline) {
++        return page;
++      }
++      if (signal?.aborted) {
++        throw new BrokerError("wait_cancelled", "read_agent_events was cancelled");
++      }
++      const baseline = this.#revision;
++      const remaining = Math.max(1, deadline - Date.now());
++      const outcome = await new Promise<"update" | "timeout" | "aborted">((resolve) => {
++        let timer: NodeJS.Timeout | undefined;
++        const finish = (value: "update" | "timeout" | "aborted"): void => {
++          this.off("update", onUpdate);
++          signal?.removeEventListener("abort", onAbort);
++          if (timer) {
++            clearTimeout(timer);
++          }
++          resolve(value);
++        };
++        const onUpdate = (): void => finish("update");
++        const onAbort = (): void => finish("aborted");
++        this.once("update", onUpdate);
++        signal?.addEventListener("abort", onAbort, { once: true });
++        if (this.#revision !== baseline) {
++          finish("update");
++          return;
++        }
++        timer = setTimeout(() => finish("timeout"), remaining);
++        timer.unref();
++      });
++      if (outcome === "aborted") {
++        throw new BrokerError("wait_cancelled", "read_agent_events was cancelled");
++      }
++    }
++  }
++
++  #eventPage(
++    agent: InternalAgent,
++    afterCursor: number,
++    maxEvents: number,
++  ): AgentEventsResult {
++    const eventCursor = agent.events.at(-1)?.seq ?? 0;
++    const events = maxEvents <= 0
++      ? []
++      : agent.events
++          .filter((event) => event.seq > afterCursor)
++          .slice(0, maxEvents);
++    return {
++      events: events.map((event) => ({ ...event })),
++      nextCursor: events.at(-1)?.seq ?? Math.max(afterCursor, eventCursor),
++      eventCursor,
++      status: agent.status,
++      done: agent.status !== "running" && agent.status !== "starting",
++      cursorExpired: afterCursor < agent.droppedThrough,
++      droppedThrough: agent.droppedThrough,
++    };
++  }
++
+   async snapshotFor(threadId: string): Promise<AgentSnapshot> {
+     return this.snapshot(await this.recover(threadId));
+   }
+@@ -759,13 +891,58 @@
+       agent.status = "running";
+       delete agent.output;
+       delete agent.error;
++      agent.deltasByTurn.clear();
++      this.#appendEvent(agent, { type: "turn_started" });
+       this.#updated();
+       return;
+     }
++    if (
++      method === "item/agentMessage/delta" &&
++      typeof params.delta === "string" &&
++      params.delta.length > 0
++    ) {
++      if (typeof params.turnId === "string") {
++        agent.deltasByTurn.add(params.turnId);
++      }
++      this.#appendEvent(agent, {
++        type: "text_delta",
++        text: params.delta,
++        ...(typeof params.itemId === "string" ? { itemId: params.itemId } : {}),
++      });
++      return;
++    }
++    if (method === "item/started" && isRecord(params.item)) {
++      const tool = toolNameFromItem(params.item);
++      if (tool) {
++        const itemId = itemIdFrom(params.item);
++        this.#appendEvent(agent, {
++          type: "tool_started",
++          tool,
++          ...(itemId ? { itemId } : {}),
++        });
++      }
++      return;
++    }
+     if (method === "item/completed" && isRecord(params.item)) {
+       const item = params.item;
++      const itemId = itemIdFrom(item);
++      const tool = toolNameFromItem(item);
+       if (item.type === "agentMessage" && typeof item.text === "string") {
+         agent.output = item.text;
++        const turnId = typeof params.turnId === "string" ? params.turnId : undefined;
++        if (!turnId || !agent.deltasByTurn.has(turnId)) {
++          this.#appendEvent(agent, {
++            type: "text_delta",
++            text: item.text,
++            ...(itemId ? { itemId } : {}),
++          });
++        }
++      } else if (tool) {
++        this.#appendEvent(agent, {
++          type: "tool_completed",
++          tool,
++          ...(itemId ? { itemId } : {}),
++        });
+       }
+       return;
+     }
+@@ -784,6 +961,10 @@
+       if (turnError !== undefined) {
+         agent.error = turnError;
+       }
++      this.#appendEvent(agent, {
++        type: "turn_completed",
++        status: agent.status,
++      });
+       this.#updated();
+     }
+   }
+--- a/packages/broker/src/broker.ts	2026-09-04 15:28:13.000000000 +0800
++++ b/packages/broker/src/broker.ts	2026-10-28 20:11:05.466363574 +0800
+@@ -12,6 +12,7 @@
+ import { BrokerError } from "./errors.js";
+ import { resolveInteraction, type Elicitor } from "./interactions.js";
+ import type {
++  AgentEventsResult,
+   AgentSnapshot,
+   BrokerConfig,
+   ProcessSpec,
+@@ -47,6 +48,21 @@
+   return Math.min(value as number, 120_000);
+ }
+ 
++function boundedInteger(
++  value: unknown,
++  label: string,
++  fallback: number,
++  maximum: number,
++): number {
++  if (value === undefined) {
++    return fallback;
++  }
++  if (!Number.isInteger(value) || (value as number) < 0) {
++    throw new BrokerError("invalid_input", `${label} must be a non-negative integer`);
++  }
++  return Math.min(value as number, maximum);
++}
++
+ async function waitForRuntimeUpdate(
+   runtimes: Array<EventEmitter & { revision: number }>,
+   baselines: Map<EventEmitter & { revision: number }, number>,
+@@ -165,6 +181,26 @@
+     };
+   }
+ 
++  async readAgentEvents(
++    agentIdInput: unknown,
++    options: { cursor?: unknown; maxEvents?: unknown; waitMs?: unknown } = {},
++    signal?: AbortSignal,
++  ): Promise<AgentEventsResult & { agentId: string }> {
++    const agentId = nonEmptyString(agentIdInput, "agentId");
++    const cursor = boundedInteger(options.cursor, "cursor", 0, Number.MAX_SAFE_INTEGER);
++    const maxEvents = boundedInteger(options.maxEvents, "maxEvents", 100, 500);
++    const waitMs = boundedInteger(options.waitMs, "waitMs", 0, 30_000);
++    const target = await this.#runtimes.forAgent(agentId);
++    const events = await target.runtime.readEvents(
++      target.threadId,
++      cursor,
++      maxEvents,
++      waitMs,
++      signal,
++    );
++    return { ...events, agentId };
++  }
++
+   async waitAgents(
+     agentIdsInput: unknown,
+     timeoutInput: unknown,
+--- a/packages/broker/src/mcp-server.ts	2026-09-04 15:28:13.000000000 +0800
++++ b/packages/broker/src/mcp-server.ts	2026-10-28 20:21:47.019152455 +0800
+@@ -10,7 +10,7 @@
+   ProcessSpec,
+ } from "./types.js";
+ 
+-const SERVER_VERSION = "0.1.1";
++const SERVER_VERSION = "0.1.1-argbridge.1";
+ const PROTOCOL_VERSION = "2025-11-25";
+ const SUPPORTED_PROTOCOL_VERSIONS = new Set([
+   "2025-11-25",
+@@ -156,6 +156,44 @@
+     },
+   },
+   {
++    name: "read_agent_events",
++    title: "Read managed-agent progress events",
++    description:
++      "Read bounded progress events for one managed agent using a monotonic cursor. Supports long polling without changing the terminal result mailbox.",
++    inputSchema: {
++      type: "object",
++      properties: {
++        agentId: { type: "string" },
++        cursor: {
++          type: "integer",
++          minimum: 0,
++          default: 0,
++          description: "Return events with sequence numbers greater than this cursor.",
++        },
++        maxEvents: {
++          type: "integer",
++          minimum: 0,
++          maximum: 500,
++          default: 100,
++        },
++        waitMs: {
++          type: "integer",
++          minimum: 0,
++          maximum: 30000,
++          default: 0,
++        },
++      },
++      required: ["agentId"],
++      additionalProperties: false,
++    },
++    annotations: {
++      readOnlyHint: true,
++      destructiveHint: false,
++      idempotentHint: true,
++      openWorldHint: false,
++    },
++  },
++  {
+     name: "interrupt_agent",
+     title: "Interrupt agent turn",
+     description:
+@@ -321,7 +359,12 @@
+       this.#initialized = true;
+       return {
+         protocolVersion: negotiatedVersion,
+-        capabilities: { tools: { listChanged: false } },
++        capabilities: {
++          tools: { listChanged: false },
++          extensions: {
++            "mixagents/events-v1": { version: 1 },
++          },
++        },
+         serverInfo: {
+           name: "mixagents-broker",
+           title: "MixAgents Broker",
+@@ -383,6 +426,18 @@
+           return toolSuccess(
+             await broker.waitAgents(args.agentIds, args.timeoutMs, waitOptions),
+           );
++        case "read_agent_events":
++          return toolSuccess(
++            await broker.readAgentEvents(
++              args.agentId,
++              {
++                cursor: args.cursor,
++                maxEvents: args.maxEvents,
++                waitMs: args.waitMs,
++              },
++              controller.signal,
++            ),
++          );
+         case "interrupt_agent":
+           return toolSuccess(await broker.interruptAgent(args.agentId));
+         case "list_agents":
+--- a/packages/broker/src/types.ts	2026-09-04 15:28:13.000000000 +0800
++++ b/packages/broker/src/types.ts	2026-10-28 20:09:12.474687805 +0800
+@@ -11,6 +11,32 @@
+   | "failed"
+   | "not_found";
+ 
++export type AgentEventType =
++  | "turn_started"
++  | "text_delta"
++  | "tool_started"
++  | "tool_completed"
++  | "turn_completed";
++
++export interface AgentEvent {
++  seq: number;
++  type: AgentEventType;
++  text?: string;
++  itemId?: string;
++  tool?: string;
++  status?: AgentStatus;
++}
++
++export interface AgentEventsResult {
++  events: AgentEvent[];
++  nextCursor: number;
++  eventCursor: number;
++  status: AgentStatus;
++  done: boolean;
++  cursorExpired: boolean;
++  droppedThrough: number;
++}
++
+ export type ReasoningEffort =
+   | "low"
+   | "medium"
+@@ -68,6 +94,8 @@
+   status: AgentStatus;
+   output?: string;
+   error?: string;
++  eventCursor?: number;
++  eventStream?: "events-v1";
+ }
+ 
+ export interface WaitResult {

@@ -4,7 +4,7 @@
 
 [English README](./README.md)
 
-`1.10.1` 修复旧 `arg-bridge-mixagents-mcp` wrapper 导致的重复 runtime fallback 警告，为 `/btw` 增加可见心跳，并禁止超时或中断的 side 被下一轮隐式复用。`1.10.0` 为 `/btw` 增加显式单任务写权限：`/btw --write --workspace <项目 canonical 路径> <任务>`。写权限必须同时满足 profile 已启用写子代理、存在兼容 write route、用户明确指定任务和 workspace。`1.9.9` 修复 `/btw` 超时显示；`1.9.8` 增加 provider Web Search 能力策略和快速 `/btw`。
+`1.11.0` 内置可审计源码的 MixAgents Broker fork，并为 `/btw` 增加 `events-v1`：模型文本 delta 和安全的工具生命周期事件通过有界 cursor/long-poll 实时到达，最终 mailbox 仍是完成结果的权威来源。旧外部 Broker 自动降级为心跳。内置构建替代 npm optional dependency，并携带上游 commit、MIT license 和第三方来源说明。`1.10.1` 修复旧 wrapper fallback 警告、心跳和 timeout side 轮换；`1.10.0` 增加显式单任务写权限。
 
 `1.6.7` 引入 provider-aware Codex resume，`1.7.0` 增加 idle 边界重绑。`1.9.1` 收紧重连语义：附着已有 native 或 structured thread 时，保留该 thread 记录的 provider/model，不会因为 cc-switch 后来切换了 route 而静默改路。
 
@@ -60,7 +60,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.10.1
+sh /tmp/install-arg-bridge.sh --version 1.11.0
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.10.1"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.11.0"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.10.1`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.11.0`。
 
 ### 4. Node 或 npm 全局目录错误
 
@@ -256,9 +256,9 @@ arg-bridge profile export <name> --include-secrets --yes
 
 ### MixAgents 模型工具、`/btw`、`cc-switch`、MCP 与 Project RSI
 
-MixAgents 是可选依赖。默认 `follow-cc-switch` 会从当前 cc-switch provider 自动生成 Broker route、模型、Base URL 和凭据；不需要手写 `broker-routes.json`，也不需要手工设置 `MIXAGENTS_BROKER_CREDENTIALS_JSON`。settings 指定的 provider 始终是 `/btw` 的首选：旧的外部 MCP runtime 如果漏掉当前生成的 route，Bridge 会先重启它，再改用随包安装的 `mixagents-broker@0.1.1` 兼容入口复核。只有上述自愈仍失败时，符合条件的 `mode=auto` profile 且 `allowForkFallback=true` 才会回退到主 session provider/model 的只读 Codex `thread/fork`；任务以普通输入发送，不走 native collaboration 的 encrypted content。manual route、显式 `/btw --route` 和 `mode=broker` 仍 fail closed。父模型的自动 Broker 工具不会把 native Codex child 冒充成 worker。新建 Bridge-managed Codex thread 会携带 `arg_bridge` dynamic-tool namespace，并设置 `features.multi_agent_v2.disable_native_tools=true`。0.164.0 的真实链路证据见 [structured Broker smoke](./docs/smoke-structured-broker-e2e-0.164.0.json)。
+MixAgents 现在以小型可审计源码 fork 随 ArgBridge 打包。默认 `follow-cc-switch` 会从当前 cc-switch provider 自动生成 Broker route、模型、Base URL 和凭据；不需要手写 `broker-routes.json`、`MIXAGENTS_BROKER_CREDENTIALS_JSON` 或外部 npm 包。内置 `events-v1` 提供有界模型文本和安全工具生命周期进度，`wait_agent` 仍是最终结果与错误的权威来源。仅当 Broker 自愈仍失败时，符合条件的 `mode=auto` + `allowForkFallback=true` 才回退到只读 Codex fork；manual route、显式 `/btw --route` 和 `mode=broker` 仍 fail closed。
 
-公开 npm 包 `mixagents-broker` 是 optional dependency，Bridge 通过稳定的 package entry 自动解析，不扫描 plugin cache；显式 MCP command/profile 配置仍优先。
+Bridge 通过包内稳定的 `vendor/mixagents-broker` 入口解析 Broker，不扫描 plugin cache。上游源码、commit 和 MIT license 记录在 `vendor/mixagents-broker/UPSTREAM.md`；显式非 legacy MCP command/profile 配置仍优先。
 
 自动派工工具包括 `spawn_agent`、`followup_task`、`wait_agent`、`list_agents`、`list_routes`、`interrupt_agent`、`close_agent` 和 queue-only 的 `send_message`。`send_message` 先在 Bridge 本地排队，下一条 `followup_task` 才会把队列正文和新任务作为普通明文输入唤醒 worker。worker 默认 read-only；workspace-write 还必须启用写路由，并提供精确的逐任务/workspace 授权。
 
@@ -352,7 +352,7 @@ Project RSI 与 MixAgents、历史 Task RSI 是三个不同层次。Bridge 只�
 | `/sendfile <绝对路径>` | 仅管理员：直接回复发送当前工作目录、bridge 媒体缓存或显式允许目录内的普通文件，不调用 agent |
 | `/config` | 调整展示偏好、访问控制和 lark-cli 身份策略 |
 | `/model` | 选择模型；Codex 直接使用 CLI 原生模型/reasoning 选项，并把结果同步到当前 profile。`/codex model` 等价于 `/codex /model`。 |
-| `/btw [--route <id>] [<内容>]` | 开启或复用独立 side agent，默认只读。profile 允许写 worker 时，可用 `/btw --write --workspace <canonical 路径> <任务>` 显式授权一次 workspace-write。优先使用子代理设置指定的 cc-switch provider；只读 `auto` 模式可回退到主 session provider 的 Codex `thread/fork`，写任务、manual route 和显式 `--route` 永不回退。`/btw out` 只关闭 side。飞书内 `/codex /btw ...` 等价。 |
+| `/btw [--route <id>] [<内容>]` | 开启或复用独立 side agent，默认只读。随包 Broker 通过 `events-v1` 流式转发文本 delta 和安全工具生命周期，最终 mailbox 仍是权威结果。profile 允许写 worker 时，可用 `/btw --write --workspace <canonical 路径> <任务>` 显式授权一次 workspace-write。优先使用子代理设置指定的 cc-switch provider；只读 `auto` 模式可回退到主 session provider 的 Codex `thread/fork`，写任务、manual route 和显式 `--route` 永不回退。`/btw out` 只关闭 side。 |
 | `/session [status\|live\|turn]` | 查看终端执行状态。tmux/live 为默认模式；`turn` 仅作为兼容回退 |
 | `/tmux list [socket]` | 仅管理员：列出本机所有存活的 Codex/Claude tmux pane，包含工作目录、agent 类型、已识别 thread、共享 App Server endpoint 和 attach 命令。可选 `-S <绝对 socket 路径>` 或 `-L <名称>` 只扫描一个 tmux server；普通 shell 不会列出 |
 | `/tmux bind <编号\|pane id\|socket::pane id>` | 仅管理员：把当前 chat/topic scope 绑定到列表中的 pane。带有共享 Codex endpoint 的 pane 走 structured 转发，普通 Codex/Claude pane 回退到 live 转发。编号只在最近一次 `/tmux list` 结果内有效 |

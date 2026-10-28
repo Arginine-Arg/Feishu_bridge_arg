@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.10.1",
+  version: "1.11.0",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -33,19 +33,26 @@ var package_default = {
   files: [
     "dist",
     "bin",
+    "vendor/mixagents-broker/plugin/mixagents-broker/dist",
+    "vendor/mixagents-broker/patches/events-v1-source.patch",
+    "vendor/mixagents-broker/LICENSE",
+    "vendor/mixagents-broker/UPSTREAM.md",
     "skills",
     "README.md",
     "README.zh.md",
     "docs",
     "CHANGELOG.md",
     "THIRD_PARTY_CODEX_NOTICE",
+    "THIRD_PARTY_MIXAGENTS_NOTICE",
     "LICENSE"
   ],
   scripts: {
     dev: "tsup --watch",
-    build: "tsup",
-    typecheck: "tsc --noEmit",
-    test: "vitest run",
+    build: "pnpm build:broker && tsup",
+    "build:broker": "tsc -p vendor/mixagents-broker/tsconfig.json",
+    typecheck: "tsc --noEmit && tsc --noEmit -p vendor/mixagents-broker/tsconfig.json",
+    test: "pnpm build:broker && vitest run && node --test vendor/mixagents-broker/test/broker.test.mjs vendor/mixagents-broker/test/mcp.test.mjs vendor/mixagents-broker/test/release.test.mjs",
+    "test:broker": "pnpm build:broker && node --test vendor/mixagents-broker/test/broker.test.mjs vendor/mixagents-broker/test/mcp.test.mjs vendor/mixagents-broker/test/release.test.mjs",
     "test:unit": "vitest run tests/unit --passWithNoTests",
     "test:integration": "vitest run tests/integration --passWithNoTests",
     "test:process": "vitest run tests/process --passWithNoTests",
@@ -95,10 +102,7 @@ var package_default = {
     "channel",
     "bridge"
   ],
-  license: "MIT",
-  optionalDependencies: {
-    "mixagents-broker": "0.1.1"
-  }
+  license: "MIT"
 };
 
 // src/platform/spawn.ts
@@ -14385,8 +14389,9 @@ function errorMessage4(error) {
 }
 
 // src/agent/subagents/mixagents.ts
-import { createRequire as createRequire2 } from "module";
+import { existsSync as existsSync6 } from "fs";
 import { basename as basename5, isAbsolute as isAbsolute5 } from "path";
+import { fileURLToPath as fileURLToPath2 } from "url";
 
 // src/agent/subagents/mcp-client.ts
 import { createInterface as createInterface5 } from "readline";
@@ -14623,7 +14628,6 @@ var REQUIRED_TOOLS = [
 ];
 var WAIT_REQUEST_MS = 12e4;
 var DEFAULT_TOTAL_WAIT_MS = 15 * 6e4;
-var require3 = createRequire2(import.meta.url);
 var MixAgentsBrokerBackend = class {
   constructor(config, env = process.env, runtime, options = {}) {
     this.config = config;
@@ -14651,6 +14655,7 @@ var MixAgentsBrokerBackend = class {
   env;
   timeoutMs;
   runtimeRecoveryNotice;
+  supportsProgressEvents = false;
   async listRoutes(signal) {
     if (signal.aborted) throw abortError2();
     this.runtimeRecoveryNotice = void 0;
@@ -14720,6 +14725,9 @@ var MixAgentsBrokerBackend = class {
   get runtimeFingerprint() {
     return this.runtime?.fingerprint;
   }
+  get progressEventsEnabled() {
+    return this.supportsProgressEvents;
+  }
   async createOrReuse(input) {
     if (input.access !== "read-only") {
       if (input.route.maxAccess !== "workspace-write") {
@@ -14756,16 +14764,56 @@ var MixAgentsBrokerBackend = class {
     });
     return agent;
   }
-  async wait(agent, signal, timeoutMs = DEFAULT_TOTAL_WAIT_MS) {
+  async wait(agent, signal, timeoutMs = DEFAULT_TOTAL_WAIT_MS, onProgress) {
+    return this.waitInternal(agent, signal, timeoutMs, onProgress, 0);
+  }
+  async waitInternal(agent, signal, timeoutMs, onProgress, initialCursor) {
     const client = await this.ensureClient();
     const deadline = Date.now() + timeoutMs;
+    let cursor = initialCursor;
+    let cursorGapReported = false;
     while (Date.now() < deadline) {
       if (signal.aborted) throw abortError2();
-      const remaining = Math.max(1, Math.min(WAIT_REQUEST_MS, deadline - Date.now()));
+      const remaining = Math.max(1, deadline - Date.now());
+      if (this.supportsProgressEvents) {
+        try {
+          const waitMs = Math.min(5e3, remaining);
+          const progress = await client.callTool("read_agent_events", {
+            agentId: agent.agentId,
+            cursor,
+            maxEvents: 200,
+            waitMs
+          }, { signal, timeoutMs: waitMs + 1e4 });
+          const nextCursor = numberValue2(progress.nextCursor);
+          if (nextCursor !== void 0) cursor = nextCursor;
+          if (progress.cursorExpired === true && !cursorGapReported) {
+            cursorGapReported = true;
+            onProgress?.({
+              type: "notice",
+              text: "MixAgents \u8FDB\u5EA6\u7F13\u51B2\u533A\u5DF2\u622A\u65AD\uFF1B\u540E\u7EED\u53EA\u663E\u793A\u4ECD\u53EF\u8BFB\u53D6\u7684\u65B0\u4E8B\u4EF6\uFF0C\u6700\u7EC8\u7ED3\u679C\u4E0D\u53D7\u5F71\u54CD\u3002"
+            });
+          }
+          this.emitProgressEvents(progress, onProgress);
+          const status2 = stringValue2(progress.status);
+          if (status2 === "not_found") throw new SubagentAgentNotFoundError(agent.agentId);
+          if (status2 !== "completed" && status2 !== "failed" && status2 !== "interrupted") {
+            continue;
+          }
+        } catch (error) {
+          if (error instanceof SubagentAgentNotFoundError) throw error;
+          if (signal.aborted) throw abortError2();
+          this.supportsProgressEvents = false;
+          onProgress?.({
+            type: "notice",
+            text: `MixAgents \u8FDB\u5EA6\u6D41\u4E0D\u53EF\u7528\uFF0C\u5DF2\u9000\u56DE\u7EC8\u6001 mailbox\uFF1A${redactSecrets(errorMessage5(error))}`
+          });
+        }
+      }
+      const waitBudget = Math.max(1, Math.min(WAIT_REQUEST_MS, deadline - Date.now()));
       const result = await client.callTool("wait_agent", {
         agentIds: [agent.agentId],
-        timeoutMs: remaining
-      }, { signal, timeoutMs: remaining + 1e4 }).catch((error) => {
+        timeoutMs: waitBudget
+      }, { signal, timeoutMs: waitBudget + 1e4 }).catch((error) => {
         throw translateToolError(error, agent.cwd);
       });
       const snapshot = firstAgent(result);
@@ -14780,17 +14828,49 @@ var MixAgentsBrokerBackend = class {
     }
     return { status: "timeout", error: "\u5B50\u4EE3\u7406\u7B49\u5F85\u8D85\u65F6" };
   }
-  async send(agent, message, signal, timeoutMs = DEFAULT_TOTAL_WAIT_MS) {
+  async send(agent, message, signal, timeoutMs = DEFAULT_TOTAL_WAIT_MS, onProgress) {
     const client = await this.ensureClient();
+    let cursor = 0;
+    let hasPreSendCursor = false;
+    if (this.supportsProgressEvents) {
+      const current = await client.callTool("read_agent_events", {
+        agentId: agent.agentId,
+        cursor: 0,
+        maxEvents: 0,
+        waitMs: 0
+      }, { signal, timeoutMs: 1e4 }).catch((error) => {
+        if (signal.aborted) throw abortError2();
+        this.supportsProgressEvents = false;
+        onProgress?.({
+          type: "notice",
+          text: `MixAgents \u65E0\u6CD5\u5EFA\u7ACB\u672C\u8F6E\u8FDB\u5EA6 cursor\uFF0C\u5DF2\u9000\u56DE\u7EC8\u6001 mailbox\uFF1A${redactSecrets(errorMessage5(error))}`
+        });
+        return void 0;
+      });
+      const currentCursor = numberValue2(current?.eventCursor);
+      if (currentCursor !== void 0) {
+        cursor = currentCursor;
+        hasPreSendCursor = true;
+      } else {
+        this.supportsProgressEvents = false;
+        onProgress?.({
+          type: "notice",
+          text: "MixAgents \u8FDB\u5EA6 cursor \u683C\u5F0F\u65E0\u6548\uFF0C\u5DF2\u9000\u56DE\u7EC8\u6001 mailbox\u3002"
+        });
+      }
+    }
     try {
-      await client.callTool("send", {
+      const sent = await client.callTool("send", {
         agentId: agent.agentId,
         message
       }, { signal, timeoutMs: 6e4 });
+      if (this.supportsProgressEvents && !hasPreSendCursor) {
+        cursor = numberValue2(sent.eventCursor) ?? cursor;
+      }
     } catch (error) {
       throw translateToolError(error, agent.cwd);
     }
-    return this.wait(agent, signal, timeoutMs);
+    return this.waitInternal(agent, signal, timeoutMs, onProgress, cursor);
   }
   async interrupt(agent, signal) {
     if (signal.aborted) throw abortError2();
@@ -14856,6 +14936,7 @@ var MixAgentsBrokerBackend = class {
       throw error;
     });
     const names = new Set(tools.map((tool) => tool.name));
+    this.supportsProgressEvents = names.has("read_agent_events");
     const missingTools = REQUIRED_TOOLS.filter((tool) => !names.has(tool));
     if (missingTools.length > 0) {
       const serverVersion = this.client?.serverVersion ?? null;
@@ -14882,6 +14963,27 @@ var MixAgentsBrokerBackend = class {
   resetClient() {
     this.client?.close();
     this.client = void 0;
+    this.supportsProgressEvents = false;
+  }
+  emitProgressEvents(value, onProgress) {
+    if (!onProgress || !Array.isArray(value.events)) return;
+    for (const raw of value.events) {
+      if (!isRecord4(raw)) continue;
+      const type = stringValue2(raw.type);
+      const itemId = stringValue2(raw.itemId);
+      if (type === "text_delta" && typeof raw.text === "string" && raw.text) {
+        onProgress({ type: "text", text: raw.text, ...itemId ? { itemId } : {} });
+      } else if (type === "tool_started" || type === "tool_completed") {
+        const tool = stringValue2(raw.tool);
+        if (tool) {
+          onProgress({
+            type,
+            tool,
+            ...itemId ? { itemId } : {}
+          });
+        }
+      }
+    }
   }
 };
 function validateRuntimeOverrides(runtime) {
@@ -15002,15 +15104,14 @@ function resolveMixAgentsLaunchConfig(config, env = process.env) {
   return resolveBundledMixAgentsLaunchConfig();
 }
 function resolveBundledMixAgentsLaunchConfig() {
-  try {
-    const server = require3.resolve("mixagents-broker/dist/server.js");
-    return {
-      command: process.execPath,
-      args: [server]
-    };
-  } catch {
-    return void 0;
-  }
+  const server = [
+    new URL("../../../vendor/mixagents-broker/plugin/mixagents-broker/dist/server.js", import.meta.url),
+    new URL("../vendor/mixagents-broker/plugin/mixagents-broker/dist/server.js", import.meta.url)
+  ].map((candidate) => fileURLToPath2(candidate)).find((candidate) => existsSync6(candidate));
+  return server ? {
+    command: process.execPath,
+    args: [server]
+  } : void 0;
 }
 function isGeneratedRuntimeBrokerLaunch(launch) {
   const candidates = [launch.command, ...launch.args].map((value) => basename5(value).toLowerCase()).filter(Boolean);
@@ -15082,6 +15183,9 @@ function isRecord4(value) {
 }
 function stringValue2(value) {
   return typeof value === "string" && value.trim() ? value.trim() : void 0;
+}
+function numberValue2(value) {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : void 0;
 }
 function stringArray2(value) {
   return Array.isArray(value) ? value.filter((item) => typeof item === "string") : [];
@@ -15605,7 +15709,7 @@ var BrokerToolController = class {
   async wait(args, signal) {
     const targets = this.resolveTargets(args);
     if (targets.length === 0) return failure("wait_agent requires logical_names or agent_ids");
-    const requestedTimeout = numberValue2(args.timeout_ms, 1, MAX_WAIT_MS) ?? (await this.requireConfig()).workerTimeoutMs;
+    const requestedTimeout = numberValue3(args.timeout_ms, 1, MAX_WAIT_MS) ?? (await this.requireConfig()).workerTimeoutMs;
     const config = await this.requireConfig();
     const backend = await this.ensureBackend(config);
     const timeoutSignal = AbortSignal.timeout(requestedTimeout);
@@ -16196,7 +16300,7 @@ function stringArray3(value, label, maximum) {
   }
   return [...new Set(value.map((item) => item.trim()).filter(Boolean))];
 }
-function numberValue2(value, minimum, maximum) {
+function numberValue3(value, minimum, maximum) {
   if (value === void 0 || value === null) return void 0;
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < minimum || value > maximum) {
     throw new Error(`numeric value must be an integer between ${minimum} and ${maximum}`);
@@ -17834,7 +17938,7 @@ function isSafeSocketParent(info) {
 
 // src/agent/structured/thread-owner.ts
 import {
-  existsSync as existsSync6,
+  existsSync as existsSync7,
   readFileSync as readFileSync8,
   readdirSync as readdirSync3,
   readlinkSync as readlinkSync2,
@@ -17847,7 +17951,7 @@ var MAX_ANCESTOR_DEPTH = 4;
 function discoverCodexThreadWriterOwners(codexHome, threadId) {
   if (process.platform !== "linux") return { pids: [], endpoints: [] };
   const lockPath = join31(codexHome, "thread-writer-locks", `${threadId}.lock`);
-  if (!existsSync6(lockPath)) return { lockPath, pids: [], endpoints: [] };
+  if (!existsSync7(lockPath)) return { lockPath, pids: [], endpoints: [] };
   const pids = findLockOwnerPids(lockPath);
   if (pids.length === 0) return { lockPath, pids, endpoints: [] };
   const family = processFamily(pids);
@@ -19490,6 +19594,7 @@ var StructuredAdapter = class {
         `\u590D\u7528 MixAgents side agent ${existing.agent.agentId}\uFF08route=${existing.route.id} access=${existing.agent.access} workspace=${existing.cwd}\uFF09\u3002
 `
       ));
+      const streamedProgress2 = { text: "" };
       try {
         let result;
         if (access3 === "workspace-write") {
@@ -19511,18 +19616,26 @@ var StructuredAdapter = class {
               emit2,
               route,
               access3,
-              () => activeBackend.wait(validated, signal, turnTimeoutMs)
+              streamedProgress2,
+              (onProgress) => activeBackend.wait(
+                validated,
+                signal,
+                turnTimeoutMs,
+                onProgress
+              )
             );
           } else {
             result = await this.withMixagentsHeartbeat(
               emit2,
               route,
               access3,
-              () => activeBackend.send(
+              streamedProgress2,
+              (onProgress) => activeBackend.send(
                 validated,
                 input.task,
                 signal,
-                turnTimeoutMs
+                turnTimeoutMs,
+                onProgress
               )
             );
           }
@@ -19532,11 +19645,13 @@ var StructuredAdapter = class {
             emit2,
             route,
             access3,
-            () => activeBackend.send(
+            streamedProgress2,
+            (onProgress) => activeBackend.send(
               agent2,
               body,
               signal,
-              turnTimeoutMs
+              turnTimeoutMs,
+              onProgress
             )
           );
         }
@@ -19549,7 +19664,8 @@ var StructuredAdapter = class {
           result,
           emit2,
           turnTimeoutMs,
-          timeoutSetting
+          timeoutSetting,
+          streamedProgress2.text
         );
       } catch (error) {
         if (signal.aborted) {
@@ -19611,12 +19727,19 @@ var StructuredAdapter = class {
     };
     this.mixagentsSides.set(`${scope}\0${scopeCwd}`, state);
     await this.saveMixagentsSides();
+    const streamedProgress = { text: "" };
     try {
       const result = await this.withMixagentsHeartbeat(
         emit2,
         route,
         access3,
-        () => resolvedBackend.wait(agent, signal, turnTimeoutMs)
+        streamedProgress,
+        (onProgress) => resolvedBackend.wait(
+          agent,
+          signal,
+          turnTimeoutMs,
+          onProgress
+        )
       );
       if (result.status === "timeout") {
         await resolvedBackend.interrupt(agent, AbortSignal.timeout(3e4)).catch(() => {
@@ -19627,7 +19750,8 @@ var StructuredAdapter = class {
         result,
         emit2,
         turnTimeoutMs,
-        timeoutSetting
+        timeoutSetting,
+        streamedProgress.text
       );
     } catch (error) {
       if (signal.aborted) {
@@ -19649,11 +19773,18 @@ var StructuredAdapter = class {
         state.updatedAt = Date.now();
         this.mixagentsSides.set(`${scope}\0${scopeCwd}`, state);
         await this.saveMixagentsSides();
+        const replacementProgress = { text: "" };
         const result = await this.withMixagentsHeartbeat(
           emit2,
           route,
           access3,
-          () => resolvedBackend.wait(replacement, signal, turnTimeoutMs)
+          replacementProgress,
+          (onProgress) => resolvedBackend.wait(
+            replacement,
+            signal,
+            turnTimeoutMs,
+            onProgress
+          )
         );
         if (result.status === "timeout") {
           await resolvedBackend.interrupt(replacement, AbortSignal.timeout(3e4)).catch(() => {
@@ -19664,26 +19795,58 @@ var StructuredAdapter = class {
           result,
           emit2,
           turnTimeoutMs,
-          timeoutSetting
+          timeoutSetting,
+          replacementProgress.text
         );
         return;
       }
       throw error;
     }
   }
-  async withMixagentsHeartbeat(emit2, route, access3, operation) {
+  async withMixagentsHeartbeat(emit2, route, access3, streamedProgress, operation) {
     const heartbeatMs = this.options.sideHeartbeatMs ?? 15e3;
     const startedAt = Date.now();
+    let lastActivityAt = startedAt;
+    const onProgress = (progress) => {
+      lastActivityAt = Date.now();
+      if (progress.type === "text") {
+        const text2 = redactSecrets(progress.text);
+        streamedProgress.text = `${streamedProgress.text}${text2}`.slice(-5e4);
+        emit2(textEvent(text2));
+        return;
+      }
+      if (progress.type === "tool_started") {
+        emit2({
+          type: "tool_use",
+          id: progress.itemId ?? `side-tool-${progress.tool}`,
+          name: progress.tool,
+          input: {}
+        });
+        return;
+      }
+      if (progress.type === "tool_completed") {
+        emit2({
+          type: "tool_result",
+          id: progress.itemId ?? `side-tool-${progress.tool}`,
+          output: `${progress.tool} completed`,
+          isError: false
+        });
+        return;
+      }
+      emit2(textEvent(`\u2139\uFE0F ${redactSecrets(progress.text)}
+`));
+    };
     const timer = heartbeatMs > 0 ? setInterval(() => {
+      if (Date.now() - lastActivityAt < heartbeatMs) return;
       const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1e3));
       emit2(textEvent(
-        `\u23F3 MixAgents side \u5DF2\u7B49\u5F85 ${elapsedSeconds} \u79D2\uFF08route=${route.id} access=${access3}\uFF09\uFF1B\u5F53\u524D Broker MCP \u53EA\u63D0\u4F9B\u7EC8\u6001 mailbox\uFF0C\u6682\u65E0 token \u6D41\u53EF\u8F6C\u53D1\u3002
+        `\u23F3 MixAgents side \u5DF2\u7B49\u5F85 ${elapsedSeconds} \u79D2\uFF08route=${route.id} access=${access3}\uFF09\uFF1B\u5F53\u524D\u6CA1\u6709\u53EF\u8F6C\u53D1\u7684\u65B0\u8FDB\u5EA6\u3002
 `
       ));
     }, heartbeatMs) : void 0;
     timer?.unref?.();
     try {
-      return await operation();
+      return await operation(onProgress);
     } finally {
       if (timer) clearInterval(timer);
     }
@@ -19699,12 +19862,24 @@ var StructuredAdapter = class {
     await this.saveMixagentsSides().catch(() => {
     });
   }
-  async applyMixagentsResult(state, result, emit2, timeoutMs, timeoutSetting = "sideTimeoutMs") {
+  async applyMixagentsResult(state, result, emit2, timeoutMs, timeoutSetting = "sideTimeoutMs", streamedText = "") {
     state.agent.status = result.status;
     state.updatedAt = Date.now();
     await this.saveMixagentsSides();
     if (result.status === "completed") {
-      emit2(textEvent(result.text?.trim() || "MixAgents side \u5DF2\u5B8C\u6210\uFF08\u65E0\u6587\u672C\u8F93\u51FA\uFF09\u3002"));
+      const finalText = redactSecrets(result.text?.trim() || "");
+      const streamed = streamedText.trim();
+      if (!finalText) {
+        emit2(textEvent(streamed || "MixAgents side \u5DF2\u5B8C\u6210\uFF08\u65E0\u6587\u672C\u8F93\u51FA\uFF09\u3002"));
+      } else if (!streamed) {
+        emit2(textEvent(finalText));
+      } else if (streamed.endsWith(finalText) || streamed === finalText) {
+      } else if (finalText.startsWith(streamed)) {
+        emit2(textEvent(finalText.slice(streamed.length)));
+      } else {
+        emit2(textEvent(`
+${finalText}`));
+      }
       return;
     }
     if (result.status === "failed") {
@@ -23832,8 +24007,8 @@ function normalizeThread(input) {
   const threadId = stringValue3(raw.id);
   const cwd = stringValue3(raw.cwd);
   if (!threadId || !cwd) return void 0;
-  const createdAt = numberValue3(raw.createdAt);
-  const updatedAt = numberValue3(raw.updatedAt);
+  const createdAt = numberValue4(raw.createdAt);
+  const updatedAt = numberValue4(raw.updatedAt);
   return {
     threadId,
     ...stringValue3(raw.sessionId) ? { sessionId: stringValue3(raw.sessionId) } : {},
@@ -23866,7 +24041,7 @@ function sourceValue(input) {
 function stringValue3(input) {
   return typeof input === "string" ? input : void 0;
 }
-function numberValue3(input) {
+function numberValue4(input) {
   return typeof input === "number" && Number.isFinite(input) ? input : void 0;
 }
 function recordValue2(input) {
@@ -35421,6 +35596,7 @@ async function collectSubagentDiagnostics(input) {
       reason: "no generated cc-switch runtime has been inspected"
     },
     launchConfigured: Boolean(resolveMixAgentsLaunchConfig(input.config, env)),
+    progress: { mode: "unknown" },
     toolContract: "unknown",
     mcpStart: "not-configured",
     credentials: describeCredentialState(
@@ -35567,6 +35743,7 @@ async function collectSubagentDiagnostics(input) {
       } : {},
       launchCommand: basename10(launch.command),
       ...backend.serverVersion ? { packageVersion: backend.serverVersion } : {},
+      progress: backend.progressEventsEnabled ? { mode: "events-v1", tool: "read_agent_events" } : { mode: "heartbeat-only" },
       toolContract: "compatible",
       mcpStart: "started",
       mcp: { status: "available" },
@@ -36097,7 +36274,7 @@ async function runSettings(options = {}) {
     assertPrompt(repairText);
     maxRepairRounds = boundedIntegerInput(repairText, 0, 10, "RSI \u6700\u5927\u4FEE\u590D\u8F6E\u6B21");
     const command = await p3.text({
-      message: "\u81EA\u5B9A\u4E49 MixAgents MCP \u547D\u4EE4\uFF08\u901A\u5E38\u7559\u7A7A\uFF0C\u81EA\u52A8\u4F7F\u7528 npm \u5305\uFF09",
+      message: "\u81EA\u5B9A\u4E49 MixAgents MCP \u547D\u4EE4\uFF08\u901A\u5E38\u7559\u7A7A\uFF0C\u81EA\u52A8\u4F7F\u7528\u968F\u5305 Broker\uFF09",
       initialValue: mcpCommand,
       placeholder: "\u7559\u7A7A\u81EA\u52A8\u53D1\u73B0"
     });
@@ -36326,7 +36503,7 @@ function formatSnapshot(snapshot) {
     ).join(" | ") : "(none)"}`,
     `main running with legacy/unknown identity=${snapshot.mainProvider.runningUnknown}`,
     `provider switch=${snapshot.mainProvider.pendingSwitch}; safe point=${snapshot.mainProvider.safeSwitchPoint}`,
-    `MixAgents mode=${snapshot.subagents.config.mode} routeMode=${snapshot.subagents.config.routeMode} provider=${snapshot.subagents.config.ccSwitchProviderId ?? "(follow-current)"} MCP=${diagnostics.mcp.status} version=${diagnostics.packageVersion ?? "(unknown)"}`,
+    `MixAgents mode=${snapshot.subagents.config.mode} routeMode=${snapshot.subagents.config.routeMode} provider=${snapshot.subagents.config.ccSwitchProviderId ?? "(follow-current)"} MCP=${diagnostics.mcp.status} version=${diagnostics.packageVersion ?? "(unknown)"} progress=${diagnostics.progress.mode}`,
     `Broker tools=${diagnostics.modelTools.brokerWired ? "wired" : "degraded"} namespace=${diagnostics.modelTools.namespace} native=${diagnostics.modelTools.nativeToolPolicy} maxWorkers=${diagnostics.limits.maxConcurrentWorkers} workerTimeoutMs=${diagnostics.limits.workerTimeoutMs} sideTimeoutMs=${diagnostics.limits.sideTimeoutMs} sideReasoning=${diagnostics.limits.sideReasoningEffort} writeWorkers=${diagnostics.limits.allowWriteWorkers}`,
     `web search mode=${diagnostics.webSearch.mode} providerSupported=${diagnostics.webSearch.providerSupported ?? "unknown"} effective=${diagnostics.webSearch.effective} reason=${diagnostics.webSearch.reason}`,
     `Broker tools degraded=${diagnostics.modelTools.degradedReason ?? "(none)"}`,
@@ -36759,7 +36936,7 @@ import {
   writeFile as writeFile10
 } from "fs/promises";
 import { basename as basename11, dirname as dirname27, join as join44 } from "path";
-import { fileURLToPath as fileURLToPath2 } from "url";
+import { fileURLToPath as fileURLToPath3 } from "url";
 var POC_MARKERS = [
   "ARG_BRIDGE_LOCAL_POC_MANAGED",
   "arg-bridge-local-poc",
@@ -36976,7 +37153,7 @@ async function findOriginalBackup(path) {
   return candidates.length === 1 ? candidates[0] : void 0;
 }
 async function locatePackageDir() {
-  let current = dirname27(fileURLToPath2(import.meta.url));
+  let current = dirname27(fileURLToPath3(import.meta.url));
   for (; ; ) {
     const packageFile = await readFile30(join44(current, "package.json"), "utf8").catch(() => void 0);
     if (packageFile) {

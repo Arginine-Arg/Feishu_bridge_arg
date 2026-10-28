@@ -56,6 +56,7 @@ import {
   SubagentAgentNotFoundError,
   subagentRouteFingerprint,
   type SideAgent,
+  type SideAgentProgress,
   type SideAgentResult,
   type SubagentBackend,
   type SubagentRoute,
@@ -1000,6 +1001,7 @@ export class StructuredAdapter implements AgentAdapter {
         `复用 MixAgents side agent ${existing.agent.agentId}` +
         `（route=${existing.route.id} access=${existing.agent.access} workspace=${existing.cwd}）。\n`,
       ));
+      const streamedProgress = { text: '' };
       try {
         let result: SideAgentResult;
         if (access === 'workspace-write') {
@@ -1024,18 +1026,26 @@ export class StructuredAdapter implements AgentAdapter {
               emit,
               route,
               access,
-              () => activeBackend.wait(validated, signal, turnTimeoutMs),
+              streamedProgress,
+              onProgress => activeBackend.wait(
+                validated,
+                signal,
+                turnTimeoutMs,
+                onProgress,
+              ),
             );
           } else {
             result = await this.withMixagentsHeartbeat(
               emit,
               route,
               access,
-              () => activeBackend.send(
+              streamedProgress,
+              onProgress => activeBackend.send(
                 validated,
                 input.task,
                 signal,
                 turnTimeoutMs,
+                onProgress,
               ),
             );
           }
@@ -1045,11 +1055,13 @@ export class StructuredAdapter implements AgentAdapter {
             emit,
             route,
             access,
-            () => activeBackend.send(
+            streamedProgress,
+            onProgress => activeBackend.send(
               agent,
               body,
               signal,
               turnTimeoutMs,
+              onProgress,
             ),
           );
         }
@@ -1062,6 +1074,7 @@ export class StructuredAdapter implements AgentAdapter {
           emit,
           turnTimeoutMs,
           timeoutSetting,
+          streamedProgress.text,
         );
       } catch (error) {
         if (signal.aborted) {
@@ -1126,12 +1139,19 @@ export class StructuredAdapter implements AgentAdapter {
     };
     this.mixagentsSides.set(`${scope}\0${scopeCwd}`, state);
     await this.saveMixagentsSides();
+    const streamedProgress = { text: '' };
     try {
       const result = await this.withMixagentsHeartbeat(
         emit,
         route,
         access,
-        () => resolvedBackend.wait(agent, signal, turnTimeoutMs),
+        streamedProgress,
+        onProgress => resolvedBackend.wait(
+          agent,
+          signal,
+          turnTimeoutMs,
+          onProgress,
+        ),
       );
       if (result.status === 'timeout') {
         await resolvedBackend.interrupt(agent, AbortSignal.timeout(30_000)).catch(() => {});
@@ -1142,6 +1162,7 @@ export class StructuredAdapter implements AgentAdapter {
         emit,
         turnTimeoutMs,
         timeoutSetting,
+        streamedProgress.text,
       );
     } catch (error) {
       if (signal.aborted) {
@@ -1164,11 +1185,18 @@ export class StructuredAdapter implements AgentAdapter {
         state.updatedAt = Date.now();
         this.mixagentsSides.set(`${scope}\0${scopeCwd}`, state);
         await this.saveMixagentsSides();
+        const replacementProgress = { text: '' };
         const result = await this.withMixagentsHeartbeat(
           emit,
           route,
           access,
-          () => resolvedBackend.wait(replacement, signal, turnTimeoutMs),
+          replacementProgress,
+          onProgress => resolvedBackend.wait(
+            replacement,
+            signal,
+            turnTimeoutMs,
+            onProgress,
+          ),
         );
         if (result.status === 'timeout') {
           await resolvedBackend.interrupt(replacement, AbortSignal.timeout(30_000)).catch(() => {});
@@ -1179,6 +1207,7 @@ export class StructuredAdapter implements AgentAdapter {
           emit,
           turnTimeoutMs,
           timeoutSetting,
+          replacementProgress.text,
         );
         return;
       }
@@ -1189,22 +1218,53 @@ export class StructuredAdapter implements AgentAdapter {
     emit: (event: AgentEvent) => void,
     route: SubagentRoute,
     access: 'read-only' | 'workspace-write',
-    operation: () => Promise<T>,
+    streamedProgress: { text: string },
+    operation: (onProgress: (progress: SideAgentProgress) => void) => Promise<T>,
   ): Promise<T> {
     const heartbeatMs = this.options.sideHeartbeatMs ?? 15_000;
     const startedAt = Date.now();
+    let lastActivityAt = startedAt;
+    const onProgress = (progress: SideAgentProgress): void => {
+      lastActivityAt = Date.now();
+      if (progress.type === 'text') {
+        const text = redactSecrets(progress.text);
+        streamedProgress.text = `${streamedProgress.text}${text}`.slice(-50_000);
+        emit(textEvent(text));
+        return;
+      }
+      if (progress.type === 'tool_started') {
+        emit({
+          type: 'tool_use',
+          id: progress.itemId ?? `side-tool-${progress.tool}`,
+          name: progress.tool,
+          input: {},
+        });
+        return;
+      }
+      if (progress.type === 'tool_completed') {
+        emit({
+          type: 'tool_result',
+          id: progress.itemId ?? `side-tool-${progress.tool}`,
+          output: `${progress.tool} completed`,
+          isError: false,
+        });
+        return;
+      }
+      emit(textEvent(`ℹ️ ${redactSecrets(progress.text)}\n`));
+    };
     const timer = heartbeatMs > 0
       ? setInterval(() => {
+          if (Date.now() - lastActivityAt < heartbeatMs) return;
           const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1_000));
           emit(textEvent(
             `⏳ MixAgents side 已等待 ${elapsedSeconds} 秒（route=${route.id} access=${access}）；` +
-            '当前 Broker MCP 只提供终态 mailbox，暂无 token 流可转发。\n',
+            '当前没有可转发的新进度。\n',
           ));
         }, heartbeatMs)
       : undefined;
     timer?.unref?.();
     try {
-      return await operation();
+      return await operation(onProgress);
     } finally {
       if (timer) clearInterval(timer);
     }
@@ -1224,12 +1284,25 @@ export class StructuredAdapter implements AgentAdapter {
     emit: (event: AgentEvent) => void,
     timeoutMs?: number,
     timeoutSetting = 'sideTimeoutMs',
+    streamedText = '',
   ): Promise<void> {
     state.agent.status = result.status;
     state.updatedAt = Date.now();
     await this.saveMixagentsSides();
     if (result.status === 'completed') {
-      emit(textEvent(result.text?.trim() || 'MixAgents side 已完成（无文本输出）。'));
+      const finalText = redactSecrets(result.text?.trim() || '');
+      const streamed = streamedText.trim();
+      if (!finalText) {
+        emit(textEvent(streamed || 'MixAgents side 已完成（无文本输出）。'));
+      } else if (!streamed) {
+        emit(textEvent(finalText));
+      } else if (streamed.endsWith(finalText) || streamed === finalText) {
+        // The streamed deltas already delivered the final mailbox text.
+      } else if (finalText.startsWith(streamed)) {
+        emit(textEvent(finalText.slice(streamed.length)));
+      } else {
+        emit(textEvent(`\n${finalText}`));
+      }
       return;
     }
     if (result.status === 'failed') {

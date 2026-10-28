@@ -108,6 +108,10 @@ describe('arg-bridge settings and doctor', () => {
     expect(first.subagents.diagnostics.mcp.status).toBe('available');
     expect(first.subagents.diagnostics.selectedRoute.id).toBe('read-a');
     expect(first.subagents.diagnostics.selectedWriteRoute.id).toBe('write-b');
+    expect(first.subagents.diagnostics.progress).toEqual({
+      mode: 'events-v1',
+      tool: 'read_agent_events',
+    });
     expect(first.subagents.diagnostics.readRoutes).toEqual(expect.arrayContaining([
       expect.objectContaining({
         id: 'read-a',
@@ -136,6 +140,7 @@ describe('arg-bridge settings and doctor', () => {
     expect(output).not.toContain('sk-super-secret-value');
     expect(output).toContain('MIXAGENTS_TEST_SECRET');
     expect(output).toContain('sideTimeoutMs=90000');
+    expect(output).toContain('progress=events-v1');
     expect(output).toContain('web search mode=auto');
   });
 

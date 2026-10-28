@@ -1,6 +1,6 @@
 {
   "name": "arg-bridge",
-  "version": "1.10.1",
+  "version": "1.11.0",
   "description": "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   "type": "module",
   "packageManager": "pnpm@10.33.0",
@@ -29,19 +29,26 @@
   "files": [
     "dist",
     "bin",
+    "vendor/mixagents-broker/plugin/mixagents-broker/dist",
+    "vendor/mixagents-broker/patches/events-v1-source.patch",
+    "vendor/mixagents-broker/LICENSE",
+    "vendor/mixagents-broker/UPSTREAM.md",
     "skills",
     "README.md",
     "README.zh.md",
     "docs",
     "CHANGELOG.md",
     "THIRD_PARTY_CODEX_NOTICE",
+    "THIRD_PARTY_MIXAGENTS_NOTICE",
     "LICENSE"
   ],
   "scripts": {
     "dev": "tsup --watch",
-    "build": "tsup",
-    "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "build": "pnpm build:broker && tsup",
+    "build:broker": "tsc -p vendor/mixagents-broker/tsconfig.json",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p vendor/mixagents-broker/tsconfig.json",
+    "test": "pnpm build:broker && vitest run && node --test vendor/mixagents-broker/test/broker.test.mjs vendor/mixagents-broker/test/mcp.test.mjs vendor/mixagents-broker/test/release.test.mjs",
+    "test:broker": "pnpm build:broker && node --test vendor/mixagents-broker/test/broker.test.mjs vendor/mixagents-broker/test/mcp.test.mjs vendor/mixagents-broker/test/release.test.mjs",
     "test:unit": "vitest run tests/unit --passWithNoTests",
     "test:integration": "vitest run tests/integration --passWithNoTests",
     "test:process": "vitest run tests/process --passWithNoTests",
@@ -91,8 +98,5 @@
     "channel",
     "bridge"
   ],
-  "license": "MIT",
-  "optionalDependencies": {
-    "mixagents-broker": "0.1.1"
-  }
+  "license": "MIT"
 }

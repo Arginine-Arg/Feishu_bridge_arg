@@ -1,19 +1,16 @@
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { expect, it } from 'vitest';
 import { MixAgentsBrokerBackend } from '../../src/agent/subagents/mixagents';
+import type { SideAgentProgress } from '../../src/agent/subagents/types';
 import type { SubagentConfig } from '../../src/config/profile-schema';
 
-const real = process.env.ARG_BRIDGE_REAL_MIXAGENTS_MCP === '1' ? it : it.skip;
-
-real('creates and completes a real MixAgents App Server worker through the official MCP server', async () => {
+it('streams and completes a real worker through the vendored MixAgents MCP server', async () => {
   const server = process.env.ARG_BRIDGE_MIXAGENTS_SERVER;
-  const fakeCodexSource = process.env.ARG_BRIDGE_FAKE_CODEX_FIXTURE;
-  if (!fakeCodexSource) {
-    throw new Error('ARG_BRIDGE_FAKE_CODEX_FIXTURE is required');
-  }
+  const fakeCodexSource = process.env.ARG_BRIDGE_FAKE_CODEX_FIXTURE ??
+    fileURLToPath(new URL('../../vendor/mixagents-broker/test/fixtures/fake-codex.mjs', import.meta.url));
   const root = await mkdtemp(join(tmpdir(), 'arg-bridge-real-mixagents-'));
   try {
     const workspace = join(root, 'workspace');
@@ -114,10 +111,19 @@ real('creates and completes a real MixAgents App Server worker through the offic
         model: 'fake-model',
         access: 'read-only',
       });
-      await expect(backend.wait(agent, signal)).resolves.toMatchObject({
+      const progress: SideAgentProgress[] = [];
+      await expect(backend.wait(agent, signal, undefined, event => {
+        progress.push(event);
+      })).resolves.toMatchObject({
         status: 'completed',
         text: `cwd:${workspace}`,
       });
+      expect(
+        progress
+          .filter(event => event.type === 'text')
+          .map(event => event.text)
+          .join(''),
+      ).toBe(`cwd:${workspace}`);
       await backend.close(agent, signal);
     } finally {
       await backend.closeBackend();

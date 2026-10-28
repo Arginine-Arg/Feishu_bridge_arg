@@ -14,7 +14,7 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const repositoryRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const packageJson = JSON.parse(
@@ -79,6 +79,54 @@ try {
     throw new Error(
       `command reported ${reportedVersion}; expected ${packageJson.version}`,
     );
+  }
+
+  const vendorServer = join(
+    installedRoot,
+    'vendor',
+    'mixagents-broker',
+    'plugin',
+    'mixagents-broker',
+    'dist',
+    'mcp-server.js',
+  );
+  const vendorServerSource = await readFile(vendorServer, 'utf8');
+  if (!vendorServerSource.includes('read_agent_events')) {
+    throw new Error('installed vendored MixAgents Broker lacks read_agent_events');
+  }
+  await Promise.all([
+    readFile(join(installedRoot, 'vendor', 'mixagents-broker', 'LICENSE'), 'utf8'),
+    readFile(join(installedRoot, 'vendor', 'mixagents-broker', 'UPSTREAM.md'), 'utf8'),
+    readFile(
+      join(
+        installedRoot,
+        'vendor',
+        'mixagents-broker',
+        'patches',
+        'events-v1-source.patch',
+      ),
+      'utf8',
+    ),
+    readFile(join(installedRoot, 'THIRD_PARTY_MIXAGENTS_NOTICE'), 'utf8'),
+  ]);
+  const installedModule = await import(
+    pathToFileURL(join(installedRoot, 'dist', 'index.js')).href
+  );
+  const launch = installedModule.resolveBundledMixAgentsLaunchConfig();
+  if (
+    !launch ||
+    launch.command !== process.execPath ||
+    launch.args[0] !== join(
+      installedRoot,
+      'vendor',
+      'mixagents-broker',
+      'plugin',
+      'mixagents-broker',
+      'dist',
+      'server.js',
+    )
+  ) {
+    throw new Error('installed package did not resolve its vendored MixAgents Broker');
   }
 
   process.stdout.write(

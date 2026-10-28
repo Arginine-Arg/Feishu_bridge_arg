@@ -107,6 +107,11 @@ state.credentialFingerprints = credentialFingerprints;
 state.proxyEnvironmentNames = Object.keys(process.env)
   .filter(name => /^(?:http|https|all)_proxy$/iu.test(name) && process.env[name])
   .sort();
+for (const agent of Object.values(state.agents)) {
+  agent.events ??= [];
+  agent.nextEventSeq ??= 1;
+  agent.droppedThrough ??= 0;
+}
 
 const pending = new Map();
 
@@ -146,9 +151,28 @@ function agentPayload(agent, status = agent.status) {
     model: agent.model,
     backend: 'app_server',
     status,
+    eventCursor: agent.events.at(-1)?.seq ?? 0,
+    eventStream: 'events-v1',
     ...(status === 'completed' ? { output: agent.lastMessage } : {}),
     ...(status === 'failed' ? { error: 'fake failure' } : {}),
   };
+}
+
+function appendEvent(agent, event) {
+  const stored = { ...event, seq: agent.nextEventSeq++ };
+  agent.events.push(stored);
+  while (agent.events.length > 256) {
+    const removed = agent.events.shift();
+    agent.droppedThrough = removed.seq;
+  }
+  return stored;
+}
+
+function queueTextEvents(agent, text) {
+  appendEvent(agent, { type: 'turn_started' });
+  for (const chunk of text.match(/.{1,6}/gsu) ?? [text]) {
+    appendEvent(agent, { type: 'text_delta', text: chunk });
+  }
 }
 
 async function handleTool(name, args, id) {
@@ -180,7 +204,11 @@ async function handleTool(name, args, id) {
       task: args.task,
       access: args.access,
       lastMessage: `result:${args.task}`,
+      events: [],
+      nextEventSeq: 1,
+      droppedThrough: 0,
     };
+    queueTextEvents(agent, agent.lastMessage);
     state.agents[agentId] = agent;
     await persist();
     return tool(id, agentPayload(agent));
@@ -200,8 +228,32 @@ async function handleTool(name, args, id) {
   if (name === 'send') {
     agent.status = 'running';
     agent.lastMessage = `followup:${args.message}`;
+    queueTextEvents(agent, agent.lastMessage);
     await persist();
     return tool(id, agentPayload(agent));
+  }
+  if (name === 'read_agent_events') {
+    const cursor = Number(args?.cursor ?? 0);
+    const maxEvents = Math.min(500, Math.max(0, Number(args?.maxEvents ?? 100)));
+    const events = maxEvents === 0
+      ? []
+      : agent.events.filter(event => event.seq > cursor).slice(0, maxEvents);
+    if (maxEvents > 0 && agent.status === 'running') {
+      agent.status = 'completed';
+      appendEvent(agent, { type: 'turn_completed', status: 'completed' });
+    }
+    await persist();
+    const eventCursor = agent.events.at(-1)?.seq ?? 0;
+    return tool(id, {
+      agentId,
+      events,
+      nextCursor: events.at(-1)?.seq ?? Math.max(cursor, eventCursor),
+      eventCursor,
+      status: agent.status,
+      done: agent.status !== 'running' && agent.status !== 'starting',
+      cursorExpired: cursor < agent.droppedThrough,
+      droppedThrough: agent.droppedThrough,
+    });
   }
   if (name === 'interrupt_agent') {
     agent.status = 'interrupted';
@@ -242,6 +294,7 @@ input.on('line', line => {
         'spawn_agent',
         'send',
         'wait_agent',
+        'read_agent_events',
         'interrupt_agent',
         'list_agents',
       ]

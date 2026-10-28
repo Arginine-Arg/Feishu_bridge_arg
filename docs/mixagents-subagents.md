@@ -1,11 +1,11 @@
 # MixAgents subagents, model tools and `cc-switch` routing
 
-Version 1.9.2 hardens `/btw` runtime recovery so the provider selected in
-settings remains the primary backend. If an external MixAgents server omits
-the current generated route, Bridge restarts it and then retries the bundled
-`mixagents-broker@0.1.1` entrypoint before using any fallback. Version 1.9.1
-makes MixAgents available through three separate paths and adds
-automatic cc-switch provider discovery for workers:
+Version 1.11.0 bundles a source-auditable MixAgents Broker fork with the
+backward-compatible `events-v1` progress stream. The provider selected in
+settings remains the primary backend. If an explicit external MixAgents server
+omits the current generated route, Bridge can recover to the vendored Broker
+before using any fallback. MixAgents is available through three separate paths
+and uses automatic cc-switch provider discovery for workers:
 
 1. the explicit `/btw` side conversation;
 2. Bridge-owned dynamic tools that the parent Codex model can call without a
@@ -115,14 +115,14 @@ collaboration fail-closed. `doctor --json` reports this boundary as
 
 arg-bridge integrates with the MixAgents STDIO MCP server. It does not scan
 `$CODEX_HOME/plugins/cache` and does not import private broker source paths.
-The public `mixagents-broker` npm package is an optional dependency. When it was
-installed successfully, arg-bridge resolves its stable
-`dist/server.js` package entry automatically with the current Node runtime.
-An explicit profile command or `ARG_BRIDGE_MIXAGENTS_MCP` still takes priority.
-On an unsupported Node runtime, the optional package can be skipped and the
-explicit command/fallback diagnostics remain available.
+ArgBridge vendors a source-auditable fork at
+`vendor/mixagents-broker/plugin/mixagents-broker/dist/server.js`. The release
+package includes the compiled MIT-licensed runtime plus provenance, while the
+Git repository contains upstream source, tests and the change description.
+An explicit non-legacy profile command or `ARG_BRIDGE_MIXAGENTS_MCP` still takes
+priority.
 
-The controller verifies all six tools before use:
+The controller verifies the six baseline tools before use:
 
 - `routes`
 - `spawn_agent`
@@ -131,7 +131,13 @@ The controller verifies all six tools before use:
 - `interrupt_agent`
 - `list_agents`
 
-The published package normally needs no launch command. A custom command can be
+The vendored Broker also advertises `mixagents/events-v1` and exposes the
+optional `read_agent_events` tool. ArgBridge enables incremental progress only
+when that tool is present; older servers continue with heartbeat-only waiting.
+See [events-v1](./mixagents-events-v1.md) for the cursor, long-poll, buffer and
+security contract.
+
+The bundled Broker normally needs no launch command. A custom command can be
 configured in `arg-bridge settings`, in the profile, with
 `ARG_BRIDGE_MIXAGENTS_MCP` (a JSON descriptor), or through
 `MIXAGENTS_BROKER_MCP_COMMAND`.
@@ -301,9 +307,10 @@ Model-visible workers use the same worker policy.
 
 The side runtime also limits Codex request/stream retries so a temporarily
 unavailable provider fails quickly instead of appearing to think indefinitely.
-Bridge emits a liveness heartbeat every 15 seconds while it waits for the
-Broker's terminal mailbox. This is not token-level streaming: the current MCP
-contract exposes final output only. When the side budget expires, Bridge stops
+With the vendored `events-v1` Broker, Bridge forwards model text deltas and safe
+tool lifecycle updates as they arrive. `wait_agent` remains authoritative for
+the final text/error. With an older external Broker, Bridge falls back to a
+liveness heartbeat every 15 seconds. When the side budget expires, Bridge stops
 waiting and requests an interrupt; remote provider work may continue. The error
 directs the user to a faster provider/route or the configured
 `sideTimeoutMs`/`workerTimeoutMs` budget. The request is not replayed on the

@@ -1925,6 +1925,33 @@ var BRIDGE_AGENT_SYSTEM_PROMPT = `
   </invariants>
   <schema>{"input_sha256":"...","kind":"task|native-command|terminal-control","presentation":"markdown|card"}</schema>
 </bridge_agent>`;
+
+// src/agent/subagents/mixagents.ts
+import { existsSync } from "fs";
+import { basename, isAbsolute } from "path";
+import { fileURLToPath } from "url";
+
+// src/agent/subagents/mcp-client.ts
+import { createInterface } from "readline";
+
+// src/platform/spawn.ts
+import crossSpawn from "cross-spawn";
+
+// src/agent/subagents/types.ts
+import { createHash as createHash2 } from "crypto";
+
+// src/agent/subagents/mixagents.ts
+var DEFAULT_TOTAL_WAIT_MS = 15 * 6e4;
+function resolveBundledMixAgentsLaunchConfig() {
+  const server = [
+    new URL("../../../vendor/mixagents-broker/plugin/mixagents-broker/dist/server.js", import.meta.url),
+    new URL("../vendor/mixagents-broker/plugin/mixagents-broker/dist/server.js", import.meta.url)
+  ].map((candidate) => fileURLToPath(candidate)).find((candidate) => existsSync(candidate));
+  return server ? {
+    command: process.execPath,
+    args: [server]
+  } : void 0;
+}
 export {
   BRIDGE_AGENT_SYSTEM_PROMPT,
   BridgeAgent,
@@ -1937,5 +1964,6 @@ export {
   renderCard,
   renderText,
   reportError,
-  reportMetric
+  reportMetric,
+  resolveBundledMixAgentsLaunchConfig
 };

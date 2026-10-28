@@ -25,6 +25,7 @@ export {
   OpenAiCompatibleBridgeClassifier,
   BRIDGE_AGENT_SYSTEM_PROMPT,
 } from './bridge-agent';
+export { resolveBundledMixAgentsLaunchConfig } from './agent/subagents/mixagents';
 export type {
   BridgeAgentClassifier,
   BridgeAgentDecision,

@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.11.0
+
+- Vendors a source-auditable MixAgents Broker 0.1.1 fork under
+  `vendor/mixagents-broker`, including upstream commit provenance and the MIT
+  license. Release package size increases by only the compiled Broker dist.
+- Adds the backward-compatible `mixagents/events-v1` capability and
+  `read_agent_events` MCP tool with cursor pagination and long polling.
+- `/btw` now streams text deltas and safe tool lifecycle updates while keeping
+  `wait_agent` final output/error authoritative.
+- Event buffers are bounded and report cursor expiry explicitly. Tool command
+  text, command output, file contents and credentials never enter progress
+  events.
+- Older MixAgents Broker servers continue to work with heartbeat-only progress.
+  The npm optional dependency is removed because the vendored build is now the
+  stable bundled runtime.
+
 ## 1.10.1
 
 - Recognizes the legacy `arg-bridge-mixagents-mcp` wrapper as a generated

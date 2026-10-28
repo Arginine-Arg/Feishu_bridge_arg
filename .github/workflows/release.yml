@@ -44,6 +44,9 @@ jobs:
       - name: Build source
         run: pnpm build
 
+      - name: Verify vendored Broker dist is reproducible
+        run: git diff --exit-code -- vendor/mixagents-broker/plugin/mixagents-broker/dist
+
       - name: Build release assets
         shell: bash
         run: |

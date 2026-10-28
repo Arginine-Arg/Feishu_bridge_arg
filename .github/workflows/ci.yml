@@ -65,11 +65,19 @@ jobs:
             exit $testExit
           }
 
+      - name: Vendored Broker tests (Windows)
+        if: runner.os == 'Windows'
+        run: pnpm test:broker
+
       - name: Typecheck
         run: pnpm typecheck
 
       - name: Build
         run: pnpm build
+
+      - name: Verify vendored Broker dist is reproducible
+        if: runner.os == 'Linux'
+        run: git diff --exit-code -- vendor/mixagents-broker/plugin/mixagents-broker/dist
 
   package-install:
     name: Package install on Node ${{ matrix.node }}

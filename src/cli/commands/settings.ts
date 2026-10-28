@@ -522,7 +522,7 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
     assertPrompt(repairText);
     maxRepairRounds = boundedIntegerInput(repairText, 0, 10, 'RSI 最大修复轮次');
     const command = await p.text({
-      message: '自定义 MixAgents MCP 命令（通常留空，自动使用 npm 包）',
+      message: '自定义 MixAgents MCP 命令（通常留空，自动使用随包 Broker）',
       initialValue: mcpCommand,
       placeholder: '留空自动发现',
     });
@@ -841,7 +841,8 @@ function formatSnapshot(snapshot: SettingsSnapshot): string {
     `provider switch=${snapshot.mainProvider.pendingSwitch}; safe point=${snapshot.mainProvider.safeSwitchPoint}`,
     `MixAgents mode=${snapshot.subagents.config.mode} routeMode=${snapshot.subagents.config.routeMode}` +
       ` provider=${snapshot.subagents.config.ccSwitchProviderId ?? '(follow-current)'}` +
-      ` MCP=${diagnostics.mcp.status} version=${diagnostics.packageVersion ?? '(unknown)'}`,
+      ` MCP=${diagnostics.mcp.status} version=${diagnostics.packageVersion ?? '(unknown)'}` +
+      ` progress=${diagnostics.progress.mode}`,
     `Broker tools=${diagnostics.modelTools.brokerWired ? 'wired' : 'degraded'}` +
       ` namespace=${diagnostics.modelTools.namespace}` +
       ` native=${diagnostics.modelTools.nativeToolPolicy}` +

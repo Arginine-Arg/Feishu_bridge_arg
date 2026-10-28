@@ -55,6 +55,14 @@ export interface SideAgentResult {
   error?: string;
 }
 
+export type SideAgentProgress =
+  | { type: 'text'; text: string; itemId?: string }
+  | { type: 'tool_started'; tool: string; itemId?: string }
+  | { type: 'tool_completed'; tool: string; itemId?: string }
+  | { type: 'notice'; text: string };
+
+export type SideAgentProgressHandler = (event: SideAgentProgress) => void;
+
 export interface SideAgentInput {
   route: SubagentRoute;
   task: string;
@@ -76,12 +84,18 @@ export interface SubagentBackend {
   readonly id: 'mixagents' | 'codex-fork';
   listRoutes(signal: AbortSignal): Promise<SubagentRoute[]>;
   createOrReuse(input: SideAgentInput): Promise<SideAgent>;
-  wait(agent: SideAgent, signal: AbortSignal, timeoutMs?: number): Promise<SideAgentResult>;
+  wait(
+    agent: SideAgent,
+    signal: AbortSignal,
+    timeoutMs?: number,
+    onProgress?: SideAgentProgressHandler,
+  ): Promise<SideAgentResult>;
   send(
     agent: SideAgent,
     message: string,
     signal: AbortSignal,
     timeoutMs?: number,
+    onProgress?: SideAgentProgressHandler,
   ): Promise<SideAgentResult>;
   interrupt(agent: SideAgent, signal: AbortSignal): Promise<void>;
   close(agent: SideAgent, signal: AbortSignal): Promise<void>;

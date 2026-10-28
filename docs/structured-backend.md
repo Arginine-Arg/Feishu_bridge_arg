@@ -277,8 +277,11 @@ For a read-only task, the auto-mode fallback sends ordinary input to a read-only
 Codex `thread/fork`. Access is `read-only` unless the user supplies
 `/btw --write --workspace <canonical-path> <task>` and the profile enables a
 compatible write route. Write tasks require MixAgents and never use fork
-fallback. Scope/cwd/route fingerprint are persisted so a Bridge restart can
-reconnect the same agent.
+fallback. The vendored MixAgents Broker streams text deltas and safe tool
+lifecycle events through `events-v1`; terminal mailbox text/errors remain
+authoritative. Older Brokers fall back to heartbeat-only progress.
+Scope/cwd/route fingerprint are persisted so a Bridge restart can reconnect the
+same agent.
 Route/provider/model/backend/revision changes replace the old agent with an
 explicit notice. `/btw out` interrupts only that side; `/stop`, `/model`,
 `/goal`, and `/compact` stay main-scoped.

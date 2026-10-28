@@ -1,5 +1,6 @@
-import { createRequire } from 'node:module';
+import { existsSync } from 'node:fs';
 import { basename, isAbsolute } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { SubagentConfig, SubagentMixAgentsConfig } from '../../config/profile-schema';
 import { McpStdioClient, McpToolError, redactSecrets } from './mcp-client';
 import {
@@ -7,6 +8,7 @@ import {
   SubagentUnavailableError,
   type SideAgent,
   type SideAgentInput,
+  type SideAgentProgressHandler,
   type SideAgentResult,
   type SubagentBackend,
   type SubagentRoute,
@@ -23,7 +25,6 @@ const REQUIRED_TOOLS = [
 
 const WAIT_REQUEST_MS = 120_000;
 const DEFAULT_TOTAL_WAIT_MS = 15 * 60_000;
-const require = createRequire(import.meta.url);
 
 export interface MixAgentsLaunchConfig {
   command: string;
@@ -62,6 +63,7 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
   private readonly env: NodeJS.ProcessEnv;
   private readonly timeoutMs: number;
   private runtimeRecoveryNotice?: string;
+  private supportsProgressEvents = false;
 
   constructor(
     private readonly config: SubagentConfig,
@@ -193,6 +195,10 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
     return this.runtime?.fingerprint;
   }
 
+  get progressEventsEnabled(): boolean {
+    return this.supportsProgressEvents;
+  }
+
   async createOrReuse(input: SideAgentInput): Promise<SideAgent> {
     if (input.access !== 'read-only') {
       if (input.route.maxAccess !== 'workspace-write') {
@@ -243,16 +249,64 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
     agent: SideAgent,
     signal: AbortSignal,
     timeoutMs = DEFAULT_TOTAL_WAIT_MS,
+    onProgress?: SideAgentProgressHandler,
+  ): Promise<SideAgentResult> {
+    return this.waitInternal(agent, signal, timeoutMs, onProgress, 0);
+  }
+
+  private async waitInternal(
+    agent: SideAgent,
+    signal: AbortSignal,
+    timeoutMs: number,
+    onProgress: SideAgentProgressHandler | undefined,
+    initialCursor: number,
   ): Promise<SideAgentResult> {
     const client = await this.ensureClient();
     const deadline = Date.now() + timeoutMs;
+    let cursor = initialCursor;
+    let cursorGapReported = false;
     while (Date.now() < deadline) {
       if (signal.aborted) throw abortError();
-      const remaining = Math.max(1, Math.min(WAIT_REQUEST_MS, deadline - Date.now()));
+      const remaining = Math.max(1, deadline - Date.now());
+      if (this.supportsProgressEvents) {
+        try {
+          const waitMs = Math.min(5_000, remaining);
+          const progress = await client.callTool('read_agent_events', {
+            agentId: agent.agentId,
+            cursor,
+            maxEvents: 200,
+            waitMs,
+          }, { signal, timeoutMs: waitMs + 10_000 });
+          const nextCursor = numberValue(progress.nextCursor);
+          if (nextCursor !== undefined) cursor = nextCursor;
+          if (progress.cursorExpired === true && !cursorGapReported) {
+            cursorGapReported = true;
+            onProgress?.({
+              type: 'notice',
+              text: 'MixAgents 进度缓冲区已截断；后续只显示仍可读取的新事件，最终结果不受影响。',
+            });
+          }
+          this.emitProgressEvents(progress, onProgress);
+          const status = stringValue(progress.status);
+          if (status === 'not_found') throw new SubagentAgentNotFoundError(agent.agentId);
+          if (status !== 'completed' && status !== 'failed' && status !== 'interrupted') {
+            continue;
+          }
+        } catch (error) {
+          if (error instanceof SubagentAgentNotFoundError) throw error;
+          if (signal.aborted) throw abortError();
+          this.supportsProgressEvents = false;
+          onProgress?.({
+            type: 'notice',
+            text: `MixAgents 进度流不可用，已退回终态 mailbox：${redactSecrets(errorMessage(error))}`,
+          });
+        }
+      }
+      const waitBudget = Math.max(1, Math.min(WAIT_REQUEST_MS, deadline - Date.now()));
       const result = await client.callTool('wait_agent', {
         agentIds: [agent.agentId],
-        timeoutMs: remaining,
-      }, { signal, timeoutMs: remaining + 10_000 }).catch(error => {
+        timeoutMs: waitBudget,
+      }, { signal, timeoutMs: waitBudget + 10_000 }).catch(error => {
         throw translateToolError(error, agent.cwd);
       });
       const snapshot = firstAgent(result);
@@ -274,17 +328,50 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
     message: string,
     signal: AbortSignal,
     timeoutMs = DEFAULT_TOTAL_WAIT_MS,
+    onProgress?: SideAgentProgressHandler,
   ): Promise<SideAgentResult> {
     const client = await this.ensureClient();
+    let cursor = 0;
+    let hasPreSendCursor = false;
+    if (this.supportsProgressEvents) {
+      const current = await client.callTool('read_agent_events', {
+        agentId: agent.agentId,
+        cursor: 0,
+        maxEvents: 0,
+        waitMs: 0,
+      }, { signal, timeoutMs: 10_000 }).catch(error => {
+        if (signal.aborted) throw abortError();
+        this.supportsProgressEvents = false;
+        onProgress?.({
+          type: 'notice',
+          text: `MixAgents 无法建立本轮进度 cursor，已退回终态 mailbox：${redactSecrets(errorMessage(error))}`,
+        });
+        return undefined;
+      });
+      const currentCursor = numberValue(current?.eventCursor);
+      if (currentCursor !== undefined) {
+        cursor = currentCursor;
+        hasPreSendCursor = true;
+      } else {
+        this.supportsProgressEvents = false;
+        onProgress?.({
+          type: 'notice',
+          text: 'MixAgents 进度 cursor 格式无效，已退回终态 mailbox。',
+        });
+      }
+    }
     try {
-      await client.callTool('send', {
+      const sent = await client.callTool('send', {
         agentId: agent.agentId,
         message,
       }, { signal, timeoutMs: 60_000 });
+      if (this.supportsProgressEvents && !hasPreSendCursor) {
+        cursor = numberValue(sent.eventCursor) ?? cursor;
+      }
     } catch (error) {
       throw translateToolError(error, agent.cwd);
     }
-    return this.wait(agent, signal, timeoutMs);
+    return this.waitInternal(agent, signal, timeoutMs, onProgress, cursor);
   }
 
   async interrupt(agent: SideAgent, signal: AbortSignal): Promise<void> {
@@ -357,6 +444,7 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
       throw error;
     });
     const names = new Set(tools.map(tool => tool.name));
+    this.supportsProgressEvents = names.has('read_agent_events');
     const missingTools = REQUIRED_TOOLS.filter(tool => !names.has(tool));
     if (missingTools.length > 0) {
       const serverVersion = this.client?.serverVersion ?? null;
@@ -387,6 +475,31 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
   private resetClient(): void {
     this.client?.close();
     this.client = undefined;
+    this.supportsProgressEvents = false;
+  }
+
+  private emitProgressEvents(
+    value: Record<string, unknown>,
+    onProgress: SideAgentProgressHandler | undefined,
+  ): void {
+    if (!onProgress || !Array.isArray(value.events)) return;
+    for (const raw of value.events) {
+      if (!isRecord(raw)) continue;
+      const type = stringValue(raw.type);
+      const itemId = stringValue(raw.itemId);
+      if (type === 'text_delta' && typeof raw.text === 'string' && raw.text) {
+        onProgress({ type: 'text', text: raw.text, ...(itemId ? { itemId } : {}) });
+      } else if (type === 'tool_started' || type === 'tool_completed') {
+        const tool = stringValue(raw.tool);
+        if (tool) {
+          onProgress({
+            type,
+            tool,
+            ...(itemId ? { itemId } : {}),
+          });
+        }
+      }
+    }
   }
 }
 
@@ -556,17 +669,18 @@ export function resolveMixAgentsLaunchConfig(
 
 /** Stable package entrypoint shipped as arg-bridge's optional dependency. */
 export function resolveBundledMixAgentsLaunchConfig(): MixAgentsLaunchConfig | undefined {
-  try {
-    const server = require.resolve('mixagents-broker/dist/server.js');
-    return {
-      command: process.execPath,
-      args: [server],
-    };
-  } catch {
-    // The public package is optional; explicit configuration remains the
-    // fallback when the runtime did not install it.
-    return undefined;
-  }
+  const server = [
+    new URL('../../../vendor/mixagents-broker/plugin/mixagents-broker/dist/server.js', import.meta.url),
+    new URL('../vendor/mixagents-broker/plugin/mixagents-broker/dist/server.js', import.meta.url),
+  ]
+    .map(candidate => fileURLToPath(candidate))
+    .find(candidate => existsSync(candidate));
+  return server
+    ? {
+        command: process.execPath,
+        args: [server],
+      }
+    : undefined;
 }
 
 function isGeneratedRuntimeBrokerLaunch(launch: MixAgentsLaunchConfig): boolean {
@@ -675,6 +789,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function numberValue(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : undefined;
 }
 
 function stringArray(value: unknown): string[] {

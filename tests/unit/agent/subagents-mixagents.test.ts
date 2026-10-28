@@ -11,6 +11,7 @@ import {
 import { resolveSubagents } from '../../../src/agent/subagents/registry';
 import {
   SubagentUnavailableError,
+  type SideAgentProgress,
 } from '../../../src/agent/subagents/types';
 import {
   DEFAULT_SUBAGENT_CONFIG,
@@ -19,8 +20,6 @@ import {
 
 const fixture = fileURLToPath(new URL('../../fixtures/fake-mixagents-mcp.mjs', import.meta.url));
 const temporary: string[] = [];
-const optionalBrokerRuntime = Number(process.versions.node.split('.')[0]) >= 22 ? it : it.skip;
-
 afterEach(async () => {
   await Promise.all(temporary.splice(0).map(path => rm(path, { recursive: true, force: true })));
 });
@@ -63,7 +62,7 @@ async function setup() {
 }
 
 describe('MixAgentsBrokerBackend', () => {
-  optionalBrokerRuntime('auto-discovers the optional published mixagents-broker MCP entry', () => {
+  it('resolves the vendored MixAgents Broker entry', () => {
     const launch = resolveMixAgentsLaunchConfig({
       ...DEFAULT_SUBAGENT_CONFIG,
       mixagents: undefined,
@@ -75,7 +74,7 @@ describe('MixAgentsBrokerBackend', () => {
     expect(launch?.args[0]?.endsWith('/dist/server.js')).toBe(true);
   });
 
-  optionalBrokerRuntime('uses the bundled Broker directly for generated cc-switch runtimes', () => {
+  it('uses the bundled Broker directly for generated cc-switch runtimes', () => {
     const runtime = {
       brokerConfigPath: '/tmp/generated-broker.json',
       credentials: {},
@@ -101,7 +100,7 @@ describe('MixAgentsBrokerBackend', () => {
     expect(backend.launchConfig.args[0]).toContain('mixagents-broker');
   });
 
-  optionalBrokerRuntime('replaces node-based legacy Broker wrappers for generated runtimes', () => {
+  it('replaces node-based legacy Broker wrappers for generated runtimes', () => {
     const runtime = {
       brokerConfigPath: '/tmp/generated-broker.json',
       credentials: {},
@@ -128,7 +127,7 @@ describe('MixAgentsBrokerBackend', () => {
     expect(backend.launchConfig.args[0]).toContain('mixagents-broker');
   });
 
-  optionalBrokerRuntime('replaces the legacy arg-bridge MixAgents wrapper for generated runtimes', () => {
+  it('replaces the legacy arg-bridge MixAgents wrapper for generated runtimes', () => {
     const runtime = {
       brokerConfigPath: '/tmp/generated-broker.json',
       credentials: {},
@@ -185,14 +184,36 @@ describe('MixAgentsBrokerBackend', () => {
         access: 'read-only',
         backendId: 'mixagents',
       });
-      await expect(backend.wait(agent, signal)).resolves.toMatchObject({
+      const progress: SideAgentProgress[] = [];
+      await expect(backend.wait(agent, signal, undefined, event => {
+        progress.push(event);
+      })).resolves.toMatchObject({
         status: 'completed',
         text: 'result:Review the patch',
       });
-      await expect(backend.send(agent, 'Check tests', signal)).resolves.toMatchObject({
+      expect(progress).toContainEqual(expect.objectContaining({
+        type: 'text',
+        text: expect.any(String),
+      }));
+      expect(
+        progress
+          .filter(event => event.type === 'text')
+          .map(event => event.text)
+          .join(''),
+      ).toBe('result:Review the patch');
+      const followupProgress: SideAgentProgress[] = [];
+      await expect(backend.send(agent, 'Check tests', signal, undefined, event => {
+        followupProgress.push(event);
+      })).resolves.toMatchObject({
         status: 'completed',
         text: 'followup:Check tests',
       });
+      expect(
+        followupProgress
+          .filter(event => event.type === 'text')
+          .map(event => event.text)
+          .join(''),
+      ).toBe('followup:Check tests');
       await backend.interrupt(agent, signal);
       const state = JSON.parse(await readFile(statePath, 'utf8'));
       const spawnCalls = state.calls.filter((call: { tool: string }) => call.tool === 'spawn_agent');
@@ -203,6 +224,36 @@ describe('MixAgentsBrokerBackend', () => {
         access: 'read-only',
       });
       expect(state.calls.filter((call: { tool: string }) => call.tool === 'wait_agent')).toHaveLength(2);
+    } finally {
+      await backend.closeBackend();
+    }
+  });
+
+  it('keeps terminal mailbox behavior when an older Broker lacks progress events', async () => {
+    const { root, env, config } = await setup();
+    const backend = new MixAgentsBrokerBackend(config, {
+      ...env,
+      FAKE_MIXAGENTS_OMIT_TOOL: 'read_agent_events',
+    });
+    try {
+      const [route] = await backend.listRoutes(new AbortController().signal);
+      const signal = new AbortController().signal;
+      const agent = await backend.createOrReuse({
+        route: route!,
+        task: 'Legacy mailbox',
+        cwd: root,
+        scope: 'legacy-progress',
+        access: 'read-only',
+        signal,
+      });
+      const progress: SideAgentProgress[] = [];
+      await expect(backend.wait(agent, signal, undefined, event => {
+        progress.push(event);
+      })).resolves.toMatchObject({
+        status: 'completed',
+        text: 'result:Legacy mailbox',
+      });
+      expect(progress).toEqual([]);
     } finally {
       await backend.closeBackend();
     }

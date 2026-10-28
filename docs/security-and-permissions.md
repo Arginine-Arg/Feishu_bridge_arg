@@ -95,6 +95,9 @@ and timeout rules below.
 - Persistent worker mappings contain logical path, Broker agent ID, optional
   worker thread ID, route fingerprint, provider/model IDs, access and workspace.
   They contain no API key or credential JSON.
+- Progress events contain model text deltas and tool item type/ID/lifecycle
+  only. Command text, command output, file contents, credentials and provider
+  headers never enter the event buffer.
 - `send_message` is Bridge-local queue-only. It never wakes the worker; the next
   `followup_task` delivers the queued plaintext and new task together.
 - Result text is redacted and bounded before persistence/display.

@@ -1,0 +1,18 @@
+Vendored MixAgents Broker
+
+The ArgBridge package includes a modified build of mixagents-broker 0.1.1.
+
+Upstream:
+  https://github.com/Utopia-V/mixagents
+  packages/broker
+  commit 09509e52bbd764fffd24c8591fb44476f770a2b9
+
+Copyright (c) 2026 Utopia-V
+
+The upstream and vendored source are licensed under the MIT License. The full
+license text is included at:
+
+  vendor/mixagents-broker/LICENSE
+
+ArgBridge modifications add a backward-compatible progress event protocol
+called events-v1. See vendor/mixagents-broker/UPSTREAM.md.

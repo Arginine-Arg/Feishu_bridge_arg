@@ -13,6 +13,7 @@ import {
   SubagentAgentNotFoundError,
   type SideAgent,
   type SideAgentInput,
+  type SideAgentProgress,
   type SideAgentResult,
   type SubagentBackend,
   type SubagentRoute,
@@ -91,6 +92,7 @@ class FakeBackend implements SubagentBackend {
   sendNotFoundOnce = false;
   hangWaits = false;
   waitResult?: SideAgentResult;
+  waitProgress: SideAgentProgress[] = [];
 
   constructor(private readonly route: () => SubagentRoute) {}
 
@@ -137,8 +139,10 @@ class FakeBackend implements SubagentBackend {
     agent: SideAgent,
     signal: AbortSignal,
     timeoutMs?: number,
+    onProgress?: (event: SideAgentProgress) => void,
   ): Promise<SideAgentResult> {
     this.waitTimeouts.push(timeoutMs);
+    for (const event of this.waitProgress) onProgress?.(event);
     if (this.waitResult) return this.waitResult;
     if (this.hangWaits) {
       await new Promise<void>((_resolve, reject) => {
@@ -156,12 +160,14 @@ class FakeBackend implements SubagentBackend {
     message: string,
     signal?: AbortSignal,
     timeoutMs?: number,
+    onProgress?: (event: SideAgentProgress) => void,
   ): Promise<SideAgentResult> {
     this.sendTimeouts.push(timeoutMs);
     if (this.sendNotFoundOnce) {
       this.sendNotFoundOnce = false;
       throw new SubagentAgentNotFoundError(agent.agentId);
     }
+    for (const event of this.waitProgress) onProgress?.(event);
     this.sends.push({ agent, message, signal });
     return { status: 'completed', text: `followup:${agent.agentId}` };
   }
@@ -1098,8 +1104,65 @@ describe('structured MixAgents /btw', () => {
     }));
     expect(events).toContainEqual(expect.objectContaining({
       type: 'text',
-      delta: expect.stringContaining('只提供终态 mailbox'),
+      delta: expect.stringContaining('当前没有可转发的新进度'),
     }));
+    await main.close();
+    await rm(profileDir, { recursive: true, force: true });
+  });
+
+  it('streams Broker progress deltas without duplicating the final mailbox text', async () => {
+    const profileDir = await mkdtemp(join(tmpdir(), 'arg-bridge-side-stream-'));
+    const backend = new FakeBackend(() => routeA);
+    backend.waitProgress = [
+      { type: 'text', text: 'sk-super-secret ' },
+      { type: 'tool_started', tool: 'commandExecution', itemId: 'tool-1' },
+      { type: 'tool_completed', tool: 'commandExecution', itemId: 'tool-1' },
+      { type: 'text', text: 'answer' },
+    ];
+    backend.waitResult = { status: 'completed', text: 'sk-super-secret answer' };
+    const main = session();
+    const adapter = new StructuredAdapter({
+      kind: 'codex',
+      binary: 'not-spawned',
+      profileDir,
+      subagents,
+      subagentResolver: vi.fn(async () => resolved(routeA, backend)),
+    });
+    Reflect.get(adapter, 'sessions').set('scope', {
+      main,
+      cwd: '/workspace',
+      view: new StructuredView(profileDir, 'main'),
+    });
+
+    const events = await drain(adapter.runSide({
+      runId: 'side-stream',
+      scopeId: 'scope',
+      cwd: '/workspace',
+      prompt: '/btw Stream the progress',
+      liveInputMode: 'side',
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'text',
+      delta: 'sk-[REDACTED] ',
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'text',
+      delta: 'answer',
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'tool_use',
+      id: 'tool-1',
+      name: 'commandExecution',
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'tool_result',
+      id: 'tool-1',
+    }));
+    expect(events.some(event =>
+      event.type === 'text' && event.delta === 'sk-super-secret answer'
+    )).toBe(false);
+    expect(JSON.stringify(events)).not.toContain('sk-super-secret');
+
     await main.close();
     await rm(profileDir, { recursive: true, force: true });
   });
