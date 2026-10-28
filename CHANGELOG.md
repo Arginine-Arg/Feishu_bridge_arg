@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.9.7
+
+- Kept the third-party Codex wrapper regression enabled where `node:sqlite` is
+  available and skipped it on Node 20, which does not provide that built-in
+  module. This removes Node 20/macOS and Node 20/Ubuntu CI failures without
+  changing the 1.9.6 runtime fix.
+
 ## 1.9.6
 
 - Fixed repeated `/btw` follow-ups failing with `already has an active writer`.

@@ -11,7 +11,10 @@ import {
 } from '../../../src/integrations/cc-switch-provider';
 
 const sqliteRuntime = Number(process.versions.node.split('.')[0]) >= 22 ? it : it.skip;
-const unixIt = process.platform === 'win32' ? it.skip : it;
+const sqliteUnixIt = Number(process.versions.node.split('.')[0]) >= 22 &&
+  process.platform !== 'win32'
+  ? it
+  : it.skip;
 const temporary: string[] = [];
 const require = createRequire(import.meta.url);
 const execFileAsync = promisify(execFile);
@@ -72,7 +75,7 @@ describe('cc-switch provider resolver', () => {
     expect(broker.codexBin).not.toBe('/opt/codex');
   });
 
-  unixIt('disables unsupported web search on the third-party Broker Codex wrapper', async () => {
+  sqliteUnixIt('disables unsupported web search on the third-party Broker Codex wrapper', async () => {
     const setup = await sqliteSetup();
     const fakeCodex = join(setup.root, 'fake-codex.mjs');
     const argsFile = join(setup.root, 'fake-codex-args.json');
