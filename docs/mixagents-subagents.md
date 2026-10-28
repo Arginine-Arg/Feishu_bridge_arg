@@ -150,6 +150,9 @@ configured in `arg-bridge settings`, in the profile, with
     "toolNamespace": "arg_bridge",
     "maxConcurrentWorkers": 4,
     "workerTimeoutMs": 900000,
+    "sideTimeoutMs": 90000,
+    "sideReasoningEffort": "low",
+    "webSearch": "auto",
     "allowWriteWorkers": false,
     "includeProgressSnapshot": true,
     "reuse": "scope-cwd",
@@ -179,11 +182,28 @@ Explicit `/btw --route <id>` and manual route mode never fall back.
 
 ## Automatic cc-switch provider resolution
 
-For generated third-party cc-switch runtimes, Bridge launches the Broker's
-Codex child with `web_search = "disabled"`. Codex 0.164 otherwise exposes its
-native `web_search` tool even when a custom Responses provider does not support
-it; some compatible gateways answer that request with 503 or leave it hanging.
-Bridge does not change the selected route, provider, model or function tools.
+Web search is provider capability, not a vendor special case. A provider may
+declare:
+
+```toml
+[model_providers.vendor]
+supports_standalone_web_search = true
+```
+
+`subagents.webSearch` supports three policies:
+
+- `auto` (default): keep the native Responses `web_search` tool only when the
+  provider declares support. If the capability is absent or false, Bridge
+  disables native search and reports the reason in settings/doctor.
+- `native`: force native search. Use this only after the selected provider has
+  been verified to support Responses `web_search`; otherwise upstream 503 or
+  timeouts remain provider errors.
+- `disabled`: never send the native search tool.
+
+Changing to a provider with declared web-search support makes the next `/btw`
+and worker use search without editing generated files. Bridge never changes the
+selected provider automatically and never turns a provider-specific failure
+into a hardcoded global ban.
 
 `routeMode: "follow-cc-switch"` is the default and needs no
 `broker-routes.json` file. On every worker operation, Bridge reads the current
@@ -196,7 +216,7 @@ cc-switch provider from SQLite (`~/.cc-switch/cc-switch.db`, with a legacy
 - the known credential field and its value in memory only.
 
 It materializes a profile-scoped Broker config under
-`<profile>/structured/cc-switch/broker-<config-hash>.json` and passes the
+`<profile>/structured/cc-switch/broker-<policy-hash>-<role>.json` and passes the
 credential to the MixAgents child as `MIXAGENTS_BROKER_CREDENTIALS_JSON`. The
 value is never written to the Broker config, profile, route map, worker mapping,
 logs, doctor JSON, or argv.
@@ -204,6 +224,7 @@ logs, doctor JSON, or argv.
 When `ccSwitchProviderId` is `null`, the next operation follows cc-switch. When
 it is set to a provider ID, workers use that provider while the main
 conversation continues to follow cc-switch. A provider switch changes the route
+fingerprint. Side/worker role and capability-policy changes also rotate the
 fingerprint; an old worker is closed and recreated, never silently reused.
 
 ## Three different provider identifiers
@@ -271,11 +292,18 @@ logs.
 ### Side concurrency and timeout
 
 `/btw` is a concurrent side operation, not a second main turn. It remains
-native-side marked even if a bridge route omits its `inputMode`. The generic
-conversation idle watchdog does not apply to Broker side turns; they use the
-profile's `subagents.workerTimeoutMs` and remain observable until the Broker
-returns completed, failed, interrupted or timed out.
-No route decision is cached until process restart.
+native-side marked even if a bridge route omits its `inputMode`. Conversational
+side turns use `subagents.sideTimeoutMs` (default 90 seconds) and
+`subagents.sideReasoningEffort` (default `low`). Model-visible workers keep the
+longer `subagents.workerTimeoutMs` budget and the provider's normal reasoning
+effort.
+
+The side runtime also limits Codex request/stream retries so a temporarily
+unavailable provider fails quickly instead of appearing to think indefinitely.
+When the side budget expires, Bridge interrupts the worker and tells the user to
+switch to a faster provider/route or increase `sideTimeoutMs`. It does not
+replay the request on the main model. No route decision is cached until process
+restart.
 
 ## Credential ownership
 
@@ -324,7 +352,7 @@ First `/btw <text>`:
 4. Spawn a MixAgents agent with `access: "read-only"`.
 5. Save agent ID, policy-free route identity, provider, model, scope, cwd, and
    route fingerprint in `structured/subagent-sides.json`.
-6. Wait for the first turn using an AbortSignal.
+6. Wait for the first turn using an AbortSignal and `sideTimeoutMs`.
 
 Later `/btw`:
 

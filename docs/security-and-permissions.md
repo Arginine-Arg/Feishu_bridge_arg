@@ -49,6 +49,19 @@ non-secret table:
 cc-switch -a codex provider list
 ```
 
+## Provider capabilities and web search
+
+Native Responses `web_search` is a provider capability, not a Bridge
+permission. `subagents.webSearch=auto` keeps it only when the selected provider
+declares `supports_standalone_web_search=true`. `native` is an explicit user
+override for a verified provider; `disabled` always removes the native tool.
+
+Unsupported or unknown capability never changes provider, credentials, route or
+model automatically. If web access is required, the user must select a provider
+that declares support. Doctor reports the declared and effective states.
+`/btw` remains read-only and uses a separate fast timeout; web-search policy
+cannot upgrade workspace or sandbox access.
+
 ## `/btw` permissions
 
 - Every `/btw` requests `read-only`.
@@ -109,7 +122,9 @@ The side-agent reuse key includes:
 - stable scope;
 - canonical cwd;
 - route fingerprint derived from route ID, provider, model, backend, revision,
-  description, tags, and maximum access.
+  target fingerprint, description, tags, and maximum access. Generated
+  cc-switch target fingerprints include role, effective web-search policy and
+  side reasoning configuration.
 
 A changed fingerprint produces a visible message and replaces the old agent.
 Broker `agentId` is never treated as a Codex thread ID.

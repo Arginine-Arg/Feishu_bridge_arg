@@ -135,6 +135,8 @@ describe('arg-bridge settings and doctor', () => {
     const output = `${JSON.stringify(second)}\n${formatSettings(second)}`;
     expect(output).not.toContain('sk-super-secret-value');
     expect(output).toContain('MIXAGENTS_TEST_SECRET');
+    expect(output).toContain('sideTimeoutMs=90000');
+    expect(output).toContain('web search mode=auto');
   });
 
   it('reports explicit broker configuration failure without crashing settings', async () => {

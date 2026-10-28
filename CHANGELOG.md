@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.9.8
+
+- Replaced the blanket `thirdParty -> web_search disabled` workaround with a
+  provider-capability policy. `subagents.webSearch=auto` honors
+  `supports_standalone_web_search`; `native` explicitly force-enables native
+  search; `disabled` is an explicit user choice. Settings and doctor report the
+  provider declaration, effective state and reason.
+- Added a dedicated fast `/btw` runtime policy. Conversational side turns use
+  `sideTimeoutMs` (90 seconds by default), `sideReasoningEffort=low`, and
+  bounded Codex request/stream retries. Automatic workers keep
+  `workerTimeoutMs` and the provider's normal reasoning configuration.
+- A timed-out side now interrupts its worker and returns an actionable
+  provider/route or timeout-budget message. The request is never replayed on
+  the main model.
+- Side/worker/reviewer runtime fingerprints include policy, so a route or
+  provider switch closes an incompatible old agent instead of silently reusing
+  it.
+
 ## 1.9.7
 
 - Kept the third-party Codex wrapper regression enabled where `node:sqlite` is

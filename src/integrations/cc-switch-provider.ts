@@ -12,6 +12,10 @@ import {
   type CodexProviderEntry,
 } from '../agent/codex/credentials';
 import type { SubagentRoute } from '../agent/subagents/types';
+import type {
+  SubagentReasoningEffort,
+  SubagentWebSearchMode,
+} from '../config/profile-schema';
 import { spawnProcess } from '../platform/spawn';
 import { writeFileAtomic } from '../platform/atomic-write';
 
@@ -61,6 +65,7 @@ export interface CcSwitchProviderSummary {
   contextWindow: number | null;
   thirdParty: boolean;
   requiresOpenAiAuth: boolean | null;
+  supportsStandaloneWebSearch: boolean | null;
   credential: {
     status: 'present' | 'missing' | 'oauth-only';
     sourcePath: string | null;
@@ -85,6 +90,18 @@ export interface CcSwitchBrokerRuntime {
   credentials: Record<string, string>;
   brokerConfigPath: string;
   fingerprint: string;
+  webSearch: {
+    mode: SubagentWebSearchMode;
+    providerSupported: boolean | null;
+    effective: 'enabled' | 'disabled';
+    reason: string;
+  };
+}
+
+export interface CcSwitchRuntimePolicy {
+  role: 'side' | 'worker' | 'reviewer';
+  webSearch: SubagentWebSearchMode;
+  sideReasoningEffort?: SubagentReasoningEffort;
 }
 
 export class CcSwitchProviderError extends Error {
@@ -288,6 +305,7 @@ export async function resolveCurrentCcSwitchCodexProvider(input: {
     wireApi,
     envKey: provider.envKey ?? credential.envKey ?? null,
     envHttpHeaders: credential.envHttpHeaders,
+    supportsStandaloneWebSearch: provider.supportsStandaloneWebSearch ?? null,
     reasoningEffort: parsed.config.modelReasoningEffort ?? null,
     contextWindow: parsed.config.modelContextWindow ?? null,
     credentialFingerprint,
@@ -308,6 +326,8 @@ export async function resolveCurrentCcSwitchCodexProvider(input: {
     contextWindow: parsed.config.modelContextWindow ?? null,
     thirdParty,
     requiresOpenAiAuth: provider.requiresOpenAiAuth ?? null,
+    supportsStandaloneWebSearch:
+      provider.supportsStandaloneWebSearch ?? (thirdParty ? null : true),
     credential: {
       status: credentialStatus,
       sourcePath: credential.sourcePath,
@@ -337,6 +357,7 @@ export async function materializeCcSwitchBrokerRuntime(input: {
   cwd: string;
   codexBin: string;
   stateDir: string;
+  runtimePolicy?: CcSwitchRuntimePolicy;
 }): Promise<CcSwitchBrokerRuntime> {
   const resolved = await resolveCurrentCcSwitchCodexProvider(input);
   const summary = resolved.summary;
@@ -360,6 +381,18 @@ export async function materializeCcSwitchBrokerRuntime(input: {
       `MixAgents 0.1.1 只支持 wire_api=responses，当前 provider 为 ${summary.wireApi}`,
     );
   }
+  const runtimePolicy = input.runtimePolicy ?? {
+    role: 'worker' as const,
+    webSearch: 'auto' as const,
+  };
+  const webSearch = resolveWebSearchPolicy(summary, runtimePolicy.webSearch);
+  const policyFingerprint = createHash('sha256').update(JSON.stringify({
+    config: summary.configFingerprint,
+    role: runtimePolicy.role,
+    webSearch: runtimePolicy.webSearch,
+    effectiveWebSearch: webSearch.effective,
+    sideReasoningEffort: runtimePolicy.sideReasoningEffort ?? null,
+  })).digest('hex');
   const routeId = ccSwitchRouteId(summary);
   const route: SubagentRoute = {
     id: routeId,
@@ -369,12 +402,16 @@ export async function materializeCcSwitchBrokerRuntime(input: {
     maxAccess: 'workspace-write',
     available: true,
     missingEnvironment: [],
-    tags: ['cc-switch', ...(summary.thirdParty ? ['third-party'] : ['official'])],
+    tags: [
+      'cc-switch',
+      ...(summary.thirdParty ? ['third-party'] : ['official']),
+      `web-search:${webSearch.effective}`,
+    ],
     backend: 'mixagents',
     default: true,
     selectionReason: 'Current cc-switch Codex provider resolved automatically',
-    revision: summary.configFingerprint.slice(0, 16),
-    targetFingerprint: summary.configFingerprint,
+    revision: policyFingerprint.slice(0, 16),
+    targetFingerprint: policyFingerprint,
     ccSwitchProviderId: summary.id,
     source: 'cc-switch',
   };
@@ -392,20 +429,30 @@ export async function materializeCcSwitchBrokerRuntime(input: {
   const configPath = join(
     input.stateDir,
     'cc-switch',
-    `broker-${summary.configFingerprint.slice(0, 16)}.json`,
+    `broker-${policyFingerprint.slice(0, 16)}-${runtimePolicy.role}.json`,
   );
   await mkdir(resolve(input.stateDir, 'cc-switch'), { recursive: true, mode: 0o700 });
   await chmod(resolve(input.stateDir, 'cc-switch'), 0o700).catch(() => {});
-  const dataDir = join(input.stateDir, 'cc-switch', 'mixagents-data');
+  const dataDir = join(
+    input.stateDir,
+    'cc-switch',
+    'mixagents-data',
+    policyFingerprint.slice(0, 16),
+  );
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
   await chmod(dataDir, 0o700).catch(() => {});
-  const codexBin = summary.thirdParty
-    ? await materializeThirdPartyCodexWrapper({
-        stateDir: input.stateDir,
-        codexBin: input.codexBin,
-        fingerprint: summary.configFingerprint,
-      })
-    : input.codexBin;
+  const codexBin = await materializeManagedCodexLauncher({
+    stateDir: input.stateDir,
+    codexBin: input.codexBin,
+    fingerprint: policyFingerprint,
+    role: runtimePolicy.role,
+    provider: summary.codexProviderId,
+    providerConfigurable: !['openai', 'codex'].includes(
+      summary.codexProviderId.toLowerCase(),
+    ),
+    webSearch: webSearch.effective,
+    sideReasoningEffort: runtimePolicy.sideReasoningEffort,
+  });
   const brokerConfig = {
     version: 1,
     defaultRoute: route.id,
@@ -428,7 +475,11 @@ export async function materializeCcSwitchBrokerRuntime(input: {
         maxAccess: 'workspace-write',
         ccSwitchProviderId: summary.id,
         source: 'cc-switch',
-        ...(summary.reasoningEffort
+        ...(runtimePolicy.role === 'side' &&
+            runtimePolicy.sideReasoningEffort &&
+            runtimePolicy.sideReasoningEffort !== 'inherit'
+          ? { reasoningEffort: runtimePolicy.sideReasoningEffort }
+          : summary.reasoningEffort
           ? { reasoningEffort: normalizeReasoningEffort(summary.reasoningEffort) }
           : {}),
       },
@@ -442,26 +493,54 @@ export async function materializeCcSwitchBrokerRuntime(input: {
     route,
     credentials: resolved.credentials,
     brokerConfigPath: configPath,
-    fingerprint: summary.configFingerprint,
+    fingerprint: policyFingerprint,
+    webSearch,
   };
 }
 
-async function materializeThirdPartyCodexWrapper(input: {
+async function materializeManagedCodexLauncher(input: {
   stateDir: string;
   codexBin: string;
   fingerprint: string;
+  role: CcSwitchRuntimePolicy['role'];
+  provider: string;
+  providerConfigurable: boolean;
+  webSearch: 'enabled' | 'disabled';
+  sideReasoningEffort?: SubagentReasoningEffort;
 }): Promise<string> {
   const wrapperDir = join(input.stateDir, 'cc-switch', 'codex-wrapper');
   await mkdir(wrapperDir, { recursive: true, mode: 0o700 });
   await chmod(wrapperDir, 0o700).catch(() => {});
-  const name = `third-party-${input.fingerprint.slice(0, 16)}`;
+  const overrides = [
+    ...(input.webSearch === 'disabled'
+      ? ['-c', 'web_search="disabled"']
+      : []),
+    ...(input.role === 'side' &&
+        input.sideReasoningEffort &&
+        input.sideReasoningEffort !== 'inherit'
+      ? ['-c', `model_reasoning_effort="${input.sideReasoningEffort}"`]
+      : []),
+    ...(input.role === 'side' && input.providerConfigurable
+      ? [
+          '-c',
+          `model_providers.${input.provider}.request_max_retries=1`,
+          '-c',
+          `model_providers.${input.provider}.stream_max_retries=1`,
+          '-c',
+          `model_providers.${input.provider}.stream_idle_timeout_ms=45000`,
+        ]
+      : []),
+  ];
+  if (overrides.length === 0) return input.codexBin;
+  const name = `managed-${input.role}-${input.fingerprint.slice(0, 16)}`;
   const launcherPath = join(wrapperDir, `${name}.mjs`);
   const launcher = [
     '#!/usr/bin/env node',
     "import { spawn } from 'node:child_process';",
     '',
     `const codexBin = ${JSON.stringify(input.codexBin)};`,
-    "const child = spawn(codexBin, ['-c', 'web_search=\"disabled\"', ...process.argv.slice(2)], {",
+    `const managedArgs = ${JSON.stringify(overrides)};`,
+    "const child = spawn(codexBin, [...managedArgs, ...process.argv.slice(2)], {",
     '  stdio: "inherit",',
     '  env: process.env,',
     '  windowsHide: true,',
@@ -496,6 +575,47 @@ async function materializeThirdPartyCodexWrapper(input: {
     { mode: 0o700 },
   );
   return commandPath;
+}
+
+export function resolveWebSearchPolicy(
+  summary: Pick<CcSwitchProviderSummary, 'id' | 'thirdParty' | 'supportsStandaloneWebSearch'>,
+  mode: SubagentWebSearchMode,
+): CcSwitchBrokerRuntime['webSearch'] {
+  const providerSupported = summary.supportsStandaloneWebSearch;
+  if (mode === 'disabled') {
+    return {
+      mode,
+      providerSupported,
+      effective: 'disabled',
+      reason: 'native web search disabled by profile policy',
+    };
+  }
+  if (mode === 'native') {
+    return {
+      mode,
+      providerSupported,
+      effective: 'enabled',
+      reason: providerSupported === true
+        ? 'provider declares native web search support'
+        : 'native web search forced by profile policy; provider capability is not proven',
+    };
+  }
+  if (providerSupported === true) {
+    return {
+      mode,
+      providerSupported,
+      effective: 'enabled',
+      reason: 'provider declares native web search support',
+    };
+  }
+  return {
+    mode,
+    providerSupported,
+    effective: 'disabled',
+    reason: providerSupported === false
+      ? 'provider declares that native web search is unsupported'
+      : `provider ${summary.id} does not declare supports_standalone_web_search; switch to a web-search-capable provider or set subagents.webSearch=native explicitly`,
+  };
 }
 
 export function ccSwitchSummaryFromCatalog(

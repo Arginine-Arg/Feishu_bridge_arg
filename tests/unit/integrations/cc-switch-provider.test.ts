@@ -11,6 +11,7 @@ import {
 } from '../../../src/integrations/cc-switch-provider';
 
 const sqliteRuntime = Number(process.versions.node.split('.')[0]) >= 22 ? it : it.skip;
+const unixIt = process.platform === 'win32' ? it.skip : it;
 const sqliteUnixIt = Number(process.versions.node.split('.')[0]) >= 22 &&
   process.platform !== 'win32'
   ? it
@@ -75,7 +76,7 @@ describe('cc-switch provider resolver', () => {
     expect(broker.codexBin).not.toBe('/opt/codex');
   });
 
-  sqliteUnixIt('disables unsupported web search on the third-party Broker Codex wrapper', async () => {
+  sqliteUnixIt('auto policy disables undeclared web search and adds the fast side budget', async () => {
     const setup = await sqliteSetup();
     const fakeCodex = join(setup.root, 'fake-codex.mjs');
     const argsFile = join(setup.root, 'fake-codex-args.json');
@@ -92,6 +93,11 @@ describe('cc-switch provider resolver', () => {
       cwd: setup.workspace,
       codexBin: fakeCodex,
       stateDir: setup.stateDir,
+      runtimePolicy: {
+        role: 'side',
+        webSearch: 'auto',
+        sideReasoningEffort: 'low',
+      },
     });
     const broker = JSON.parse(await readFile(runtime.brokerConfigPath, 'utf8')) as {
       codexBin: string;
@@ -102,9 +108,162 @@ describe('cc-switch provider resolver', () => {
     expect(JSON.parse(await readFile(argsFile, 'utf8'))).toEqual([
       '-c',
       'web_search="disabled"',
+      '-c',
+      'model_reasoning_effort="low"',
+      '-c',
+      'model_providers.deepseek.request_max_retries=1',
+      '-c',
+      'model_providers.deepseek.stream_max_retries=1',
+      '-c',
+      'model_providers.deepseek.stream_idle_timeout_ms=45000',
       'app-server',
       '--stdio',
     ]);
+    expect(runtime.webSearch).toMatchObject({
+      mode: 'auto',
+      providerSupported: null,
+      effective: 'disabled',
+    });
+  });
+
+  sqliteUnixIt('keeps native web search when the provider declares support', async () => {
+    const setup = await sqliteSetup({ supportsWebSearch: true });
+    const fakeCodex = join(setup.root, 'fake-codex-supported.mjs');
+    const argsFile = join(setup.root, 'fake-codex-supported-args.json');
+    await writeFile(fakeCodex, [
+      '#!/usr/bin/env node',
+      "import { writeFileSync } from 'node:fs';",
+      `writeFileSync(${JSON.stringify(argsFile)}, JSON.stringify(process.argv.slice(2)));`,
+      '',
+    ].join('\n'));
+    await chmod(fakeCodex, 0o700);
+    const runtime = await materializeCcSwitchBrokerRuntime({
+      env: setup.env,
+      codexHome: setup.codexHome,
+      cwd: setup.workspace,
+      codexBin: fakeCodex,
+      stateDir: setup.stateDir,
+      runtimePolicy: {
+        role: 'side',
+        webSearch: 'auto',
+        sideReasoningEffort: 'low',
+      },
+    });
+    const broker = JSON.parse(await readFile(runtime.brokerConfigPath, 'utf8')) as {
+      codexBin: string;
+    };
+    await execFileAsync(broker.codexBin, ['app-server', '--stdio']);
+    const args = JSON.parse(await readFile(argsFile, 'utf8')) as string[];
+    expect(args).not.toContain('web_search="disabled"');
+    expect(runtime.webSearch).toMatchObject({
+      mode: 'auto',
+      providerSupported: true,
+      effective: 'enabled',
+    });
+  });
+
+  sqliteRuntime('lets native policy force web search for an undeclared provider', async () => {
+    const setup = await sqliteSetup();
+    const runtime = await materializeCcSwitchBrokerRuntime({
+      env: setup.env,
+      codexHome: setup.codexHome,
+      cwd: setup.workspace,
+      codexBin: '/opt/codex',
+      stateDir: setup.stateDir,
+      runtimePolicy: {
+        role: 'worker',
+        webSearch: 'native',
+      },
+    });
+    expect(runtime.webSearch).toMatchObject({
+      mode: 'native',
+      providerSupported: null,
+      effective: 'enabled',
+      reason: expect.stringContaining('forced'),
+    });
+  });
+
+  sqliteRuntime('changes the route fingerprint when side policy changes', async () => {
+    const setup = await sqliteSetup({ supportsWebSearch: true });
+    const base = {
+      env: setup.env,
+      codexHome: setup.codexHome,
+      cwd: setup.workspace,
+      codexBin: '/opt/codex',
+      stateDir: setup.stateDir,
+    };
+    const low = await materializeCcSwitchBrokerRuntime({
+      ...base,
+      runtimePolicy: {
+        role: 'side',
+        webSearch: 'auto',
+        sideReasoningEffort: 'low',
+      },
+    });
+    const high = await materializeCcSwitchBrokerRuntime({
+      ...base,
+      runtimePolicy: {
+        role: 'side',
+        webSearch: 'auto',
+        sideReasoningEffort: 'high',
+      },
+    });
+    expect(low.route.id).toBe(high.route.id);
+    expect(low.route.targetFingerprint).not.toBe(high.route.targetFingerprint);
+    expect(low.brokerConfigPath).not.toBe(high.brokerConfigPath);
+  });
+
+  unixIt('does not override reserved built-in provider configuration', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'arg-bridge-cc-switch-official-'));
+    temporary.push(root);
+    const ccHome = join(root, '.cc-switch');
+    const workspace = join(root, 'workspace');
+    const stateDir = join(root, 'state');
+    await Promise.all([
+      mkdir(ccHome, { recursive: true }),
+      mkdir(workspace, { recursive: true }),
+    ]);
+    await writeFile(join(ccHome, 'settings.json'), JSON.stringify({
+      currentProviderCodex: 'official',
+      providers: {
+        codex: [{
+          id: 'official',
+          name: 'OpenAI Official',
+          isCurrent: true,
+          settings_config: {
+            auth: { OPENAI_API_KEY: 'sk-official-test' },
+            config: 'model = "gpt-5.5"\nmodel_provider = "openai"\n',
+          },
+        }],
+      },
+    }), { mode: 0o600 });
+    const fakeCodex = join(root, 'fake-codex-official.mjs');
+    const argsFile = join(root, 'fake-codex-official-args.json');
+    await writeFile(fakeCodex, [
+      '#!/usr/bin/env node',
+      "import { writeFileSync } from 'node:fs';",
+      `writeFileSync(${JSON.stringify(argsFile)}, JSON.stringify(process.argv.slice(2)));`,
+      '',
+    ].join('\n'));
+    await chmod(fakeCodex, 0o700);
+    const runtime = await materializeCcSwitchBrokerRuntime({
+      env: { ...process.env, CC_SWITCH_HOME: ccHome },
+      cwd: workspace,
+      codexBin: fakeCodex,
+      stateDir,
+      runtimePolicy: {
+        role: 'side',
+        webSearch: 'auto',
+        sideReasoningEffort: 'low',
+      },
+    });
+    const broker = JSON.parse(await readFile(runtime.brokerConfigPath, 'utf8')) as {
+      codexBin: string;
+    };
+    await execFileAsync(broker.codexBin, ['app-server', '--stdio']);
+    const args = JSON.parse(await readFile(argsFile, 'utf8')) as string[];
+    expect(args).toContain('model_reasoning_effort="low"');
+    expect(args.join(' ')).not.toContain('model_providers.openai.request_max_retries');
   });
 
   sqliteRuntime('fails closed when the selected provider has no key', async () => {
@@ -223,6 +382,7 @@ describe('cc-switch provider resolver', () => {
 async function sqliteSetup(options: {
   auth?: Record<string, unknown>;
   databaseCurrent?: string;
+  supportsWebSearch?: boolean;
 } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'arg-bridge-cc-switch-sqlite-'));
   temporary.push(root);
@@ -268,6 +428,7 @@ async function sqliteSetup(options: {
         provider: 'deepseek',
         name: 'lixin',
         baseUrl: 'https://api.example.test/v1',
+        supportsWebSearch: options.supportsWebSearch,
       }),
     }),
     options.databaseCurrent === 'other' ? 0 : 1,
@@ -286,6 +447,7 @@ async function sqliteSetup(options: {
         provider: 'custom',
         name: 'Provider B',
         baseUrl: 'https://b.example.test/v1',
+        supportsWebSearch: options.supportsWebSearch,
       }),
     }),
     options.databaseCurrent === 'other' ? 1 : 0,
@@ -303,6 +465,7 @@ async function sqliteSetup(options: {
     provider: 'deepseek',
     name: 'lixin',
     baseUrl: 'https://api.example.test/v1',
+    supportsWebSearch: options.supportsWebSearch,
   }), { mode: 0o600 });
   return {
     root,
@@ -341,6 +504,7 @@ function configToml(input: {
   provider: string;
   name: string;
   baseUrl: string;
+  supportsWebSearch?: boolean;
 }): string {
   return [
     `model = "${input.model}"`,
@@ -353,5 +517,8 @@ function configToml(input: {
     'wire_api = "responses"',
     'requires_openai_auth = false',
     'env_key = "OPENAI_API_KEY"',
+    ...(input.supportsWebSearch === undefined
+      ? []
+      : [`supports_standalone_web_search = ${input.supportsWebSearch}`]),
   ].join('\n');
 }

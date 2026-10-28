@@ -171,6 +171,16 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
       'Bridge 会自动读取这里选中的 cc-switch Codex provider，并生成 Broker route、模型和凭据。',
       '默认“跟随当前 provider”：以后在 cc-switch 切换 provider 后，下一条子代理任务自动使用新 provider，无需改 Key 或手写 route。',
       '如果选择固定 provider，子代理始终使用该 provider；主对话仍由 cc-switch 当前 provider 控制。',
+      `Web Search 能力：provider ${
+        diagnostics.webSearch.providerSupported === true
+          ? '声明支持'
+          : diagnostics.webSearch.providerSupported === false
+            ? '声明不支持'
+            : '未声明'
+      }；当前策略=${diagnostics.webSearch.mode}，实际=${diagnostics.webSearch.effective}。` +
+        (diagnostics.webSearch.effective === 'disabled'
+          ? '需要联网搜索时请切换到声明支持原生搜索的 API，或仅在已验证时强制 native。'
+          : ''),
       availableReadRoutes.length === 0
         ? '当前 provider 的 Broker route 会在首次派发时自动生成；doctor 会显示真实可用性。'
         : `当前已解析 ${availableReadRoutes.length} 条可用只读 route。`,
@@ -195,7 +205,15 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
         ...ccProviders.map(provider => ({
           value: provider.id,
           label: `${provider.name} (${provider.id})`,
-          hint: provider.current ? '当前主对话 provider；也可固定使用' : '固定使用这个 provider',
+          hint: provider.current
+            ? `当前主对话 provider；Web Search=${
+                diagnostics.webSearch.providerSupported === true
+                  ? 'supported'
+                  : diagnostics.webSearch.providerSupported === false
+                    ? 'unsupported'
+                    : 'undeclared'
+              }`
+            : '固定使用这个 provider；保存后会重新解析其模型和 Web Search 能力',
         })),
       ],
     });
@@ -361,6 +379,9 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
   let nativeToolPolicy = currentSubagents.nativeToolPolicy;
   let maxConcurrentWorkers = currentSubagents.maxConcurrentWorkers;
   let workerTimeoutMs = currentSubagents.workerTimeoutMs;
+  let sideTimeoutMs = currentSubagents.sideTimeoutMs;
+  let sideReasoningEffort = currentSubagents.sideReasoningEffort;
+  let webSearch = currentSubagents.webSearch;
   let includeProgressSnapshot = currentSubagents.includeProgressSnapshot;
   let maxRepairRounds = currentRsi.maxRepairRounds;
   const currentMcp = rawProfile.subagents?.mixagents;
@@ -416,6 +437,59 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
     workerTimeoutMs = Math.round(
       boundedNumberInput(timeoutText, 0.5, 1440, '子代理超时分钟数') * 60_000,
     );
+    const sideTimeoutText = await p.text({
+      message: '/btw 单轮最长等待时间（秒）',
+      initialValue: String(sideTimeoutMs / 1_000),
+    });
+    assertPrompt(sideTimeoutText);
+    sideTimeoutMs = Math.round(
+      boundedNumberInput(sideTimeoutText, 15, 1800, '/btw 单轮等待秒数') * 1_000,
+    );
+    const sideEffort = await p.select<SubagentConfig['sideReasoningEffort']>({
+      message: '/btw 的推理速度',
+      initialValue: sideReasoningEffort,
+      options: [
+        {
+          value: 'low',
+          label: '低（推荐）',
+          hint: '更快恢复进度；自动子代理仍保持原推理等级',
+        },
+        { value: 'medium', label: '中', hint: '速度与质量平衡' },
+        { value: 'high', label: '高', hint: '更慢，适合复杂复核' },
+        { value: 'xhigh', label: '很高', hint: '慢速深度复核' },
+        { value: 'max', label: '最高', hint: '最慢，通常只用于离线重任务' },
+        {
+          value: 'inherit',
+          label: '跟随 provider',
+          hint: '使用 cc-switch provider 自己的配置',
+        },
+      ],
+    });
+    assertPrompt(sideEffort);
+    sideReasoningEffort = sideEffort;
+    const webSearchMode = await p.select<SubagentConfig['webSearch']>({
+      message: '子代理是否启用原生 Web Search？',
+      initialValue: webSearch,
+      options: [
+        {
+          value: 'auto',
+          label: '按 provider 能力自动决定（推荐）',
+          hint: 'provider 未声明支持时关闭；需要联网时请换支持搜索的 API',
+        },
+        {
+          value: 'native',
+          label: '强制使用原生 Web Search',
+          hint: '只应对已验证支持 Responses web_search 的 provider 使用',
+        },
+        {
+          value: 'disabled',
+          label: '始终关闭',
+          hint: '适合无需联网的纯本地复核',
+        },
+      ],
+    });
+    assertPrompt(webSearchMode);
+    webSearch = webSearchMode;
     const writeWorkers = await p.confirm({
       message: '允许模型创建可写文件的子代理？（仍需用户逐任务授权）',
       initialValue: allowWriteWorkers,
@@ -509,6 +583,12 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
     `子代理：${modeText}`,
     `子代理线路：${routeText}`,
     `Key：${credentialText}`,
+    `子代理 Web Search：${webSearch === 'auto'
+      ? `按 provider 能力（当前 ${diagnostics.webSearch.effective}）`
+      : webSearch === 'native'
+        ? '强制原生'
+        : '关闭'}`,
+    `/btw 速度：reasoning=${sideReasoningEffort} timeout=${sideTimeoutMs / 1_000}s`,
     `项目证据校验：${rsiMode === 'off' ? '关闭' : '自动（只对已初始化项目）'}`,
     advanced ? '高级参数：已展开编辑' : '高级参数：保持原值',
   ].join('\n'), '步骤 5 / 5 · 保存前确认');
@@ -570,6 +650,9 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
         nativeToolPolicy,
         maxConcurrentWorkers,
         workerTimeoutMs,
+        sideTimeoutMs,
+        sideReasoningEffort,
+        webSearch,
         allowWriteWorkers,
         allowForkFallback,
         includeProgressSnapshot,
@@ -762,7 +845,13 @@ function formatSnapshot(snapshot: SettingsSnapshot): string {
       ` native=${diagnostics.modelTools.nativeToolPolicy}` +
       ` maxWorkers=${diagnostics.limits.maxConcurrentWorkers}` +
       ` workerTimeoutMs=${diagnostics.limits.workerTimeoutMs}` +
+      ` sideTimeoutMs=${diagnostics.limits.sideTimeoutMs}` +
+      ` sideReasoning=${diagnostics.limits.sideReasoningEffort}` +
       ` writeWorkers=${diagnostics.limits.allowWriteWorkers}`,
+    `web search mode=${diagnostics.webSearch.mode}` +
+      ` providerSupported=${diagnostics.webSearch.providerSupported ?? 'unknown'}` +
+      ` effective=${diagnostics.webSearch.effective}` +
+      ` reason=${diagnostics.webSearch.reason}`,
     `Broker tools degraded=${diagnostics.modelTools.degradedReason ?? '(none)'}`,
     `credential mode=${diagnostics.credentials.mode} status=${diagnostics.credentials.status}` +
       ` providerRef=${diagnostics.credentials.providerReference ?? '(none)'}`,

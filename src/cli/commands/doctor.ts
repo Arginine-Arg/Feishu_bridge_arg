@@ -51,6 +51,7 @@ export interface DoctorReport {
     }>;
     modelTools: SettingsSnapshot['subagents']['diagnostics']['modelTools'];
     limits: SettingsSnapshot['subagents']['diagnostics']['limits'];
+    webSearch: SettingsSnapshot['subagents']['diagnostics']['webSearch'];
   };
   nativeCollaboration: {
     brokerShadowConfigured: boolean;
@@ -266,6 +267,17 @@ export async function loadDoctorReport(options: DoctorOptionsWithProbe = {}): Pr
           }`,
   });
   checks.push({
+    id: 'web-search',
+    status: diagnostics.webSearch.mode === 'native' &&
+        diagnostics.webSearch.providerSupported !== true
+      ? 'warn'
+      : 'pass',
+    message: `mode=${diagnostics.webSearch.mode}` +
+      ` providerSupported=${diagnostics.webSearch.providerSupported ?? 'unknown'}` +
+      ` effective=${diagnostics.webSearch.effective}` +
+      ` reason=${diagnostics.webSearch.reason}`,
+  });
+  checks.push({
     id: 'rsi-feedback-loop',
     status: snapshot.rsi.config.mode === 'off'
       ? 'pass'
@@ -414,6 +426,7 @@ export async function loadDoctorReport(options: DoctorOptionsWithProbe = {}): Pr
       })),
       modelTools: diagnostics.modelTools,
       limits: diagnostics.limits,
+      webSearch: diagnostics.webSearch,
     },
     nativeCollaboration: {
       brokerShadowConfigured:

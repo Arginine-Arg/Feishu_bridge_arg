@@ -36,6 +36,8 @@ export interface ResolveSubagentInput {
   codexHome?: string;
   codexBin?: string;
   parentProviderId?: string;
+  /** Selects role-specific runtime policy without changing the provider. */
+  runtimeRole?: 'side' | 'worker' | 'reviewer';
   signal: AbortSignal;
 }
 
@@ -88,6 +90,11 @@ export async function resolveSubagents(input: ResolveSubagentInput): Promise<Res
         cwd: input.cwd,
         codexBin: input.codexBin ?? env.CODEX_BINARY?.trim() ?? 'codex',
         stateDir: input.stateDir ?? defaultGeneratedRuntimeDir(env),
+        runtimePolicy: {
+          role: input.runtimeRole ?? 'worker',
+          webSearch: config.webSearch,
+          sideReasoningEffort: config.sideReasoningEffort,
+        },
       });
       runtime = {
         brokerConfigPath: generated.brokerConfigPath,

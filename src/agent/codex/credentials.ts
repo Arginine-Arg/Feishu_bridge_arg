@@ -28,6 +28,7 @@ export interface CodexProviderEntry {
   bearerToken?: string;
   wireApi?: string;
   requiresOpenAiAuth?: boolean;
+  supportsStandaloneWebSearch?: boolean;
   envHttpHeaders?: Record<string, string>;
   httpHeaders?: Record<string, string>;
 }
@@ -76,6 +77,7 @@ const INTERESTING_PROVIDER_KEYS = new Set([
   'experimental_bearer_token',
   'wire_api',
   'requires_openai_auth',
+  'supports_standalone_web_search',
   'env_http_headers',
   'http_headers',
 ]);
@@ -292,6 +294,11 @@ export function parseCodexConfigSummary(raw: string): CodexConfigSummary {
       else if (key === 'requires_openai_auth') {
         const boolean = parseTomlBoolean(value);
         if (boolean !== undefined) providerEntry.requiresOpenAiAuth = boolean;
+      } else if (key === 'supports_standalone_web_search') {
+        const boolean = parseTomlBoolean(value);
+        if (boolean !== undefined) {
+          providerEntry.supportsStandaloneWebSearch = boolean;
+        }
       } else if (key === 'env_http_headers') {
         const headers = parseTomlInlineStringMap(value);
         if (headers) providerEntry.envHttpHeaders = headers;

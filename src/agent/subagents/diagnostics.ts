@@ -41,7 +41,15 @@ export interface SubagentDiagnostics {
   limits: {
     maxConcurrentWorkers: number;
     workerTimeoutMs: number;
+    sideTimeoutMs: number;
+    sideReasoningEffort: SubagentConfig['sideReasoningEffort'];
     allowWriteWorkers: boolean;
+  };
+  webSearch: {
+    mode: SubagentConfig['webSearch'];
+    providerSupported: boolean | null;
+    effective: 'enabled' | 'disabled' | 'unknown';
+    reason: string;
   };
   launchConfigured: boolean;
   launchCommand?: string;
@@ -201,7 +209,15 @@ export async function collectSubagentDiagnostics(input: {
     limits: {
       maxConcurrentWorkers: input.config.maxConcurrentWorkers,
       workerTimeoutMs: input.config.workerTimeoutMs,
+      sideTimeoutMs: input.config.sideTimeoutMs,
+      sideReasoningEffort: input.config.sideReasoningEffort,
       allowWriteWorkers: input.config.allowWriteWorkers,
+    },
+    webSearch: {
+      mode: input.config.webSearch,
+      providerSupported: null,
+      effective: input.config.webSearch === 'disabled' ? 'disabled' : 'unknown',
+      reason: 'no generated cc-switch runtime has been inspected',
     },
     launchConfigured: Boolean(resolveMixAgentsLaunchConfig(input.config, env)),
     toolContract: 'unknown',
@@ -275,6 +291,12 @@ export async function collectSubagentDiagnostics(input: {
     credentials: Record<string, string>;
     fingerprint: string;
     route?: SubagentRoute;
+    webSearch?: {
+      mode: SubagentConfig['webSearch'];
+      providerSupported: boolean | null;
+      effective: 'enabled' | 'disabled';
+      reason: string;
+    };
   } | undefined;
   if (input.config.routeMode === 'follow-cc-switch') {
     if ('error' in providerResolution) {
@@ -311,12 +333,18 @@ export async function collectSubagentDiagnostics(input: {
         cwd: input.cwd,
         codexBin: input.codexBin ?? env.CODEX_BINARY?.trim() ?? 'codex',
         stateDir: input.stateDir,
+        runtimePolicy: {
+          role: 'side',
+          webSearch: input.config.webSearch,
+          sideReasoningEffort: input.config.sideReasoningEffort,
+        },
       });
       brokerRuntime = {
         brokerConfigPath: generated.brokerConfigPath,
         credentials: generated.credentials,
         fingerprint: generated.fingerprint,
         route: generated.route,
+        webSearch: generated.webSearch,
       };
     } catch (error) {
       return {
@@ -351,6 +379,11 @@ export async function collectSubagentDiagnostics(input: {
     return {
       ...base,
       ...(brokerRuntime ? { brokerConfigPath: brokerRuntime.brokerConfigPath } : {}),
+      ...(brokerRuntime?.webSearch
+        ? {
+            webSearch: brokerRuntime.webSearch,
+          }
+        : {}),
       launchCommand: basename(launch.command),
       ...(backend.serverVersion ? { packageVersion: backend.serverVersion } : {}),
       toolContract: 'compatible',

@@ -722,6 +722,7 @@ export class StructuredAdapter implements AgentAdapter {
   private async autoBrokerRuntime(
     config: SubagentConfig,
     cwd: string,
+    role: 'side' | 'worker' = 'worker',
   ): Promise<MixAgentsRuntimeOverrides | undefined> {
     if (
       !config.enabled ||
@@ -738,6 +739,11 @@ export class StructuredAdapter implements AgentAdapter {
       cwd,
       codexBin: this.options.binary,
       stateDir: join(this.options.profileDir, 'structured'),
+      runtimePolicy: {
+        role,
+        webSearch: config.webSearch,
+        sideReasoningEffort: config.sideReasoningEffort,
+      },
     });
     return {
       brokerConfigPath: generated.brokerConfigPath,
@@ -763,7 +769,7 @@ export class StructuredAdapter implements AgentAdapter {
     if (state.backend) return state.backend;
     const config = await this.currentSubagentsConfig();
     if (!config.enabled || config.mode === 'off' || config.mode === 'fork') return undefined;
-    const runtime = await this.autoBrokerRuntime(config, cwd);
+    const runtime = await this.autoBrokerRuntime(config, cwd, 'side');
     const backend = new MixAgentsBrokerBackend(
       config,
       this.options.env ?? process.env,
@@ -847,7 +853,7 @@ export class StructuredAdapter implements AgentAdapter {
     }
 
     let existing = this.sideStateFor(scope, cwd);
-    const workerTimeoutMs = resolved.config.workerTimeoutMs;
+    const sideTimeoutMs = resolved.config.sideTimeoutMs;
     const changeReason = existing ? routeChangeReason(existing, route, cwd) : undefined;
     if (existing && changeReason) {
       emit(textEvent(`side route/workspace 已变化（${changeReason}）；正在结束旧 MixAgents agent ${existing.agent.agentId}，随后创建新 agent。`));
@@ -872,8 +878,11 @@ export class StructuredAdapter implements AgentAdapter {
       });
       emit(textEvent(`复用 MixAgents side agent ${existing.agent.agentId}（route=${existing.route.id}）。\n`));
       try {
-        const result = await activeBackend.send(existing.agent, body, signal, workerTimeoutMs);
-        await this.applyMixagentsResult(existing, result, emit);
+        const result = await activeBackend.send(existing.agent, body, signal, sideTimeoutMs);
+        if (result.status === 'timeout') {
+          await activeBackend.interrupt(existing.agent, AbortSignal.timeout(30_000)).catch(() => {});
+        }
+        await this.applyMixagentsResult(existing, result, emit, sideTimeoutMs);
       } catch (error) {
         if (signal.aborted) {
           await this.interruptAbortedMixagentsSide(existing);
@@ -931,8 +940,11 @@ export class StructuredAdapter implements AgentAdapter {
     this.mixagentsSides.set(`${scope}\0${cwd}`, state);
     await this.saveMixagentsSides();
     try {
-      const result = await resolvedBackend.wait(agent, signal, workerTimeoutMs);
-      await this.applyMixagentsResult(state, result, emit);
+      const result = await resolvedBackend.wait(agent, signal, sideTimeoutMs);
+      if (result.status === 'timeout') {
+        await resolvedBackend.interrupt(agent, AbortSignal.timeout(30_000)).catch(() => {});
+      }
+      await this.applyMixagentsResult(state, result, emit, sideTimeoutMs);
     } catch (error) {
       if (signal.aborted) {
         await this.interruptAbortedMixagentsSide(state);
@@ -951,8 +963,11 @@ export class StructuredAdapter implements AgentAdapter {
         state.updatedAt = Date.now();
         this.mixagentsSides.set(`${scope}\0${cwd}`, state);
         await this.saveMixagentsSides();
-        const result = await resolvedBackend.wait(replacement, signal, workerTimeoutMs);
-        await this.applyMixagentsResult(state, result, emit);
+        const result = await resolvedBackend.wait(replacement, signal, sideTimeoutMs);
+        if (result.status === 'timeout') {
+          await resolvedBackend.interrupt(replacement, AbortSignal.timeout(30_000)).catch(() => {});
+        }
+        await this.applyMixagentsResult(state, result, emit, sideTimeoutMs);
         return;
       }
       throw error;
@@ -971,6 +986,7 @@ export class StructuredAdapter implements AgentAdapter {
     state: MixAgentsSideState,
     result: SideAgentResult,
     emit: (event: AgentEvent) => void,
+    timeoutMs?: number,
   ): Promise<void> {
     state.agent.status = result.status;
     state.updatedAt = Date.now();
@@ -984,7 +1000,13 @@ export class StructuredAdapter implements AgentAdapter {
       return;
     }
     if (result.status === 'timeout') {
-      emit({ type: 'error', message: result.error || 'MixAgents side 超时', terminationReason: 'timeout' });
+      emit({
+        type: 'error',
+        message:
+          `MixAgents side ${timeoutMs ? `${Math.round(timeoutMs / 1_000)} 秒` : ''}超时，worker 已停止。` +
+          '请切换到更快的 provider/route，或在设置中调整 sideTimeoutMs；本次请求不会自动换模型重放。',
+        terminationReason: 'timeout',
+      });
       return;
     }
     if (result.status === 'interrupted') {
@@ -1646,6 +1668,7 @@ export class StructuredAdapter implements AgentAdapter {
             ...(this.runtimeIdentity?.ccSwitchProviderId
               ? { parentProviderId: this.runtimeIdentity.ccSwitchProviderId }
               : {}),
+            runtimeRole: 'side',
             signal: abort.signal,
             ...(btw.route ? { requestedRoute: btw.route } : {}),
           });

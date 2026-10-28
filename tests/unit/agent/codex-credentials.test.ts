@@ -77,6 +77,17 @@ env_key = "MY_VENDOR_KEY"
       envKey: 'MY_VENDOR_KEY',
     });
   });
+
+  it('reads the declared native web-search capability', () => {
+    const summary = parseCodexConfigSummary(`
+model_provider = "vendor"
+[model_providers.vendor]
+base_url = "https://vendor.example.com/v1"
+supports_standalone_web_search = true
+`);
+
+    expect(summary.providers.get('vendor')?.supportsStandaloneWebSearch).toBe(true);
+  });
 });
 
 describe('codex provider classification', () => {

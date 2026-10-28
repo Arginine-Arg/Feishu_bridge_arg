@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.9.7",
+  version: "1.9.8",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -708,6 +708,9 @@ var DEFAULT_SUBAGENT_CONFIG = {
   toolNamespace: "arg_bridge",
   maxConcurrentWorkers: 4,
   workerTimeoutMs: 15 * 6e4,
+  sideTimeoutMs: 9e4,
+  sideReasoningEffort: "low",
+  webSearch: "auto",
   allowWriteWorkers: false,
   includeProgressSnapshot: true,
   reuse: "scope-cwd",
@@ -752,12 +755,18 @@ function normalizeSubagents(input) {
     toolNamespace: validToolNamespace(raw.toolNamespace) ?? DEFAULT_SUBAGENT_CONFIG.toolNamespace,
     maxConcurrentWorkers: boundedInteger(raw.maxConcurrentWorkers, 1, 32, 4),
     workerTimeoutMs: boundedInteger(raw.workerTimeoutMs, 3e4, 24 * 60 * 6e4, 15 * 6e4),
+    sideTimeoutMs: boundedInteger(raw.sideTimeoutMs, 15e3, 30 * 6e4, 9e4),
+    sideReasoningEffort: normalizeSideReasoningEffort(raw.sideReasoningEffort),
+    webSearch: raw.webSearch === "native" || raw.webSearch === "disabled" ? raw.webSearch : "auto",
     allowWriteWorkers: raw.allowWriteWorkers === true,
     includeProgressSnapshot: raw.includeProgressSnapshot !== false,
     reuse: "scope-cwd",
     allowForkFallback: raw.allowForkFallback !== false,
     ...mixagents && Object.keys(mixagents).length > 0 ? { mixagents } : {}
   };
+}
+function normalizeSideReasoningEffort(value) {
+  return value === "inherit" || value === "low" || value === "medium" || value === "high" || value === "xhigh" || value === "max" ? value : DEFAULT_SUBAGENT_CONFIG.sideReasoningEffort;
 }
 function ccSwitchProviderId(value) {
   const text2 = nonEmptyString(value);
@@ -6235,6 +6244,7 @@ var INTERESTING_PROVIDER_KEYS = /* @__PURE__ */ new Set([
   "experimental_bearer_token",
   "wire_api",
   "requires_openai_auth",
+  "supports_standalone_web_search",
   "env_http_headers",
   "http_headers"
 ]);
@@ -6395,6 +6405,11 @@ function parseCodexConfigSummary(raw) {
       else if (key === "requires_openai_auth") {
         const boolean = parseTomlBoolean(value);
         if (boolean !== void 0) providerEntry.requiresOpenAiAuth = boolean;
+      } else if (key === "supports_standalone_web_search") {
+        const boolean = parseTomlBoolean(value);
+        if (boolean !== void 0) {
+          providerEntry.supportsStandaloneWebSearch = boolean;
+        }
       } else if (key === "env_http_headers") {
         const headers = parseTomlInlineStringMap(value);
         if (headers) providerEntry.envHttpHeaders = headers;
@@ -13627,6 +13642,7 @@ async function resolveCurrentCcSwitchCodexProvider(input = {}) {
     wireApi,
     envKey: provider.envKey ?? credential.envKey ?? null,
     envHttpHeaders: credential.envHttpHeaders,
+    supportsStandaloneWebSearch: provider.supportsStandaloneWebSearch ?? null,
     reasoningEffort: parsed.config.modelReasoningEffort ?? null,
     contextWindow: parsed.config.modelContextWindow ?? null,
     credentialFingerprint,
@@ -13647,6 +13663,7 @@ async function resolveCurrentCcSwitchCodexProvider(input = {}) {
     contextWindow: parsed.config.modelContextWindow ?? null,
     thirdParty,
     requiresOpenAiAuth: provider.requiresOpenAiAuth ?? null,
+    supportsStandaloneWebSearch: provider.supportsStandaloneWebSearch ?? (thirdParty ? null : true),
     credential: {
       status: credentialStatus,
       sourcePath: credential.sourcePath,
@@ -13687,6 +13704,18 @@ async function materializeCcSwitchBrokerRuntime(input) {
       `MixAgents 0.1.1 \u53EA\u652F\u6301 wire_api=responses\uFF0C\u5F53\u524D provider \u4E3A ${summary.wireApi}`
     );
   }
+  const runtimePolicy = input.runtimePolicy ?? {
+    role: "worker",
+    webSearch: "auto"
+  };
+  const webSearch = resolveWebSearchPolicy(summary, runtimePolicy.webSearch);
+  const policyFingerprint2 = createHash4("sha256").update(JSON.stringify({
+    config: summary.configFingerprint,
+    role: runtimePolicy.role,
+    webSearch: runtimePolicy.webSearch,
+    effectiveWebSearch: webSearch.effective,
+    sideReasoningEffort: runtimePolicy.sideReasoningEffort ?? null
+  })).digest("hex");
   const routeId2 = ccSwitchRouteId(summary);
   const route = {
     id: routeId2,
@@ -13696,12 +13725,16 @@ async function materializeCcSwitchBrokerRuntime(input) {
     maxAccess: "workspace-write",
     available: true,
     missingEnvironment: [],
-    tags: ["cc-switch", ...summary.thirdParty ? ["third-party"] : ["official"]],
+    tags: [
+      "cc-switch",
+      ...summary.thirdParty ? ["third-party"] : ["official"],
+      `web-search:${webSearch.effective}`
+    ],
     backend: "mixagents",
     default: true,
     selectionReason: "Current cc-switch Codex provider resolved automatically",
-    revision: summary.configFingerprint.slice(0, 16),
-    targetFingerprint: summary.configFingerprint,
+    revision: policyFingerprint2.slice(0, 16),
+    targetFingerprint: policyFingerprint2,
     ccSwitchProviderId: summary.id,
     source: "cc-switch"
   };
@@ -13715,20 +13748,32 @@ async function materializeCcSwitchBrokerRuntime(input) {
   const configPath = join26(
     input.stateDir,
     "cc-switch",
-    `broker-${summary.configFingerprint.slice(0, 16)}.json`
+    `broker-${policyFingerprint2.slice(0, 16)}-${runtimePolicy.role}.json`
   );
   await mkdir16(resolve4(input.stateDir, "cc-switch"), { recursive: true, mode: 448 });
   await chmod6(resolve4(input.stateDir, "cc-switch"), 448).catch(() => {
   });
-  const dataDir = join26(input.stateDir, "cc-switch", "mixagents-data");
+  const dataDir = join26(
+    input.stateDir,
+    "cc-switch",
+    "mixagents-data",
+    policyFingerprint2.slice(0, 16)
+  );
   await mkdir16(dataDir, { recursive: true, mode: 448 });
   await chmod6(dataDir, 448).catch(() => {
   });
-  const codexBin = summary.thirdParty ? await materializeThirdPartyCodexWrapper({
+  const codexBin = await materializeManagedCodexLauncher({
     stateDir: input.stateDir,
     codexBin: input.codexBin,
-    fingerprint: summary.configFingerprint
-  }) : input.codexBin;
+    fingerprint: policyFingerprint2,
+    role: runtimePolicy.role,
+    provider: summary.codexProviderId,
+    providerConfigurable: !["openai", "codex"].includes(
+      summary.codexProviderId.toLowerCase()
+    ),
+    webSearch: webSearch.effective,
+    sideReasoningEffort: runtimePolicy.sideReasoningEffort
+  });
   const brokerConfig = {
     version: 1,
     defaultRoute: route.id,
@@ -13749,7 +13794,7 @@ async function materializeCcSwitchBrokerRuntime(input) {
         maxAccess: "workspace-write",
         ccSwitchProviderId: summary.id,
         source: "cc-switch",
-        ...summary.reasoningEffort ? { reasoningEffort: normalizeReasoningEffort(summary.reasoningEffort) } : {}
+        ...runtimePolicy.role === "side" && runtimePolicy.sideReasoningEffort && runtimePolicy.sideReasoningEffort !== "inherit" ? { reasoningEffort: runtimePolicy.sideReasoningEffort } : summary.reasoningEffort ? { reasoningEffort: normalizeReasoningEffort(summary.reasoningEffort) } : {}
       }
     }
   };
@@ -13762,22 +13807,37 @@ async function materializeCcSwitchBrokerRuntime(input) {
     route,
     credentials: resolved.credentials,
     brokerConfigPath: configPath,
-    fingerprint: summary.configFingerprint
+    fingerprint: policyFingerprint2,
+    webSearch
   };
 }
-async function materializeThirdPartyCodexWrapper(input) {
+async function materializeManagedCodexLauncher(input) {
   const wrapperDir = join26(input.stateDir, "cc-switch", "codex-wrapper");
   await mkdir16(wrapperDir, { recursive: true, mode: 448 });
   await chmod6(wrapperDir, 448).catch(() => {
   });
-  const name = `third-party-${input.fingerprint.slice(0, 16)}`;
+  const overrides = [
+    ...input.webSearch === "disabled" ? ["-c", 'web_search="disabled"'] : [],
+    ...input.role === "side" && input.sideReasoningEffort && input.sideReasoningEffort !== "inherit" ? ["-c", `model_reasoning_effort="${input.sideReasoningEffort}"`] : [],
+    ...input.role === "side" && input.providerConfigurable ? [
+      "-c",
+      `model_providers.${input.provider}.request_max_retries=1`,
+      "-c",
+      `model_providers.${input.provider}.stream_max_retries=1`,
+      "-c",
+      `model_providers.${input.provider}.stream_idle_timeout_ms=45000`
+    ] : []
+  ];
+  if (overrides.length === 0) return input.codexBin;
+  const name = `managed-${input.role}-${input.fingerprint.slice(0, 16)}`;
   const launcherPath = join26(wrapperDir, `${name}.mjs`);
   const launcher = [
     "#!/usr/bin/env node",
     "import { spawn } from 'node:child_process';",
     "",
     `const codexBin = ${JSON.stringify(input.codexBin)};`,
-    `const child = spawn(codexBin, ['-c', 'web_search="disabled"', ...process.argv.slice(2)], {`,
+    `const managedArgs = ${JSON.stringify(overrides)};`,
+    "const child = spawn(codexBin, [...managedArgs, ...process.argv.slice(2)], {",
     '  stdio: "inherit",',
     "  env: process.env,",
     "  windowsHide: true,",
@@ -13814,6 +13874,39 @@ async function materializeThirdPartyCodexWrapper(input) {
     { mode: 448 }
   );
   return commandPath;
+}
+function resolveWebSearchPolicy(summary, mode) {
+  const providerSupported = summary.supportsStandaloneWebSearch;
+  if (mode === "disabled") {
+    return {
+      mode,
+      providerSupported,
+      effective: "disabled",
+      reason: "native web search disabled by profile policy"
+    };
+  }
+  if (mode === "native") {
+    return {
+      mode,
+      providerSupported,
+      effective: "enabled",
+      reason: providerSupported === true ? "provider declares native web search support" : "native web search forced by profile policy; provider capability is not proven"
+    };
+  }
+  if (providerSupported === true) {
+    return {
+      mode,
+      providerSupported,
+      effective: "enabled",
+      reason: "provider declares native web search support"
+    };
+  }
+  return {
+    mode,
+    providerSupported,
+    effective: "disabled",
+    reason: providerSupported === false ? "provider declares that native web search is unsupported" : `provider ${summary.id} does not declare supports_standalone_web_search; switch to a web-search-capable provider or set subagents.webSearch=native explicitly`
+  };
 }
 async function readSqliteProviders(databasePath, appType, currentProviderId) {
   const sql = [
@@ -15048,7 +15141,12 @@ async function resolveSubagents(input) {
         ...config.ccSwitchProviderId ? { providerId: config.ccSwitchProviderId } : {},
         cwd: input.cwd,
         codexBin: input.codexBin ?? env.CODEX_BINARY?.trim() ?? "codex",
-        stateDir: input.stateDir ?? defaultGeneratedRuntimeDir(env)
+        stateDir: input.stateDir ?? defaultGeneratedRuntimeDir(env),
+        runtimePolicy: {
+          role: input.runtimeRole ?? "worker",
+          webSearch: config.webSearch,
+          sideReasoningEffort: config.sideReasoningEffort
+        }
       });
       runtime = {
         brokerConfigPath: generated.brokerConfigPath,
@@ -19147,7 +19245,7 @@ var StructuredAdapter = class {
       }
     });
   }
-  async autoBrokerRuntime(config, cwd) {
+  async autoBrokerRuntime(config, cwd, role = "worker") {
     if (!config.enabled || config.routeMode !== "follow-cc-switch" || config.mode !== "auto" && config.mode !== "broker") return void 0;
     const generated = await materializeCcSwitchBrokerRuntime({
       env: this.options.env ?? process.env,
@@ -19156,7 +19254,12 @@ var StructuredAdapter = class {
       ...config.ccSwitchProviderId ? { providerId: config.ccSwitchProviderId } : {},
       cwd,
       codexBin: this.options.binary,
-      stateDir: join34(this.options.profileDir, "structured")
+      stateDir: join34(this.options.profileDir, "structured"),
+      runtimePolicy: {
+        role,
+        webSearch: config.webSearch,
+        sideReasoningEffort: config.sideReasoningEffort
+      }
     });
     return {
       brokerConfigPath: generated.brokerConfigPath,
@@ -19179,7 +19282,7 @@ var StructuredAdapter = class {
     if (state.backend) return state.backend;
     const config = await this.currentSubagentsConfig();
     if (!config.enabled || config.mode === "off" || config.mode === "fork") return void 0;
-    const runtime = await this.autoBrokerRuntime(config, cwd);
+    const runtime = await this.autoBrokerRuntime(config, cwd, "side");
     const backend = new MixAgentsBrokerBackend(
       config,
       this.options.env ?? process.env,
@@ -19248,7 +19351,7 @@ var StructuredAdapter = class {
       return;
     }
     let existing = this.sideStateFor(scope, cwd);
-    const workerTimeoutMs = resolved.config.workerTimeoutMs;
+    const sideTimeoutMs = resolved.config.sideTimeoutMs;
     const changeReason = existing ? routeChangeReason(existing, route, cwd) : void 0;
     if (existing && changeReason) {
       emit2(textEvent(`side route/workspace \u5DF2\u53D8\u5316\uFF08${changeReason}\uFF09\uFF1B\u6B63\u5728\u7ED3\u675F\u65E7 MixAgents agent ${existing.agent.agentId}\uFF0C\u968F\u540E\u521B\u5EFA\u65B0 agent\u3002`));
@@ -19275,8 +19378,12 @@ var StructuredAdapter = class {
       emit2(textEvent(`\u590D\u7528 MixAgents side agent ${existing.agent.agentId}\uFF08route=${existing.route.id}\uFF09\u3002
 `));
       try {
-        const result = await activeBackend.send(existing.agent, body, signal, workerTimeoutMs);
-        await this.applyMixagentsResult(existing, result, emit2);
+        const result = await activeBackend.send(existing.agent, body, signal, sideTimeoutMs);
+        if (result.status === "timeout") {
+          await activeBackend.interrupt(existing.agent, AbortSignal.timeout(3e4)).catch(() => {
+          });
+        }
+        await this.applyMixagentsResult(existing, result, emit2, sideTimeoutMs);
       } catch (error) {
         if (signal.aborted) {
           await this.interruptAbortedMixagentsSide(existing);
@@ -19334,8 +19441,12 @@ var StructuredAdapter = class {
     this.mixagentsSides.set(`${scope}\0${cwd}`, state);
     await this.saveMixagentsSides();
     try {
-      const result = await resolvedBackend.wait(agent, signal, workerTimeoutMs);
-      await this.applyMixagentsResult(state, result, emit2);
+      const result = await resolvedBackend.wait(agent, signal, sideTimeoutMs);
+      if (result.status === "timeout") {
+        await resolvedBackend.interrupt(agent, AbortSignal.timeout(3e4)).catch(() => {
+        });
+      }
+      await this.applyMixagentsResult(state, result, emit2, sideTimeoutMs);
     } catch (error) {
       if (signal.aborted) {
         await this.interruptAbortedMixagentsSide(state);
@@ -19355,8 +19466,12 @@ var StructuredAdapter = class {
         state.updatedAt = Date.now();
         this.mixagentsSides.set(`${scope}\0${cwd}`, state);
         await this.saveMixagentsSides();
-        const result = await resolvedBackend.wait(replacement, signal, workerTimeoutMs);
-        await this.applyMixagentsResult(state, result, emit2);
+        const result = await resolvedBackend.wait(replacement, signal, sideTimeoutMs);
+        if (result.status === "timeout") {
+          await resolvedBackend.interrupt(replacement, AbortSignal.timeout(3e4)).catch(() => {
+          });
+        }
+        await this.applyMixagentsResult(state, result, emit2, sideTimeoutMs);
         return;
       }
       throw error;
@@ -19373,7 +19488,7 @@ var StructuredAdapter = class {
     await this.saveMixagentsSides().catch(() => {
     });
   }
-  async applyMixagentsResult(state, result, emit2) {
+  async applyMixagentsResult(state, result, emit2, timeoutMs) {
     state.agent.status = result.status;
     state.updatedAt = Date.now();
     await this.saveMixagentsSides();
@@ -19386,7 +19501,11 @@ var StructuredAdapter = class {
       return;
     }
     if (result.status === "timeout") {
-      emit2({ type: "error", message: result.error || "MixAgents side \u8D85\u65F6", terminationReason: "timeout" });
+      emit2({
+        type: "error",
+        message: `MixAgents side ${timeoutMs ? `${Math.round(timeoutMs / 1e3)} \u79D2` : ""}\u8D85\u65F6\uFF0Cworker \u5DF2\u505C\u6B62\u3002\u8BF7\u5207\u6362\u5230\u66F4\u5FEB\u7684 provider/route\uFF0C\u6216\u5728\u8BBE\u7F6E\u4E2D\u8C03\u6574 sideTimeoutMs\uFF1B\u672C\u6B21\u8BF7\u6C42\u4E0D\u4F1A\u81EA\u52A8\u6362\u6A21\u578B\u91CD\u653E\u3002`,
+        terminationReason: "timeout"
+      });
       return;
     }
     if (result.status === "interrupted") {
@@ -19999,6 +20118,7 @@ ${truncateSnapshot(redactDiagnosticText(redactSecrets(manifest)), 8e3)}
             codexBin: this.options.binary,
             ...this.options.codexHome ? { codexHome: this.options.codexHome } : {},
             ...this.runtimeIdentity?.ccSwitchProviderId ? { parentProviderId: this.runtimeIdentity.ccSwitchProviderId } : {},
+            runtimeRole: "side",
             signal: abort.signal,
             ...btw.route ? { requestedRoute: btw.route } : {}
           });
@@ -35048,7 +35168,15 @@ async function collectSubagentDiagnostics(input) {
     limits: {
       maxConcurrentWorkers: input.config.maxConcurrentWorkers,
       workerTimeoutMs: input.config.workerTimeoutMs,
+      sideTimeoutMs: input.config.sideTimeoutMs,
+      sideReasoningEffort: input.config.sideReasoningEffort,
       allowWriteWorkers: input.config.allowWriteWorkers
+    },
+    webSearch: {
+      mode: input.config.webSearch,
+      providerSupported: null,
+      effective: input.config.webSearch === "disabled" ? "disabled" : "unknown",
+      reason: "no generated cc-switch runtime has been inspected"
     },
     launchConfigured: Boolean(resolveMixAgentsLaunchConfig(input.config, env)),
     toolContract: "unknown",
@@ -35145,13 +35273,19 @@ async function collectSubagentDiagnostics(input) {
         ...input.config.ccSwitchProviderId ? { providerId: input.config.ccSwitchProviderId } : {},
         cwd: input.cwd,
         codexBin: input.codexBin ?? env.CODEX_BINARY?.trim() ?? "codex",
-        stateDir: input.stateDir
+        stateDir: input.stateDir,
+        runtimePolicy: {
+          role: "side",
+          webSearch: input.config.webSearch,
+          sideReasoningEffort: input.config.sideReasoningEffort
+        }
       });
       brokerRuntime = {
         brokerConfigPath: generated.brokerConfigPath,
         credentials: generated.credentials,
         fingerprint: generated.fingerprint,
-        route: generated.route
+        route: generated.route,
+        webSearch: generated.webSearch
       };
     } catch (error) {
       return {
@@ -35186,6 +35320,9 @@ async function collectSubagentDiagnostics(input) {
     return {
       ...base,
       ...brokerRuntime ? { brokerConfigPath: brokerRuntime.brokerConfigPath } : {},
+      ...brokerRuntime?.webSearch ? {
+        webSearch: brokerRuntime.webSearch
+      } : {},
       launchCommand: basename10(launch.command),
       ...backend.serverVersion ? { packageVersion: backend.serverVersion } : {},
       toolContract: "compatible",
@@ -35416,6 +35553,7 @@ async function runSettings(options = {}) {
       "Bridge \u4F1A\u81EA\u52A8\u8BFB\u53D6\u8FD9\u91CC\u9009\u4E2D\u7684 cc-switch Codex provider\uFF0C\u5E76\u751F\u6210 Broker route\u3001\u6A21\u578B\u548C\u51ED\u636E\u3002",
       "\u9ED8\u8BA4\u201C\u8DDF\u968F\u5F53\u524D provider\u201D\uFF1A\u4EE5\u540E\u5728 cc-switch \u5207\u6362 provider \u540E\uFF0C\u4E0B\u4E00\u6761\u5B50\u4EE3\u7406\u4EFB\u52A1\u81EA\u52A8\u4F7F\u7528\u65B0 provider\uFF0C\u65E0\u9700\u6539 Key \u6216\u624B\u5199 route\u3002",
       "\u5982\u679C\u9009\u62E9\u56FA\u5B9A provider\uFF0C\u5B50\u4EE3\u7406\u59CB\u7EC8\u4F7F\u7528\u8BE5 provider\uFF1B\u4E3B\u5BF9\u8BDD\u4ECD\u7531 cc-switch \u5F53\u524D provider \u63A7\u5236\u3002",
+      `Web Search \u80FD\u529B\uFF1Aprovider ${diagnostics.webSearch.providerSupported === true ? "\u58F0\u660E\u652F\u6301" : diagnostics.webSearch.providerSupported === false ? "\u58F0\u660E\u4E0D\u652F\u6301" : "\u672A\u58F0\u660E"}\uFF1B\u5F53\u524D\u7B56\u7565=${diagnostics.webSearch.mode}\uFF0C\u5B9E\u9645=${diagnostics.webSearch.effective}\u3002` + (diagnostics.webSearch.effective === "disabled" ? "\u9700\u8981\u8054\u7F51\u641C\u7D22\u65F6\u8BF7\u5207\u6362\u5230\u58F0\u660E\u652F\u6301\u539F\u751F\u641C\u7D22\u7684 API\uFF0C\u6216\u4EC5\u5728\u5DF2\u9A8C\u8BC1\u65F6\u5F3A\u5236 native\u3002" : ""),
       availableReadRoutes.length === 0 ? "\u5F53\u524D provider \u7684 Broker route \u4F1A\u5728\u9996\u6B21\u6D3E\u53D1\u65F6\u81EA\u52A8\u751F\u6210\uFF1Bdoctor \u4F1A\u663E\u793A\u771F\u5B9E\u53EF\u7528\u6027\u3002" : `\u5F53\u524D\u5DF2\u89E3\u6790 ${availableReadRoutes.length} \u6761\u53EF\u7528\u53EA\u8BFB route\u3002`,
       ...unavailableRoutes.length ? [`\u5F53\u524D\u4E0D\u53EF\u7528 route\uFF1A${unavailableRoutes.map(
         (route) => `${route.id}(${route.missingEnvironment.join(",") || "unavailable"})`
@@ -35434,7 +35572,7 @@ async function runSettings(options = {}) {
         ...ccProviders.map((provider) => ({
           value: provider.id,
           label: `${provider.name} (${provider.id})`,
-          hint: provider.current ? "\u5F53\u524D\u4E3B\u5BF9\u8BDD provider\uFF1B\u4E5F\u53EF\u56FA\u5B9A\u4F7F\u7528" : "\u56FA\u5B9A\u4F7F\u7528\u8FD9\u4E2A provider"
+          hint: provider.current ? `\u5F53\u524D\u4E3B\u5BF9\u8BDD provider\uFF1BWeb Search=${diagnostics.webSearch.providerSupported === true ? "supported" : diagnostics.webSearch.providerSupported === false ? "unsupported" : "undeclared"}` : "\u56FA\u5B9A\u4F7F\u7528\u8FD9\u4E2A provider\uFF1B\u4FDD\u5B58\u540E\u4F1A\u91CD\u65B0\u89E3\u6790\u5176\u6A21\u578B\u548C Web Search \u80FD\u529B"
         }))
       ]
     });
@@ -35576,6 +35714,9 @@ async function runSettings(options = {}) {
   let nativeToolPolicy = currentSubagents.nativeToolPolicy;
   let maxConcurrentWorkers = currentSubagents.maxConcurrentWorkers;
   let workerTimeoutMs = currentSubagents.workerTimeoutMs;
+  let sideTimeoutMs = currentSubagents.sideTimeoutMs;
+  let sideReasoningEffort = currentSubagents.sideReasoningEffort;
+  let webSearch = currentSubagents.webSearch;
   let includeProgressSnapshot = currentSubagents.includeProgressSnapshot;
   let maxRepairRounds = currentRsi.maxRepairRounds;
   const currentMcp = rawProfile.subagents?.mixagents;
@@ -35631,6 +35772,59 @@ async function runSettings(options = {}) {
     workerTimeoutMs = Math.round(
       boundedNumberInput(timeoutText, 0.5, 1440, "\u5B50\u4EE3\u7406\u8D85\u65F6\u5206\u949F\u6570") * 6e4
     );
+    const sideTimeoutText = await p3.text({
+      message: "/btw \u5355\u8F6E\u6700\u957F\u7B49\u5F85\u65F6\u95F4\uFF08\u79D2\uFF09",
+      initialValue: String(sideTimeoutMs / 1e3)
+    });
+    assertPrompt(sideTimeoutText);
+    sideTimeoutMs = Math.round(
+      boundedNumberInput(sideTimeoutText, 15, 1800, "/btw \u5355\u8F6E\u7B49\u5F85\u79D2\u6570") * 1e3
+    );
+    const sideEffort = await p3.select({
+      message: "/btw \u7684\u63A8\u7406\u901F\u5EA6",
+      initialValue: sideReasoningEffort,
+      options: [
+        {
+          value: "low",
+          label: "\u4F4E\uFF08\u63A8\u8350\uFF09",
+          hint: "\u66F4\u5FEB\u6062\u590D\u8FDB\u5EA6\uFF1B\u81EA\u52A8\u5B50\u4EE3\u7406\u4ECD\u4FDD\u6301\u539F\u63A8\u7406\u7B49\u7EA7"
+        },
+        { value: "medium", label: "\u4E2D", hint: "\u901F\u5EA6\u4E0E\u8D28\u91CF\u5E73\u8861" },
+        { value: "high", label: "\u9AD8", hint: "\u66F4\u6162\uFF0C\u9002\u5408\u590D\u6742\u590D\u6838" },
+        { value: "xhigh", label: "\u5F88\u9AD8", hint: "\u6162\u901F\u6DF1\u5EA6\u590D\u6838" },
+        { value: "max", label: "\u6700\u9AD8", hint: "\u6700\u6162\uFF0C\u901A\u5E38\u53EA\u7528\u4E8E\u79BB\u7EBF\u91CD\u4EFB\u52A1" },
+        {
+          value: "inherit",
+          label: "\u8DDF\u968F provider",
+          hint: "\u4F7F\u7528 cc-switch provider \u81EA\u5DF1\u7684\u914D\u7F6E"
+        }
+      ]
+    });
+    assertPrompt(sideEffort);
+    sideReasoningEffort = sideEffort;
+    const webSearchMode = await p3.select({
+      message: "\u5B50\u4EE3\u7406\u662F\u5426\u542F\u7528\u539F\u751F Web Search\uFF1F",
+      initialValue: webSearch,
+      options: [
+        {
+          value: "auto",
+          label: "\u6309 provider \u80FD\u529B\u81EA\u52A8\u51B3\u5B9A\uFF08\u63A8\u8350\uFF09",
+          hint: "provider \u672A\u58F0\u660E\u652F\u6301\u65F6\u5173\u95ED\uFF1B\u9700\u8981\u8054\u7F51\u65F6\u8BF7\u6362\u652F\u6301\u641C\u7D22\u7684 API"
+        },
+        {
+          value: "native",
+          label: "\u5F3A\u5236\u4F7F\u7528\u539F\u751F Web Search",
+          hint: "\u53EA\u5E94\u5BF9\u5DF2\u9A8C\u8BC1\u652F\u6301 Responses web_search \u7684 provider \u4F7F\u7528"
+        },
+        {
+          value: "disabled",
+          label: "\u59CB\u7EC8\u5173\u95ED",
+          hint: "\u9002\u5408\u65E0\u9700\u8054\u7F51\u7684\u7EAF\u672C\u5730\u590D\u6838"
+        }
+      ]
+    });
+    assertPrompt(webSearchMode);
+    webSearch = webSearchMode;
     const writeWorkers = await p3.confirm({
       message: "\u5141\u8BB8\u6A21\u578B\u521B\u5EFA\u53EF\u5199\u6587\u4EF6\u7684\u5B50\u4EE3\u7406\uFF1F\uFF08\u4ECD\u9700\u7528\u6237\u9010\u4EFB\u52A1\u6388\u6743\uFF09",
       initialValue: allowWriteWorkers
@@ -35699,6 +35893,8 @@ async function runSettings(options = {}) {
     `\u5B50\u4EE3\u7406\uFF1A${modeText}`,
     `\u5B50\u4EE3\u7406\u7EBF\u8DEF\uFF1A${routeText}`,
     `Key\uFF1A${credentialText}`,
+    `\u5B50\u4EE3\u7406 Web Search\uFF1A${webSearch === "auto" ? `\u6309 provider \u80FD\u529B\uFF08\u5F53\u524D ${diagnostics.webSearch.effective}\uFF09` : webSearch === "native" ? "\u5F3A\u5236\u539F\u751F" : "\u5173\u95ED"}`,
+    `/btw \u901F\u5EA6\uFF1Areasoning=${sideReasoningEffort} timeout=${sideTimeoutMs / 1e3}s`,
     `\u9879\u76EE\u8BC1\u636E\u6821\u9A8C\uFF1A${rsiMode === "off" ? "\u5173\u95ED" : "\u81EA\u52A8\uFF08\u53EA\u5BF9\u5DF2\u521D\u59CB\u5316\u9879\u76EE\uFF09"}`,
     advanced ? "\u9AD8\u7EA7\u53C2\u6570\uFF1A\u5DF2\u5C55\u5F00\u7F16\u8F91" : "\u9AD8\u7EA7\u53C2\u6570\uFF1A\u4FDD\u6301\u539F\u503C"
   ].join("\n"), "\u6B65\u9AA4 5 / 5 \xB7 \u4FDD\u5B58\u524D\u786E\u8BA4");
@@ -35748,6 +35944,9 @@ async function runSettings(options = {}) {
         nativeToolPolicy,
         maxConcurrentWorkers,
         workerTimeoutMs,
+        sideTimeoutMs,
+        sideReasoningEffort,
+        webSearch,
         allowWriteWorkers,
         allowForkFallback,
         includeProgressSnapshot,
@@ -35886,7 +36085,8 @@ function formatSnapshot(snapshot) {
     `main running with legacy/unknown identity=${snapshot.mainProvider.runningUnknown}`,
     `provider switch=${snapshot.mainProvider.pendingSwitch}; safe point=${snapshot.mainProvider.safeSwitchPoint}`,
     `MixAgents mode=${snapshot.subagents.config.mode} routeMode=${snapshot.subagents.config.routeMode} provider=${snapshot.subagents.config.ccSwitchProviderId ?? "(follow-current)"} MCP=${diagnostics.mcp.status} version=${diagnostics.packageVersion ?? "(unknown)"}`,
-    `Broker tools=${diagnostics.modelTools.brokerWired ? "wired" : "degraded"} namespace=${diagnostics.modelTools.namespace} native=${diagnostics.modelTools.nativeToolPolicy} maxWorkers=${diagnostics.limits.maxConcurrentWorkers} workerTimeoutMs=${diagnostics.limits.workerTimeoutMs} writeWorkers=${diagnostics.limits.allowWriteWorkers}`,
+    `Broker tools=${diagnostics.modelTools.brokerWired ? "wired" : "degraded"} namespace=${diagnostics.modelTools.namespace} native=${diagnostics.modelTools.nativeToolPolicy} maxWorkers=${diagnostics.limits.maxConcurrentWorkers} workerTimeoutMs=${diagnostics.limits.workerTimeoutMs} sideTimeoutMs=${diagnostics.limits.sideTimeoutMs} sideReasoning=${diagnostics.limits.sideReasoningEffort} writeWorkers=${diagnostics.limits.allowWriteWorkers}`,
+    `web search mode=${diagnostics.webSearch.mode} providerSupported=${diagnostics.webSearch.providerSupported ?? "unknown"} effective=${diagnostics.webSearch.effective} reason=${diagnostics.webSearch.reason}`,
     `Broker tools degraded=${diagnostics.modelTools.degradedReason ?? "(none)"}`,
     `credential mode=${diagnostics.credentials.mode} status=${diagnostics.credentials.status} providerRef=${diagnostics.credentials.providerReference ?? "(none)"}`,
     `selected route=${diagnostics.selectedRoute.id ?? "(none)"}` + (diagnostics.selectedRoute.error ? ` error=${diagnostics.selectedRoute.error}` : ""),
@@ -36077,6 +36277,11 @@ async function loadDoctorReport(options = {}) {
     message: diagnostics.credentials.mode === "mixagents-managed" ? `MixAgents managed\uFF1Bbridge \u53EA\u4F20 providerRef=${diagnostics.credentials.providerReference ?? "(missing)"}` : diagnostics.credentials.mode === "cc-switch-auto" ? `cc-switch auto\uFF1Bprovider=${diagnostics.credentials.providerReference ?? "(unknown)"} source=${diagnostics.credentials.sourcePath ?? "(unknown)"} fingerprint=${diagnostics.credentials.fingerprint ?? "(none)"} missing=${diagnostics.credentials.missingEnvironment.join(",") || "none"}` : `inherit-env\uFF1Bpresent/missing only: ${diagnostics.credentials.missingEnvironment.join(",") || "none missing"}`
   });
   checks.push({
+    id: "web-search",
+    status: diagnostics.webSearch.mode === "native" && diagnostics.webSearch.providerSupported !== true ? "warn" : "pass",
+    message: `mode=${diagnostics.webSearch.mode} providerSupported=${diagnostics.webSearch.providerSupported ?? "unknown"} effective=${diagnostics.webSearch.effective} reason=${diagnostics.webSearch.reason}`
+  });
+  checks.push({
     id: "rsi-feedback-loop",
     status: snapshot.rsi.config.mode === "off" ? "pass" : snapshot.rsi.config.maxRepairRounds > 0 ? "pass" : "warn",
     message: snapshot.rsi.config.mode === "off" ? "disabled" : `maxRepairRounds=${snapshot.rsi.config.maxRepairRounds} timeoutMs=${snapshot.rsi.config.repairTimeoutMs}; reviewer is required for a pass`
@@ -36174,7 +36379,8 @@ async function loadDoctorReport(options = {}) {
         missingEnvironment: route.missingEnvironment
       })),
       modelTools: diagnostics.modelTools,
-      limits: diagnostics.limits
+      limits: diagnostics.limits,
+      webSearch: diagnostics.webSearch
     },
     nativeCollaboration: {
       brokerShadowConfigured: diagnostics.modelTools.configured && diagnostics.modelTools.nativeToolPolicy === "shadow",

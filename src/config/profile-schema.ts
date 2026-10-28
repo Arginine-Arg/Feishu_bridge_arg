@@ -74,6 +74,14 @@ export interface NetworkConfig {
 export type SubagentMode = 'off' | 'auto' | 'broker' | 'fork';
 export type SubagentRouteMode = 'follow-cc-switch' | 'manual';
 export type SubagentAccess = 'read-only' | 'workspace-write';
+export type SubagentWebSearchMode = 'auto' | 'native' | 'disabled';
+export type SubagentReasoningEffort =
+  | 'inherit'
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'xhigh'
+  | 'max';
 
 export interface SubagentMixAgentsConfig {
   /**
@@ -115,6 +123,18 @@ export interface SubagentConfig {
   toolNamespace: string;
   maxConcurrentWorkers: number;
   workerTimeoutMs: number;
+  /** Fast, independent budget for conversational /btw side turns. */
+  sideTimeoutMs: number;
+  /**
+   * Reasoning effort for interactive /btw side turns. Automatic workers keep
+   * the provider/cc-switch setting.
+   */
+  sideReasoningEffort: SubagentReasoningEffort;
+  /**
+   * Native Responses web-search policy. `auto` uses the provider's declared
+   * supports_standalone_web_search capability; `native` force-enables it.
+   */
+  webSearch: SubagentWebSearchMode;
   /** Workspace-write workers additionally require per-task authorization. */
   allowWriteWorkers: boolean;
   includeProgressSnapshot: boolean;
@@ -425,6 +445,9 @@ export const DEFAULT_SUBAGENT_CONFIG: SubagentConfig = {
   toolNamespace: 'arg_bridge',
   maxConcurrentWorkers: 4,
   workerTimeoutMs: 15 * 60_000,
+  sideTimeoutMs: 90_000,
+  sideReasoningEffort: 'low',
+  webSearch: 'auto',
   allowWriteWorkers: false,
   includeProgressSnapshot: true,
   reuse: 'scope-cwd',
@@ -497,12 +520,28 @@ function normalizeSubagents(input: unknown): SubagentConfig {
     toolNamespace: validToolNamespace(raw.toolNamespace) ?? DEFAULT_SUBAGENT_CONFIG.toolNamespace,
     maxConcurrentWorkers: boundedInteger(raw.maxConcurrentWorkers, 1, 32, 4),
     workerTimeoutMs: boundedInteger(raw.workerTimeoutMs, 30_000, 24 * 60 * 60_000, 15 * 60_000),
+    sideTimeoutMs: boundedInteger(raw.sideTimeoutMs, 15_000, 30 * 60_000, 90_000),
+    sideReasoningEffort: normalizeSideReasoningEffort(raw.sideReasoningEffort),
+    webSearch: raw.webSearch === 'native' || raw.webSearch === 'disabled'
+      ? raw.webSearch
+      : 'auto',
     allowWriteWorkers: raw.allowWriteWorkers === true,
     includeProgressSnapshot: raw.includeProgressSnapshot !== false,
     reuse: 'scope-cwd',
     allowForkFallback: raw.allowForkFallback !== false,
     ...(mixagents && Object.keys(mixagents).length > 0 ? { mixagents } : {}),
   };
+}
+
+function normalizeSideReasoningEffort(value: unknown): SubagentReasoningEffort {
+  return value === 'inherit' ||
+    value === 'low' ||
+    value === 'medium' ||
+    value === 'high' ||
+    value === 'xhigh' ||
+    value === 'max'
+    ? value
+    : DEFAULT_SUBAGENT_CONFIG.sideReasoningEffort;
 }
 
 function ccSwitchProviderId(value: unknown): string | null {
