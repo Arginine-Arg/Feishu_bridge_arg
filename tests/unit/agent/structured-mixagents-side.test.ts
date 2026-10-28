@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -1045,6 +1045,7 @@ describe('structured MixAgents /btw', () => {
     const root = await mkdtemp(join(tmpdir(), 'arg-bridge-side-write-'));
     const workspace = join(root, 'project');
     await mkdir(workspace, { recursive: true });
+    const canonicalWorkspace = await realpath(workspace);
     const profileDir = join(profileDirFor(root), 'state');
     await mkdir(profileDir, { recursive: true });
     const backend = new FakeBackend(() => routeA);
@@ -1097,10 +1098,10 @@ describe('structured MixAgents /btw', () => {
     expect(backend.spawns).toHaveLength(2);
     expect(backend.spawns[1]).toMatchObject({
       route: routeWrite,
-      cwd: workspace,
+      cwd: canonicalWorkspace,
       access: 'workspace-write',
       writeAuthorization: {
-        workspace,
+        workspace: canonicalWorkspace,
         task: expect.stringContaining('Implement the change'),
       },
     });
