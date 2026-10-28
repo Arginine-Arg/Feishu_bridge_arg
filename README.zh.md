@@ -4,7 +4,7 @@
 
 [English README](./README.md)
 
-`1.9.8` 把“第三方 provider 一律关闭搜索”的错误策略改成 provider 能力策略：`auto` 尊重 provider 的 `supports_standalone_web_search`，`native` 可显式强制，`disabled` 是明确的用户选择。`/btw` 新增独立的低 reasoning、90 秒快速预算和有限重试；provider 失败时会尽快停止 side worker，并提示切换 provider/route 或调整预算，不会在主模型重放。`1.9.7` 修正 Node 20 CI；`1.9.6` 修复 `/btw` 的 active writer、缺失 worker 重建和兼容 Broker 选择；`/model`、`/compact` 等原生命令会直接注入正在运行的 Codex 终端。`1.9.5` 增加主任务与 `/btw` 并行及独立 worker timeout；`1.9.4` 修复选中 provider 的凭据优先级；`1.9.3` 修复 native 恢复、稳定 socket 和 adopt 幂等。
+`1.9.9` 修复 `/btw` 超时显示：agent timeout 现在显示真实 90 秒或用户配置的预算，不再误显示成 `0 分钟无响应`；由 cc-switch 自动生成的 runtime 也会立即绕过 `.js`/`.mjs`/node 形式的旧 MixAgents 包装入口。`1.9.8` 增加 provider Web Search 能力策略和低 reasoning、有限重试的 `/btw` 快速运行时；`1.9.7` 修正 Node 20 CI；`1.9.6` 修复 `/btw` 的 active writer、缺失 worker 重建和兼容 Broker 选择；`/model`、`/compact` 等原生命令会直接注入正在运行的 Codex 终端。`1.9.5` 增加主任务与 `/btw` 并行及独立 worker timeout；`1.9.4` 修复选中 provider 的凭据优先级；`1.9.3` 修复 native 恢复、稳定 socket 和 adopt 幂等。
 
 `1.6.7` 引入 provider-aware Codex resume，`1.7.0` 增加 idle 边界重绑。`1.9.1` 收紧重连语义：附着已有 native 或 structured thread 时，保留该 thread 记录的 provider/model，不会因为 cc-switch 后来切换了 route 而静默改路。
 
@@ -60,7 +60,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.9.8
+sh /tmp/install-arg-bridge.sh --version 1.9.9
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.9.8"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.9.9"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.9.8`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.9.9`。
 
 ### 4. Node 或 npm 全局目录错误
 

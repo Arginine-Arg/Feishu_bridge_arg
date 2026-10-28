@@ -77,9 +77,15 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
     // fail and then recover through the bundled server. The generated runtime
     // schema is versioned with the bundled package; use it directly.
     const bundledLaunch = runtime ? resolveBundledMixAgentsLaunchConfig() : undefined;
+    // Older profiles and generated helper scripts often point at a wrapper
+    // named mixagents-broker[-mcp], including .js/.mjs launchers and `node`
+    // commands whose argument points at that package. Those wrappers can load
+    // a different broker config, so a generated cc-switch runtime should use
+    // the bridge-bundled Broker directly. Custom/non-wrapper MCP commands
+    // remain authoritative.
     const launch = configuredLaunch &&
       bundledLaunch &&
-      isLegacyBrokerWrapper(configuredLaunch) &&
+      isGeneratedRuntimeBrokerLaunch(configuredLaunch) &&
       !sameLaunch(configuredLaunch, bundledLaunch)
       ? bundledLaunch
       : configuredLaunch;
@@ -557,9 +563,13 @@ export function resolveBundledMixAgentsLaunchConfig(): MixAgentsLaunchConfig | u
   }
 }
 
-function isLegacyBrokerWrapper(launch: MixAgentsLaunchConfig): boolean {
-  const executable = basename(launch.command).toLowerCase().replace(/\.(?:cmd|exe)$/u, '');
-  return executable === 'mixagents-broker' || executable === 'mixagents-broker-mcp';
+function isGeneratedRuntimeBrokerLaunch(launch: MixAgentsLaunchConfig): boolean {
+  const candidates = [launch.command, ...launch.args]
+    .map(value => basename(value).toLowerCase())
+    .filter(Boolean);
+  return candidates.some(value =>
+    /^mixagents-broker(?:-mcp)?(?:\.(?:mjs|cjs|js|cmd|exe))?$/u.test(value)
+  );
 }
 
 export function applyMixAgentsConfig(

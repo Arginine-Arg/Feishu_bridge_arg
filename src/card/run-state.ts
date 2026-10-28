@@ -196,14 +196,16 @@ export function reduce(state: RunState, evt: AgentEvent): RunState {
       const terminal =
         evt.terminationReason === 'interrupted'
           ? 'interrupted'
-          : evt.terminationReason === 'timeout'
-            ? 'idle_timeout'
-            : 'error';
+          : 'error';
       return withLiveness(
         {
           ...state,
           terminal,
-          errorMsg: terminal === 'error' ? evt.message : state.errorMsg,
+          errorMsg: terminal === 'error'
+            ? evt.terminationReason === 'timeout'
+              ? evt.message || 'agent 执行超时'
+              : evt.message
+            : state.errorMsg,
           footer: null,
         },
         Date.now(),
@@ -216,14 +218,16 @@ export function reduce(state: RunState, evt: AgentEvent): RunState {
         evt.terminationReason === 'interrupted'
           ? 'interrupted'
           : evt.terminationReason === 'timeout'
-            ? 'idle_timeout'
+            ? 'error'
             : 'done';
+      const errorMsg = terminal === 'error' ? 'agent 执行超时' : state.errorMsg;
       return withLiveness(
         {
           ...state,
           blocks: closeStreamingText(state.blocks),
           reasoning: { ...state.reasoning, active: false },
           terminal,
+          errorMsg,
           footer: null,
         },
         Date.now(),

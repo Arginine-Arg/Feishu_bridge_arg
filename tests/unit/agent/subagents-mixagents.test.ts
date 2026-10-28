@@ -101,6 +101,33 @@ describe('MixAgentsBrokerBackend', () => {
     expect(backend.launchConfig.args[0]).toContain('mixagents-broker');
   });
 
+  optionalBrokerRuntime('replaces node-based legacy Broker wrappers for generated runtimes', () => {
+    const runtime = {
+      brokerConfigPath: '/tmp/generated-broker.json',
+      credentials: {},
+      fingerprint: 'runtime-fingerprint',
+      route: {
+        id: 'generated-route',
+        provider: 'custom',
+        model: 'model-a',
+        maxAccess: 'read-only' as const,
+        available: true,
+        missingEnvironment: [],
+        tags: ['cc-switch'],
+      },
+    };
+    const backend = new MixAgentsBrokerBackend({
+      ...DEFAULT_SUBAGENT_CONFIG,
+      mixagents: {
+        mcpCommand: process.execPath,
+        mcpArgs: ['/home/example/.local/bin/mixagents-broker-mcp.mjs'],
+      },
+    }, process.env, runtime);
+
+    expect(backend.launchConfig.command).toBe(process.execPath);
+    expect(backend.launchConfig.args[0]).toContain('mixagents-broker');
+  });
+
   it('lists routes, spawns a read-only agent, reuses it, and interrupts it', async () => {
     const { root, statePath, env, config } = await setup();
     const backend = new MixAgentsBrokerBackend(config, env);

@@ -1579,12 +1579,12 @@ function reduce(state, evt) {
       });
     }
     case "error": {
-      const terminal = evt.terminationReason === "interrupted" ? "interrupted" : evt.terminationReason === "timeout" ? "idle_timeout" : "error";
+      const terminal = evt.terminationReason === "interrupted" ? "interrupted" : "error";
       return withLiveness(
         {
           ...state,
           terminal,
-          errorMsg: terminal === "error" ? evt.message : state.errorMsg,
+          errorMsg: terminal === "error" ? evt.terminationReason === "timeout" ? evt.message || "agent \u6267\u884C\u8D85\u65F6" : evt.message : state.errorMsg,
           footer: null
         },
         Date.now(),
@@ -1592,13 +1592,15 @@ function reduce(state, evt) {
       );
     }
     case "done": {
-      const terminal = evt.terminationReason === "interrupted" ? "interrupted" : evt.terminationReason === "timeout" ? "idle_timeout" : "done";
+      const terminal = evt.terminationReason === "interrupted" ? "interrupted" : evt.terminationReason === "timeout" ? "error" : "done";
+      const errorMsg = terminal === "error" ? "agent \u6267\u884C\u8D85\u65F6" : state.errorMsg;
       return withLiveness(
         {
           ...state,
           blocks: closeStreamingText(state.blocks),
           reasoning: { ...state.reasoning, active: false },
           terminal,
+          errorMsg,
           footer: null
         },
         Date.now(),

@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.9.9
+
+- Agent timeouts now render as actionable errors with the real timeout message.
+  They are no longer mapped to the conversational idle watchdog, which made a
+  bounded `/btw` timeout appear as `0 分钟无响应`.
+- Generated cc-switch runtimes now recognize `.js`, `.mjs`, `.cjs` and
+  node-launched `mixagents-broker-mcp` wrappers, starting the bundled Broker
+  directly instead of probing an obsolete external process first.
+
 ## 1.9.8
 
 - Replaced the blanket `thirdParty -> web_search disabled` workaround with a

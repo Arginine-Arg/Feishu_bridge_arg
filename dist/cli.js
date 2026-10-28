@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.9.8",
+  version: "1.9.9",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -14629,7 +14629,7 @@ var MixAgentsBrokerBackend = class {
     this.env = env;
     const configuredLaunch = resolveMixAgentsLaunchConfig(config, env);
     const bundledLaunch = runtime ? resolveBundledMixAgentsLaunchConfig() : void 0;
-    const launch = configuredLaunch && bundledLaunch && isLegacyBrokerWrapper(configuredLaunch) && !sameLaunch(configuredLaunch, bundledLaunch) ? bundledLaunch : configuredLaunch;
+    const launch = configuredLaunch && bundledLaunch && isGeneratedRuntimeBrokerLaunch(configuredLaunch) && !sameLaunch(configuredLaunch, bundledLaunch) ? bundledLaunch : configuredLaunch;
     if (!launch) {
       throw new SubagentUnavailableError(
         "mixagents-not-configured",
@@ -15003,9 +15003,11 @@ function resolveBundledMixAgentsLaunchConfig() {
     return void 0;
   }
 }
-function isLegacyBrokerWrapper(launch) {
-  const executable = basename5(launch.command).toLowerCase().replace(/\.(?:cmd|exe)$/u, "");
-  return executable === "mixagents-broker" || executable === "mixagents-broker-mcp";
+function isGeneratedRuntimeBrokerLaunch(launch) {
+  const candidates = [launch.command, ...launch.args].map((value) => basename5(value).toLowerCase()).filter(Boolean);
+  return candidates.some(
+    (value) => /^mixagents-broker(?:-mcp)?(?:\.(?:mjs|cjs|js|cmd|exe))?$/u.test(value)
+  );
 }
 function agentFromSnapshot(value, fallback) {
   const agentId = stringValue2(value.agentId);
@@ -23205,12 +23207,12 @@ function reduce(state, evt) {
       });
     }
     case "error": {
-      const terminal = evt.terminationReason === "interrupted" ? "interrupted" : evt.terminationReason === "timeout" ? "idle_timeout" : "error";
+      const terminal = evt.terminationReason === "interrupted" ? "interrupted" : "error";
       return withLiveness(
         {
           ...state,
           terminal,
-          errorMsg: terminal === "error" ? evt.message : state.errorMsg,
+          errorMsg: terminal === "error" ? evt.terminationReason === "timeout" ? evt.message || "agent \u6267\u884C\u8D85\u65F6" : evt.message : state.errorMsg,
           footer: null
         },
         Date.now(),
@@ -23218,13 +23220,15 @@ function reduce(state, evt) {
       );
     }
     case "done": {
-      const terminal = evt.terminationReason === "interrupted" ? "interrupted" : evt.terminationReason === "timeout" ? "idle_timeout" : "done";
+      const terminal = evt.terminationReason === "interrupted" ? "interrupted" : evt.terminationReason === "timeout" ? "error" : "done";
+      const errorMsg = terminal === "error" ? "agent \u6267\u884C\u8D85\u65F6" : state.errorMsg;
       return withLiveness(
         {
           ...state,
           blocks: closeStreamingText(state.blocks),
           reasoning: { ...state.reasoning, active: false },
           terminal,
+          errorMsg,
           footer: null
         },
         Date.now(),

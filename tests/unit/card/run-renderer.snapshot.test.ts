@@ -70,6 +70,16 @@ describe('run card renderer snapshots', () => {
     expectCard(markIdleTimeout(stateFrom([{ type: 'text', delta: 'partial' }]), 15)).toMatchSnapshot();
   });
 
+  it('renders agent timeouts with their real message instead of zero idle minutes', () => {
+    const text = renderText(reduce(initialState, {
+      type: 'error',
+      message: 'MixAgents side 90 秒超时，worker 已停止。',
+      terminationReason: 'timeout',
+    }));
+    expect(text).toContain('90 秒超时');
+    expect(text).not.toContain('0 分钟无响应');
+  });
+
   it('renders markdown text mode without card-only controls', () => {
     const state = stateFrom([
       { type: 'thinking', delta: 'hidden reasoning' },

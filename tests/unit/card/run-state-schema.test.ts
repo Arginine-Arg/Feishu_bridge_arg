@@ -9,9 +9,10 @@ describe('run state terminal event schema', () => {
     expect(
       reduce(initialState, { type: 'done', terminationReason: 'interrupted' }).terminal,
     ).toBe('interrupted');
-    expect(reduce(initialState, { type: 'done', terminationReason: 'timeout' }).terminal).toBe(
-      'idle_timeout',
-    );
+    expect(reduce(initialState, { type: 'done', terminationReason: 'timeout' })).toMatchObject({
+      terminal: 'error',
+      errorMsg: 'agent 执行超时',
+    });
   });
 
   it('maps error termination reasons onto visible terminal states', () => {
@@ -34,8 +35,22 @@ describe('run state terminal event schema', () => {
         type: 'error',
         message: 'timeout',
         terminationReason: 'timeout',
-      }).terminal,
-    ).toBe('idle_timeout');
+      }),
+    ).toMatchObject({
+      terminal: 'error',
+      errorMsg: 'timeout',
+    });
+  });
+
+  it('keeps idle-watchdog timeouts distinct from agent timeouts', () => {
+    const reduced = reduce(initialState, {
+      type: 'error',
+      message: 'MixAgents side 90 秒超时，worker 已停止。',
+      terminationReason: 'timeout',
+    });
+    expect(reduced.terminal).toBe('error');
+    expect(reduced.errorMsg).toContain('90 秒超时');
+    expect(reduced.idleTimeoutMinutes).toBeUndefined();
   });
 
   it('does not present an unterminated agent event stream as successful', () => {
