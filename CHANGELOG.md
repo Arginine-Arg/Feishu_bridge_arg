@@ -15,6 +15,9 @@
   read-only conversational `/btw` turns.
 - `/btw` keeps the Codex-like tools available inside read-only mode and adds the
   same explicit per-task write path for cases that need file changes.
+- Replacing an expired Bridge relay for the same terminal command now detaches
+  it without killing the managed tmux session, so the next turn reconnects to
+  the existing conversation.
 
 ## 1.9.9
 

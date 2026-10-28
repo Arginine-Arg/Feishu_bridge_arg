@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { dirname } from 'node:path';
 import readline from 'node:readline';
 
@@ -126,10 +126,16 @@ function tool(id, value, isError = false) {
   });
 }
 
-async function persist() {
-  const temporary = `${statePath}.${process.pid}.tmp`;
-  await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
-  await rename(temporary, statePath);
+let persistTail = Promise.resolve();
+function persist() {
+  const contents = `${JSON.stringify(state, null, 2)}\n`;
+  const operation = persistTail.then(async () => {
+    const temporary = `${statePath}.${process.pid}.${randomUUID()}.tmp`;
+    await writeFile(temporary, contents, { mode: 0o600 });
+    await rename(temporary, statePath);
+  });
+  persistTail = operation.catch(() => {});
+  return operation;
 }
 
 function agentPayload(agent, status = agent.status) {

@@ -8135,8 +8135,11 @@ var LiveSessionPool = class {
       command.cleanup?.();
       return existing;
     }
-    if (existing) void existing.close("replace").catch(() => {
-    });
+    if (existing) {
+      const replacement = existing.signature === command.signature ? existing.detach("replace") : existing.close("replace");
+      void replacement.catch(() => {
+      });
+    }
     const session = new LiveTerminalSession(command, () => {
       if (this.sessions.get(key) === session) this.sessions.delete(key);
     });
