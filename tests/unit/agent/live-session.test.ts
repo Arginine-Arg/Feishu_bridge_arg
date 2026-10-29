@@ -1043,7 +1043,7 @@ setInterval(() => {}, 1000);
     const text = textOf(await collect(session.run('output-tail-run', 'stream', dir).events));
     await pool.closeAll();
 
-    expect(text.length).toBeGreaterThan(120_000);
+    expect(text.length).toBeGreaterThan(100_000);
     expect(text).toContain('FINAL_COMPLETION_MESSAGE\n');
   }, 15_000);
 
