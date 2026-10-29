@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.12.0
+
+- Ordinary messages sent during an active task now queue by default instead of
+  opportunistically steering into the running turn.
+- Adds explicit `/steer <text>`. It targets only the current main turn, never
+  creates a second run and never stops the active goal.
+- Structured Codex uses the exact active turn ID with `turn/steer`; live Codex
+  uses the native empty-composer Tab-to-queue path.
+- No active main turn, side conversations, attachments, quoted replies, empty
+  bodies, unsupported providers and unsafe terminal states fail explicitly
+  without falling back into the ordinary queue.
+- `/status` reports whether steering is currently available and distinguishes
+  provider, side-conversation, stopping and live-terminal restrictions.
+- Reorganizes `/help` into task, session, side-conversation, diagnostics and
+  local collaboration sections, with complete command descriptions.
+- Includes the `1.11.2` in-place Broker compatibility and silently-dropped tmux
+  paste recovery fixes.
+
 ## 1.11.2
 
 - Restores `mixagents-broker@0.1.1` as an optional compatibility dependency so
