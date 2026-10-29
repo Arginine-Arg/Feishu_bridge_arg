@@ -11,6 +11,10 @@
 - A new process with a stale profile path containing
   `node_modules/mixagents-broker/dist/server.js` now automatically redirects to
   the vendored Broker with a visible notice.
+- A tmux client disconnect whose paste is acknowledged but silently dropped now
+  retries once through literal terminal keys only when the exact pre-submit
+  ready screen remains unchanged; normal drafts and rendered progress suppress
+  the retry to avoid duplicate tasks.
 - Doctor reports `vendorBroker=present|missing` and
   `legacyNpmBroker=present|missing`. On Node 20, npm correctly omits the
   legacy package because it declares Node >=22.19; the vendored Broker remains

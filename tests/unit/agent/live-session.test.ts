@@ -2623,9 +2623,12 @@ setInterval(() => {}, 1000);
     }
   }, 20_000);
 
-  tmuxAttachIt('survives an attached client disconnect without replacing the agent conversation', async () => {
+  tmuxAttachIt('survives an attached client disconnect and recovers a silently dropped paste', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-client-disconnect-test-'));
     const bin = join(dir, 'fake-tmux-client-disconnect-agent.mjs');
+    const wrapperDir = join(dir, 'bin');
+    const dropPasteMarker = join(dir, 'drop-next-paste');
+    const realTmux = spawnSync('sh', ['-c', 'command -v tmux'], { encoding: 'utf8' }).stdout.trim();
     const countFile = join(dir, 'starts.txt');
     const scopeKey = 'client-disconnect-scope';
     const signature = 'client-disconnect-signature';
@@ -2654,6 +2657,22 @@ setInterval(() => {}, 1000);
       'utf8',
     );
     await chmod(bin, 0o755);
+    expect(realTmux).toBeTruthy();
+    await mkdir(wrapperDir, { recursive: true });
+    await writeFile(
+      join(wrapperDir, 'tmux'),
+      `#!/bin/sh
+sub="$3"
+if [ "$sub" = "-f" ]; then sub="$4"; fi
+if [ "$sub" = "paste-buffer" ] && [ -f ${JSON.stringify(dropPasteMarker)} ]; then
+  mv ${JSON.stringify(dropPasteMarker)} ${JSON.stringify(`${dropPasteMarker}.used`)}
+  exit 0
+fi
+exec ${JSON.stringify(realTmux)} "$@"
+`,
+      'utf8',
+    );
+    await chmod(join(wrapperDir, 'tmux'), 0o755);
 
     // Reproduce a user tmux configuration that would otherwise destroy the
     // last session as soon as its only attached client disconnects.
@@ -2673,6 +2692,10 @@ setInterval(() => {}, 1000);
         command: process.execPath,
         args: [bin],
         cwd: dir,
+        env: {
+          ...process.env,
+          PATH: `${wrapperDir}:${process.env.PATH ?? ''}`,
+        },
         signature,
         tmuxScopeId: scopeKey,
         usePty: true,
@@ -2691,6 +2714,10 @@ setInterval(() => {}, 1000);
       expect(textOf(await collect(session.run('disconnect-first', 'first', dir).events))).toContain(
         'reply:first:turn=1',
       );
+      // The helper gets a successful tmux exit for the next paste but no bytes
+      // reach the pane, reproducing the hosted-runner failure without weakening
+      // the conversation/single-start assertions below.
+      await writeFile(dropPasteMarker, 'drop\n');
       expect(
         spawnSync('tmux', ['-S', socketPath, 'show-options', '-t', sessionName, 'destroy-unattached'], {
           encoding: 'utf8',

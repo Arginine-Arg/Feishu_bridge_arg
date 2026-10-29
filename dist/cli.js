@@ -8123,6 +8123,7 @@ var NORMAL_SUBMIT_RETRY_POLL_MS = 400;
 var NORMAL_SUBMIT_RETRY_MAX_ATTEMPTS = 5;
 var NORMAL_SUBMIT_RETRY_MAX_CHECKS = 12;
 var NORMAL_SUBMIT_RETRY_MAX_WAIT_MS = 12e4;
+var NORMAL_SILENT_PASTE_RETRY_DELAY_MS = 3e3;
 var TMUX_FINAL_SETTLE_MS = 2500;
 var TMUX_FINAL_SETTLE_MAX_MS = 15e3;
 var MAX_TURN_OUTPUT_CHARS = 12e4;
@@ -8714,6 +8715,8 @@ var LiveTerminalSession = class {
     let normalSubmitRetryAttempts = 0;
     let normalSubmitRetryChecks = 0;
     let normalSubmitRetryStartedAt = 0;
+    let silentPasteRetryAttempted = false;
+    let submitBaseline = "";
     let sideBodyAwaitingSubmit = false;
     let settlingTimer;
     let settling = false;
@@ -8918,6 +8921,19 @@ var LiveTerminalSession = class {
                 attempt: normalSubmitRetryAttempts
               });
               if (!done && !interruption.requested && !interruption.detached) writeTurn("\r");
+            }
+            normalSubmitRetryTimer = setTimeout(retryIfDraftAppears, NORMAL_SUBMIT_RETRY_POLL_MS);
+            return;
+          }
+          if (!sideMode && !silentPasteRetryAttempted && !sawNormalSubmitProgress && turnPrompt.trim() && submitBaseline.trim() && Date.now() - normalSubmitRetryStartedAt >= NORMAL_SILENT_PASTE_RETRY_DELAY_MS && terminal.trim() === submitBaseline.trim() && isLiveTerminalReady(terminal)) {
+            silentPasteRetryAttempted = true;
+            normalSubmitRetryAttempts += 1;
+            if (!concurrentSide) this.turnRetryCount += 1;
+            log.warn("agent-live", "normal-silent-paste-retry", {
+              promptPreview: previewLiveText(turnPrompt)
+            });
+            if (!done && !interruption.requested && !interruption.detached) {
+              this.write(`${turnPrompt}\r`, !concurrentSide, "keys");
             }
             normalSubmitRetryTimer = setTimeout(retryIfDraftAppears, NORMAL_SUBMIT_RETRY_POLL_MS);
             return;
@@ -9286,6 +9302,7 @@ var LiveTerminalSession = class {
                 writeTurn(turnPrompt);
                 markInput();
               } else {
+                submitBaseline = this.latestTerminalState();
                 writeTurn(`${turnPrompt}\r`);
                 markInput();
                 scheduleNormalSubmitRetry();

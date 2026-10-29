@@ -153,6 +153,12 @@ const NORMAL_SUBMIT_RETRY_POLL_MS = 400;
 const NORMAL_SUBMIT_RETRY_MAX_ATTEMPTS = 5;
 const NORMAL_SUBMIT_RETRY_MAX_CHECKS = 12;
 const NORMAL_SUBMIT_RETRY_MAX_WAIT_MS = 120_000;
+// A tmux paste can be acknowledged by the server yet never reach the pane
+// after an attached client disappears. Only retry the transport when the
+// terminal remains byte-for-byte on the exact ready screen captured before
+// submit; any rendered user text, busy state, or draft suppresses this path to
+// prevent duplicate task submission.
+const NORMAL_SILENT_PASTE_RETRY_DELAY_MS = 3_000;
 // tmux capture is a screen/history stream rather than an end-of-process
 // signal. Keep the listener alive for several capture ticks after the native
 // editor becomes ready so a final scrollback frame cannot arrive after the
@@ -924,6 +930,8 @@ export class LiveTerminalSession {
     let normalSubmitRetryAttempts = 0;
     let normalSubmitRetryChecks = 0;
     let normalSubmitRetryStartedAt = 0;
+    let silentPasteRetryAttempted = false;
+    let submitBaseline = '';
     let sideBodyAwaitingSubmit = false;
     let settlingTimer: ReturnType<typeof setTimeout> | undefined;
     let settling = false;
@@ -1180,6 +1188,29 @@ export class LiveTerminalSession {
                 attempt: normalSubmitRetryAttempts,
               });
               if (!done && !interruption.requested && !interruption.detached) writeTurn('\r');
+            }
+            normalSubmitRetryTimer = setTimeout(retryIfDraftAppears, NORMAL_SUBMIT_RETRY_POLL_MS);
+            return;
+          }
+          if (
+            !sideMode &&
+            !silentPasteRetryAttempted &&
+            !sawNormalSubmitProgress &&
+            turnPrompt.trim() &&
+            submitBaseline.trim() &&
+            Date.now() - normalSubmitRetryStartedAt >= NORMAL_SILENT_PASTE_RETRY_DELAY_MS &&
+            terminal.trim() === submitBaseline.trim() &&
+            isLiveTerminalReady(terminal)
+          ) {
+            silentPasteRetryAttempted = true;
+            normalSubmitRetryAttempts += 1;
+            if (!concurrentSide) this.turnRetryCount += 1;
+            log.warn('agent-live', 'normal-silent-paste-retry', {
+              promptPreview: previewLiveText(turnPrompt),
+            });
+            if (!done && !interruption.requested && !interruption.detached) {
+              // `keys` uses literal send-keys rather than the paste buffer.
+              this.write(`${turnPrompt}\r`, !concurrentSide, 'keys');
             }
             normalSubmitRetryTimer = setTimeout(retryIfDraftAppears, NORMAL_SUBMIT_RETRY_POLL_MS);
             return;
@@ -1666,6 +1697,7 @@ export class LiveTerminalSession {
               writeTurn(turnPrompt);
               markInput();
             } else {
+              submitBaseline = this.latestTerminalState();
               writeTurn(`${turnPrompt}\r`);
               markInput();
               scheduleNormalSubmitRetry();
