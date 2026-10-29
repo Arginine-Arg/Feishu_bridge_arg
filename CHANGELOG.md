@@ -15,6 +15,9 @@
   provider, side-conversation, stopping and live-terminal restrictions.
 - Reorganizes `/help` into task, session, side-conversation, diagnostics and
   local collaboration sections, with complete command descriptions.
+- Hardens tmux recovery after a client disconnect: a silently dropped paste
+  may retry literal keys and then one fresh bracketed paste, but only while the
+  exact pre-submit ready screen remains unchanged.
 - Includes the `1.11.2` in-place Broker compatibility and silently-dropped tmux
   paste recovery fixes.
 

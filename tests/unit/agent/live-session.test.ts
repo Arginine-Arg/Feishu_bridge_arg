@@ -2631,6 +2631,7 @@ setInterval(() => {}, 1000);
     const bin = join(dir, 'fake-tmux-client-disconnect-agent.mjs');
     const wrapperDir = join(dir, 'bin');
     const dropPasteMarker = join(dir, 'drop-next-paste');
+    const dropLiteralMarker = join(dir, 'drop-next-literal');
     const realTmux = spawnSync('sh', ['-c', 'command -v tmux'], { encoding: 'utf8' }).stdout.trim();
     const countFile = join(dir, 'starts.txt');
     const scopeKey = 'client-disconnect-scope';
@@ -2670,6 +2671,16 @@ if [ "$sub" = "-f" ]; then sub="$4"; fi
 if [ "$sub" = "paste-buffer" ] && [ -f ${JSON.stringify(dropPasteMarker)} ]; then
   mv ${JSON.stringify(dropPasteMarker)} ${JSON.stringify(`${dropPasteMarker}.used`)}
   exit 0
+fi
+if [ "$sub" = "send-keys" ] && [ -f ${JSON.stringify(dropLiteralMarker)} ]; then
+  saw_literal=0
+  for arg in "$@"; do
+    if [ "$arg" = "-l" ]; then saw_literal=1; break; fi
+  done
+  if [ "$saw_literal" = "1" ]; then
+    mv ${JSON.stringify(dropLiteralMarker)} ${JSON.stringify(`${dropLiteralMarker}.used`)}
+    exit 0
+  fi
 fi
 exec ${JSON.stringify(realTmux)} "$@"
 `,
@@ -2721,6 +2732,7 @@ exec ${JSON.stringify(realTmux)} "$@"
       // reach the pane, reproducing the hosted-runner failure without weakening
       // the conversation/single-start assertions below.
       await writeFile(dropPasteMarker, 'drop\n');
+      await writeFile(dropLiteralMarker, 'drop\n');
       expect(
         spawnSync('tmux', ['-S', socketPath, 'show-options', '-t', sessionName, 'destroy-unattached'], {
           encoding: 'utf8',

@@ -160,6 +160,8 @@ const NORMAL_SUBMIT_RETRY_MAX_WAIT_MS = 120_000;
 // submit; any rendered user text, busy state, or draft suppresses this path to
 // prevent duplicate task submission.
 const NORMAL_SILENT_PASTE_RETRY_DELAY_MS = 3_000;
+const NORMAL_SILENT_PASTE_RETRY_INTERVAL_MS = 1_200;
+const NORMAL_SILENT_PASTE_RETRY_MAX_ATTEMPTS = 2;
 // tmux capture is a screen/history stream rather than an end-of-process
 // signal. Keep the listener alive for several capture ticks after the native
 // editor becomes ready so a final scrollback frame cannot arrive after the
@@ -969,7 +971,8 @@ export class LiveTerminalSession {
     let normalSubmitRetryAttempts = 0;
     let normalSubmitRetryChecks = 0;
     let normalSubmitRetryStartedAt = 0;
-    let silentPasteRetryAttempted = false;
+    let silentPasteRetryAttempts = 0;
+    let lastSilentPasteRetryAt = 0;
     let submitBaseline = '';
     let sideBodyAwaitingSubmit = false;
     let settlingTimer: ReturnType<typeof setTimeout> | undefined;
@@ -1233,23 +1236,33 @@ export class LiveTerminalSession {
           }
           if (
             !sideMode &&
-            !silentPasteRetryAttempted &&
+            silentPasteRetryAttempts < NORMAL_SILENT_PASTE_RETRY_MAX_ATTEMPTS &&
             !sawNormalSubmitProgress &&
             turnPrompt.trim() &&
             submitBaseline.trim() &&
             Date.now() - normalSubmitRetryStartedAt >= NORMAL_SILENT_PASTE_RETRY_DELAY_MS &&
+            Date.now() - lastSilentPasteRetryAt >= NORMAL_SILENT_PASTE_RETRY_INTERVAL_MS &&
             terminal.trim() === submitBaseline.trim() &&
             isLiveTerminalReady(terminal)
           ) {
-            silentPasteRetryAttempted = true;
+            silentPasteRetryAttempts += 1;
+            lastSilentPasteRetryAt = Date.now();
             normalSubmitRetryAttempts += 1;
             if (!concurrentSide) this.turnRetryCount += 1;
             log.warn('agent-live', 'normal-silent-paste-retry', {
               promptPreview: previewLiveText(turnPrompt),
+              attempt: silentPasteRetryAttempts,
             });
             if (!done && !interruption.requested && !interruption.detached) {
-              // `keys` uses literal send-keys rather than the paste buffer.
-              this.write(`${turnPrompt}\r`, !concurrentSide, 'keys');
+              // Alternate literal keys and a fresh bracketed paste. A tmux
+              // client transition can make either transport transiently
+              // ineffective; both attempts still require the unchanged ready
+              // baseline above, so rendered work suppresses all retries.
+              this.write(
+                `${turnPrompt}\r`,
+                !concurrentSide,
+                silentPasteRetryAttempts === 1 ? 'keys' : 'text',
+              );
             }
             normalSubmitRetryTimer = setTimeout(retryIfDraftAppears, NORMAL_SUBMIT_RETRY_POLL_MS);
             return;

@@ -8124,6 +8124,8 @@ var NORMAL_SUBMIT_RETRY_MAX_ATTEMPTS = 5;
 var NORMAL_SUBMIT_RETRY_MAX_CHECKS = 12;
 var NORMAL_SUBMIT_RETRY_MAX_WAIT_MS = 12e4;
 var NORMAL_SILENT_PASTE_RETRY_DELAY_MS = 3e3;
+var NORMAL_SILENT_PASTE_RETRY_INTERVAL_MS = 1200;
+var NORMAL_SILENT_PASTE_RETRY_MAX_ATTEMPTS = 2;
 var TMUX_FINAL_SETTLE_MS = 2500;
 var TMUX_FINAL_SETTLE_MAX_MS = 15e3;
 var MAX_TURN_OUTPUT_CHARS = 12e4;
@@ -8736,7 +8738,8 @@ var LiveTerminalSession = class {
     let normalSubmitRetryAttempts = 0;
     let normalSubmitRetryChecks = 0;
     let normalSubmitRetryStartedAt = 0;
-    let silentPasteRetryAttempted = false;
+    let silentPasteRetryAttempts = 0;
+    let lastSilentPasteRetryAt = 0;
     let submitBaseline = "";
     let sideBodyAwaitingSubmit = false;
     let settlingTimer;
@@ -8946,15 +8949,21 @@ var LiveTerminalSession = class {
             normalSubmitRetryTimer = setTimeout(retryIfDraftAppears, NORMAL_SUBMIT_RETRY_POLL_MS);
             return;
           }
-          if (!sideMode && !silentPasteRetryAttempted && !sawNormalSubmitProgress && turnPrompt.trim() && submitBaseline.trim() && Date.now() - normalSubmitRetryStartedAt >= NORMAL_SILENT_PASTE_RETRY_DELAY_MS && terminal.trim() === submitBaseline.trim() && isLiveTerminalReady(terminal)) {
-            silentPasteRetryAttempted = true;
+          if (!sideMode && silentPasteRetryAttempts < NORMAL_SILENT_PASTE_RETRY_MAX_ATTEMPTS && !sawNormalSubmitProgress && turnPrompt.trim() && submitBaseline.trim() && Date.now() - normalSubmitRetryStartedAt >= NORMAL_SILENT_PASTE_RETRY_DELAY_MS && Date.now() - lastSilentPasteRetryAt >= NORMAL_SILENT_PASTE_RETRY_INTERVAL_MS && terminal.trim() === submitBaseline.trim() && isLiveTerminalReady(terminal)) {
+            silentPasteRetryAttempts += 1;
+            lastSilentPasteRetryAt = Date.now();
             normalSubmitRetryAttempts += 1;
             if (!concurrentSide) this.turnRetryCount += 1;
             log.warn("agent-live", "normal-silent-paste-retry", {
-              promptPreview: previewLiveText(turnPrompt)
+              promptPreview: previewLiveText(turnPrompt),
+              attempt: silentPasteRetryAttempts
             });
             if (!done && !interruption.requested && !interruption.detached) {
-              this.write(`${turnPrompt}\r`, !concurrentSide, "keys");
+              this.write(
+                `${turnPrompt}\r`,
+                !concurrentSide,
+                silentPasteRetryAttempts === 1 ? "keys" : "text"
+              );
             }
             normalSubmitRetryTimer = setTimeout(retryIfDraftAppears, NORMAL_SUBMIT_RETRY_POLL_MS);
             return;
