@@ -2681,7 +2681,11 @@ setInterval(() => {}, 1000);
         // synthetic idle watchdog closes this deliberately tiny fixture.
         idleMs: 1_500,
         outputFlushMs: 30,
-        startupTimeoutMs: 4_000,
+        // Match the production no-output budget. A 4s override can expire
+        // while a heavily contended CI runner is still scheduling the first
+        // helper capture after submit, which falsely turns this into a silent
+        // done before the fake agent has consumed turn 2.
+        startupTimeoutMs: 15_000,
       };
       const session = pool.getOrCreate(scopeKey, sessionOptions);
       expect(textOf(await collect(session.run('disconnect-first', 'first', dir).events))).toContain(
@@ -2718,16 +2722,22 @@ setInterval(() => {}, 1000);
       const secondSession = pool.getOrCreate(scopeKey, sessionOptions);
       const secondEvents = await collect(secondSession.run('disconnect-second', 'second', dir).events);
       const finalScreen = spawnSync('tmux', ['-S', socketPath, 'capture-pane', '-p', '-t', sessionName], { encoding: 'utf8' }).stdout;
-      expect(textOf(secondEvents), JSON.stringify({ secondEvents, finalScreen })).toBe(
+      const starts = await readFile(countFile, 'utf8');
+      expect(textOf(secondEvents), JSON.stringify({
+        secondEvents,
+        finalScreen,
+        starts,
+        diagnostics: pool.diagnostics(scopeKey),
+      })).toBe(
         '• reply:second:turn=2\n',
       );
-      expect(await readFile(countFile, 'utf8')).toBe('start\n');
+      expect(starts).toBe('start\n');
     } finally {
       if (attached) terminateAttachClient(attached, 'SIGTERM');
       await pool.closeAll();
       spawnSync('tmux', ['-S', socketPath, 'kill-server'], { stdio: 'ignore' });
     }
-  }, 30_000);
+  }, 45_000);
 
   tmuxIt('keeps native Ctrl-C unbound and adopts a selected resume while the old pane lives', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-ctrl-c-test-'));
