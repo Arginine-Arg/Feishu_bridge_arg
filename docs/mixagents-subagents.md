@@ -122,6 +122,13 @@ Git repository contains upstream source, tests and the change description.
 An explicit non-legacy profile command or `ARG_BRIDGE_MIXAGENTS_MCP` still takes
 priority.
 
+Version 1.11.2 also keeps `mixagents-broker@0.1.1` as an optional compatibility
+dependency. New processes never prefer it for generated cc-switch runtimes; it
+exists so a pre-1.11 process that is still running can resolve its old
+`node_modules/mixagents-broker/dist/server.js` path after an in-place upgrade.
+Current processes also map a stale profile path to the vendored entry. Doctor
+reports both `vendorBroker` and `legacyNpmBroker` presence.
+
 The controller verifies the six baseline tools before use:
 
 - `routes`

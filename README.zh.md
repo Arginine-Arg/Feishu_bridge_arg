@@ -4,7 +4,7 @@
 
 [English README](./README.md)
 
-`1.11.1` 把 `sideTimeoutMs` 改为软等待提示，并在每个 `workerTimeoutMs` 等待窗口结束后自动续等，长 `/btw` 会继续在原 run 中完成，不需要重新提问。`/btw result` 作为 Bridge 中断、旧版 timeout 状态等异常场景的恢复入口，不会重放任务；只有 `/btw out` 才明确中断并丢弃。`1.11.0` 内置可审计源码的 MixAgents Broker fork，并通过 `events-v1` 实时转发文本 delta 和安全工具生命周期。
+`1.11.2` 修复从 pre-1.11 进程直接升级时的 Broker 路径断裂：恢复 `mixagents-broker@0.1.1` npm 入口作为兼容依赖，新进程仍优先使用 vendored `events-v1` Broker；配置文件中的陈旧 node_modules 路径会自动映射到 vendor，doctor 同时显示两个入口。`1.11.1` 让 `/btw` 自动跨等待窗口续等到完成或 `/btw out`。
 
 `1.6.7` 引入 provider-aware Codex resume，`1.7.0` 增加 idle 边界重绑。`1.9.1` 收紧重连语义：附着已有 native 或 structured thread 时，保留该 thread 记录的 provider/model，不会因为 cc-switch 后来切换了 route 而静默改路。
 
@@ -60,7 +60,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.11.1
+sh /tmp/install-arg-bridge.sh --version 1.11.2
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.11.1"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.11.2"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.11.1`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.11.2`。
 
 ### 4. Node 或 npm 全局目录错误
 

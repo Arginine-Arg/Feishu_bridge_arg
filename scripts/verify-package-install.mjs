@@ -2,6 +2,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { createRequire } from 'node:module';
 import {
   lstat,
   mkdir,
@@ -53,6 +54,9 @@ try {
   );
   const installedPackageJson = JSON.parse(
     await readFile(join(installedRoot, 'package.json'), 'utf8'),
+  );
+  const installedRequire = createRequire(
+    pathToFileURL(join(installedRoot, 'package.json')),
   );
   if (installedPackageJson.version !== packageJson.version) {
     throw new Error(
@@ -109,6 +113,12 @@ try {
     ),
     readFile(join(installedRoot, 'THIRD_PARTY_MIXAGENTS_NOTICE'), 'utf8'),
   ]);
+  const legacyBrokerServer = installedRequire.resolve(
+    'mixagents-broker/dist/server.js',
+  );
+  if (!(await readFile(legacyBrokerServer)).length) {
+    throw new Error('installed legacy MixAgents Broker entry is empty');
+  }
   const installedModule = await import(
     pathToFileURL(join(installedRoot, 'dist', 'index.js')).href
   );

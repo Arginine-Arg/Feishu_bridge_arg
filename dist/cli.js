@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.11.1",
+  version: "1.11.2",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -102,7 +102,10 @@ var package_default = {
     "channel",
     "bridge"
   ],
-  license: "MIT"
+  license: "MIT",
+  optionalDependencies: {
+    "mixagents-broker": "0.1.1"
+  }
 };
 
 // src/platform/spawn.ts
@@ -14390,6 +14393,7 @@ function errorMessage4(error) {
 
 // src/agent/subagents/mixagents.ts
 import { existsSync as existsSync6 } from "fs";
+import { createRequire as createRequire2 } from "module";
 import { basename as basename5, isAbsolute as isAbsolute5 } from "path";
 import { fileURLToPath as fileURLToPath2 } from "url";
 
@@ -14628,6 +14632,7 @@ var REQUIRED_TOOLS = [
 ];
 var WAIT_REQUEST_MS = 12e4;
 var DEFAULT_TOTAL_WAIT_MS = 15 * 6e4;
+var require3 = createRequire2(import.meta.url);
 var MixAgentsBrokerBackend = class {
   constructor(config, env = process.env, runtime, options = {}) {
     this.config = config;
@@ -14636,7 +14641,13 @@ var MixAgentsBrokerBackend = class {
     this.env = env;
     const configuredLaunch = resolveMixAgentsLaunchConfig(config, env);
     const bundledLaunch = runtime ? resolveBundledMixAgentsLaunchConfig() : void 0;
-    const launch = configuredLaunch && bundledLaunch && isGeneratedRuntimeBrokerLaunch(configuredLaunch) && !sameLaunch(configuredLaunch, bundledLaunch) ? bundledLaunch : configuredLaunch;
+    const replaceConfiguredLaunch = Boolean(
+      configuredLaunch && bundledLaunch && !sameLaunch(configuredLaunch, bundledLaunch) && (isGeneratedRuntimeBrokerLaunch(configuredLaunch) || isMissingKnownLegacyBrokerLaunch(configuredLaunch))
+    );
+    const launch = replaceConfiguredLaunch ? bundledLaunch : configuredLaunch;
+    if (replaceConfiguredLaunch && isMissingKnownLegacyBrokerLaunch(configuredLaunch)) {
+      this.launchReplacementNotice = "\u914D\u7F6E\u6587\u4EF6\u4E2D\u7684\u65E7 MixAgents npm Broker \u8DEF\u5F84\u5DF2\u5931\u6548\uFF0C\u5DF2\u81EA\u52A8\u6539\u7528\u968F\u5305 vendored Broker\uFF1Bprovider/model/route \u5747\u672A\u6539\u53D8\u3002";
+    }
     if (!launch) {
       throw new SubagentUnavailableError(
         "mixagents-not-configured",
@@ -14655,6 +14666,7 @@ var MixAgentsBrokerBackend = class {
   env;
   timeoutMs;
   runtimeRecoveryNotice;
+  launchReplacementNotice;
   supportsProgressEvents = false;
   async listRoutes(signal) {
     if (signal.aborted) throw abortError2();
@@ -14684,7 +14696,7 @@ var MixAgentsBrokerBackend = class {
     }
   }
   get recoveryNotice() {
-    return this.runtimeRecoveryNotice;
+    return this.runtimeRecoveryNotice ?? this.launchReplacementNotice;
   }
   async listRoutesOnce(signal) {
     const client = await this.ensureClient();
@@ -15121,10 +15133,23 @@ function resolveBundledMixAgentsLaunchConfig() {
     args: [server]
   } : void 0;
 }
+function resolveLegacyInstalledMixAgentsLaunchConfig() {
+  try {
+    const server = require3.resolve("mixagents-broker/dist/server.js");
+    return existsSync6(server) ? { command: process.execPath, args: [server] } : void 0;
+  } catch {
+    return void 0;
+  }
+}
 function isGeneratedRuntimeBrokerLaunch(launch) {
   const candidates = [launch.command, ...launch.args].map((value) => basename5(value).toLowerCase()).filter(Boolean);
   return candidates.some(
     (value) => /^(?:mixagents-broker(?:-mcp)?|arg-bridge-mixagents-(?:mcp|broker(?:-mcp)?))(?:\.(?:mjs|cjs|js|cmd|exe))?$/u.test(value)
+  );
+}
+function isMissingKnownLegacyBrokerLaunch(launch) {
+  return [launch.command, ...launch.args].some(
+    (value) => isAbsolute5(value) && /[\\/]node_modules[\\/]mixagents-broker[\\/]dist[\\/]server\.js$/u.test(value) && !existsSync6(value)
   );
 }
 function agentFromSnapshot(value, fallback) {
@@ -35757,6 +35782,11 @@ async function collectSubagentDiagnostics(input) {
       reason: "no generated cc-switch runtime has been inspected"
     },
     launchConfigured: Boolean(resolveMixAgentsLaunchConfig(input.config, env)),
+    launchCompatibility: {
+      vendor: resolveBundledMixAgentsLaunchConfig() ? "present" : "missing",
+      legacyNpm: resolveLegacyInstalledMixAgentsLaunchConfig() ? "present" : "missing",
+      purpose: "new-runtime-plus-running-process-compatibility"
+    },
     progress: { mode: "unknown" },
     toolContract: "unknown",
     mcpStart: "not-configured",
@@ -36664,7 +36694,7 @@ function formatSnapshot(snapshot) {
     ).join(" | ") : "(none)"}`,
     `main running with legacy/unknown identity=${snapshot.mainProvider.runningUnknown}`,
     `provider switch=${snapshot.mainProvider.pendingSwitch}; safe point=${snapshot.mainProvider.safeSwitchPoint}`,
-    `MixAgents mode=${snapshot.subagents.config.mode} routeMode=${snapshot.subagents.config.routeMode} provider=${snapshot.subagents.config.ccSwitchProviderId ?? "(follow-current)"} MCP=${diagnostics.mcp.status} version=${diagnostics.packageVersion ?? "(unknown)"} progress=${diagnostics.progress.mode}`,
+    `MixAgents mode=${snapshot.subagents.config.mode} routeMode=${snapshot.subagents.config.routeMode} provider=${snapshot.subagents.config.ccSwitchProviderId ?? "(follow-current)"} MCP=${diagnostics.mcp.status} version=${diagnostics.packageVersion ?? "(unknown)"} progress=${diagnostics.progress.mode} vendorBroker=${diagnostics.launchCompatibility.vendor} legacyNpmBroker=${diagnostics.launchCompatibility.legacyNpm}`,
     `Broker tools=${diagnostics.modelTools.brokerWired ? "wired" : "degraded"} namespace=${diagnostics.modelTools.namespace} native=${diagnostics.modelTools.nativeToolPolicy} maxWorkers=${diagnostics.limits.maxConcurrentWorkers} workerTimeoutMs=${diagnostics.limits.workerTimeoutMs} sideTimeoutMs=${diagnostics.limits.sideTimeoutMs} sideReasoning=${diagnostics.limits.sideReasoningEffort} writeWorkers=${diagnostics.limits.allowWriteWorkers}`,
     `web search mode=${diagnostics.webSearch.mode} providerSupported=${diagnostics.webSearch.providerSupported ?? "unknown"} effective=${diagnostics.webSearch.effective} reason=${diagnostics.webSearch.reason}`,
     `Broker tools degraded=${diagnostics.modelTools.degradedReason ?? "(none)"}`,
@@ -36857,6 +36887,11 @@ async function loadDoctorReport(options = {}) {
     message: diagnostics.credentials.mode === "mixagents-managed" ? `MixAgents managed\uFF1Bbridge \u53EA\u4F20 providerRef=${diagnostics.credentials.providerReference ?? "(missing)"}` : diagnostics.credentials.mode === "cc-switch-auto" ? `cc-switch auto\uFF1Bprovider=${diagnostics.credentials.providerReference ?? "(unknown)"} source=${diagnostics.credentials.sourcePath ?? "(unknown)"} fingerprint=${diagnostics.credentials.fingerprint ?? "(none)"} missing=${diagnostics.credentials.missingEnvironment.join(",") || "none"}` : `inherit-env\uFF1Bpresent/missing only: ${diagnostics.credentials.missingEnvironment.join(",") || "none missing"}`
   });
   checks.push({
+    id: "mixagents-launch-compatibility",
+    status: diagnostics.launchCompatibility.vendor === "missing" ? "fail" : diagnostics.launchCompatibility.legacyNpm === "missing" ? "warn" : "pass",
+    message: `vendor=${diagnostics.launchCompatibility.vendor} legacyNpm=${diagnostics.launchCompatibility.legacyNpm}` + (diagnostics.launchCompatibility.legacyNpm === "missing" ? "\uFF1B\u65B0\u8FDB\u7A0B\u53EF\u7528\uFF0C\u4F46\u5347\u7EA7\u524D\u4ECD\u5728\u8FD0\u884C\u4E14\u4F9D\u8D56\u65E7 node_modules \u8DEF\u5F84\u7684\u8FDB\u7A0B\u9700\u8981\u91CD\u542F" : "")
+  });
+  checks.push({
     id: "web-search",
     status: diagnostics.webSearch.mode === "native" && diagnostics.webSearch.providerSupported !== true ? "warn" : "pass",
     message: `mode=${diagnostics.webSearch.mode} providerSupported=${diagnostics.webSearch.providerSupported ?? "unknown"} effective=${diagnostics.webSearch.effective} reason=${diagnostics.webSearch.reason}`
@@ -36943,6 +36978,7 @@ async function loadDoctorReport(options = {}) {
       mcpStatus: diagnostics.mcp.status,
       packageVersion: diagnostics.packageVersion ?? null,
       launchConfigured: diagnostics.launchConfigured,
+      launchCompatibility: diagnostics.launchCompatibility,
       mcpStart: diagnostics.mcpStart,
       toolContract: diagnostics.toolContract,
       credentials: diagnostics.credentials,

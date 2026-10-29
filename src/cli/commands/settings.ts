@@ -842,7 +842,9 @@ function formatSnapshot(snapshot: SettingsSnapshot): string {
     `MixAgents mode=${snapshot.subagents.config.mode} routeMode=${snapshot.subagents.config.routeMode}` +
       ` provider=${snapshot.subagents.config.ccSwitchProviderId ?? '(follow-current)'}` +
       ` MCP=${diagnostics.mcp.status} version=${diagnostics.packageVersion ?? '(unknown)'}` +
-      ` progress=${diagnostics.progress.mode}`,
+      ` progress=${diagnostics.progress.mode}` +
+      ` vendorBroker=${diagnostics.launchCompatibility.vendor}` +
+      ` legacyNpmBroker=${diagnostics.launchCompatibility.legacyNpm}`,
     `Broker tools=${diagnostics.modelTools.brokerWired ? 'wired' : 'degraded'}` +
       ` namespace=${diagnostics.modelTools.namespace}` +
       ` native=${diagnostics.modelTools.nativeToolPolicy}` +

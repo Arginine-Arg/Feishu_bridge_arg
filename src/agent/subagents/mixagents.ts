@@ -1,4 +1,5 @@
 import { existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { basename, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { SubagentConfig, SubagentMixAgentsConfig } from '../../config/profile-schema';
@@ -25,6 +26,7 @@ const REQUIRED_TOOLS = [
 
 const WAIT_REQUEST_MS = 120_000;
 const DEFAULT_TOTAL_WAIT_MS = 15 * 60_000;
+const require = createRequire(import.meta.url);
 
 export interface MixAgentsLaunchConfig {
   command: string;
@@ -63,6 +65,7 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
   private readonly env: NodeJS.ProcessEnv;
   private readonly timeoutMs: number;
   private runtimeRecoveryNotice?: string;
+  private launchReplacementNotice?: string;
   private supportsProgressEvents = false;
 
   constructor(
@@ -85,12 +88,20 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
     // a different broker config, so a generated cc-switch runtime should use
     // the bridge-bundled Broker directly. Custom/non-wrapper MCP commands
     // remain authoritative.
-    const launch = configuredLaunch &&
+    const replaceConfiguredLaunch = Boolean(
+      configuredLaunch &&
       bundledLaunch &&
-      isGeneratedRuntimeBrokerLaunch(configuredLaunch) &&
-      !sameLaunch(configuredLaunch, bundledLaunch)
-      ? bundledLaunch
-      : configuredLaunch;
+      !sameLaunch(configuredLaunch, bundledLaunch) &&
+      (
+        isGeneratedRuntimeBrokerLaunch(configuredLaunch) ||
+        isMissingKnownLegacyBrokerLaunch(configuredLaunch)
+      ),
+    );
+    const launch = replaceConfiguredLaunch ? bundledLaunch : configuredLaunch;
+    if (replaceConfiguredLaunch && isMissingKnownLegacyBrokerLaunch(configuredLaunch!)) {
+      this.launchReplacementNotice =
+        '配置文件中的旧 MixAgents npm Broker 路径已失效，已自动改用随包 vendored Broker；provider/model/route 均未改变。';
+    }
     if (!launch) {
       throw new SubagentUnavailableError(
         'mixagents-not-configured',
@@ -141,7 +152,7 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
   }
 
   get recoveryNotice(): string | undefined {
-    return this.runtimeRecoveryNotice;
+    return this.runtimeRecoveryNotice ?? this.launchReplacementNotice;
   }
 
   private async listRoutesOnce(signal: AbortSignal): Promise<SubagentRoute[]> {
@@ -692,12 +703,32 @@ export function resolveBundledMixAgentsLaunchConfig(): MixAgentsLaunchConfig | u
     : undefined;
 }
 
+/** Legacy npm path retained for pre-1.11 long-running processes. */
+export function resolveLegacyInstalledMixAgentsLaunchConfig(): MixAgentsLaunchConfig | undefined {
+  try {
+    const server = require.resolve('mixagents-broker/dist/server.js');
+    return existsSync(server)
+      ? { command: process.execPath, args: [server] }
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function isGeneratedRuntimeBrokerLaunch(launch: MixAgentsLaunchConfig): boolean {
   const candidates = [launch.command, ...launch.args]
     .map(value => basename(value).toLowerCase())
     .filter(Boolean);
   return candidates.some(value =>
     /^(?:mixagents-broker(?:-mcp)?|arg-bridge-mixagents-(?:mcp|broker(?:-mcp)?))(?:\.(?:mjs|cjs|js|cmd|exe))?$/u.test(value)
+  );
+}
+
+function isMissingKnownLegacyBrokerLaunch(launch: MixAgentsLaunchConfig): boolean {
+  return [launch.command, ...launch.args].some(value =>
+    isAbsolute(value) &&
+    /[\\/]node_modules[\\/]mixagents-broker[\\/]dist[\\/]server\.js$/u.test(value) &&
+    !existsSync(value)
   );
 }
 

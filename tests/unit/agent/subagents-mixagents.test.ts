@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   mergeRuntimeRoutes,
   MixAgentsBrokerBackend,
+  resolveLegacyInstalledMixAgentsLaunchConfig,
   resolveMixAgentsLaunchConfig,
 } from '../../../src/agent/subagents/mixagents';
 import { resolveSubagents } from '../../../src/agent/subagents/registry';
@@ -72,6 +73,52 @@ describe('MixAgentsBrokerBackend', () => {
     });
     expect(launch?.args[0]).toContain('mixagents-broker');
     expect(launch?.args[0]).toMatch(/[\\/]dist[\\/]server\.js$/u);
+  });
+
+  it('retains the legacy npm entry for pre-1.11 running processes', () => {
+    const launch = resolveLegacyInstalledMixAgentsLaunchConfig();
+    expect(launch).toMatchObject({
+      command: process.execPath,
+      args: [expect.stringMatching(/[\\/]mixagents-broker[\\/]dist[\\/]server\.js$/u)],
+    });
+  });
+
+  it('maps a stale pre-1.11 profile path to the vendored Broker', async () => {
+    const { root } = await setup();
+    const stale = join(
+      root,
+      'missing-install',
+      'node_modules',
+      'mixagents-broker',
+      'dist',
+      'server.js',
+    );
+    const backend = new MixAgentsBrokerBackend({
+      ...DEFAULT_SUBAGENT_CONFIG,
+      mixagents: {
+        mcpCommand: process.execPath,
+        mcpArgs: [stale],
+      },
+    }, process.env, {
+      brokerConfigPath: '/tmp/generated-broker.json',
+      credentials: {},
+      fingerprint: 'runtime-fingerprint',
+      route: {
+        id: 'generated-route',
+        provider: 'custom',
+        model: 'model-a',
+        maxAccess: 'read-only' as const,
+        available: true,
+        missingEnvironment: [],
+        tags: ['cc-switch'],
+      },
+    });
+
+    expect(backend.launchConfig.command).toBe(process.execPath);
+    expect(backend.launchConfig.args[0]).not.toBe(stale);
+    expect(backend.launchConfig.args[0]).toMatch(
+      /[\\/]vendor[\\/]mixagents-broker[\\/]/u,
+    );
   });
 
   it('uses the bundled Broker directly for generated cc-switch runtimes', () => {

@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.11.2
+
+- Restores `mixagents-broker@0.1.1` as an optional compatibility dependency so
+  pre-1.11 processes that are still running can resolve the old
+  `node_modules/mixagents-broker/dist/server.js` path across an in-place
+  ArgBridge upgrade.
+- New processes continue to prefer the vendored `events-v1` Broker. The npm
+  package is retained only as a module-resolution shim for running processes.
+- A new process with a stale profile path containing
+  `node_modules/mixagents-broker/dist/server.js` now automatically redirects to
+  the vendored Broker with a visible notice.
+- Doctor reports `vendorBroker=present|missing` and
+  `legacyNpmBroker=present|missing`, and warns when the legacy entry is absent.
+
 ## 1.11.1
 
 - `sideTimeoutMs` is now a soft waiting notice instead of a hard cancellation.

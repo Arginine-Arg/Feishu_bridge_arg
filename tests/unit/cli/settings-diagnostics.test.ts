@@ -112,6 +112,11 @@ describe('arg-bridge settings and doctor', () => {
       mode: 'events-v1',
       tool: 'read_agent_events',
     });
+    expect(first.subagents.diagnostics.launchCompatibility).toMatchObject({
+      vendor: 'present',
+      legacyNpm: 'present',
+      purpose: 'new-runtime-plus-running-process-compatibility',
+    });
     expect(first.subagents.diagnostics.readRoutes).toEqual(expect.arrayContaining([
       expect.objectContaining({
         id: 'read-a',
@@ -141,6 +146,8 @@ describe('arg-bridge settings and doctor', () => {
     expect(output).toContain('MIXAGENTS_TEST_SECRET');
     expect(output).toContain('sideTimeoutMs=90000');
     expect(output).toContain('progress=events-v1');
+    expect(output).toContain('vendorBroker=present');
+    expect(output).toContain('legacyNpmBroker=present');
     expect(output).toContain('web search mode=auto');
   });
 

@@ -29,6 +29,7 @@ export interface DoctorReport {
     mcpStatus: string;
     packageVersion: string | null;
     launchConfigured: boolean;
+    launchCompatibility: SettingsSnapshot['subagents']['diagnostics']['launchCompatibility'];
     mcpStart: string;
     toolContract: string;
     credentials: {
@@ -267,6 +268,20 @@ export async function loadDoctorReport(options: DoctorOptionsWithProbe = {}): Pr
           }`,
   });
   checks.push({
+    id: 'mixagents-launch-compatibility',
+    status: diagnostics.launchCompatibility.vendor === 'missing'
+      ? 'fail'
+      : diagnostics.launchCompatibility.legacyNpm === 'missing'
+        ? 'warn'
+        : 'pass',
+    message:
+      `vendor=${diagnostics.launchCompatibility.vendor} ` +
+      `legacyNpm=${diagnostics.launchCompatibility.legacyNpm}` +
+      (diagnostics.launchCompatibility.legacyNpm === 'missing'
+        ? '；新进程可用，但升级前仍在运行且依赖旧 node_modules 路径的进程需要重启'
+        : ''),
+  });
+  checks.push({
     id: 'web-search',
     status: diagnostics.webSearch.mode === 'native' &&
         diagnostics.webSearch.providerSupported !== true
@@ -409,6 +424,7 @@ export async function loadDoctorReport(options: DoctorOptionsWithProbe = {}): Pr
       mcpStatus: diagnostics.mcp.status,
       packageVersion: diagnostics.packageVersion ?? null,
       launchConfigured: diagnostics.launchConfigured,
+      launchCompatibility: diagnostics.launchCompatibility,
       mcpStart: diagnostics.mcpStart,
       toolContract: diagnostics.toolContract,
       credentials: diagnostics.credentials,

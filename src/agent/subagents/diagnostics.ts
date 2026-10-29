@@ -18,6 +18,8 @@ import { redactSecrets } from './mcp-client';
 import {
   mergeRuntimeRoutes,
   MixAgentsBrokerBackend,
+  resolveBundledMixAgentsLaunchConfig,
+  resolveLegacyInstalledMixAgentsLaunchConfig,
   resolveMixAgentsLaunchConfig,
 } from './mixagents';
 import { selectSubagentRoute } from './registry';
@@ -53,6 +55,11 @@ export interface SubagentDiagnostics {
   };
   launchConfigured: boolean;
   launchCommand?: string;
+  launchCompatibility: {
+    vendor: 'present' | 'missing';
+    legacyNpm: 'present' | 'missing';
+    purpose: 'new-runtime-plus-running-process-compatibility';
+  };
   packageVersion?: string;
   progress: {
     mode: 'events-v1' | 'heartbeat-only' | 'unknown';
@@ -224,6 +231,11 @@ export async function collectSubagentDiagnostics(input: {
       reason: 'no generated cc-switch runtime has been inspected',
     },
     launchConfigured: Boolean(resolveMixAgentsLaunchConfig(input.config, env)),
+    launchCompatibility: {
+      vendor: resolveBundledMixAgentsLaunchConfig() ? 'present' : 'missing',
+      legacyNpm: resolveLegacyInstalledMixAgentsLaunchConfig() ? 'present' : 'missing',
+      purpose: 'new-runtime-plus-running-process-compatibility',
+    },
     progress: { mode: 'unknown' },
     toolContract: 'unknown',
     mcpStart: 'not-configured',
