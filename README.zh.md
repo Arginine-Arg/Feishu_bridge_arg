@@ -4,7 +4,7 @@
 
 [English README](./README.md)
 
-`1.12.0` 把主任务运行中的消息投递改成显式控制：普通消息默认排队到下一轮，只有 `/steer <正文>` 会插入当前 main turn，不中断 goal，也不创建第二轮。`/status` 会显示 provider、side conversation 和 live 终端当前是否允许 steer；`/help` 已按任务、会话、side、诊断和本机协作重新分组。该版本同时包含 `1.11.2` 的 Broker 升级兼容与 tmux paste 丢失恢复。
+`1.13.0` 新增旧 Codex thread 的 provider-generation 迁移：`--adopt <thread-id> --follow-current-provider` 只保留有界 user/assistant 文本历史，目标 Bridge thread 使用当前 cc-switch 选中的 provider、model 和凭据 fingerprint。旧 thread 只读；目标运行在独立的 provider-specific App Server；`thread/start` 会显式传入并校验 `modelProvider`/`model`。`1.12.0` 引入显式 `/steer <正文>`，普通任务中消息默认排队到下一轮。
 
 `1.6.7` 引入 provider-aware Codex resume，`1.7.0` 增加 idle 边界重绑。`1.9.1` 收紧重连语义：附着已有 native 或 structured thread 时，保留该 thread 记录的 provider/model，不会因为 cc-switch 后来切换了 route 而静默改路。
 
@@ -60,7 +60,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.12.0
+sh /tmp/install-arg-bridge.sh --version 1.13.0
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.12.0"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.13.0"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.12.0`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.13.0`。
 
 ### 4. Node 或 npm 全局目录错误
 
@@ -228,6 +228,7 @@ arg-bridge migrate-local-poc --profile codex --apply
 arg-bridge native [thread] [--profile <name>]
 arg-bridge native --bridge [--profile <name>]
 arg-bridge native --adopt <thread-id> [--profile <name>]
+arg-bridge native --adopt <thread-id> --follow-current-provider [--profile <name>]
 arg-bridge codex [thread] [--profile <name>]
 arg-bridge settings --profile codex [--json]
 arg-bridge doctor --profile codex --json
@@ -280,6 +281,7 @@ codex plugin add mixagents-broker@mixagents
 ```bash
 arg-bridge native --bridge
 arg-bridge native --adopt <old-thread-id>
+arg-bridge native --adopt <old-thread-id> --follow-current-provider
 ```
 
 `--bridge` 会启动一个由 Bridge 托管的 native TUI：Codex 父 thread 获得
@@ -294,6 +296,14 @@ resume 前会定位真实 writer owner。新建 thread 时 `--yolo` 与
 thread 的用户/助手文本，有限截断并脱敏后，创建新 Bridge-managed thread 注入
 历史，再附着 TUI；命令会明确打印旧 ID 和新 ID。详见
 [native bridge](./docs/native-bridge.md)。
+
+普通 `--adopt` 会保留源 thread 的 provider/model。加
+`--follow-current-provider` 后，只保留有界的 user/assistant 文本历史，
+目标 thread 使用当前 cc-switch 解析出的 provider、model 和凭据 fingerprint。
+该模式只通过旧 thread 的真实 owner/idle 边界读取历史，另起独立的
+provider-specific App Server，并把 `modelProvider`、`model` 显式传给
+`thread/start`。provider、model 或凭据任一无法解析时会在创建目标 thread
+前 fail closed。重复执行时按 provider/model/credential generation 幂等复用。
 
 ### 长任务中途消息
 

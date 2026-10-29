@@ -49,6 +49,7 @@ export async function runNative(
     profile?: string;
     bridge?: boolean;
     adopt?: string;
+    followCurrentProvider?: boolean;
   } & CodexPermissionCliOptions,
 ): Promise<void> {
   const rootPaths = resolveAppPaths();
@@ -68,6 +69,9 @@ export async function runNative(
   const binary = config.codex?.binaryPath ?? 'codex';
   const codexHome = config.codex?.codexHome
     ?? (config.codex?.inheritCodexHome === false ? `${paths.profileDir}/codex-home` : undefined);
+  if (opts.followCurrentProvider && !opts.adopt) {
+    throw new Error('--follow-current-provider 只能与 --adopt <thread-id> 一起使用');
+  }
   if (opts.bridge || opts.adopt) {
     if (config.agentKind !== 'codex') {
       throw new Error('arg-bridge native --bridge/--adopt 只支持 Codex profile');
@@ -88,6 +92,7 @@ export async function runNative(
       approvalPolicy: permissions.approvalPolicy,
       ...(thread ? { threadId: thread } : {}),
       ...(opts.adopt ? { adoptThreadId: opts.adopt } : {}),
+      ...(opts.followCurrentProvider ? { followCurrentProvider: true } : {}),
     });
     try {
       if (bridge.mode === 'adopted') {
@@ -98,6 +103,13 @@ export async function runNative(
         if (!bridge.reusedAdoption) {
           console.log(
             'Codex 0.164 thread/resume does not accept dynamicTools; the old text history was copied into this new Bridge thread.',
+          );
+        }
+        if (bridge.providerSelection) {
+          console.log(
+            `Migrated provider: cc-switch=${bridge.providerSelection.ccSwitchProviderId ?? '(unknown)'} ` +
+              `model_provider=${bridge.providerSelection.modelProvider} ` +
+              `model=${bridge.providerSelection.model}`,
           );
         }
       } else {

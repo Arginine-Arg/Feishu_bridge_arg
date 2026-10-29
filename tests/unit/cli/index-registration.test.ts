@@ -32,12 +32,14 @@ describe('CLI command registration', () => {
     const adoptOptions = source.match(/--adopt <thread-id>/g) ?? [];
     const yoloOptions = source.match(/\.option\('--yolo'/g) ?? [];
     const bypassOptions = source.match(/--dangerously-bypass-approvals-and-sandbox/g) ?? [];
+    const followProviderOptions = source.match(/--follow-current-provider/g) ?? [];
     const sandboxOptions = source.match(/--sandbox <mode>/g) ?? [];
     const approvalOptions = source.match(/--ask-for-approval <policy>/g) ?? [];
     expect(bridgeOptions.length).toBeGreaterThanOrEqual(2);
     expect(adoptOptions.length).toBeGreaterThanOrEqual(2);
     expect(yoloOptions.length).toBeGreaterThanOrEqual(2);
     expect(bypassOptions.length).toBeGreaterThanOrEqual(4);
+    expect(followProviderOptions.length).toBeGreaterThanOrEqual(2);
     expect(sandboxOptions.length).toBeGreaterThanOrEqual(2);
     expect(approvalOptions.length).toBeGreaterThanOrEqual(2);
   });

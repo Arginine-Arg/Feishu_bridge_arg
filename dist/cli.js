@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.12.0",
+  version: "1.13.0",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -18246,6 +18246,35 @@ async function prepareNativeCodexEnvironment(input) {
     }
   };
 }
+function resolveFollowCurrentProviderSelection(prepared) {
+  const identity = prepared.runtimeIdentity;
+  if (!identity?.ccSwitchProviderId) {
+    throw new Error("\u65E0\u6CD5\u89E3\u6790\u5F53\u524D cc-switch Codex provider ID\uFF1B\u5DF2\u62D2\u7EDD follow-current-provider \u8FC1\u79FB");
+  }
+  if (!identity.codexProviderId) {
+    throw new Error("\u65E0\u6CD5\u89E3\u6790\u5F53\u524D Codex model_provider\uFF1B\u5DF2\u62D2\u7EDD follow-current-provider \u8FC1\u79FB");
+  }
+  if (!identity.model) {
+    throw new Error("\u65E0\u6CD5\u89E3\u6790\u5F53\u524D Codex model\uFF1B\u5DF2\u62D2\u7EDD follow-current-provider \u8FC1\u79FB");
+  }
+  if (prepared.credential.missingToken) {
+    throw new Error(
+      `\u5F53\u524D provider ${identity.ccSwitchProviderId} \u7F3A\u5C11\u51ED\u636E\u5B57\u6BB5 ${prepared.credential.envKey ?? "(unknown)"}\uFF1B\u5DF2\u62D2\u7EDD\u521B\u5EFA\u53EF\u80FD\u4F7F\u7528\u65E7 key \u7684 Bridge thread`
+    );
+  }
+  const runtimeFingerprint = createHash8("sha256").update(JSON.stringify({
+    ccSwitchProviderId: identity.ccSwitchProviderId,
+    modelProvider: identity.codexProviderId,
+    model: identity.model,
+    fingerprint: prepared.fingerprint
+  })).digest("hex");
+  return {
+    ccSwitchProviderId: identity.ccSwitchProviderId,
+    modelProvider: identity.codexProviderId,
+    model: identity.model,
+    runtimeFingerprint
+  };
+}
 async function createNativeBridgeSession(input) {
   if (input.adoptThreadId && input.threadId) {
     throw new Error("--adopt and a positional thread cannot be used together");
@@ -18272,7 +18301,19 @@ async function createNativeBridgeSession(input) {
   const markerPath = join32(input.profileDir, "structured", "broker-threads.json");
   const requestedThread = input.threadId?.trim();
   const adoptThread = input.adoptThreadId?.trim();
-  const adoptedMarker = adoptThread ? await findAdoptedThreadMarker(markerPath, adoptThread, namespace) : void 0;
+  if (input.followCurrentProvider && !adoptThread) {
+    throw new Error("--follow-current-provider \u53EA\u80FD\u4E0E --adopt <thread-id> \u4E00\u8D77\u4F7F\u7528");
+  }
+  if (input.followCurrentProvider && requestedThread) {
+    throw new Error("--follow-current-provider migration \u4E0D\u80FD\u540C\u65F6\u6307\u5B9A positional thread");
+  }
+  const providerSelection = input.followCurrentProvider ? resolveFollowCurrentProviderSelection(prepared) : void 0;
+  const adoptedMarker = adoptThread ? await findAdoptedThreadMarker(
+    markerPath,
+    adoptThread,
+    namespace,
+    providerSelection
+  ) : void 0;
   const existingThread = requestedThread ?? adoptedMarker?.threadId;
   if (requestedThread) {
     const marker = await readThreadMarker(markerPath, requestedThread);
@@ -18282,11 +18323,12 @@ async function createNativeBridgeSession(input) {
       );
     }
   }
+  let sourceHost = providerSelection && adoptThread && !adoptedMarker ? await findLoadedThreadHost(input.profileDir, adoptThread, env) : void 0;
   let host = existingThread ? await findLoadedThreadHost(input.profileDir, existingThread, env) : void 0;
-  if (!host && adoptThread) {
+  if (!host && adoptThread && !providerSelection) {
     host = await findLoadedThreadHost(input.profileDir, adoptThread, env);
   }
-  const nativeScope = `native-bridge:${input.profileName}:${input.cwd}`;
+  const nativeScope = providerSelection ? `native-bridge-follow-current:${input.profileName}:${input.cwd}:${providerSelection.runtimeFingerprint}` : `native-bridge:${input.profileName}:${input.cwd}`;
   const nativeHostDirectory = codexHostRuntimeDirectory(
     input.profileDir,
     nativeScope,
@@ -18295,21 +18337,26 @@ async function createNativeBridgeSession(input) {
   );
   let ownsHost = false;
   if (!host) {
-    const connected = await connectCodexHost({
-      binary: input.binary,
-      profileDir: input.profileDir,
-      scope: nativeScope,
-      cwd: input.cwd,
-      env,
-      fingerprint: prepared.fingerprint,
-      ...prepared.runtimeIdentity ? { runtimeIdentity: prepared.runtimeIdentity } : {}
-    });
-    host = {
-      rpc: connected.rpc,
-      endpoint: connected.endpoint,
-      directory: nativeHostDirectory
-    };
-    ownsHost = true;
+    try {
+      const connected = await connectCodexHost({
+        binary: input.binary,
+        profileDir: input.profileDir,
+        scope: nativeScope,
+        cwd: input.cwd,
+        env,
+        fingerprint: prepared.fingerprint,
+        ...prepared.runtimeIdentity ? { runtimeIdentity: prepared.runtimeIdentity } : {}
+      });
+      host = {
+        rpc: connected.rpc,
+        endpoint: connected.endpoint,
+        directory: nativeHostDirectory
+      };
+      ownsHost = true;
+    } catch (error) {
+      sourceHost?.rpc.close();
+      throw error;
+    }
   }
   if (!host) throw new Error("Bridge native App Server host \u4E0D\u53EF\u7528");
   let rpc = host.rpc;
@@ -18327,19 +18374,29 @@ async function createNativeBridgeSession(input) {
     await controller?.close().catch(() => {
     });
     await releaseCodexThreadWriter(rpc, markerThreadId);
+    sourceHost?.rpc.close();
     rpc.close();
     if (owned) await dropOwner(input.profileDir).catch(() => {
     });
   };
   try {
     if (existingThread) {
-      await resumeCodexThread(
+      const resumed = await resumeCodexThread(
         rpc,
         { threadId: existingThread, excludeTurns: true, cwd: input.cwd },
         codexThreadPermissionOverrides(input.sandbox, input.approvalPolicy),
         18e4,
         { preserveProviderModel: true }
       );
+      if (providerSelection) {
+        const resumedProvider = typeof resumed.thread?.modelProvider === "string" ? resumed.thread.modelProvider : typeof resumed.modelProvider === "string" ? resumed.modelProvider : "";
+        const resumedModel = typeof resumed.thread?.model === "string" ? resumed.thread.model : typeof resumed.model === "string" ? resumed.model : "";
+        if (resumedProvider !== providerSelection.modelProvider || resumedModel !== providerSelection.model) {
+          throw new Error(
+            `\u5DF2\u6709 follow-current-provider thread \u7684 provider/model \u4E0D\u5339\u914D\uFF1A\u671F\u671B ${providerSelection.modelProvider}/${providerSelection.model}\uFF0C\u5B9E\u9645 ${resumedProvider || "(missing)"}/${resumedModel || "(missing)"}`
+          );
+        }
+      }
       markerThreadId = existingThread;
       mode = adoptedMarker ? "adopted" : "attached";
       if (adoptedMarker) {
@@ -18348,7 +18405,9 @@ async function createNativeBridgeSession(input) {
       }
     }
     if (!markerThreadId && adoptThread) {
-      const old = await readIdleThread(rpc, adoptThread);
+      const old = await readIdleThread(sourceHost?.rpc ?? rpc, adoptThread);
+      sourceHost?.rpc.close();
+      sourceHost = void 0;
       const history = extractAssistantHistory(old);
       if (history.items.length === 0) {
         throw new Error(
@@ -18357,27 +18416,30 @@ async function createNativeBridgeSession(input) {
       }
       oldThreadId = adoptThread;
       mode = "adopted";
-      markerThreadId = await startBridgeThread(rpc, {
+      const started = await startBridgeThread(rpc, {
         cwd: input.cwd,
         config,
         sandbox: input.sandbox,
         approvalPolicy: input.approvalPolicy,
         namespace,
-        adoptedFrom: adoptThread
+        adoptedFrom: adoptThread,
+        ...providerSelection ? { providerSelection } : {}
       });
+      markerThreadId = started.id;
       await rpc.request("thread/inject_items", {
         threadId: markerThreadId,
         items: history.items
       });
       await materializeBridgeThread(rpc, markerThreadId, adoptThread);
     } else if (!markerThreadId) {
-      markerThreadId = await startBridgeThread(rpc, {
+      const started = await startBridgeThread(rpc, {
         cwd: input.cwd,
         config,
         sandbox: input.sandbox,
         approvalPolicy: input.approvalPolicy,
         namespace
       });
+      markerThreadId = started.id;
       await materializeBridgeThread(rpc, markerThreadId);
     }
     if (!markerThreadId) throw new Error("Codex \u6CA1\u6709\u8FD4\u56DE Bridge-managed thread ID");
@@ -18425,7 +18487,13 @@ async function createNativeBridgeSession(input) {
       throw new Error(`Bridge Broker preflight \u5931\u8D25\uFF1A${preflight.text}`);
     }
     if (!reusedAdoption) {
-      await writeThreadMarker(markerPath, markerThreadId, namespace, oldThreadId);
+      await writeThreadMarker(
+        markerPath,
+        markerThreadId,
+        namespace,
+        oldThreadId,
+        providerSelection
+      );
     }
     session = new CodexStructuredSession(markerThreadId, endpoint, rpc, controller);
     return {
@@ -18433,6 +18501,7 @@ async function createNativeBridgeSession(input) {
       threadId: markerThreadId,
       ...oldThreadId ? { oldThreadId } : {},
       ...reusedAdoption ? { reusedAdoption: true } : {},
+      ...providerSelection ? { providerSelection } : {},
       endpoint,
       env,
       cwd: input.cwd,
@@ -18502,13 +18571,31 @@ async function startBridgeThread(rpc, input) {
     config: brokerCodexThreadConfig(input.config),
     developerInstructions: instructions,
     dynamicTools: brokerToolSpecs(input.namespace),
+    ...input.providerSelection ? {
+      modelProvider: input.providerSelection.modelProvider,
+      model: input.providerSelection.model
+    } : {},
     ...codexThreadPermissionOverrides(input.sandbox, input.approvalPolicy)
   });
   const id = result.thread?.id;
   if (typeof id !== "string" || !id) {
     throw new Error("Codex thread/start \u6CA1\u6709\u8FD4\u56DE thread ID");
   }
-  return id;
+  const modelProvider = typeof result.modelProvider === "string" ? result.modelProvider : typeof result.thread?.modelProvider === "string" ? result.thread.modelProvider : "";
+  const model = typeof result.model === "string" ? result.model : typeof result.thread?.model === "string" ? result.thread.model : "";
+  if (input.providerSelection) {
+    if (modelProvider !== input.providerSelection.modelProvider) {
+      throw new Error(
+        `\u65B0 Bridge thread provider \u4E0D\u5339\u914D\uFF1A\u671F\u671B ${input.providerSelection.modelProvider}\uFF0C\u5B9E\u9645 ${modelProvider || "(missing)"}`
+      );
+    }
+    if (model !== input.providerSelection.model) {
+      throw new Error(
+        `\u65B0 Bridge thread model \u4E0D\u5339\u914D\uFF1A\u671F\u671B ${input.providerSelection.model}\uFF0C\u5B9E\u9645 ${model || "(missing)"}`
+      );
+    }
+  }
+  return { id, modelProvider, model };
 }
 async function materializeBridgeThread(rpc, threadId, adoptedFrom) {
   await rpc.request("thread/inject_items", {
@@ -18616,17 +18703,22 @@ async function probeLoadedEndpoints(socketPaths, threadId, env) {
   }
   return loaded;
 }
-async function findAdoptedThreadMarker(path, adoptedFrom, namespace) {
+async function findAdoptedThreadMarker(path, adoptedFrom, namespace, providerSelection) {
   try {
     const parsed = JSON.parse(await readFile19(path, "utf8"));
     if (parsed.version !== 1 || !parsed.threads || typeof parsed.threads !== "object") {
       return void 0;
     }
     return Object.entries(parsed.threads).flatMap(([threadId, marker]) => {
-      if (!threadId || marker?.version !== BROKER_TOOL_VERSION || marker.namespace !== namespace || marker.adoptedFrom !== adoptedFrom) return [];
+      if (!threadId || marker?.version !== BROKER_TOOL_VERSION || marker.namespace !== namespace || marker.adoptedFrom !== adoptedFrom || providerSelection && (marker.followCurrentProvider !== true || marker.ccSwitchProviderId !== providerSelection.ccSwitchProviderId || marker.modelProvider !== providerSelection.modelProvider || marker.model !== providerSelection.model || marker.runtimeFingerprint !== providerSelection.runtimeFingerprint)) return [];
       return [{
         threadId,
-        createdAt: Number.isFinite(marker.createdAt) ? marker.createdAt : 0
+        createdAt: Number.isFinite(marker.createdAt) ? marker.createdAt : 0,
+        ...marker.followCurrentProvider ? { followCurrentProvider: true } : {},
+        ...marker.ccSwitchProviderId ? { ccSwitchProviderId: marker.ccSwitchProviderId } : {},
+        ...marker.modelProvider ? { modelProvider: marker.modelProvider } : {},
+        ...marker.model ? { model: marker.model } : {},
+        ...marker.runtimeFingerprint ? { runtimeFingerprint: marker.runtimeFingerprint } : {}
       }];
     }).sort(
       (left, right) => right.createdAt - left.createdAt || right.threadId.localeCompare(left.threadId)
@@ -18644,7 +18736,7 @@ async function readThreadMarker(path, threadId) {
     return void 0;
   }
 }
-async function writeThreadMarker(path, threadId, namespace, adoptedFrom) {
+async function writeThreadMarker(path, threadId, namespace, adoptedFrom, providerSelection) {
   let parsed = { version: 1, threads: {} };
   try {
     const current = JSON.parse(await readFile19(path, "utf8"));
@@ -18660,7 +18752,14 @@ async function writeThreadMarker(path, threadId, namespace, adoptedFrom) {
     version: BROKER_TOOL_VERSION,
     namespace,
     createdAt: Date.now(),
-    ...adoptedFrom ? { adoptedFrom } : {}
+    ...adoptedFrom ? { adoptedFrom } : {},
+    ...providerSelection ? {
+      followCurrentProvider: true,
+      ...providerSelection.ccSwitchProviderId ? { ccSwitchProviderId: providerSelection.ccSwitchProviderId } : {},
+      modelProvider: providerSelection.modelProvider,
+      model: providerSelection.model,
+      runtimeFingerprint: providerSelection.runtimeFingerprint
+    } : {}
   };
   await mkdir19(dirname19(path), { recursive: true, mode: 448 });
   await writeFileAtomic(path, `${JSON.stringify({ version: 1, threads }, null, 2)}
@@ -35752,6 +35851,9 @@ async function runNative(thread, opts) {
   }
   const binary = config.codex?.binaryPath ?? "codex";
   const codexHome = config.codex?.codexHome ?? (config.codex?.inheritCodexHome === false ? `${paths2.profileDir}/codex-home` : void 0);
+  if (opts.followCurrentProvider && !opts.adopt) {
+    throw new Error("--follow-current-provider \u53EA\u80FD\u4E0E --adopt <thread-id> \u4E00\u8D77\u4F7F\u7528");
+  }
   if (opts.bridge || opts.adopt) {
     if (config.agentKind !== "codex") {
       throw new Error("arg-bridge native --bridge/--adopt \u53EA\u652F\u6301 Codex profile");
@@ -35771,7 +35873,8 @@ async function runNative(thread, opts) {
       sandbox,
       approvalPolicy: permissions.approvalPolicy,
       ...thread ? { threadId: thread } : {},
-      ...opts.adopt ? { adoptThreadId: opts.adopt } : {}
+      ...opts.adopt ? { adoptThreadId: opts.adopt } : {},
+      ...opts.followCurrentProvider ? { followCurrentProvider: true } : {}
     });
     try {
       if (bridge.mode === "adopted") {
@@ -35781,6 +35884,11 @@ async function runNative(thread, opts) {
         if (!bridge.reusedAdoption) {
           console.log(
             "Codex 0.164 thread/resume does not accept dynamicTools; the old text history was copied into this new Bridge thread."
+          );
+        }
+        if (bridge.providerSelection) {
+          console.log(
+            `Migrated provider: cc-switch=${bridge.providerSelection.ccSwitchProviderId ?? "(unknown)"} model_provider=${bridge.providerSelection.modelProvider} model=${bridge.providerSelection.model}`
           );
         }
       } else {
@@ -37634,8 +37742,8 @@ function formatReport(report) {
 // src/cli/index.ts
 var program = new Command();
 program.name("arg-bridge").description("Bridge Feishu/Lark messenger with local CLI coding agents").version(package_default.version, "-v, --version");
-program.command("native [thread]").description("Open or resume an agent in this shell; Codex shares an App Server with Bridge").option("--profile <name>", "profile whose agent and permissions to use").option("--yolo", "alias for --dangerously-bypass-approvals-and-sandbox on a new Codex thread").option("--dangerously-bypass-approvals-and-sandbox", "skip approvals and sandboxing on a new Codex thread").option("-s, --sandbox <mode>", "read-only, workspace-write, or danger-full-access").option("-a, --ask-for-approval <policy>", "never or on-request (resume inherits frozen permissions)").option("--bridge", "Open a Bridge-managed native TUI with Broker dynamic tools").option("--adopt <thread-id>", "Migrate an existing Codex thread into a new Bridge-managed thread").action(async (thread, opts) => runNative(thread, opts));
-program.command("codex [thread]").description("Alias for `native`/`native <thread>`; launches the official Codex binary without replacing it").option("--profile <name>", "profile whose Codex agent and permissions to use").option("--yolo", "alias for --dangerously-bypass-approvals-and-sandbox on a new Codex thread").option("--dangerously-bypass-approvals-and-sandbox", "skip approvals and sandboxing on a new Codex thread").option("-s, --sandbox <mode>", "read-only, workspace-write, or danger-full-access").option("-a, --ask-for-approval <policy>", "never or on-request (resume inherits frozen permissions)").option("--bridge", "Open a Bridge-managed native TUI with Broker dynamic tools").option("--adopt <thread-id>", "Migrate an existing Codex thread into a new Bridge-managed thread").action(async (thread, opts) => runNative(thread, opts));
+program.command("native [thread]").description("Open or resume an agent in this shell; Codex shares an App Server with Bridge").option("--profile <name>", "profile whose agent and permissions to use").option("--yolo", "alias for --dangerously-bypass-approvals-and-sandbox on a new Codex thread").option("--dangerously-bypass-approvals-and-sandbox", "skip approvals and sandboxing on a new Codex thread").option("-s, --sandbox <mode>", "read-only, workspace-write, or danger-full-access").option("-a, --ask-for-approval <policy>", "never or on-request (resume inherits frozen permissions)").option("--bridge", "Open a Bridge-managed native TUI with Broker dynamic tools").option("--adopt <thread-id>", "Migrate an existing Codex thread into a new Bridge-managed thread").option("--follow-current-provider", "With --adopt, create the migrated thread under the current cc-switch provider/model").action(async (thread, opts) => runNative(thread, opts));
+program.command("codex [thread]").description("Alias for `native`/`native <thread>`; launches the official Codex binary without replacing it").option("--profile <name>", "profile whose Codex agent and permissions to use").option("--yolo", "alias for --dangerously-bypass-approvals-and-sandbox on a new Codex thread").option("--dangerously-bypass-approvals-and-sandbox", "skip approvals and sandboxing on a new Codex thread").option("-s, --sandbox <mode>", "read-only, workspace-write, or danger-full-access").option("-a, --ask-for-approval <policy>", "never or on-request (resume inherits frozen permissions)").option("--bridge", "Open a Bridge-managed native TUI with Broker dynamic tools").option("--adopt <thread-id>", "Migrate an existing Codex thread into a new Bridge-managed thread").option("--follow-current-provider", "With --adopt, create the migrated thread under the current cc-switch provider/model").action(async (thread, opts) => runNative(thread, opts));
 program.command("settings").description("Open the guided cc-switch/MixAgents/Project RSI settings flow").option("--profile <name>", "profile to inspect or edit (defaults to active profile)").option("--json", "print a machine-readable, secret-free snapshot without prompting").action(async (opts) => {
   await runSettings(opts);
 });

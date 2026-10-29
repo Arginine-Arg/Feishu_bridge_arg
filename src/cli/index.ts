@@ -48,6 +48,7 @@ program.command('native [thread]')
   .option('-a, --ask-for-approval <policy>', 'never or on-request (resume inherits frozen permissions)')
   .option('--bridge', 'Open a Bridge-managed native TUI with Broker dynamic tools')
   .option('--adopt <thread-id>', 'Migrate an existing Codex thread into a new Bridge-managed thread')
+  .option('--follow-current-provider', 'With --adopt, create the migrated thread under the current cc-switch provider/model')
   .action(async (thread: string | undefined, opts: {
     profile?: string;
     yolo?: boolean;
@@ -56,6 +57,7 @@ program.command('native [thread]')
     askForApproval?: string;
     bridge?: boolean;
     adopt?: string;
+    followCurrentProvider?: boolean;
   }) => runNative(thread, opts));
 
 program.command('codex [thread]')
@@ -67,6 +69,7 @@ program.command('codex [thread]')
   .option('-a, --ask-for-approval <policy>', 'never or on-request (resume inherits frozen permissions)')
   .option('--bridge', 'Open a Bridge-managed native TUI with Broker dynamic tools')
   .option('--adopt <thread-id>', 'Migrate an existing Codex thread into a new Bridge-managed thread')
+  .option('--follow-current-provider', 'With --adopt, create the migrated thread under the current cc-switch provider/model')
   .action(async (thread: string | undefined, opts: {
     profile?: string;
     yolo?: boolean;
@@ -75,6 +78,7 @@ program.command('codex [thread]')
     askForApproval?: string;
     bridge?: boolean;
     adopt?: string;
+    followCurrentProvider?: boolean;
   }) => runNative(thread, opts));
 
 program.command('settings')

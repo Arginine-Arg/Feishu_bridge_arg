@@ -77,6 +77,11 @@ export interface NativeBridgeSessionOptions {
   threadId?: string;
   /** Migrate a legacy thread into a new Bridge-managed thread. */
   adoptThreadId?: string;
+  /**
+   * With --adopt, create the destination under the current cc-switch
+   * provider/model instead of inheriting the source thread's App Server.
+   */
+  followCurrentProvider?: boolean;
 }
 
 export type NativeSandbox = 'read-only' | 'workspace-write' | 'danger-full-access';
@@ -87,6 +92,7 @@ export interface NativeBridgeSession {
   oldThreadId?: string;
   /** True when --adopt resolves an intact marker instead of creating a thread. */
   reusedAdoption?: boolean;
+  providerSelection?: NativeBridgeProviderSelection;
   endpoint: string;
   env: NodeJS.ProcessEnv;
   cwd: string;
@@ -95,6 +101,14 @@ export interface NativeBridgeSession {
   controller?: BrokerToolController;
   session?: CodexStructuredSession;
   close(): Promise<void>;
+}
+
+export interface NativeBridgeProviderSelection {
+  ccSwitchProviderId?: string;
+  modelProvider: string;
+  model: string;
+  /** Opaque hash of provider/model/fingerprint; contains no credential values. */
+  runtimeFingerprint: string;
 }
 
 /**
@@ -146,6 +160,41 @@ export async function prepareNativeCodexEnvironment(input: {
   };
 }
 
+export function resolveFollowCurrentProviderSelection(
+  prepared: NativeCodexEnvironment,
+): NativeBridgeProviderSelection {
+  const identity = prepared.runtimeIdentity;
+  if (!identity?.ccSwitchProviderId) {
+    throw new Error('无法解析当前 cc-switch Codex provider ID；已拒绝 follow-current-provider 迁移');
+  }
+  if (!identity.codexProviderId) {
+    throw new Error('无法解析当前 Codex model_provider；已拒绝 follow-current-provider 迁移');
+  }
+  if (!identity.model) {
+    throw new Error('无法解析当前 Codex model；已拒绝 follow-current-provider 迁移');
+  }
+  if (prepared.credential.missingToken) {
+    throw new Error(
+      `当前 provider ${identity.ccSwitchProviderId} 缺少凭据字段 ${prepared.credential.envKey ?? '(unknown)'}；` +
+        '已拒绝创建可能使用旧 key 的 Bridge thread',
+    );
+  }
+  const runtimeFingerprint = createHash('sha256')
+    .update(JSON.stringify({
+      ccSwitchProviderId: identity.ccSwitchProviderId,
+      modelProvider: identity.codexProviderId,
+      model: identity.model,
+      fingerprint: prepared.fingerprint,
+    }))
+    .digest('hex');
+  return {
+    ccSwitchProviderId: identity.ccSwitchProviderId,
+    modelProvider: identity.codexProviderId,
+    model: identity.model,
+    runtimeFingerprint,
+  };
+}
+
 export async function createNativeBridgeSession(
   input: NativeBridgeSessionOptions,
 ): Promise<NativeBridgeSession> {
@@ -183,8 +232,22 @@ export async function createNativeBridgeSession(
   const markerPath = join(input.profileDir, 'structured', 'broker-threads.json');
   const requestedThread = input.threadId?.trim();
   const adoptThread = input.adoptThreadId?.trim();
+  if (input.followCurrentProvider && !adoptThread) {
+    throw new Error('--follow-current-provider 只能与 --adopt <thread-id> 一起使用');
+  }
+  if (input.followCurrentProvider && requestedThread) {
+    throw new Error('--follow-current-provider migration 不能同时指定 positional thread');
+  }
+  const providerSelection = input.followCurrentProvider
+    ? resolveFollowCurrentProviderSelection(prepared)
+    : undefined;
   const adoptedMarker = adoptThread
-    ? await findAdoptedThreadMarker(markerPath, adoptThread, namespace)
+    ? await findAdoptedThreadMarker(
+        markerPath,
+        adoptThread,
+        namespace,
+        providerSelection,
+      )
     : undefined;
   const existingThread = requestedThread ?? adoptedMarker?.threadId;
 
@@ -198,13 +261,18 @@ export async function createNativeBridgeSession(
     }
   }
 
+  let sourceHost = providerSelection && adoptThread && !adoptedMarker
+    ? await findLoadedThreadHost(input.profileDir, adoptThread, env)
+    : undefined;
   let host = existingThread
     ? await findLoadedThreadHost(input.profileDir, existingThread, env)
     : undefined;
-  if (!host && adoptThread) {
+  if (!host && adoptThread && !providerSelection) {
     host = await findLoadedThreadHost(input.profileDir, adoptThread, env);
   }
-  const nativeScope = `native-bridge:${input.profileName}:${input.cwd}`;
+  const nativeScope = providerSelection
+    ? `native-bridge-follow-current:${input.profileName}:${input.cwd}:${providerSelection.runtimeFingerprint}`
+    : `native-bridge:${input.profileName}:${input.cwd}`;
   const nativeHostDirectory = codexHostRuntimeDirectory(
     input.profileDir,
     nativeScope,
@@ -213,21 +281,26 @@ export async function createNativeBridgeSession(
   );
   let ownsHost = false;
   if (!host) {
-    const connected = await connectCodexHost({
-      binary: input.binary,
-      profileDir: input.profileDir,
-      scope: nativeScope,
-      cwd: input.cwd,
-      env,
-      fingerprint: prepared.fingerprint,
-      ...(prepared.runtimeIdentity ? { runtimeIdentity: prepared.runtimeIdentity } : {}),
-    });
-    host = {
-      rpc: connected.rpc,
-      endpoint: connected.endpoint,
-      directory: nativeHostDirectory,
-    };
-    ownsHost = true;
+    try {
+      const connected = await connectCodexHost({
+        binary: input.binary,
+        profileDir: input.profileDir,
+        scope: nativeScope,
+        cwd: input.cwd,
+        env,
+        fingerprint: prepared.fingerprint,
+        ...(prepared.runtimeIdentity ? { runtimeIdentity: prepared.runtimeIdentity } : {}),
+      });
+      host = {
+        rpc: connected.rpc,
+        endpoint: connected.endpoint,
+        directory: nativeHostDirectory,
+      };
+      ownsHost = true;
+    } catch (error) {
+      sourceHost?.rpc.close();
+      throw error;
+    }
   }
   if (!host) throw new Error('Bridge native App Server host 不可用');
 
@@ -245,19 +318,42 @@ export async function createNativeBridgeSession(
     await session?.close().catch(() => {});
     await controller?.close().catch(() => {});
     await releaseCodexThreadWriter(rpc, markerThreadId);
+    sourceHost?.rpc.close();
     rpc.close();
     if (owned) await dropOwner(input.profileDir).catch(() => {});
   };
 
   try {
     if (existingThread) {
-      await resumeCodexThread(
+      const resumed = await resumeCodexThread(
         rpc,
         { threadId: existingThread, excludeTurns: true, cwd: input.cwd },
         codexThreadPermissionOverrides(input.sandbox, input.approvalPolicy),
         180_000,
         { preserveProviderModel: true },
       );
+      if (providerSelection) {
+        const resumedProvider = typeof resumed.thread?.modelProvider === 'string'
+          ? resumed.thread.modelProvider
+          : typeof resumed.modelProvider === 'string'
+            ? resumed.modelProvider
+            : '';
+        const resumedModel = typeof resumed.thread?.model === 'string'
+          ? resumed.thread.model
+          : typeof resumed.model === 'string'
+            ? resumed.model
+            : '';
+        if (
+          resumedProvider !== providerSelection.modelProvider ||
+          resumedModel !== providerSelection.model
+        ) {
+          throw new Error(
+            `已有 follow-current-provider thread 的 provider/model 不匹配：` +
+              `期望 ${providerSelection.modelProvider}/${providerSelection.model}，` +
+              `实际 ${resumedProvider || '(missing)'}/${resumedModel || '(missing)'}`,
+          );
+        }
+      }
       markerThreadId = existingThread;
       mode = adoptedMarker ? 'adopted' : 'attached';
       if (adoptedMarker) {
@@ -267,7 +363,9 @@ export async function createNativeBridgeSession(
     }
 
     if (!markerThreadId && adoptThread) {
-      const old = await readIdleThread(rpc, adoptThread);
+      const old = await readIdleThread(sourceHost?.rpc ?? rpc, adoptThread);
+      sourceHost?.rpc.close();
+      sourceHost = undefined;
       const history = extractAssistantHistory(old);
       if (history.items.length === 0) {
         throw new Error(
@@ -276,27 +374,30 @@ export async function createNativeBridgeSession(
       }
       oldThreadId = adoptThread;
       mode = 'adopted';
-      markerThreadId = await startBridgeThread(rpc, {
+      const started = await startBridgeThread(rpc, {
         cwd: input.cwd,
         config,
         sandbox: input.sandbox,
         approvalPolicy: input.approvalPolicy,
         namespace,
         adoptedFrom: adoptThread,
+        ...(providerSelection ? { providerSelection } : {}),
       });
+      markerThreadId = started.id;
       await rpc.request('thread/inject_items', {
         threadId: markerThreadId,
         items: history.items,
       });
       await materializeBridgeThread(rpc, markerThreadId, adoptThread);
     } else if (!markerThreadId) {
-      markerThreadId = await startBridgeThread(rpc, {
+      const started = await startBridgeThread(rpc, {
         cwd: input.cwd,
         config,
         sandbox: input.sandbox,
         approvalPolicy: input.approvalPolicy,
         namespace,
       });
+      markerThreadId = started.id;
       await materializeBridgeThread(rpc, markerThreadId);
     }
 
@@ -351,7 +452,13 @@ export async function createNativeBridgeSession(
       throw new Error(`Bridge Broker preflight 失败：${preflight.text}`);
     }
     if (!reusedAdoption) {
-      await writeThreadMarker(markerPath, markerThreadId, namespace, oldThreadId);
+      await writeThreadMarker(
+        markerPath,
+        markerThreadId,
+        namespace,
+        oldThreadId,
+        providerSelection,
+      );
     }
     session = new CodexStructuredSession(markerThreadId, endpoint, rpc, controller);
     return {
@@ -359,6 +466,7 @@ export async function createNativeBridgeSession(
       threadId: markerThreadId,
       ...(oldThreadId ? { oldThreadId } : {}),
       ...(reusedAdoption ? { reusedAdoption: true } : {}),
+      ...(providerSelection ? { providerSelection } : {}),
       endpoint,
       env,
       cwd: input.cwd,
@@ -433,8 +541,9 @@ async function startBridgeThread(
     approvalPolicy?: CodexApprovalPolicy;
     namespace: string;
     adoptedFrom?: string;
+    providerSelection?: NativeBridgeProviderSelection;
   },
-): Promise<string> {
+): Promise<{ id: string; modelProvider: string; model: string }> {
   const configRead: Wire = await rpc.request('config/read', { cwd: input.cwd }).catch(() => ({}));
   const existing = configRead.config?.developer_instructions;
   if (existing != null && typeof existing !== 'string') {
@@ -455,13 +564,37 @@ async function startBridgeThread(
     config: brokerCodexThreadConfig(input.config),
     developerInstructions: instructions,
     dynamicTools: brokerToolSpecs(input.namespace),
+    ...(input.providerSelection ? {
+      modelProvider: input.providerSelection.modelProvider,
+      model: input.providerSelection.model,
+    } : {}),
     ...codexThreadPermissionOverrides(input.sandbox, input.approvalPolicy),
   });
   const id = result.thread?.id;
   if (typeof id !== 'string' || !id) {
     throw new Error('Codex thread/start 没有返回 thread ID');
   }
-  return id;
+  const modelProvider = typeof result.modelProvider === 'string'
+    ? result.modelProvider
+    : (typeof result.thread?.modelProvider === 'string' ? result.thread.modelProvider : '');
+  const model = typeof result.model === 'string'
+    ? result.model
+    : (typeof result.thread?.model === 'string' ? result.thread.model : '');
+  if (input.providerSelection) {
+    if (modelProvider !== input.providerSelection.modelProvider) {
+      throw new Error(
+        `新 Bridge thread provider 不匹配：期望 ${input.providerSelection.modelProvider}，` +
+          `实际 ${modelProvider || '(missing)'}`,
+      );
+    }
+    if (model !== input.providerSelection.model) {
+      throw new Error(
+        `新 Bridge thread model 不匹配：期望 ${input.providerSelection.model}，` +
+          `实际 ${model || '(missing)'}`,
+      );
+    }
+  }
+  return { id, modelProvider, model };
 }
 
 /**
@@ -611,11 +744,21 @@ interface ThreadMarker {
   namespace: string;
   createdAt: number;
   adoptedFrom?: string;
+  followCurrentProvider?: boolean;
+  ccSwitchProviderId?: string;
+  modelProvider?: string;
+  model?: string;
+  runtimeFingerprint?: string;
 }
 
 export interface AdoptedThreadMarker {
   threadId: string;
   createdAt: number;
+  followCurrentProvider?: boolean;
+  ccSwitchProviderId?: string;
+  modelProvider?: string;
+  model?: string;
+  runtimeFingerprint?: string;
 }
 
 /**
@@ -626,6 +769,7 @@ export async function findAdoptedThreadMarker(
   path: string,
   adoptedFrom: string,
   namespace: string,
+  providerSelection?: NativeBridgeProviderSelection,
 ): Promise<AdoptedThreadMarker | undefined> {
   try {
     const parsed = JSON.parse(await readFile(path, 'utf8')) as {
@@ -641,11 +785,23 @@ export async function findAdoptedThreadMarker(
           !threadId ||
           marker?.version !== BROKER_TOOL_VERSION ||
           marker.namespace !== namespace ||
-          marker.adoptedFrom !== adoptedFrom
+          marker.adoptedFrom !== adoptedFrom ||
+          (providerSelection && (
+            marker.followCurrentProvider !== true ||
+            marker.ccSwitchProviderId !== providerSelection.ccSwitchProviderId ||
+            marker.modelProvider !== providerSelection.modelProvider ||
+            marker.model !== providerSelection.model ||
+            marker.runtimeFingerprint !== providerSelection.runtimeFingerprint
+          ))
         ) return [];
         return [{
           threadId,
           createdAt: Number.isFinite(marker.createdAt) ? marker.createdAt : 0,
+          ...(marker.followCurrentProvider ? { followCurrentProvider: true } : {}),
+          ...(marker.ccSwitchProviderId ? { ccSwitchProviderId: marker.ccSwitchProviderId } : {}),
+          ...(marker.modelProvider ? { modelProvider: marker.modelProvider } : {}),
+          ...(marker.model ? { model: marker.model } : {}),
+          ...(marker.runtimeFingerprint ? { runtimeFingerprint: marker.runtimeFingerprint } : {}),
         }];
       })
       .sort((left, right) =>
@@ -679,6 +835,7 @@ async function writeThreadMarker(
   threadId: string,
   namespace: string,
   adoptedFrom?: string,
+  providerSelection?: NativeBridgeProviderSelection,
 ): Promise<void> {
   let parsed: {
     version?: number;
@@ -705,6 +862,15 @@ async function writeThreadMarker(
     namespace,
     createdAt: Date.now(),
     ...(adoptedFrom ? { adoptedFrom } : {}),
+    ...(providerSelection ? {
+      followCurrentProvider: true,
+      ...(providerSelection.ccSwitchProviderId
+        ? { ccSwitchProviderId: providerSelection.ccSwitchProviderId }
+        : {}),
+      modelProvider: providerSelection.modelProvider,
+      model: providerSelection.model,
+      runtimeFingerprint: providerSelection.runtimeFingerprint,
+    } : {}),
   };
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   await writeFileAtomic(path, `${JSON.stringify({ version: 1, threads }, null, 2)}\n`, {

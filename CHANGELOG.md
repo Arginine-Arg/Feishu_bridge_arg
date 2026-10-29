@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.13.0
+
+- Adds `arg-bridge native --adopt <thread-id> --follow-current-provider`.
+  It preserves bounded user/assistant text history while creating the new
+  Bridge-managed thread under the provider, model and credential fingerprint
+  currently selected by cc-switch.
+- Follow-provider adoption reads the old thread only through its authoritative
+  owner at an idle boundary, then starts a separate provider-specific App
+  Server. It never reuses the old provider's host for the destination thread.
+- Passes explicit `modelProvider` and `model` values to `thread/start` and
+  verifies the returned thread identity before attaching the TUI.
+- Fails closed when the cc-switch provider ID, Codex `model_provider`, model or
+  credential cannot be resolved.
+- Records the provider generation in `broker-threads.json`. Repeated migration
+  with the same provider/model/credential generation is idempotent, while a
+  provider switch creates a distinct destination without overwriting the
+  previous migration.
+
 ## 1.12.0
 
 - Ordinary messages sent during an active task now queue by default instead of

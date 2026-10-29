@@ -21,6 +21,9 @@ arg-bridge native --bridge <thread-id> --profile codex
 
 # Safely migrate an old thread into a new Bridge-managed thread
 arg-bridge native --adopt <old-thread-id>
+
+# Preserve bounded text history but use the current cc-switch provider/model
+arg-bridge native --adopt <old-thread-id> --follow-current-provider
 ```
 
 `--adopt` is an explicit migration, not an in-place history rewrite. It:
@@ -41,6 +44,21 @@ Repeating the same `--adopt` is idempotent after 1.9.3: the newest existing
 marker for that source thread is resumed instead of allocating another target
 thread. The marker is also reloaded by a running Bridge daemon on a cache miss,
 so `/tmux bind` can use the adopted thread without restarting the daemon.
+
+`--follow-current-provider` is an explicit provider-generation migration:
+
+- the old thread is read only through its authoritative owner endpoint at an
+  idle boundary;
+- the destination runs on a separate App Server keyed by the current
+  cc-switch provider/model/credential/config fingerprint;
+- `thread/start` receives explicit `modelProvider` and `model` values, and the
+  response is verified before the TUI starts;
+- missing provider id, `model_provider`, model or credential fails closed;
+- the resulting marker records the provider generation, so repeating the same
+  migration for that generation is idempotent, while switching providers can
+  create a distinct destination without overwriting the previous migration.
+
+Plain `--adopt` continues to preserve the source thread's provider/model.
 
 ## Why the ID changes
 
@@ -175,7 +193,12 @@ with:
       "version": 1,
       "namespace": "arg_bridge",
       "createdAt": 1234567890,
-      "adoptedFrom": "<old-thread-id>"
+      "adoptedFrom": "<old-thread-id>",
+      "followCurrentProvider": true,
+      "ccSwitchProviderId": "<cc-switch-provider-id>",
+      "modelProvider": "<codex-model-provider>",
+      "model": "<model>",
+      "runtimeFingerprint": "<opaque-sha256>"
     }
   }
 }

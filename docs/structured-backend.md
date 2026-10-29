@@ -133,6 +133,7 @@ For a Bridge-managed terminal session, use:
 ```sh
 arg-bridge native --bridge --profile codex
 arg-bridge native --adopt <old-thread-id> --profile codex
+arg-bridge native --adopt <old-thread-id> --follow-current-provider --profile codex
 ```
 
 `--bridge` registers `arg_bridge.*` dynamic tools and keeps the Bridge tool host

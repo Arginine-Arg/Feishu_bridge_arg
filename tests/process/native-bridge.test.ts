@@ -17,15 +17,21 @@ nativeBridge('registers dynamic tools and safely migrates a legacy thread into a
   const codexHome = join(root, 'codex-home');
   const workspace = join(root, 'workspace');
   const profileDir = join(root, 'profile');
+  const ccSwitchHome = join(root, 'cc-switch');
   const brokerState = join(root, 'broker-state.json');
   await Promise.all([
     mkdir(codexHome, { recursive: true }),
     mkdir(workspace, { recursive: true }),
     mkdir(profileDir, { recursive: true }),
+    mkdir(ccSwitchHome, { recursive: true }),
   ]);
+  await writeFile(join(ccSwitchHome, 'settings.json'), JSON.stringify({
+    currentProviderCodex: 'native-test-provider',
+  }), { mode: 0o600 });
 
   const requests: Array<Record<string, any>> = [];
   let dynamicMode = true;
+  let simpleMode = false;
   const provider = createServer((request, response) => {
     const chunks: Buffer[] = [];
     request.on('data', chunk => chunks.push(Buffer.from(chunk)));
@@ -42,6 +48,14 @@ nativeBridge('registers dynamic tools and safely migrates a legacy thread into a
           created('legacy-1'),
           assistantMessage('legacy-final', 'LEGACY_THREAD_CONTEXT_ORBIT_731'),
           completed('legacy-1'),
+        ]));
+        return;
+      }
+      if (simpleMode) {
+        response.end(sse([
+          created('follow-final'),
+          assistantMessage('follow-final', 'FOLLOW_CURRENT_PROVIDER_OK'),
+          completed('follow-final'),
         ]));
         return;
       }
@@ -93,6 +107,7 @@ nativeBridge('registers dynamic tools and safely migrates a legacy thread into a
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     CODEX_HOME: codexHome,
+    CC_SWITCH_HOME: ccSwitchHome,
     OPENAI_API_KEY: 'trace-only-native',
     XDG_RUNTIME_DIR: join(root, 'runtime'),
     FAKE_MIXAGENTS_STATE: brokerState,
@@ -304,6 +319,110 @@ nativeBridge('registers dynamic tools and safely migrates a legacy thread into a
       'utf8',
     ));
     expect(repeatedMarker.threads[adoptedThreadId].createdAt).toBe(adoptedCreatedAt);
+    await bridge.close();
+    bridge = undefined;
+
+    await writeFile(join(codexHome, 'config.toml'), [
+      'model = "native-follow-model"',
+      'model_provider = "native-local-follow"',
+      'approval_policy = "never"',
+      'sandbox_mode = "read-only"',
+      '',
+      '[model_providers.native-local-follow]',
+      'name = "Native Local Follow"',
+      `base_url = "http://127.0.0.1:${address.port}/v1"`,
+      'wire_api = "responses"',
+      'requires_openai_auth = false',
+      'env_key = "OPENAI_API_KEY"',
+    ].join('\n'), { mode: 0o600 });
+    requests.length = 0;
+    simpleMode = true;
+    bridge = await createNativeBridgeSession({
+      profileName: 'codex',
+      profileDir,
+      cwd: workspace,
+      config: profile,
+      env,
+      binary: 'codex',
+      codexHome,
+      sandbox: 'read-only',
+      adoptThreadId: oldThreadId,
+      followCurrentProvider: true,
+    });
+    expect(bridge).toMatchObject({
+      mode: 'adopted',
+      oldThreadId,
+      providerSelection: {
+        modelProvider: 'native-local-follow',
+        model: 'native-follow-model',
+      },
+    });
+    expect(bridge.threadId).not.toBe(adoptedThreadId);
+    const followHostRegistry = JSON.parse(await readFile(
+      join(profileDir, 'structured', 'app-server-registry.json'),
+      'utf8',
+    ));
+    expect(followHostRegistry.hosts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        directory: bridge.endpoint.slice('unix://'.length).replace(/\/server\.sock$/u, ''),
+        runtimeIdentity: expect.objectContaining({
+          codexProviderId: 'native-local-follow',
+          model: 'native-follow-model',
+        }),
+      }),
+    ]));
+    const followEvents: Array<{ type: string; delta?: string }> = [];
+    await bridge.session!.submit({
+      runId: 'native-follow-provider',
+      scopeId: 'native-scope',
+      cwd: workspace,
+      prompt: 'Confirm the new provider thread.',
+    }, event => followEvents.push(event), AbortSignal.timeout(60_000));
+    expect(followEvents.filter(event => event.type === 'error')).toEqual([]);
+    expect(followEvents.filter(event => event.type === 'text').map(event => event.delta).join(''))
+      .toContain('FOLLOW_CURRENT_PROVIDER_OK');
+    expect(requests.some(request => request.model === 'native-follow-model')).toBe(true);
+    expect(requests.some(request =>
+      request.model === 'native-follow-model' &&
+      JSON.stringify(request).includes('LEGACY_THREAD_CONTEXT_ORBIT_731')
+    )).toBe(true);
+    const followMarker = JSON.parse(await readFile(
+      join(profileDir, 'structured', 'broker-threads.json'),
+      'utf8',
+    ));
+    expect(followMarker.threads[bridge.threadId]).toMatchObject({
+      adoptedFrom: oldThreadId,
+      followCurrentProvider: true,
+      modelProvider: 'native-local-follow',
+      model: 'native-follow-model',
+      runtimeFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    const followThreadId = bridge.threadId;
+    await bridge.close();
+    bridge = undefined;
+
+    bridge = await createNativeBridgeSession({
+      profileName: 'codex',
+      profileDir,
+      cwd: workspace,
+      config: profile,
+      env,
+      binary: 'codex',
+      codexHome,
+      sandbox: 'read-only',
+      adoptThreadId: oldThreadId,
+      followCurrentProvider: true,
+    });
+    expect(bridge).toMatchObject({
+      mode: 'adopted',
+      threadId: followThreadId,
+      oldThreadId,
+      reusedAdoption: true,
+      providerSelection: {
+        modelProvider: 'native-local-follow',
+        model: 'native-follow-model',
+      },
+    });
   } finally {
     await bridge?.close();
     await new Promise<void>(resolve => provider.close(() => resolve()));

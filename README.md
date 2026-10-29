@@ -4,7 +4,7 @@ A lightweight bot that bridges Feishu / Lark messenger with your local Claude Co
 
 [中文 README](./README.zh.md)
 
-Version 1.12.0 makes active-task messaging explicit: ordinary messages queue for the next turn, while `/steer <text>` targets only the current main turn without stopping its goal or starting another run. `/status` reports provider and terminal steering capability, and `/help` is reorganized into complete task, session, side-conversation and diagnostics sections. The release includes the 1.11.2 Broker upgrade compatibility and tmux paste recovery fixes.
+Version 1.13.0 adds provider-generation migration for existing Codex threads: `--adopt <thread-id> --follow-current-provider` preserves bounded text history while creating the Bridge-managed destination under the provider, model and credential currently selected by cc-switch. The old thread remains read-only, the destination uses a separate provider-specific App Server, and `thread/start` receives and verifies explicit `modelProvider`/`model` values. Version 1.12.0 introduced explicit `/steer <text>` while ordinary active-task messages queue for the next turn.
 
 Version 1.6.7 introduced provider-aware Codex resume, and 1.7.0 added idle-boundary rebinding. Version 1.9.1 narrows reattachment semantics: reconnecting to an existing native or structured thread preserves the provider/model recorded by that thread instead of silently following a newly selected cc-switch route.
 
@@ -60,7 +60,7 @@ Install a pinned release or use a writable custom npm prefix when required:
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.12.0
+sh /tmp/install-arg-bridge.sh --version 1.13.0
 # Example for a machine without permission to write npm's configured global prefix:
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ Release tarballs are preferred. If a Git install is required, keep both compatib
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.12.0"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.13.0"
 ```
 
-`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.12.0`.
+`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.13.0`.
 
 ### 4. Node or npm global-prefix errors
 
@@ -228,6 +228,7 @@ arg-bridge migrate-local-poc --profile codex --apply
 arg-bridge native [thread] [--profile <name>]
 arg-bridge native --bridge [--profile <name>]
 arg-bridge native --adopt <thread-id> [--profile <name>]
+arg-bridge native --adopt <thread-id> --follow-current-provider [--profile <name>]
 arg-bridge codex [thread] [--profile <name>]
 arg-bridge settings --profile codex [--json]
 arg-bridge doctor --profile codex --json
@@ -283,6 +284,7 @@ Version 1.9.1 adds two explicit terminal entry points:
 ```bash
 arg-bridge native --bridge
 arg-bridge native --adopt <old-thread-id>
+arg-bridge native --adopt <old-thread-id> --follow-current-provider
 ```
 
 `--bridge` starts a Bridge-managed native TUI with `arg_bridge.*` dynamic tools
@@ -297,6 +299,15 @@ An old thread cannot be upgraded by editing JSONL or adding a marker: Codex
 user/assistant text, applies a bounded redacted handoff, starts a new
 Bridge-managed thread, and prints both the old and new IDs. See
 [native bridge](./docs/native-bridge.md).
+
+Plain `--adopt` preserves the source thread's provider/model. Add
+`--follow-current-provider` to preserve only the bounded user/assistant text
+while creating the destination thread under the provider, model and credential
+fingerprint currently resolved from cc-switch. This mode reads the old thread
+only through its owner/idle boundary, starts a separate provider-specific App
+Server, and passes `modelProvider` and `model` explicitly to `thread/start`.
+Missing provider, model or credential fails before the new thread is created.
+Repeating the command is idempotent per provider/model/credential generation.
 
 ### Mid-turn messages
 
