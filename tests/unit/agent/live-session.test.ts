@@ -2706,12 +2706,15 @@ setInterval(() => {}, 1000);
       expect(spawnSync('tmux', ['-S', socketPath, 'list-clients', '-F', '#{client_width}x#{client_height}'], {
         encoding: 'utf8',
       }).stdout.trim()).toBe('120x40');
-      expect(
-        spawnSync('tmux', ['-S', socketPath, 'detach-client', '-s', sessionName], {
-          stdio: 'ignore',
-        }).status,
-      ).toBe(0);
+      // Simulate a real client/network disconnect rather than asking the
+      // server to detach a client it has not finished constructing its pane
+      // state for. On the hosted runner the latter can leave paste delivery
+      // targeting a stale client transition even though the pane stays alive.
+      terminateAttachClient(attached, 'SIGHUP');
       await waitForTmuxClient(socketPath, false, 3_000);
+      // Let the long-lived helper publish at least one post-disconnect capture
+      // before the next turn writes into the pane.
+      await testDelay(500);
 
       expect(
         spawnSync('tmux', ['-S', socketPath, 'has-session', '-t', sessionName], { stdio: 'ignore' }).status,
@@ -2722,10 +2725,20 @@ setInterval(() => {}, 1000);
       const secondSession = pool.getOrCreate(scopeKey, sessionOptions);
       const secondEvents = await collect(secondSession.run('disconnect-second', 'second', dir).events);
       const finalScreen = spawnSync('tmux', ['-S', socketPath, 'capture-pane', '-p', '-t', sessionName], { encoding: 'utf8' }).stdout;
+      const paneState = spawnSync('tmux', [
+        '-S',
+        socketPath,
+        'display-message',
+        '-p',
+        '-t',
+        sessionName,
+        '#{pane_dead}|#{pane_current_command}|#{pane_in_mode}|#{pane_pid}',
+      ], { encoding: 'utf8' }).stdout;
       const starts = await readFile(countFile, 'utf8');
       expect(textOf(secondEvents), JSON.stringify({
         secondEvents,
         finalScreen,
+        paneState,
         starts,
         diagnostics: pool.diagnostics(scopeKey),
       })).toBe(
