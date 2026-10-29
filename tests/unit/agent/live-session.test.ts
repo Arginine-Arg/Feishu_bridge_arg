@@ -2626,13 +2626,9 @@ setInterval(() => {}, 1000);
     }
   }, 20_000);
 
-  tmuxAttachIt('survives an attached client disconnect and recovers a silently dropped paste', async () => {
+  tmuxAttachIt('survives an attached client disconnect through a fresh relay without replacing the agent', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-client-disconnect-test-'));
     const bin = join(dir, 'fake-tmux-client-disconnect-agent.mjs');
-    const wrapperDir = join(dir, 'bin');
-    const dropPasteMarker = join(dir, 'drop-next-paste');
-    const dropLiteralMarker = join(dir, 'drop-next-literal');
-    const realTmux = spawnSync('sh', ['-c', 'command -v tmux'], { encoding: 'utf8' }).stdout.trim();
     const countFile = join(dir, 'starts.txt');
     const scopeKey = 'client-disconnect-scope';
     const signature = 'client-disconnect-signature';
@@ -2661,32 +2657,6 @@ setInterval(() => {}, 1000);
       'utf8',
     );
     await chmod(bin, 0o755);
-    expect(realTmux).toBeTruthy();
-    await mkdir(wrapperDir, { recursive: true });
-    await writeFile(
-      join(wrapperDir, 'tmux'),
-      `#!/bin/sh
-sub="$3"
-if [ "$sub" = "-f" ]; then sub="$4"; fi
-if [ "$sub" = "paste-buffer" ] && [ -f ${JSON.stringify(dropPasteMarker)} ]; then
-  mv ${JSON.stringify(dropPasteMarker)} ${JSON.stringify(`${dropPasteMarker}.used`)}
-  exit 0
-fi
-if [ "$sub" = "send-keys" ] && [ -f ${JSON.stringify(dropLiteralMarker)} ]; then
-  saw_literal=0
-  for arg in "$@"; do
-    if [ "$arg" = "-l" ]; then saw_literal=1; break; fi
-  done
-  if [ "$saw_literal" = "1" ]; then
-    mv ${JSON.stringify(dropLiteralMarker)} ${JSON.stringify(`${dropLiteralMarker}.used`)}
-    exit 0
-  fi
-fi
-exec ${JSON.stringify(realTmux)} "$@"
-`,
-      'utf8',
-    );
-    await chmod(join(wrapperDir, 'tmux'), 0o755);
 
     // Reproduce a user tmux configuration that would otherwise destroy the
     // last session as soon as its only attached client disconnects.
@@ -2706,10 +2676,6 @@ exec ${JSON.stringify(realTmux)} "$@"
         command: process.execPath,
         args: [bin],
         cwd: dir,
-        env: {
-          ...process.env,
-          PATH: `${wrapperDir}:${process.env.PATH ?? ''}`,
-        },
         signature,
         tmuxScopeId: scopeKey,
         usePty: true,
@@ -2728,11 +2694,6 @@ exec ${JSON.stringify(realTmux)} "$@"
       expect(textOf(await collect(session.run('disconnect-first', 'first', dir).events))).toContain(
         'reply:first:turn=1',
       );
-      // The helper gets a successful tmux exit for the next paste but no bytes
-      // reach the pane, reproducing the hosted-runner failure without weakening
-      // the conversation/single-start assertions below.
-      await writeFile(dropPasteMarker, 'drop\n');
-      await writeFile(dropLiteralMarker, 'drop\n');
       expect(
         spawnSync('tmux', ['-S', socketPath, 'show-options', '-t', sessionName, 'destroy-unattached'], {
           encoding: 'utf8',
@@ -2769,6 +2730,7 @@ exec ${JSON.stringify(realTmux)} "$@"
       // Let the long-lived helper publish at least one post-disconnect capture
       // before the next turn writes into the pane.
       await testDelay(500);
+      await pool.release(scopeKey, 'attached-client-disconnected');
 
       expect(
         spawnSync('tmux', ['-S', socketPath, 'has-session', '-t', sessionName], { stdio: 'ignore' }).status,
@@ -2801,6 +2763,106 @@ exec ${JSON.stringify(realTmux)} "$@"
       expect(starts).toBe('start\n');
     } finally {
       if (attached) terminateAttachClient(attached, 'SIGTERM');
+      await pool.closeAll();
+      spawnSync('tmux', ['-S', socketPath, 'kill-server'], { stdio: 'ignore' });
+    }
+  }, 45_000);
+
+  tmuxIt('recovers a silently dropped paste and failed literal fallback without replacing the agent', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-paste-recovery-test-'));
+    const bin = join(dir, 'fake-tmux-paste-recovery-agent.mjs');
+    const wrapperDir = join(dir, 'bin');
+    const dropPasteMarker = join(dir, 'drop-next-paste');
+    const dropLiteralMarker = join(dir, 'drop-next-literal');
+    const tmuxTraceFile = join(dir, 'tmux-trace.txt');
+    const realTmux = spawnSync('sh', ['-c', 'command -v tmux'], { encoding: 'utf8' }).stdout.trim();
+    const countFile = join(dir, 'starts.txt');
+    const scopeKey = 'paste-recovery-scope';
+    const signature = 'paste-recovery-signature';
+    const { socketPath } = liveTmuxIdentity(dir, scopeKey, signature);
+    await writeFile(
+      bin,
+      `#!/usr/bin/env node
+import { appendFileSync } from 'node:fs';
+appendFileSync(${JSON.stringify(countFile)}, 'start\\n');
+process.stdin.setEncoding('utf8');
+let buffer = '';
+let turn = 0;
+process.stdin.on('data', (chunk) => {
+  buffer += chunk;
+  let index;
+  while ((index = buffer.search(/[\\r\\n]/)) !== -1) {
+    const line = buffer.slice(0, index).trim();
+    buffer = buffer.slice(index + 1);
+    if (!line) continue;
+    turn += 1;
+    process.stdout.write('\\x1b[2J\\x1b[H› ' + line + '\\n• reply:' + line + ':turn=' + turn + '\\n›\\n');
+  }
+});
+setInterval(() => {}, 1000);
+`,
+      'utf8',
+    );
+    await chmod(bin, 0o755);
+    expect(realTmux).toBeTruthy();
+    await mkdir(wrapperDir, { recursive: true });
+    await writeFile(
+      join(wrapperDir, 'tmux'),
+      `#!/bin/sh
+sub="$3"
+if [ "$sub" = "-f" ]; then sub="$5"; fi
+printf '%s\n' "$sub" >> ${JSON.stringify(tmuxTraceFile)}
+if [ "$sub" = "paste-buffer" ] && [ -f ${JSON.stringify(dropPasteMarker)} ]; then
+  mv ${JSON.stringify(dropPasteMarker)} ${JSON.stringify(`${dropPasteMarker}.used`)}
+  exit 0
+fi
+if [ "$sub" = "send-keys" ] && [ -f ${JSON.stringify(dropLiteralMarker)} ]; then
+  saw_literal=0
+  for arg in "$@"; do
+    if [ "$arg" = "-l" ]; then saw_literal=1; break; fi
+  done
+  if [ "$saw_literal" = "1" ]; then
+    mv ${JSON.stringify(dropLiteralMarker)} ${JSON.stringify(`${dropLiteralMarker}.used`)}
+    exit 0
+  fi
+fi
+exec ${JSON.stringify(realTmux)} "$@"
+`,
+      'utf8',
+    );
+    await chmod(join(wrapperDir, 'tmux'), 0o755);
+
+    const pool = new LiveSessionPool();
+    const options: LiveSessionCommand = {
+      command: process.execPath,
+      args: [bin],
+      cwd: dir,
+      env: {
+        ...process.env,
+        PATH: `${wrapperDir}:${process.env.PATH ?? ''}`,
+      },
+      signature,
+      tmuxScopeId: scopeKey,
+      usePty: true,
+      backend: 'tmux',
+      idleMs: 1_500,
+      outputFlushMs: 30,
+      startupTimeoutMs: 15_000,
+    };
+    try {
+      const session = pool.getOrCreate(scopeKey, options);
+      expect(textOf(await collect(session.run('paste-first', 'first', dir).events))).toContain(
+        'reply:first:turn=1',
+      );
+      await writeFile(dropPasteMarker, 'drop\n');
+      await writeFile(dropLiteralMarker, 'drop\n');
+      const secondEvents = await collect(session.run('paste-second', 'second', dir).events);
+      expect(textOf(secondEvents)).toBe('• reply:second:turn=2\n');
+      const trace = await readFile(tmuxTraceFile, 'utf8');
+      expect(trace.match(/^paste-buffer$/gmu)?.length).toBeGreaterThanOrEqual(2);
+      expect(pool.diagnostics(scopeKey).retryCount).toBeGreaterThanOrEqual(2);
+      expect(await readFile(countFile, 'utf8')).toBe('start\n');
+    } finally {
       await pool.closeAll();
       spawnSync('tmux', ['-S', socketPath, 'kill-server'], { stdio: 'ignore' });
     }
