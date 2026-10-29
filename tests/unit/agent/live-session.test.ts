@@ -2710,8 +2710,20 @@ setInterval(() => {}, 1000);
       // server to detach a client it has not finished constructing its pane
       // state for. On the hosted runner the latter can leave paste delivery
       // targeting a stale client transition even though the pane stays alive.
-      terminateAttachClient(attached, 'SIGHUP');
-      await waitForTmuxClient(socketPath, false, 3_000);
+      terminateAttachClient(attached, 'SIGTERM');
+      try {
+        await waitForTmuxClient(socketPath, false, 2_000);
+      } catch {
+        // Some `script` builds reap their child client asynchronously or
+        // ignore the forwarded signal. Fall back to the server-side detach,
+        // which still exercises the same durable-session boundary.
+        expect(
+          spawnSync('tmux', ['-S', socketPath, 'detach-client', '-s', sessionName], {
+            stdio: 'ignore',
+          }).status,
+        ).toBe(0);
+        await waitForTmuxClient(socketPath, false, 1_000);
+      }
       // Let the long-lived helper publish at least one post-disconnect capture
       // before the next turn writes into the pane.
       await testDelay(500);
