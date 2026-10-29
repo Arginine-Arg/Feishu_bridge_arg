@@ -143,12 +143,16 @@ describe('Claude slash command visible behavior', () => {
     expect(lastContent(h.channel)).toHaveProperty('card');
     expect(JSON.stringify(lastContent(h.channel))).toContain('lark-cli');
     expect(JSON.stringify(lastContent(h.channel))).toContain('user-ready');
+    expect(JSON.stringify(lastContent(h.channel))).toContain('当前没有运行中的 main turn');
 
     await expect(h.run('/help')).resolves.toBe(true);
     expect(lastContent(h.channel)).toHaveProperty('card');
     const help = JSON.stringify(lastContent(h.channel));
     expect(help).toContain('Fake Agent');
     expect(help).toContain('lark-cli 身份策略');
+    expect(help).toContain('/steer');
+    expect(help).toContain('长任务中的消息');
+    expect(help).toContain('/btw out');
     expect(help).not.toContain('/lark');
     expect(help).not.toContain('交给 Claude');
   });

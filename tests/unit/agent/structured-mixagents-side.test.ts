@@ -266,6 +266,11 @@ describe('structured MixAgents /btw', () => {
       status: 'unavailable',
       reason: expect.stringContaining('next-turn queueing'),
     });
+    expect(run.steerCapability?.()).toMatchObject({
+      available: false,
+      kind: 'provider',
+      reason: expect.stringContaining('next-turn queueing'),
+    });
     await run.stop({ force: true });
     await drain(run);
     await main.close();

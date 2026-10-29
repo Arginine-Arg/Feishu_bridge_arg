@@ -111,6 +111,11 @@ import {
   markNativeAgentCommand,
   type LiveInputMode,
 } from './live-input';
+import {
+  mainTurnSteerAvailability,
+  parseSteerCommand,
+  type MainTurnSteerUnavailableReason,
+} from './turn-steer';
 import type { AppPaths } from '../config/app-paths';
 import {
   consumeCotEvents,
@@ -885,6 +890,81 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   }
 
   const route = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
+  const steerRequest = parseSteerCommand(route.msg.content);
+  if (steerRequest) {
+    const replyOptions = {
+      replyTo: msg.messageId,
+      ...(chatMode === 'topic' && threadId ? { replyInThread: true } : {}),
+    };
+    const sendSteerReply = async (markdown: string): Promise<void> => {
+      await channel
+        .send(msg.chatId, { markdown }, replyOptions)
+        .catch((err) => log.warn('intake', 'steer-ack-failed', {
+          scope,
+          err: err instanceof Error ? err.message : String(err),
+        }));
+    };
+    if (!steerRequest.text) {
+      await sendSteerReply('用法：`/steer <要插入当前 main turn 的正文>`。');
+      return;
+    }
+    if (emsg.resources.length > 0) {
+      await sendSteerReply('⚠️ `/steer` 不支持附件。请直接发送附件和说明，它们会按普通消息排队到下一轮。');
+      return;
+    }
+    if (replyQuoteTargetForMessage(emsg, chatMode)) {
+      await sendSteerReply('⚠️ `/steer` 不支持引用回复。请去掉引用；需要引用上下文时请把必要内容写入正文。');
+      return;
+    }
+    const editorSideState = sideConversationState(sideConversationByScope, scope);
+    if (editorSideState && editorSideState.phase !== 'closed') {
+      await sendSteerReply(formatMainTurnSteerUnavailable('side-active'));
+      return;
+    }
+    const steerability = mainTurnSteerAvailability(activeRuns, scope);
+    if (!steerability.available) {
+      await sendSteerReply(formatMainTurnSteerUnavailable(
+        steerability.reason,
+        steerability.detail,
+      ));
+      return;
+    }
+    const result = await activeRuns.steer(scope, {
+      text: steerRequest.text,
+      clientUserMessageId: msg.messageId,
+    });
+    if (result.status === 'steered') {
+      log.info('intake', 'turn-steered-explicit', {
+        scope,
+        messageId: msg.messageId,
+        chars: steerRequest.text.length,
+      });
+      await sendSteerReply(
+        '↪ `/steer` 已插入当前 main turn，将在下一个模型边界生效；goal 和当前任务保持运行。',
+      );
+      return;
+    }
+    if (result.status === 'uncertain') {
+      log.warn('intake', 'turn-steer-uncertain', {
+        scope,
+        messageId: msg.messageId,
+        err: result.reason,
+      });
+      await sendSteerReply(
+        '⚠️ `/steer` 状态未知，可能已经被当前 turn 接收；没有自动重发，也没有转入普通队列。请先检查当前任务再决定是否重试。',
+      );
+      return;
+    }
+    log.info('intake', 'turn-steer-unavailable', {
+      scope,
+      messageId: msg.messageId,
+      reason: result.reason ?? 'not steerable',
+    });
+    await sendSteerReply(
+      `⚠️ \`/steer\` 未发送：${formatSteerFailure(result.reason)}。消息没有进入普通队列，也没有创建新一轮。`,
+    );
+    return;
+  }
   const structuredQuestion = agent.structuredQuestion?.(scope);
   if (structuredQuestion && !route.forceNative && !route.msg.content.trimStart().startsWith('/')) {
     route.msg = { ...route.msg, content: `/answer ${structuredQuestion} ${route.msg.content}` };
@@ -1359,59 +1439,6 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
     }
   }
   const priorityLiveInput = priorityLiveControl || priorityNativeCommand;
-  const activeMainHandle = activeRuns.get(scope);
-  const steerText = agentMsg.content.trim();
-  const earlierPending = pending.snapshot(scope)[0];
-  const canSteerActive =
-    !priorityLiveInput &&
-    !nativeInputMode &&
-    !activeRuns.getSide(scope) &&
-    Boolean(activeMainHandle && !activeMainHandle.interrupted &&
-      !activeMainHandle.stopRequested && !activeMainHandle.detached &&
-      activeMainHandle.run.steer) &&
-    Boolean(steerText) &&
-    !steerText.startsWith('/') &&
-    agentMsg.resources.length === 0 &&
-    (earlierPending?.queued ?? 0) === 0 &&
-    (earlierPending?.deferred ?? 0) === 0 &&
-    !replyQuoteTargetForMessage(agentMsg, chatMode);
-  if (canSteerActive) {
-    const result = await activeRuns.steer(scope, {
-      text: steerText,
-      clientUserMessageId: agentMsg.messageId,
-    });
-    if (result.status === 'steered') {
-      log.info('intake', 'turn-steered', {
-        scope,
-        messageId: agentMsg.messageId,
-        chars: steerText.length,
-      });
-      await channel.send(
-        msg.chatId,
-        { text: '↪ 已插入当前 Codex 任务，将在下一个模型边界生效。' },
-        { replyTo: msg.messageId },
-      ).catch((err) => log.warn('intake', 'steer-ack-failed', { scope, err: String(err) }));
-      return;
-    }
-    if (result.status === 'uncertain') {
-      log.warn('intake', 'turn-steer-uncertain', {
-        scope,
-        messageId: agentMsg.messageId,
-        err: result.reason,
-      });
-      await channel.send(
-        msg.chatId,
-        { text: '⚠️ 中途消息状态未知，未自动重发；请检查当前任务后再决定是否重发。' },
-        { replyTo: msg.messageId },
-      ).catch((err) => log.warn('intake', 'steer-uncertain-ack-failed', { scope, err: String(err) }));
-      return;
-    }
-    log.info('intake', 'turn-steer-unavailable', {
-      scope,
-      messageId: agentMsg.messageId,
-      reason: result.reason ?? 'not steerable',
-    });
-  }
   const size = priorityLiveInput
     ? pending.pushFront(scope, agentMsg, {
         immediate: true,
@@ -1441,12 +1468,51 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
       .send(
         msg.chatId,
         {
-          text: `⏳ 当前任务仍在运行，你的消息已排队（当前 ${size} 条）。可随时发送 /status 检查会话；想立即打断请发 /stop。`,
+          text:
+            `⏳ 当前任务仍在运行，普通消息已排队（当前 ${size} 条）。` +
+            `想插入当前 main turn 请发 /steer <正文>；查看状态用 /status；立即打断用 /stop。`,
         },
         { replyTo: msg.messageId },
       )
       .catch((err) => log.warn('intake', 'busy-ack-failed', { scope, err: String(err) }));
   }
+}
+
+function formatMainTurnSteerUnavailable(
+  reason: MainTurnSteerUnavailableReason,
+  detail?: string,
+): string {
+  switch (reason) {
+    case 'side-active':
+      return '⚠️ `/steer` 未发送：当前有 `/btw` side conversation。请先 `/btw out` 回到 main thread 后重试。';
+    case 'no-active-main':
+      return '⚠️ `/steer` 未发送：当前没有运行中的 main turn。若想开始新一轮，请直接发送正文。';
+    case 'run-stopping':
+      return '⚠️ `/steer` 未发送：当前 main turn 正在停止或已分离。';
+    case 'provider-unsupported':
+      return `⚠️ \`/steer\` 未发送：${
+        detail ? formatSteerFailure(detail) : '当前 provider 不支持安全的中途注入'
+      }。消息没有进入普通队列，也没有创建新一轮。`;
+    case 'backend-unavailable':
+      return `⚠️ \`/steer\` 未发送：${
+        detail ? formatSteerFailure(detail) : '当前终端状态不允许安全注入'
+      }。消息没有进入普通队列，也没有创建新一轮。`;
+  }
+}
+
+function formatSteerFailure(reason: string | undefined): string {
+  const detail = reason?.trim();
+  if (!detail) return '当前 turn 已不可注入或 provider 不支持';
+  if (/third-party|next-turn queueing/iu.test(detail)) {
+    return '当前第三方 structured provider 不支持安全的 turn/steer';
+  }
+  if (/no active turn|active run changed|not steerable/iu.test(detail)) {
+    return '当前 main turn 已经结束或切换';
+  }
+  if (/composer|draft|empty-composer|terminal/iu.test(detail)) {
+    return '当前终端 composer 不是可安全注入的空闲状态';
+  }
+  return detail;
 }
 
 export interface AgentCommandRoute {
@@ -1458,7 +1524,7 @@ export interface AgentCommandRoute {
 export function commandPreservesPendingMessages(content: string): boolean {
   const command = content.trim().toLowerCase();
   return (
-    /^\/(?:status|help|ps)(?:\s|$)/u.test(command) ||
+    /^\/(?:status|help|ps|steer)(?:\s|$)/u.test(command) ||
     /^\/session(?:\s+\/?status)?\s*$/u.test(command) ||
     /^\/tmux(?:\s+(?:list|status|tail|attach))?(?:\s|$)/u.test(command) ||
     /^\/(?:timeout|output)(?:\s|$)/u.test(command)

@@ -8215,6 +8215,10 @@ var LiveSessionPool = class {
     if (!session) return false;
     return session.steerActiveTurn(input, expectedRunId, stillActive);
   }
+  steerCapability(key, expectedRunId, stillActive = () => true) {
+    const session = this.sessions.get(key);
+    return session ? session.steerCapability(expectedRunId, stillActive) : { available: false, kind: "run", reason: "live session is not active" };
+  }
 };
 var LiveTerminalSession = class {
   signature;
@@ -8411,6 +8415,23 @@ var LiveTerminalSession = class {
     });
     this.controlInputTail = task.then(() => void 0, () => void 0);
     return task;
+  }
+  steerCapability(expectedRunId, stillActive = () => true) {
+    if (!stillActive() || this.closed || !this.isAlive() || this.turnGeneration !== expectedRunId || !["submitted", "busy", "streaming"].includes(this.turnPhase)) {
+      return {
+        available: false,
+        kind: "run",
+        reason: "live turn is no longer active"
+      };
+    }
+    if (!canSteerLiveTerminal(this.latestTerminalState())) {
+      return {
+        available: false,
+        kind: "terminal",
+        reason: "native terminal is not in an empty-composer active turn"
+      };
+    }
+    return { available: true };
   }
   async sendControlInputNow(input, generation, stillActive) {
     if (!stillActive() || this.closed || !this.isAlive()) return false;
@@ -12968,6 +12989,10 @@ var CodexAdapter = class {
     if (side || opts.liveInputMode) return run;
     return {
       ...run,
+      steerCapability: () => {
+        const stillActive = () => this.liveSessions.diagnostics(scopeKey).generation === opts.runId;
+        return this.liveSessions.steerCapability(scopeKey, opts.runId, stillActive);
+      },
       steer: async (request) => {
         const stillActive = () => this.liveSessions.diagnostics(scopeKey).generation === opts.runId;
         const steered = await this.liveSessions.steerActive(
@@ -20893,21 +20918,44 @@ ${prompt}
         events.close();
       }
     })();
+    const steerCapability = () => {
+      if (this.providerIsThirdParty) {
+        return {
+          available: false,
+          kind: "provider",
+          reason: "third-party Responses provider uses next-turn queueing instead of turn/steer"
+        };
+      }
+      if (side || terminal || options.liveInputMode) {
+        return {
+          available: false,
+          kind: "terminal",
+          reason: "active target is not a steerable Codex turn"
+        };
+      }
+      if (detached || abort.signal.aborted || !(activeTarget instanceof CodexStructuredSession)) {
+        return {
+          available: false,
+          kind: "run",
+          reason: "no active Codex turn to steer"
+        };
+      }
+      return { available: true };
+    };
     return {
       runId: options.runId,
       events,
       stop: async () => {
         abort.abort();
       },
+      steerCapability,
       steer: async (request) => {
-        if (this.providerIsThirdParty) {
-          return {
-            status: "unavailable",
-            reason: "third-party Responses provider uses next-turn queueing instead of turn/steer"
-          };
+        const capability = steerCapability();
+        if (!capability.available) {
+          return { status: "unavailable", reason: capability.reason };
         }
-        if (side || terminal || detached || abort.signal.aborted || options.liveInputMode || !(activeTarget instanceof CodexStructuredSession)) {
-          return { status: "unavailable", reason: "active target is not a steerable Codex turn" };
+        if (!(activeTarget instanceof CodexStructuredSession)) {
+          return { status: "unavailable", reason: "no active Codex turn to steer" };
         }
         return activeTarget.steer(request);
       },
@@ -22696,6 +22744,9 @@ function statusCard(info) {
     ...info.activeCommentScopes && info.activeCommentScopes.length > 0 ? [
       `\u{1F4DD} **comment runs**: ${info.activeCommentScopes.map((scope) => `\`${escapeCode(scope)}\``).join(", ")}`
     ] : [],
+    ...info.steer ? [
+      `\u21AA ${info.steer.available ? "\u2705" : "\u26D4"} **steer**: ${info.steer.label}`
+    ] : [],
     `\u{1F6A6} **queue**: ${queueLine}`,
     ...info.live ? [
       `\u{1F9E0} **live**: ${escapeMd(info.live.phase)} \xB7 input=${escapeMd(info.live.inputState)} \xB7 retry=${info.live.retryCount}`,
@@ -22772,35 +22823,75 @@ function helpCard(agentName = "Agent") {
   return shell("\u{1F4A1} \u4F7F\u7528\u5E2E\u52A9", [
     divMd(
       [
-        "**\u547D\u4EE4\u5217\u8868**",
+        `\u76F4\u63A5\u53D1\u9001\u666E\u901A\u6587\u672C\u5373\u53EF\u4E0E ${escapedAgentName} \u5F00\u59CB\u6216\u7EE7\u7EED\u4F1A\u8BDD\u3002`,
+        "\u957F\u4EFB\u52A1\u8FD0\u884C\u65F6\uFF0C\u666E\u901A\u6D88\u606F\u9ED8\u8BA4\u6392\u961F\u5230\u4E0B\u4E00\u8F6E\uFF0C\u4E0D\u4F1A\u6253\u65AD\u5F53\u524D\u4EFB\u52A1\u3002"
+      ].join("\n")
+    ),
+    HR,
+    divMd(
+      [
+        "**\u26A1 \u957F\u4EFB\u52A1\u4E2D\u7684\u6D88\u606F**",
+        "",
+        "- \u666E\u901A\u6587\u672C \u2014 \u6392\u961F\u5230\u5F53\u524D turn \u7ED3\u675F\u540E\u5904\u7406",
+        "- `/steer <\u6B63\u6587>` \u2014 \u53EA\u63D2\u5165\u5F53\u524D main turn\uFF0C\u4E0D\u6253\u65AD goal\uFF1B\u6CA1\u6709\u6D3B\u52A8\u4EFB\u52A1\u6216 provider \u4E0D\u652F\u6301\u65F6\u4F1A\u660E\u786E\u62D2\u7EDD",
+        "- `/status` \u2014 \u67E5\u770B\u961F\u5217\u3001\u5F53\u524D turn \u4EE5\u53CA `/steer` \u662F\u5426\u53EF\u7528",
+        "- `/stop` \u2014 \u7ACB\u5373\u7ED3\u675F\u5F53\u524D\u6B63\u5728\u8DD1\u7684\u4EFB\u52A1\uFF08\u4E5F\u53EF\u70B9\u5361\u7247\u5E95\u90E8 \u23F9 \u7EC8\u6B62\u6309\u94AE\uFF09",
+        "- `/stop comment:<scopeHash>` \u2014 \u7BA1\u7406\u5458\u505C\u6B62\u4E91\u6587\u6863\u8BC4\u8BBA\u4EFB\u52A1"
+      ].join("\n")
+    ),
+    HR,
+    divMd(
+      [
+        "**\u{1F9ED} \u4F1A\u8BDD\u4E0E\u5DE5\u4F5C\u533A**",
         "",
         "- `/new` `/reset` \u2014 \u6E05\u7A7A\u5F53\u524D chat \u7684\u4F1A\u8BDD",
-        "- `/new chat [name]` \u2014 \u65B0\u5EFA\u7FA4+\u65B0\u4F1A\u8BDD\uFF0C\u81EA\u52A8\u62C9\u4F60\u8FDB\u7FA4",
+        "- `/new chat [name]` \u2014 \u65B0\u5EFA\u7FA4\u548C\u65B0\u4F1A\u8BDD\uFF0C\u81EA\u52A8\u62C9\u4F60\u8FDB\u7FA4",
         "- `/resume [N]` \u2014 \u5217\u51FA\u5E76\u6062\u590D\u5386\u53F2\u4F1A\u8BDD\uFF08\u6700\u591A N \u6761\uFF09",
         "- `/cd <path>` \u2014 \u5207\u6362\u5DE5\u4F5C\u76EE\u5F55\uFF08\u4F1A\u91CD\u7F6E session\uFF09",
-        "- `/ws list|save <name>|use <name>|remove <name>` \u2014 \u5DE5\u4F5C\u76EE\u5F55",
-        "- `/account` \u2014 \u67E5\u770B\u5F53\u524D\u5E94\u7528\uFF1B`/account change` \u6362 appId/secret \u5E76\u91CD\u8FDE",
-        "- `/config` \u2014 \u8C03\u6574\u504F\u597D\u3001\u8BBF\u95EE\u63A7\u5236\u548C lark-cli \u8EAB\u4EFD\u7B56\u7565",
-        "- `/model` \u2014 \u9009\u62E9\u6A21\u578B\uFF1BCodex \u4F7F\u7528 CLI \u539F\u751F\u6A21\u578B\u548C reasoning \u9009\u9879\u5E76\u540C\u6B65\u5230 profile",
-        "- `/btw <\u5185\u5BB9>` \u2014 \u53EA\u8BFB side conversation\uFF1B`/codex /btw <\u5185\u5BB9>` \u7B49\u4EF7",
-        "- `/btw --write --workspace <canonical \u8DEF\u5F84> <\u4EFB\u52A1>` \u2014 \u663E\u5F0F\u6388\u6743\u4E00\u6B21 workspace-write\uFF08\u9700\u5728 settings \u9AD8\u7EA7\u53C2\u6570\u542F\u7528\uFF09",
-        "- `/btw result` \u2014 \u6536\u53D6\u540E\u53F0 side \u5728\u8F6F\u7B49\u5F85\u63D0\u793A\u6216\u786C\u7B49\u5F85\u7ED3\u675F\u540E\u4EA7\u751F\u7684\u8FDF\u5230\u7ED3\u679C\uFF1B`/btw out` \u624D\u4F1A\u4E2D\u65AD\u5E76\u4E22\u5F03",
-        "- `/status` \u2014 \u5F53\u524D\u72B6\u6001",
+        "- `/ws list|save <name>|use <name>|remove <name>` \u2014 \u7BA1\u7406\u547D\u540D\u5DE5\u4F5C\u76EE\u5F55",
         "- `/session` \u2014 \u67E5\u770B\u6216\u5207\u6362\u540E\u53F0 agent session \u6A21\u5F0F",
-        "- `/tmux list [socket]|bind <\u7F16\u53F7\u6216 pane id>|status|attach|tail [N]|unbind|release` \u2014 \u7BA1\u7406\u5458\u7BA1\u7406 tmux\uFF1B`list` \u663E\u793A\u5171\u4EAB endpoint \u4E0E structured \u547D\u4EE4\uFF0C`tail` \u9ED8\u8BA4\u663E\u793A\u5F53\u524D pane \u672B\u5C3E 27 \u884C",
-        "- `/sendfile <path>` \u2014 \u7BA1\u7406\u5458\u76F4\u63A5\u56DE\u590D\u5F53\u524D\u6D88\u606F\u53D1\u9001\u5DE5\u4F5C\u76EE\u5F55\u5185\u7684\u6587\u4EF6",
-        "- `/output [live|final|off|status]` \u2014 \u8BBE\u7F6E\u5F53\u524D\u4F1A\u8BDD\u7684\u8F93\u51FA\u6295\u9012\u7B56\u7565\uFF0C\u4E0D\u5F71\u54CD agent \u7EE7\u7EED\u8FD0\u884C",
-        "- `/stop` \u2014 \u7ED3\u675F\u5F53\u524D\u6B63\u5728\u8DD1\u7684\u4EFB\u52A1\uFF08\u4E5F\u53EF\u70B9\u5361\u7247\u5E95\u90E8 \u23F9 \u7EC8\u6B62 \u6309\u94AE\uFF09",
-        "- `/stop comment:<scopeHash>` \u2014 \u7BA1\u7406\u5458\u505C\u6B62\u4E91\u6587\u6863\u8BC4\u8BBA\u4EFB\u52A1",
-        "- `/timeout [N|off|default]` \u2014 \u5F53\u524D session \u7684\u63A2\u6D3B\u5206\u949F\u6570,`/config` \u6539\u5168\u5C40\u9ED8\u8BA4",
-        "- `/timeout comment:<scopeHash> N` \u2014 \u7BA1\u7406\u5458\u8BBE\u7F6E\u4E91\u6587\u6863\u8BC4\u8BBA\u4EFB\u52A1\u63A2\u6D3B",
-        "- `/ps` \u2014 \u5217\u51FA\u672C\u673A\u6240\u6709 bot,\u6807\u8BC6\u5F53\u524D\u6B63\u5728\u56DE\u590D\u7684\u90A3\u4E2A",
-        "- `/exit <id|#>` \u2014 \u5173\u6389\u6307\u5B9A bot(\u7528 `/ps` \u770B id/\u5E8F\u53F7)",
-        "- `/reconnect` \u2014 \u5F3A\u5236\u91CD\u8FDE WebSocket(\u7F51\u7EDC\u6296\u52A8\u540E bot \u6CA1\u53CD\u5E94\u65F6\u7528)",
-        `- \`/doctor [\u63CF\u8FF0]\` \u2014 \u628A\u65E5\u5FD7\u548C\u63CF\u8FF0\u4EA4\u7ED9 ${escapedAgentName} \u81EA\u52A9\u8BCA\u65AD`,
-        "- `/help` \u2014 \u672C\u5E2E\u52A9",
+        "- `/model` \u2014 \u9009\u62E9\u6A21\u578B\uFF1BCodex \u4F7F\u7528\u539F\u751F\u6A21\u578B\u548C reasoning \u9009\u9879\u5E76\u540C\u6B65\u5230 profile",
+        "- `/codex /\u547D\u4EE4` \u2014 \u663E\u5F0F\u628A\u672A\u8BC6\u522B\u7684\u539F\u751F\u547D\u4EE4\u8F6C\u53D1\u7ED9\u5F53\u524D Codex CLI"
+      ].join("\n")
+    ),
+    HR,
+    divMd(
+      [
+        "**\u{1FA84} Side conversation**",
         "",
-        `\u5176\u4ED6\u5185\u5BB9\u76F4\u63A5\u4EA4\u7ED9 ${escapedAgentName}\u3002`
+        "- `/btw <\u5185\u5BB9>` \u2014 \u5F00\u542F\u6216\u7EE7\u7EED\u53EA\u8BFB side conversation\uFF1B`/codex /btw <\u5185\u5BB9>` \u7B49\u4EF7",
+        "- `/btw --write --workspace <canonical \u8DEF\u5F84> <\u4EFB\u52A1>` \u2014 \u663E\u5F0F\u6388\u6743\u4E00\u6B21 workspace-write\uFF08\u9700\u5728 settings \u9AD8\u7EA7\u53C2\u6570\u542F\u7528\uFF09",
+        "- `/btw result` \u2014 \u6536\u53D6\u540E\u53F0 side \u7684\u8FDF\u5230\u7ED3\u679C",
+        "- `/btw out` \u2014 \u9000\u51FA side\uFF1B\u8FD9\u662F `/btw` \u7684\u4E2D\u65AD\u548C\u4E22\u5F03\u5165\u53E3"
+      ].join("\n")
+    ),
+    HR,
+    divMd(
+      [
+        "**\u{1F4CA} \u8FD0\u884C\u3001\u8F93\u51FA\u4E0E\u8BCA\u65AD**",
+        "",
+        "- `/output [live|final|off|status]` \u2014 \u8C03\u6574\u8F93\u51FA\u6295\u9012\uFF0C\u4E0D\u5F71\u54CD agent \u8FD0\u884C",
+        "- `/timeout [N|off|default]` \u2014 \u5F53\u524D session \u7684\u63A2\u6D3B\u5206\u949F\u6570\uFF1B`/config` \u4FEE\u6539\u5168\u5C40\u9ED8\u8BA4",
+        "- `/timeout comment:<scopeHash> N` \u2014 \u7BA1\u7406\u5458\u8BBE\u7F6E\u4E91\u6587\u6863\u8BC4\u8BBA\u4EFB\u52A1\u63A2\u6D3B",
+        "- `/doctor [\u63CF\u8FF0]` \u2014 \u628A\u65E5\u5FD7\u548C\u63CF\u8FF0\u4EA4\u7ED9 agent \u81EA\u52A9\u8BCA\u65AD",
+        "- `/reconnect` \u2014 \u5F3A\u5236\u91CD\u8FDE WebSocket\uFF0C\u7528\u4E8E\u7F51\u7EDC\u6296\u52A8\u540E bot \u65E0\u54CD\u5E94",
+        "- `/sendfile <path>` \u2014 \u7BA1\u7406\u5458\u53D1\u9001\u5DE5\u4F5C\u76EE\u5F55\u5185\u7684\u6587\u4EF6"
+      ].join("\n")
+    ),
+    HR,
+    divMd(
+      [
+        "**\u{1F5A5} \u672C\u673A\u4E0E\u534F\u4F5C**",
+        "",
+        "- `/tmux list [socket]|bind <\u7F16\u53F7\u6216 pane id>|status|attach|tail [N]|unbind|release` \u2014 \u7BA1\u7406\u5458\u7BA1\u7406 tmux",
+        "- `/ps` \u2014 \u5217\u51FA\u672C\u673A\u6240\u6709 bot\uFF0C\u6807\u8BC6\u5F53\u524D\u6B63\u5728\u56DE\u590D\u7684\u8FDB\u7A0B",
+        "- `/exit <id|#>` \u2014 \u5173\u95ED\u6307\u5B9A bot\uFF08\u7528 `/ps` \u67E5\u770B id \u6216\u5E8F\u53F7\uFF09",
+        "- `/account` \u2014 \u67E5\u770B\u5F53\u524D\u5E94\u7528\uFF1B`/account change` \u66F4\u6362 appId/secret \u5E76\u91CD\u8FDE",
+        "- `/config` \u2014 \u8C03\u6574\u504F\u597D\u3001\u8BBF\u95EE\u63A7\u5236\u548C lark-cli \u8EAB\u4EFD\u7B56\u7565",
+        "- `/invite user|admin @\u67D0\u4EBA`\u3001`/invite group` \u2014 \u7BA1\u7406\u8BBF\u95EE\u767D\u540D\u5355",
+        "- `/remove user|admin @\u67D0\u4EBA`\u3001`/remove group` \u2014 \u79FB\u51FA\u8BBF\u95EE\u767D\u540D\u5355",
+        "- `/doc` \u2014 \u67E5\u770B\u4E91\u6587\u6863\u8BC4\u8BBA\u89E6\u53D1\u65B9\u5F0F",
+        "- `/help` \u2014 \u672C\u5E2E\u52A9"
       ].join("\n")
     ),
     HR,
@@ -24327,6 +24418,30 @@ function reject2(code, userVisible) {
   };
 }
 
+// src/bot/turn-steer.ts
+function parseSteerCommand(content) {
+  const match = /^\/steer(?:\s+([\s\S]*))?$/iu.exec(content.trim());
+  return match ? { text: (match[1] ?? "").trim() } : void 0;
+}
+function mainTurnSteerAvailability(activeRuns, scope) {
+  if (activeRuns.getSide(scope)) return { available: false, reason: "side-active" };
+  const handle = activeRuns.get(scope);
+  if (!handle) return { available: false, reason: "no-active-main" };
+  if (handle.interrupted || handle.stopRequested || handle.detached) {
+    return { available: false, reason: "run-stopping" };
+  }
+  if (!handle.run.steer) return { available: false, reason: "provider-unsupported" };
+  const capability = handle.run.steerCapability?.();
+  if (capability && !capability.available) {
+    return {
+      available: false,
+      reason: capability.kind === "provider" ? "provider-unsupported" : capability.kind === "run" ? "run-stopping" : "backend-unavailable",
+      detail: capability.reason
+    };
+  }
+  return { available: true, handle };
+}
+
 // src/bot/group.ts
 async function createBoundChat(opts) {
   const { channel, name, inviteOpenId, description } = opts;
@@ -24997,6 +25112,7 @@ async function handleStatus(_args, ctx) {
     log.warn("command", "live-diagnostics-failed", { err: String(err) });
     return void 0;
   });
+  const steerability = mainTurnSteerAvailability(ctx.activeRuns, ctx.scope);
   const card = statusCard({
     profileName: ctx.controls.profile,
     cwd,
@@ -25009,6 +25125,10 @@ async function handleStatus(_args, ctx) {
     activeRun: ctx.activeRuns.hasAny(ctx.scope),
     activeScopes: ctx.activeRuns.scopes().filter((scope) => !scope.startsWith("comment:")),
     activeCommentScopes: ctx.activeRuns.scopes().filter((scope) => scope.startsWith("comment:")),
+    steer: steerability.available ? { available: true, label: "\u53EF\u7528 \xB7 `/steer <\u6B63\u6587>`" } : {
+      available: false,
+      label: formatSteerStatusReason(steerability.reason)
+    },
     queue: ctx.processPool?.snapshot(),
     ownerState: formatOwnerState(ctx),
     scope: ctx.scope,
@@ -25036,6 +25156,20 @@ async function handleStatus(_args, ctx) {
     } : {}
   });
   await ctx.channel.send(ctx.msg.chatId, { card }, commandReplyOptions(ctx));
+}
+function formatSteerStatusReason(reason) {
+  switch (reason) {
+    case "side-active":
+      return "\u4E0D\u53EF\u7528 \xB7 side conversation \u6B63\u5728\u5360\u7528\u7EC8\u7AEF";
+    case "no-active-main":
+      return "\u4E0D\u53EF\u7528 \xB7 \u5F53\u524D\u6CA1\u6709\u8FD0\u884C\u4E2D\u7684 main turn";
+    case "run-stopping":
+      return "\u4E0D\u53EF\u7528 \xB7 \u5F53\u524D turn \u6B63\u5728\u505C\u6B62\u6216\u5DF2\u5206\u79BB";
+    case "provider-unsupported":
+      return "\u4E0D\u53EF\u7528 \xB7 \u5F53\u524D provider/\u7EC8\u7AEF\u4E0D\u652F\u6301 turn steer";
+    case "backend-unavailable":
+      return "\u4E0D\u53EF\u7528 \xB7 \u5F53\u524D\u7EC8\u7AEF\u72B6\u6001\u4E0D\u5141\u8BB8\u5B89\u5168\u6CE8\u5165";
+  }
 }
 function formatOwnerState(ctx) {
   const state = ctx.controls.ownerRefreshState;
@@ -31599,6 +31733,79 @@ async function intakeMessage(deps) {
     return;
   }
   const route = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
+  const steerRequest = parseSteerCommand(route.msg.content);
+  if (steerRequest) {
+    const replyOptions = {
+      replyTo: msg.messageId,
+      ...chatMode === "topic" && threadId ? { replyInThread: true } : {}
+    };
+    const sendSteerReply = async (markdown2) => {
+      await channel.send(msg.chatId, { markdown: markdown2 }, replyOptions).catch((err) => log.warn("intake", "steer-ack-failed", {
+        scope,
+        err: err instanceof Error ? err.message : String(err)
+      }));
+    };
+    if (!steerRequest.text) {
+      await sendSteerReply("\u7528\u6CD5\uFF1A`/steer <\u8981\u63D2\u5165\u5F53\u524D main turn \u7684\u6B63\u6587>`\u3002");
+      return;
+    }
+    if (emsg.resources.length > 0) {
+      await sendSteerReply("\u26A0\uFE0F `/steer` \u4E0D\u652F\u6301\u9644\u4EF6\u3002\u8BF7\u76F4\u63A5\u53D1\u9001\u9644\u4EF6\u548C\u8BF4\u660E\uFF0C\u5B83\u4EEC\u4F1A\u6309\u666E\u901A\u6D88\u606F\u6392\u961F\u5230\u4E0B\u4E00\u8F6E\u3002");
+      return;
+    }
+    if (replyQuoteTargetForMessage(emsg, chatMode)) {
+      await sendSteerReply("\u26A0\uFE0F `/steer` \u4E0D\u652F\u6301\u5F15\u7528\u56DE\u590D\u3002\u8BF7\u53BB\u6389\u5F15\u7528\uFF1B\u9700\u8981\u5F15\u7528\u4E0A\u4E0B\u6587\u65F6\u8BF7\u628A\u5FC5\u8981\u5185\u5BB9\u5199\u5165\u6B63\u6587\u3002");
+      return;
+    }
+    const editorSideState = sideConversationState(sideConversationByScope, scope);
+    if (editorSideState && editorSideState.phase !== "closed") {
+      await sendSteerReply(formatMainTurnSteerUnavailable("side-active"));
+      return;
+    }
+    const steerability = mainTurnSteerAvailability(activeRuns, scope);
+    if (!steerability.available) {
+      await sendSteerReply(formatMainTurnSteerUnavailable(
+        steerability.reason,
+        steerability.detail
+      ));
+      return;
+    }
+    const result = await activeRuns.steer(scope, {
+      text: steerRequest.text,
+      clientUserMessageId: msg.messageId
+    });
+    if (result.status === "steered") {
+      log.info("intake", "turn-steered-explicit", {
+        scope,
+        messageId: msg.messageId,
+        chars: steerRequest.text.length
+      });
+      await sendSteerReply(
+        "\u21AA `/steer` \u5DF2\u63D2\u5165\u5F53\u524D main turn\uFF0C\u5C06\u5728\u4E0B\u4E00\u4E2A\u6A21\u578B\u8FB9\u754C\u751F\u6548\uFF1Bgoal \u548C\u5F53\u524D\u4EFB\u52A1\u4FDD\u6301\u8FD0\u884C\u3002"
+      );
+      return;
+    }
+    if (result.status === "uncertain") {
+      log.warn("intake", "turn-steer-uncertain", {
+        scope,
+        messageId: msg.messageId,
+        err: result.reason
+      });
+      await sendSteerReply(
+        "\u26A0\uFE0F `/steer` \u72B6\u6001\u672A\u77E5\uFF0C\u53EF\u80FD\u5DF2\u7ECF\u88AB\u5F53\u524D turn \u63A5\u6536\uFF1B\u6CA1\u6709\u81EA\u52A8\u91CD\u53D1\uFF0C\u4E5F\u6CA1\u6709\u8F6C\u5165\u666E\u901A\u961F\u5217\u3002\u8BF7\u5148\u68C0\u67E5\u5F53\u524D\u4EFB\u52A1\u518D\u51B3\u5B9A\u662F\u5426\u91CD\u8BD5\u3002"
+      );
+      return;
+    }
+    log.info("intake", "turn-steer-unavailable", {
+      scope,
+      messageId: msg.messageId,
+      reason: result.reason ?? "not steerable"
+    });
+    await sendSteerReply(
+      `\u26A0\uFE0F \`/steer\` \u672A\u53D1\u9001\uFF1A${formatSteerFailure(result.reason)}\u3002\u6D88\u606F\u6CA1\u6709\u8FDB\u5165\u666E\u901A\u961F\u5217\uFF0C\u4E5F\u6CA1\u6709\u521B\u5EFA\u65B0\u4E00\u8F6E\u3002`
+    );
+    return;
+  }
   const structuredQuestion = agent.structuredQuestion?.(scope);
   if (structuredQuestion && !route.forceNative && !route.msg.content.trimStart().startsWith("/")) {
     route.msg = { ...route.msg, content: `/answer ${structuredQuestion} ${route.msg.content}` };
@@ -31960,47 +32167,6 @@ async function intakeMessage(deps) {
     }
   }
   const priorityLiveInput = priorityLiveControl || priorityNativeCommand;
-  const activeMainHandle = activeRuns.get(scope);
-  const steerText = agentMsg.content.trim();
-  const earlierPending = pending.snapshot(scope)[0];
-  const canSteerActive = !priorityLiveInput && !nativeInputMode && !activeRuns.getSide(scope) && Boolean(activeMainHandle && !activeMainHandle.interrupted && !activeMainHandle.stopRequested && !activeMainHandle.detached && activeMainHandle.run.steer) && Boolean(steerText) && !steerText.startsWith("/") && agentMsg.resources.length === 0 && (earlierPending?.queued ?? 0) === 0 && (earlierPending?.deferred ?? 0) === 0 && !replyQuoteTargetForMessage(agentMsg, chatMode);
-  if (canSteerActive) {
-    const result = await activeRuns.steer(scope, {
-      text: steerText,
-      clientUserMessageId: agentMsg.messageId
-    });
-    if (result.status === "steered") {
-      log.info("intake", "turn-steered", {
-        scope,
-        messageId: agentMsg.messageId,
-        chars: steerText.length
-      });
-      await channel.send(
-        msg.chatId,
-        { text: "\u21AA \u5DF2\u63D2\u5165\u5F53\u524D Codex \u4EFB\u52A1\uFF0C\u5C06\u5728\u4E0B\u4E00\u4E2A\u6A21\u578B\u8FB9\u754C\u751F\u6548\u3002" },
-        { replyTo: msg.messageId }
-      ).catch((err) => log.warn("intake", "steer-ack-failed", { scope, err: String(err) }));
-      return;
-    }
-    if (result.status === "uncertain") {
-      log.warn("intake", "turn-steer-uncertain", {
-        scope,
-        messageId: agentMsg.messageId,
-        err: result.reason
-      });
-      await channel.send(
-        msg.chatId,
-        { text: "\u26A0\uFE0F \u4E2D\u9014\u6D88\u606F\u72B6\u6001\u672A\u77E5\uFF0C\u672A\u81EA\u52A8\u91CD\u53D1\uFF1B\u8BF7\u68C0\u67E5\u5F53\u524D\u4EFB\u52A1\u540E\u518D\u51B3\u5B9A\u662F\u5426\u91CD\u53D1\u3002" },
-        { replyTo: msg.messageId }
-      ).catch((err) => log.warn("intake", "steer-uncertain-ack-failed", { scope, err: String(err) }));
-      return;
-    }
-    log.info("intake", "turn-steer-unavailable", {
-      scope,
-      messageId: agentMsg.messageId,
-      reason: result.reason ?? "not steerable"
-    });
-  }
   const size = priorityLiveInput ? pending.pushFront(scope, agentMsg, {
     immediate: true,
     priorityOrder: "fifo",
@@ -32019,15 +32185,43 @@ async function intakeMessage(deps) {
     void channel.send(
       msg.chatId,
       {
-        text: `\u23F3 \u5F53\u524D\u4EFB\u52A1\u4ECD\u5728\u8FD0\u884C\uFF0C\u4F60\u7684\u6D88\u606F\u5DF2\u6392\u961F\uFF08\u5F53\u524D ${size} \u6761\uFF09\u3002\u53EF\u968F\u65F6\u53D1\u9001 /status \u68C0\u67E5\u4F1A\u8BDD\uFF1B\u60F3\u7ACB\u5373\u6253\u65AD\u8BF7\u53D1 /stop\u3002`
+        text: `\u23F3 \u5F53\u524D\u4EFB\u52A1\u4ECD\u5728\u8FD0\u884C\uFF0C\u666E\u901A\u6D88\u606F\u5DF2\u6392\u961F\uFF08\u5F53\u524D ${size} \u6761\uFF09\u3002\u60F3\u63D2\u5165\u5F53\u524D main turn \u8BF7\u53D1 /steer <\u6B63\u6587>\uFF1B\u67E5\u770B\u72B6\u6001\u7528 /status\uFF1B\u7ACB\u5373\u6253\u65AD\u7528 /stop\u3002`
       },
       { replyTo: msg.messageId }
     ).catch((err) => log.warn("intake", "busy-ack-failed", { scope, err: String(err) }));
   }
 }
+function formatMainTurnSteerUnavailable(reason, detail) {
+  switch (reason) {
+    case "side-active":
+      return "\u26A0\uFE0F `/steer` \u672A\u53D1\u9001\uFF1A\u5F53\u524D\u6709 `/btw` side conversation\u3002\u8BF7\u5148 `/btw out` \u56DE\u5230 main thread \u540E\u91CD\u8BD5\u3002";
+    case "no-active-main":
+      return "\u26A0\uFE0F `/steer` \u672A\u53D1\u9001\uFF1A\u5F53\u524D\u6CA1\u6709\u8FD0\u884C\u4E2D\u7684 main turn\u3002\u82E5\u60F3\u5F00\u59CB\u65B0\u4E00\u8F6E\uFF0C\u8BF7\u76F4\u63A5\u53D1\u9001\u6B63\u6587\u3002";
+    case "run-stopping":
+      return "\u26A0\uFE0F `/steer` \u672A\u53D1\u9001\uFF1A\u5F53\u524D main turn \u6B63\u5728\u505C\u6B62\u6216\u5DF2\u5206\u79BB\u3002";
+    case "provider-unsupported":
+      return `\u26A0\uFE0F \`/steer\` \u672A\u53D1\u9001\uFF1A${detail ? formatSteerFailure(detail) : "\u5F53\u524D provider \u4E0D\u652F\u6301\u5B89\u5168\u7684\u4E2D\u9014\u6CE8\u5165"}\u3002\u6D88\u606F\u6CA1\u6709\u8FDB\u5165\u666E\u901A\u961F\u5217\uFF0C\u4E5F\u6CA1\u6709\u521B\u5EFA\u65B0\u4E00\u8F6E\u3002`;
+    case "backend-unavailable":
+      return `\u26A0\uFE0F \`/steer\` \u672A\u53D1\u9001\uFF1A${detail ? formatSteerFailure(detail) : "\u5F53\u524D\u7EC8\u7AEF\u72B6\u6001\u4E0D\u5141\u8BB8\u5B89\u5168\u6CE8\u5165"}\u3002\u6D88\u606F\u6CA1\u6709\u8FDB\u5165\u666E\u901A\u961F\u5217\uFF0C\u4E5F\u6CA1\u6709\u521B\u5EFA\u65B0\u4E00\u8F6E\u3002`;
+  }
+}
+function formatSteerFailure(reason) {
+  const detail = reason?.trim();
+  if (!detail) return "\u5F53\u524D turn \u5DF2\u4E0D\u53EF\u6CE8\u5165\u6216 provider \u4E0D\u652F\u6301";
+  if (/third-party|next-turn queueing/iu.test(detail)) {
+    return "\u5F53\u524D\u7B2C\u4E09\u65B9 structured provider \u4E0D\u652F\u6301\u5B89\u5168\u7684 turn/steer";
+  }
+  if (/no active turn|active run changed|not steerable/iu.test(detail)) {
+    return "\u5F53\u524D main turn \u5DF2\u7ECF\u7ED3\u675F\u6216\u5207\u6362";
+  }
+  if (/composer|draft|empty-composer|terminal/iu.test(detail)) {
+    return "\u5F53\u524D\u7EC8\u7AEF composer \u4E0D\u662F\u53EF\u5B89\u5168\u6CE8\u5165\u7684\u7A7A\u95F2\u72B6\u6001";
+  }
+  return detail;
+}
 function commandPreservesPendingMessages(content) {
   const command = content.trim().toLowerCase();
-  return /^\/(?:status|help|ps)(?:\s|$)/u.test(command) || /^\/session(?:\s+\/?status)?\s*$/u.test(command) || /^\/tmux(?:\s+(?:list|status|tail|attach))?(?:\s|$)/u.test(command) || /^\/(?:timeout|output)(?:\s|$)/u.test(command);
+  return /^\/(?:status|help|ps|steer)(?:\s|$)/u.test(command) || /^\/session(?:\s+\/?status)?\s*$/u.test(command) || /^\/tmux(?:\s+(?:list|status|tail|attach))?(?:\s|$)/u.test(command) || /^\/(?:timeout|output)(?:\s|$)/u.test(command);
 }
 function rewriteAgentCommandMessage(msg, agentKind) {
   const trimmed = msg.content.trimStart();

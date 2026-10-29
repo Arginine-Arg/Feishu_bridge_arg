@@ -31,7 +31,7 @@ For a product walkthrough, see the [Feishu document](https://larkcommunity.feish
 - **Persistent tmux execution**: each chat or topic runs one native Claude/Codex CLI inside tmux. Normal messages and native slash commands share that same terminal context.
 - **Clean transport boundary**: ordinary chat is forwarded as the user's text, without bridge XML, routing IDs, or operational instructions. Only an actual reply quote, card, topic context, or downloaded attachment is added when present.
 - **Idempotent delivery**: duplicate Feishu events are durably claimed by message ID before they reach the agent; tmux redraws and embedded history replays are reconciled to their genuinely new text, and card updates are serialized.
-- **Queueing and batching**: messages sent in quick succession are handled together; ordinary messages sent during a run are queued for the next turn, while bridge controls and `/btw` stay on the native control path. `/btw` detaches only the bridge relay (it never sends Ctrl-C to the running goal), then opens or reuses the side conversation without competing terminal writes. A body is submitted only after Codex confirms the side is visible; slow redraws, soft-wrapped drafts, and empty bodies are handled explicitly, while `/btw out` sends one guarded exit key only after confirming side mode.
+- **Queueing, steering, and batching**: messages sent in quick succession are handled together; ordinary messages sent during a run queue for the next turn, while `/steer <text>` explicitly targets the current main turn without interrupting its goal. Bridge controls and `/btw` stay on their native control paths. `/btw` detaches only the bridge relay (it never sends Ctrl-C to the running goal), then opens or reuses the side conversation without competing terminal writes. A body is submitted only after Codex confirms the side is visible; slow redraws, soft-wrapped drafts, and empty bodies are handled explicitly, while `/btw out` sends one guarded exit key only after confirming side mode.
 - **Multiple workspaces**: use `/cd` to switch the current project, and `/ws` to save and reuse common project directories.
 - **Images and files**: send them to the bot directly, and the bridge downloads them locally for the agent.
 - **Interactive cards**: `/help`, `/ws list`, and `/status` return cards with clickable buttons.
@@ -300,16 +300,17 @@ Bridge-managed thread, and prints both the old and new IDs. See
 
 ### Mid-turn messages
 
-Ordinary text sent while Codex is working is treated as steering, not as a
-second task:
+Ordinary text sent while Codex is working queues for the next turn by default.
+Only an explicit `/steer <text>` attempts to add input to the current main turn:
 
-- structured sessions call `turn/steer` with the exact active turn ID;
+- official structured sessions call `turn/steer` with the exact active turn ID;
 - live Codex terminals use the native Tab-to-queue composer;
-- multiple messages are serialized and the original turn continues;
-- `/stop`, `/goal`, `/btw`, picker controls, side conversations, attachments
-  and quoted reply batches keep their dedicated routing;
-- if steering is unavailable, the message falls back to the normal next-turn
-  queue; an uncertain timeout is reported and never automatically replayed.
+- `/steer` does not start a second turn, stop the goal, or change the current task;
+- explicit steering calls are serialized while the ordinary queue keeps its FIFO order;
+- no active main turn, an active side conversation, attachments, quoted replies,
+  or an unsupported provider produce an explicit failure instead of a silent
+  next-turn fallback;
+- an uncertain timeout is reported and never automatically replayed.
 
 The agent normally consumes the steering input at its next model/tool boundary,
 matching Codex's own interactive behavior.
@@ -359,6 +360,7 @@ See [MixAgents subagents](./docs/mixagents-subagents.md), [Bridge-managed native
 | `/sendfile <absolute-path>` | Admin-only: reply with a regular file from the current workspace, bridge media cache, or an explicitly allowed outbound directory, without invoking the agent |
 | `/config` | Adjust presentation preferences, access settings, and lark-cli identity policy |
 | `/model` | Choose the model; Codex uses its native model/reasoning picker and syncs the result to the active profile. `/codex model` is a shorthand for `/codex /model`. |
+| `/steer <text>` | Add text to the current main turn at its next model boundary without interrupting the goal or starting a second turn. Fails explicitly for no active turn, side conversations, attachments/quotes, or unsupported providers. |
 | `/btw [--route <id>] [<text>]` | Open or reuse an independent side agent; access is read-only by default. The bundled Broker streams text deltas and safe tool lifecycle progress via `events-v1`; final mailbox results remain authoritative. `sideTimeoutMs` is a soft notice and each `workerTimeoutMs` wait window automatically continues until completion or explicit `/btw out`. `/btw result` is a recovery command for retained timeout state and never resends the task. Write tasks use `/btw --write --workspace <canonical-path> <task>` and never fall back to Codex fork. |
 | `/session [status\|live\|turn]` | Inspect terminal execution. tmux/live is the default; `turn` remains a legacy compatibility fallback |
 | `/tmux list [socket]` | Admin-only: list every live Codex/Claude tmux pane on this host, including working directory, agent kind, adopted thread, shared App Server endpoint, and attach command. Optional `-S <absolute socket path>` or `-L <socket name>` selects one tmux server; plain shells are never listed |
@@ -422,7 +424,7 @@ A pane without a shared endpoint still works: `/tmux bind` uses live transport, 
 
 Long conversations / tasks are not cut off by a fixed time limit, but two behaviors are worth knowing (optimized in this fork):
 
-- **Queued messages (looks unresponsive)**: while a run is active on the same chat/topic, a new ordinary message does **not** interrupt it — it queues for after the current run. Busy notices are limited to one per 30 seconds, so later progress checks still receive a liveness reply without spamming rapid bursts. Read-only `/status` and `/session status` checks do not discard queued work. **Send `/stop` to interrupt now.**
+- **Queued messages (looks unresponsive)**: while a run is active on the same chat/topic, a new ordinary message does **not** interrupt it — it queues for after the current run. To add input to the current turn without interrupting the goal, send `/steer <text>`; `/status` reports whether steering is currently available. Busy notices are limited to one per 30 seconds, so later progress checks still receive a liveness reply without spamming rapid bursts. Read-only `/status` and `/session status` checks do not discard queued work. **Send `/stop` to interrupt now.**
 - **Streaming-card rollover and degradation**: Feishu/Lark automatically closes streaming cards after about 10 minutes. The bridge starts a continuation card every 8 minutes while the run is still active. Each continuation begins at a text cursor, so it contains only newly produced output rather than replaying the accumulated transcript. If a card is withdrawn or invalidated mid-run (Feishu `230011`), the bridge keeps draining the agent and **posts the full answer as a fresh message**.
 - **Terminal-history isolation**: live tmux capture is scoped to the current prompt and reconciled against the current turn's delivery ledger before every update. Redraws, prior terminal output, legacy bridge envelopes, and substantial embedded history replays are removed rather than sent again; newly produced text on either side of a replay and final lines remain eligible for delivery after a long task.
 - **Low-emphasis terminal activity**: Codex `Ran`/`Explored` frames, Claude tool surfaces, and non-interactive command echoes are retained inside one collapsed **Execution activity** panel. Text-mode streams show only a compact item count, and final answer messages omit the trace entirely. Normal progress notes, code, tables, and the final answer remain complete; completed fenced code and diffs use expandable panels, while tables and terminal diagrams keep monospace alignment. Native pickers such as `/model` are never compacted, so every option stays available to the signed control card.

@@ -89,6 +89,10 @@ import { evaluateRunPolicy } from '../policy/run-policy';
 import type { ProcessPool } from '../bot/process-pool';
 import type { RunExecutor } from '../runtime/run-executor';
 import { RunRejected } from '../runtime/errors';
+import {
+  mainTurnSteerAvailability,
+  type MainTurnSteerUnavailableReason,
+} from '../bot/turn-steer';
 import { validateAppCredentials } from '../utils/feishu-auth';
 import type { WorkspaceStore } from '../workspace/store';
 import { createBoundChat, defaultChatName } from '../bot/group';
@@ -959,6 +963,7 @@ async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {
     log.warn('command', 'live-diagnostics-failed', { err: String(err) });
     return undefined;
   });
+  const steerability = mainTurnSteerAvailability(ctx.activeRuns, ctx.scope);
   const card = statusCard({
     profileName: ctx.controls.profile,
     cwd,
@@ -971,6 +976,12 @@ async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {
     activeRun: ctx.activeRuns.hasAny(ctx.scope),
     activeScopes: ctx.activeRuns.scopes().filter((scope) => !scope.startsWith('comment:')),
     activeCommentScopes: ctx.activeRuns.scopes().filter((scope) => scope.startsWith('comment:')),
+    steer: steerability.available
+      ? { available: true, label: '可用 · `/steer <正文>`' }
+      : {
+          available: false,
+          label: formatSteerStatusReason(steerability.reason),
+        },
     queue: ctx.processPool?.snapshot(),
     ownerState: formatOwnerState(ctx),
     scope: ctx.scope,
@@ -998,6 +1009,21 @@ async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {
     } : {}),
   });
   await ctx.channel.send(ctx.msg.chatId, { card }, commandReplyOptions(ctx));
+}
+
+function formatSteerStatusReason(reason: MainTurnSteerUnavailableReason): string {
+  switch (reason) {
+    case 'side-active':
+      return '不可用 · side conversation 正在占用终端';
+    case 'no-active-main':
+      return '不可用 · 当前没有运行中的 main turn';
+    case 'run-stopping':
+      return '不可用 · 当前 turn 正在停止或已分离';
+    case 'provider-unsupported':
+      return '不可用 · 当前 provider/终端不支持 turn steer';
+    case 'backend-unavailable':
+      return '不可用 · 当前终端状态不允许安全注入';
+  }
 }
 
 function formatOwnerState(ctx: CommandContext): string {

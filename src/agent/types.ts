@@ -34,6 +34,14 @@ export type AgentSteerResult =
   | { status: 'unavailable'; reason?: string }
   | { status: 'uncertain'; reason: string };
 
+export type AgentSteerCapability =
+  | { available: true }
+  | {
+      available: false;
+      kind: 'provider' | 'terminal' | 'run';
+      reason: string;
+    };
+
 export interface LiveSessionDiagnostics {
   phase: LiveTurnPhase;
   /** True when the persistent terminal is currently in a side conversation. */
@@ -138,6 +146,12 @@ export interface AgentRun {
    * automatically because the server may already have accepted it.
    */
   steer?(request: AgentSteerRequest): Promise<AgentSteerResult>;
+  /**
+   * Describe whether steering can currently be attempted without changing the
+   * run. This is used by `/status` and the explicit `/steer` preflight; the
+   * actual `steer()` call remains authoritative and may still race a turn end.
+   */
+  steerCapability?(): AgentSteerCapability;
   detach?(): Promise<void>;
   /**
    * Wait up to `timeoutMs` for the agent process to exit on its own.

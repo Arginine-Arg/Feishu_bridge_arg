@@ -16,6 +16,7 @@ import type {
   AgentEvent,
   AgentRun,
   AgentRunStopOptions,
+  AgentSteerCapability,
   LiveSessionDiagnostics,
   LiveTurnPhase,
 } from './types';
@@ -288,6 +289,17 @@ export class LiveSessionPool {
     if (!session) return false;
     return session.steerActiveTurn(input, expectedRunId, stillActive);
   }
+
+  steerCapability(
+    key: string,
+    expectedRunId: string,
+    stillActive: () => boolean = () => true,
+  ): AgentSteerCapability {
+    const session = this.sessions.get(key);
+    return session
+      ? session.steerCapability(expectedRunId, stillActive)
+      : { available: false, kind: 'run', reason: 'live session is not active' };
+  }
 }
 
 export class LiveTerminalSession {
@@ -536,6 +548,33 @@ export class LiveTerminalSession {
     });
     this.controlInputTail = task.then(() => undefined, () => undefined);
     return task;
+  }
+
+  steerCapability(
+    expectedRunId: string,
+    stillActive: () => boolean = () => true,
+  ): AgentSteerCapability {
+    if (
+      !stillActive() ||
+      this.closed ||
+      !this.isAlive() ||
+      this.turnGeneration !== expectedRunId ||
+      !['submitted', 'busy', 'streaming'].includes(this.turnPhase)
+    ) {
+      return {
+        available: false,
+        kind: 'run',
+        reason: 'live turn is no longer active',
+      };
+    }
+    if (!canSteerLiveTerminal(this.latestTerminalState())) {
+      return {
+        available: false,
+        kind: 'terminal',
+        reason: 'native terminal is not in an empty-composer active turn',
+      };
+    }
+    return { available: true };
   }
 
   private async sendControlInputNow(

@@ -2368,6 +2368,9 @@ setInterval(() => {}, 1000);
       void iterator.next();
       await expect.poll(() => session.getDiagnostics().phase, { timeout: 5_000 }).toBe('busy');
 
+      expect(pool.steerCapability(scope, runId, () => true)).toEqual({
+        available: true,
+      });
       await expect(pool.steerActive(
         scope,
         'mid-course instruction',

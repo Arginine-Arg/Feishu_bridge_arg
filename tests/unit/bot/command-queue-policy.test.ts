@@ -10,6 +10,7 @@ describe('command pending-message policy', () => {
     expect(commandPreservesPendingMessages('/tmux tail 80')).toBe(true);
     expect(commandPreservesPendingMessages('/help')).toBe(true);
     expect(commandPreservesPendingMessages('/ps')).toBe(true);
+    expect(commandPreservesPendingMessages('/steer inspect the current diff')).toBe(true);
   });
 
   it('drops queued work for context-changing commands', () => {

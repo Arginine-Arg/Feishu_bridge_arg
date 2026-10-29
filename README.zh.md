@@ -31,7 +31,7 @@
 - **常驻 tmux 执行**：每个 chat/topic 在 tmux 中运行一个原生 Claude/Codex CLI；普通消息和原生斜杠命令共享同一终端上下文。
 - **干净传输边界**：普通消息按用户原文转发，不携带 bridge XML、路由 ID 或运行指令；仅在真实存在时附加引用、卡片、话题上下文或已下载附件。
 - **幂等投递**：飞书重复事件会按 message ID 在进入 agent 前持久化去重；tmux 重绘和内嵌历史回放会归并为真正新增的文本，卡片更新按顺序提交。
-- **排队与消息合并**：短时间连续发送的消息会合并处理；任务运行中收到的普通消息会排队到下一轮，bridge 控制命令和 `/btw` 走原生控制路径。`/btw` 只脱离 bridge relay，不会向正在运行的 goal 发送 Ctrl-C，然后打开或复用 side conversation，避免和当前终端并发写入。正文会等待 Codex 确认 side 已出现后再提交；慢响应、软换行和空正文均有专门处理，`/btw out` 只在确认 side 后发送一次安全退出键。
+- **排队、steer 与消息合并**：短时间连续发送的消息会合并处理；任务运行中收到的普通消息默认排队到下一轮，只有 `/steer <正文>` 会尝试插入当前 main turn，且不中断 goal。bridge 控制命令和 `/btw` 继续走各自的原生控制路径。`/btw` 只脱离 bridge relay，不会向正在运行的 goal 发送 Ctrl-C，然后打开或复用 side conversation，避免和当前终端并发写入。正文会等待 Codex 确认 side 已出现后再提交；慢响应、软换行和空正文均有专门处理，`/btw out` 只在确认 side 后发送一次安全退出键。
 - **多工作空间**：用 `/cd` 切换当前项目，用 `/ws` 保存和复用常用项目目录。
 - **图片 / 文件**：直接发给 bot，bridge 下载到本地后交给本机 agent 处理。
 - **卡片按钮**：`/help`、`/ws list`、`/status` 返回可点击的交互卡片。
@@ -297,13 +297,14 @@ thread 的用户/助手文本，有限截断并脱敏后，创建新 Bridge-mana
 
 ### 长任务中途消息
 
-Codex 工作期间发送的普通文本会作为当前 turn 的 steering 输入，而不会启动第二个任务：
+Codex 工作期间，普通文本默认排队到下一轮。只有显式 `/steer <正文>` 才会尝试插入当前 main turn：
 
-- structured 会话调用 `turn/steer`，并绑定当前准确的 turn ID；
+- 官方 structured Codex 会话调用 `turn/steer`，并绑定当前准确的 turn ID；
 - live Codex 终端使用原生 Tab-to-queue 编辑器机制；
-- 多条中途消息按顺序串行插入，原任务继续运行；
-- `/stop`、`/goal`、`/btw`、选择器控制、side conversation、附件和引用消息继续走各自专用路径；
-- 不支持 steering 时自动退回原来的“下一轮执行”队列；结果不确定的超时会明确提示，绝不自动重发。
+- `/steer` 不启动第二个 turn，不停止 goal，也不改变当前任务；
+- 多条显式 steer 按顺序串行插入，普通队列保持 FIFO；
+- 没有活动 main turn、side conversation 正在占用终端、附件/引用消息或 provider 不支持时，`/steer` 会明确拒绝，不会静默降级成下一轮排队；
+- 结果不确定的超时会明确提示，绝不自动重发。
 
 Agent 通常会在下一次模型调用或工具边界读取这些输入，行为与 Codex 原生交互一致。
 
@@ -352,6 +353,7 @@ Project RSI 与 MixAgents、历史 Task RSI 是三个不同层次。Bridge 只�
 | `/sendfile <绝对路径>` | 仅管理员：直接回复发送当前工作目录、bridge 媒体缓存或显式允许目录内的普通文件，不调用 agent |
 | `/config` | 调整展示偏好、访问控制和 lark-cli 身份策略 |
 | `/model` | 选择模型；Codex 直接使用 CLI 原生模型/reasoning 选项，并把结果同步到当前 profile。`/codex model` 等价于 `/codex /model`。 |
+| `/steer <正文>` | 只把正文插入当前 main turn 的下一个模型边界；不中断 goal，也不创建第二轮。无活动任务、side 会话、附件/引用或 provider 不支持时明确失败。 |
 | `/btw [--route <id>] [<内容>]` | 开启或复用独立 side agent，默认只读。随包 Broker 通过 `events-v1` 流式转发文本 delta 和安全工具生命周期，最终 mailbox 仍是权威结果。`sideTimeoutMs` 只是软提醒，每个 `workerTimeoutMs` 等待窗口结束后自动续等，直到完成或 `/btw out`。`/btw result` 是异常残留状态的恢复命令且不重发任务。写任务使用 `/btw --write --workspace <canonical 路径> <任务>`，永不回退 Codex fork。 |
 | `/session [status\|live\|turn]` | 查看终端执行状态。tmux/live 为默认模式；`turn` 仅作为兼容回退 |
 | `/tmux list [socket]` | 仅管理员：列出本机所有存活的 Codex/Claude tmux pane，包含工作目录、agent 类型、已识别 thread、共享 App Server endpoint 和 attach 命令。可选 `-S <绝对 socket 路径>` 或 `-L <名称>` 只扫描一个 tmux server；普通 shell 不会列出 |
@@ -415,7 +417,7 @@ Project RSI 与 MixAgents、历史 Task RSI 是三个不同层次。Bridge 只�
 
 长对话 / 长任务不会因为"跑太久"被固定时限掐断,但有两种表现要知道(本 fork 已针对性优化):
 
-- **消息排队(看起来没反应)**:同一个 chat / 话题已经有任务在跑时,你新发的普通消息**不会打断它,会排队**到当前任务结束后处理。忙时提示按 30 秒限频,所以稍后再次询问仍会收到存活回执,短时间连发又不会刷屏。只读的 `/status` 和 `/session status` 不会再清空已排队消息。**要立刻打断,发 `/stop`。**
+- **消息排队(看起来没反应)**:同一个 chat / 话题已经有任务在跑时,你新发的普通消息**不会打断它,会排队**到当前任务结束后处理。想插入当前 turn 而不中断 goal，用 `/steer <正文>`；`/status` 会显示当前是否可 steer。忙时提示按 30 秒限频,所以稍后再次询问仍会收到存活回执,短时间连发又不会刷屏。只读的 `/status` 和 `/session status` 不会再清空已排队消息。**要立刻打断,发 `/stop`。**
 - **流式卡片续接与失效降级**:飞书/Lark 会在约 10 分钟后自动关闭流式卡片。任务仍在运行时,bridge 每 8 分钟新建一张续接卡片；每一段从文本游标继续，只包含之后新产生的输出，不会重放已发送的完整历史。如果卡片被撤回或失效(飞书 `230011 withdrawn`),bridge 仍会继续消费 agent 输出,并**把完整答案作为一条全新消息补发**。
 - **终端历史隔离**：live tmux 只捕获当前提示词对应的输出，并在每次更新前与本轮投递账本归并。终端重绘、早先任务内容、旧版 bridge 信封和足够长的内嵌历史回放都会被移除；回放前后真正新增的文本及长任务最后答复行仍会发送。
 - **低强调终端活动**：Codex 的 `Ran`/`Explored` 帧、Claude 工具表面和非交互命令回显会保留在一块默认折叠的“执行活动”面板中。纯文本流只显示活动项数量，最终答复完全不携带这些轨迹；正常进度、代码、表格和正文都会完整保留。完成态中的 fenced code 和 diff 会进入可展开面板，表格、架构图和字符画保持等宽对齐。`/model` 等原生选择器绝不进入压缩路径，因此签名控制卡仍保留完整选项。
@@ -427,6 +429,7 @@ Project RSI 与 MixAgents、历史 Task RSI 是三个不同层次。Bridge 只�
 
 - 让 agent 把完整日志 / 报告写进项目文件(如 `report.md`、`task.log`),飞书里只发短进度和最终摘要——飞书卡片有长度上限,大量 stdout 塞进卡片会拖累稳定性。
 - 想确认存活状态可发送 `/status`,它不会破坏排队中的普通消息。
+- 想把补充信息送到正在运行的 main turn，用 `/steer <正文>`；普通文本仍按 FIFO 排队。
 - 打断当前任务用 `/stop`;其余新消息大概率只是排队。
 
 ## 回复展示与 COT

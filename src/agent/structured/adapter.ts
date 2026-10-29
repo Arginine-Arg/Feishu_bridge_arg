@@ -11,6 +11,7 @@ import type {
   AgentEvent,
   AgentRun,
   AgentRunOptions,
+  AgentSteerCapability,
   AgentSteerRequest,
   AgentSteerResult,
 } from '../types';
@@ -2339,24 +2340,44 @@ export class StructuredAdapter implements AgentAdapter {
         events.close();
       }
     })();
+    const steerCapability = (): AgentSteerCapability => {
+      if (this.providerIsThirdParty) {
+        return {
+          available: false,
+          kind: 'provider',
+          reason: 'third-party Responses provider uses next-turn queueing instead of turn/steer',
+        };
+      }
+      if (side || terminal || options.liveInputMode) {
+        return {
+          available: false,
+          kind: 'terminal',
+          reason: 'active target is not a steerable Codex turn',
+        };
+      }
+      if (
+        detached ||
+        abort.signal.aborted ||
+        !(activeTarget instanceof CodexStructuredSession)
+      ) {
+        return {
+          available: false,
+          kind: 'run',
+          reason: 'no active Codex turn to steer',
+        };
+      }
+      return { available: true };
+    };
     return { runId: options.runId, events,
       stop: async () => { abort.abort(); },
+      steerCapability,
       steer: async (request: AgentSteerRequest): Promise<AgentSteerResult> => {
-        if (this.providerIsThirdParty) {
-          return {
-            status: 'unavailable',
-            reason: 'third-party Responses provider uses next-turn queueing instead of turn/steer',
-          };
+        const capability = steerCapability();
+        if (!capability.available) {
+          return { status: 'unavailable', reason: capability.reason };
         }
-        if (
-          side ||
-          terminal ||
-          detached ||
-          abort.signal.aborted ||
-          options.liveInputMode ||
-          !(activeTarget instanceof CodexStructuredSession)
-        ) {
-          return { status: 'unavailable', reason: 'active target is not a steerable Codex turn' };
+        if (!(activeTarget instanceof CodexStructuredSession)) {
+          return { status: 'unavailable', reason: 'no active Codex turn to steer' };
         }
         return activeTarget.steer(request);
       },

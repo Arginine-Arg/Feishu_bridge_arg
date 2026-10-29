@@ -76,6 +76,7 @@ export interface StatusInfo {
   activeRun: boolean;
   activeScopes?: string[];
   activeCommentScopes?: string[];
+  steer?: { available: boolean; label: string };
   queue?: { active: number; waiting: number; cap: number };
   ownerState: string;
   /** Session scope (= chatId or chatId:threadId in topic groups). */
@@ -128,6 +129,11 @@ export function statusCard(info: StatusInfo): object {
     ...(info.activeCommentScopes && info.activeCommentScopes.length > 0
       ? [
           `📝 **comment runs**: ${info.activeCommentScopes.map((scope) => `\`${escapeCode(scope)}\``).join(', ')}`,
+        ]
+      : []),
+    ...(info.steer
+      ? [
+          `↪ ${info.steer.available ? '✅' : '⛔'} **steer**: ${info.steer.label}`,
         ]
       : []),
     `🚦 **queue**: ${queueLine}`,
@@ -224,35 +230,75 @@ export function helpCard(agentName = 'Agent'): object {
   return shell('💡 使用帮助', [
     divMd(
       [
-        '**命令列表**',
+        `直接发送普通文本即可与 ${escapedAgentName} 开始或继续会话。`,
+        '长任务运行时，普通消息默认排队到下一轮，不会打断当前任务。',
+      ].join('\n'),
+    ),
+    HR,
+    divMd(
+      [
+        '**⚡ 长任务中的消息**',
+        '',
+        '- 普通文本 — 排队到当前 turn 结束后处理',
+        '- `/steer <正文>` — 只插入当前 main turn，不打断 goal；没有活动任务或 provider 不支持时会明确拒绝',
+        '- `/status` — 查看队列、当前 turn 以及 `/steer` 是否可用',
+        '- `/stop` — 立即结束当前正在跑的任务（也可点卡片底部 ⏹ 终止按钮）',
+        '- `/stop comment:<scopeHash>` — 管理员停止云文档评论任务',
+      ].join('\n'),
+    ),
+    HR,
+    divMd(
+      [
+        '**🧭 会话与工作区**',
         '',
         '- `/new` `/reset` — 清空当前 chat 的会话',
-        '- `/new chat [name]` — 新建群+新会话，自动拉你进群',
+        '- `/new chat [name]` — 新建群和新会话，自动拉你进群',
         '- `/resume [N]` — 列出并恢复历史会话（最多 N 条）',
         '- `/cd <path>` — 切换工作目录（会重置 session）',
-        '- `/ws list|save <name>|use <name>|remove <name>` — 工作目录',
-        '- `/account` — 查看当前应用；`/account change` 换 appId/secret 并重连',
-        '- `/config` — 调整偏好、访问控制和 lark-cli 身份策略',
-        '- `/model` — 选择模型；Codex 使用 CLI 原生模型和 reasoning 选项并同步到 profile',
-        '- `/btw <内容>` — 只读 side conversation；`/codex /btw <内容>` 等价',
-        '- `/btw --write --workspace <canonical 路径> <任务>` — 显式授权一次 workspace-write（需在 settings 高级参数启用）',
-        '- `/btw result` — 收取后台 side 在软等待提示或硬等待结束后产生的迟到结果；`/btw out` 才会中断并丢弃',
-        '- `/status` — 当前状态',
+        '- `/ws list|save <name>|use <name>|remove <name>` — 管理命名工作目录',
         '- `/session` — 查看或切换后台 agent session 模式',
-        '- `/tmux list [socket]|bind <编号或 pane id>|status|attach|tail [N]|unbind|release` — 管理员管理 tmux；`list` 显示共享 endpoint 与 structured 命令，`tail` 默认显示当前 pane 末尾 27 行',
-        '- `/sendfile <path>` — 管理员直接回复当前消息发送工作目录内的文件',
-        '- `/output [live|final|off|status]` — 设置当前会话的输出投递策略，不影响 agent 继续运行',
-        '- `/stop` — 结束当前正在跑的任务（也可点卡片底部 ⏹ 终止 按钮）',
-        '- `/stop comment:<scopeHash>` — 管理员停止云文档评论任务',
-        '- `/timeout [N|off|default]` — 当前 session 的探活分钟数,`/config` 改全局默认',
-        '- `/timeout comment:<scopeHash> N` — 管理员设置云文档评论任务探活',
-        '- `/ps` — 列出本机所有 bot,标识当前正在回复的那个',
-        '- `/exit <id|#>` — 关掉指定 bot(用 `/ps` 看 id/序号)',
-        '- `/reconnect` — 强制重连 WebSocket(网络抖动后 bot 没反应时用)',
-        `- \`/doctor [描述]\` — 把日志和描述交给 ${escapedAgentName} 自助诊断`,
-        '- `/help` — 本帮助',
+        '- `/model` — 选择模型；Codex 使用原生模型和 reasoning 选项并同步到 profile',
+        '- `/codex /命令` — 显式把未识别的原生命令转发给当前 Codex CLI',
+      ].join('\n'),
+    ),
+    HR,
+    divMd(
+      [
+        '**🪄 Side conversation**',
         '',
-        `其他内容直接交给 ${escapedAgentName}。`,
+        '- `/btw <内容>` — 开启或继续只读 side conversation；`/codex /btw <内容>` 等价',
+        '- `/btw --write --workspace <canonical 路径> <任务>` — 显式授权一次 workspace-write（需在 settings 高级参数启用）',
+        '- `/btw result` — 收取后台 side 的迟到结果',
+        '- `/btw out` — 退出 side；这是 `/btw` 的中断和丢弃入口',
+      ].join('\n'),
+    ),
+    HR,
+    divMd(
+      [
+        '**📊 运行、输出与诊断**',
+        '',
+        '- `/output [live|final|off|status]` — 调整输出投递，不影响 agent 运行',
+        '- `/timeout [N|off|default]` — 当前 session 的探活分钟数；`/config` 修改全局默认',
+        '- `/timeout comment:<scopeHash> N` — 管理员设置云文档评论任务探活',
+        '- `/doctor [描述]` — 把日志和描述交给 agent 自助诊断',
+        '- `/reconnect` — 强制重连 WebSocket，用于网络抖动后 bot 无响应',
+        '- `/sendfile <path>` — 管理员发送工作目录内的文件',
+      ].join('\n'),
+    ),
+    HR,
+    divMd(
+      [
+        '**🖥 本机与协作**',
+        '',
+        '- `/tmux list [socket]|bind <编号或 pane id>|status|attach|tail [N]|unbind|release` — 管理员管理 tmux',
+        '- `/ps` — 列出本机所有 bot，标识当前正在回复的进程',
+        '- `/exit <id|#>` — 关闭指定 bot（用 `/ps` 查看 id 或序号）',
+        '- `/account` — 查看当前应用；`/account change` 更换 appId/secret 并重连',
+        '- `/config` — 调整偏好、访问控制和 lark-cli 身份策略',
+        '- `/invite user|admin @某人`、`/invite group` — 管理访问白名单',
+        '- `/remove user|admin @某人`、`/remove group` — 移出访问白名单',
+        '- `/doc` — 查看云文档评论触发方式',
+        '- `/help` — 本帮助',
       ].join('\n'),
     ),
     HR,

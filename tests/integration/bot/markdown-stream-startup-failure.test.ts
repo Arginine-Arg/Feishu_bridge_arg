@@ -17,6 +17,7 @@ import type {
   AgentEvent,
   AgentRun,
   AgentRunOptions,
+  AgentSteerCapability,
   AgentSteerRequest,
   AgentSteerResult,
 } from '../../../src/agent/types.js';
@@ -98,14 +99,18 @@ afterEach(async () => {
 });
 
 describe('markdown stream startup failures', () => {
-  it('steers a new Feishu message into the active task instead of queueing behind it', async () => {
+  it('injects an explicit /steer message into the active main turn', async () => {
     const agent = new SteerableHangingAgent();
     const h = await createHarness({ agent });
     await startTestBridge(h);
 
     await h.channel.handlers.message?.(message('om_active_start', 'start a long task'));
     await agent.started.promise;
-    await h.channel.handlers.message?.(message('om_mid_turn', 'also check the failing test'));
+    await h.channel.handlers.message?.(message('om_active_status', '/status'));
+    expect(JSON.stringify(h.channel.sent)).toContain('✅ **steer**');
+    await h.channel.handlers.message?.(
+      message('om_mid_turn', '/steer also check the failing test'),
+    );
 
     expect(agent.runCalls).toBe(1);
     expect(agent.steers).toEqual([{
@@ -113,12 +118,32 @@ describe('markdown stream startup failures', () => {
       clientUserMessageId: 'om_mid_turn',
     }]);
     expect(h.channel.sent).toContainEqual(expect.objectContaining({
-      content: { text: '↪ 已插入当前 Codex 任务，将在下一个模型边界生效。' },
+      content: {
+        markdown:
+          '↪ `/steer` 已插入当前 main turn，将在下一个模型边界生效；goal 和当前任务保持运行。',
+      },
     }));
     agent.finish();
   });
 
-  it('does not replay a mid-turn message when steer acceptance is uncertain', async () => {
+  it('keeps ordinary messages queued even when the active provider supports steering', async () => {
+    const agent = new SteerableHangingAgent();
+    const h = await createHarness({ agent });
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_queue_start', 'start a long task'));
+    await agent.started.promise;
+    await h.channel.handlers.message?.(message('om_queue_mid', 'queue this for later'));
+
+    expect(agent.runCalls).toBe(1);
+    expect(agent.steers).toEqual([]);
+    expect(JSON.stringify(h.channel.sent)).toContain('普通消息已排队');
+
+    agent.finish();
+    await expect.poll(() => agent.runCalls, { timeout: 3_000 }).toBe(2);
+  });
+
+  it('does not replay an explicit /steer when acceptance is uncertain', async () => {
     const agent = new SteerableHangingAgent({
       status: 'uncertain',
       reason: 'turn/steer timed out; outcome unknown',
@@ -128,48 +153,103 @@ describe('markdown stream startup failures', () => {
 
     await h.channel.handlers.message?.(message('om_uncertain_start', 'start a long task'));
     await agent.started.promise;
-    await h.channel.handlers.message?.(message('om_uncertain_mid', 'do not duplicate this'));
+    await h.channel.handlers.message?.(
+      message('om_uncertain_mid', '/steer do not duplicate this'),
+    );
 
     expect(h.channel.sent).toContainEqual(expect.objectContaining({
-      content: { text: '⚠️ 中途消息状态未知，未自动重发；请检查当前任务后再决定是否重发。' },
+      content: {
+        markdown:
+          '⚠️ `/steer` 状态未知，可能已经被当前 turn 接收；没有自动重发，也没有转入普通队列。请先检查当前任务再决定是否重试。',
+      },
     }));
     agent.finish();
     await new Promise(resolve => setTimeout(resolve, 100));
     expect(agent.runCalls).toBe(1);
   });
 
-  it('falls back to the next turn when native steering is unavailable', async () => {
+  it('fails explicitly without queueing when the provider cannot steer', async () => {
     const agent = new SteerableHangingAgent({
       status: 'unavailable',
-      reason: 'composer contains a draft',
+      reason: 'third-party Responses provider uses next-turn queueing instead of turn/steer',
+    }, {
+      available: false,
+      kind: 'provider',
+      reason: 'third-party Responses provider uses next-turn queueing instead of turn/steer',
     });
     const h = await createHarness({ agent });
     await startTestBridge(h);
 
     await h.channel.handlers.message?.(message('om_fallback_start', 'start a long task'));
     await agent.started.promise;
-    await h.channel.handlers.message?.(message('om_fallback_mid', 'run this after the current turn'));
-    agent.finish();
+    await h.channel.handlers.message?.(message('om_fallback_status', '/status'));
+    expect(JSON.stringify(h.channel.sent)).toContain('⛔ **steer**');
+    expect(JSON.stringify(h.channel.sent)).toContain('当前 provider/终端不支持 turn steer');
+    await h.channel.handlers.message?.(
+      message('om_fallback_mid', '/steer do not silently queue this'),
+    );
 
-    await expect.poll(() => agent.runCalls, { timeout: 3_000 }).toBe(2);
+    expect(agent.steers).toEqual([]);
+    expect(JSON.stringify(h.channel.sent)).toContain(
+      '当前第三方 structured provider 不支持安全的 turn/steer',
+    );
+    expect(JSON.stringify(h.channel.sent)).toContain(
+      '消息没有进入普通队列，也没有创建新一轮',
+    );
+    agent.finish();
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(agent.runCalls).toBe(1);
   });
 
-  it('does not let a later steer jump ahead of an earlier queued message', async () => {
-    const agent = new SteerableHangingAgent([
-      { status: 'unavailable', reason: 'composer contains a draft' },
-      { status: 'steered' },
-    ]);
+  it('rejects /steer when no main turn is active', async () => {
+    const agent = new SteerableHangingAgent();
+    const h = await createHarness({ agent });
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_no_active', '/steer no active task'));
+
+    expect(agent.runCalls).toBe(0);
+    expect(agent.steers).toEqual([]);
+    expect(JSON.stringify(h.channel.sent)).toContain(
+      '当前没有运行中的 main turn',
+    );
+  });
+
+  it('rejects unsupported /steer inputs without queueing or starting a run', async () => {
+    const agent = new SteerableHangingAgent();
+    const h = await createHarness({ agent });
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_steer_start', 'start a long task'));
+    await agent.started.promise;
+    await h.channel.handlers.message?.(message('om_steer_empty', '/steer'));
+
+    const attachment = message('om_steer_attachment', '/steer inspect this file');
+    attachment.resources = [{ type: 'file', fileKey: 'file-key' }] as never;
+    await h.channel.handlers.message?.(attachment);
+
+    expect(agent.steers).toEqual([]);
+    expect(JSON.stringify(h.channel.sent)).toContain('用法：`/steer');
+    expect(JSON.stringify(h.channel.sent)).toContain('`/steer` 不支持附件');
+
+    agent.finish();
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(agent.runCalls).toBe(1);
+  });
+
+  it('lets explicit /steer bypass the ordinary FIFO without reordering queued work', async () => {
+    const agent = new SteerableHangingAgent();
     const h = await createHarness({ agent });
     await startTestBridge(h);
 
     await h.channel.handlers.message?.(message('om_fifo_start', 'start a long task'));
     await agent.started.promise;
     await h.channel.handlers.message?.(message('om_fifo_first', 'first follow-up'));
-    await h.channel.handlers.message?.(message('om_fifo_second', 'second follow-up'));
+    await h.channel.handlers.message?.(message('om_fifo_second', '/steer second follow-up'));
 
     expect(agent.steers).toEqual([{
-      text: 'first follow-up',
-      clientUserMessageId: 'om_fifo_first',
+      text: 'second follow-up',
+      clientUserMessageId: 'om_fifo_second',
     }]);
     agent.finish();
     await expect.poll(() => agent.runCalls, { timeout: 3_000 }).toBe(2);
@@ -2139,10 +2219,15 @@ class SteerableHangingAgent extends FakeAgentAdapter {
   private finishRun?: () => void;
 
   private readonly steerResults: AgentSteerResult[];
+  private readonly capability?: AgentSteerCapability;
 
-  constructor(steerResult: AgentSteerResult | AgentSteerResult[] = { status: 'steered' }) {
+  constructor(
+    steerResult: AgentSteerResult | AgentSteerResult[] = { status: 'steered' },
+    capability?: AgentSteerCapability,
+  ) {
     super({ id: 'codex', displayName: 'Codex' });
     this.steerResults = Array.isArray(steerResult) ? [...steerResult] : [steerResult];
+    this.capability = capability;
   }
 
   override run(opts: AgentRunOptions): AgentRun {
@@ -2152,6 +2237,7 @@ class SteerableHangingAgent extends FakeAgentAdapter {
     return {
       runId: opts.runId,
       events: this.events(gate.promise),
+      ...(this.capability ? { steerCapability: () => this.capability! } : {}),
       steer: async (request: AgentSteerRequest) => {
         this.steers.push(request);
         return this.steerResults.shift() ?? { status: 'steered' };

@@ -514,6 +514,11 @@ export class CodexAdapter implements AgentAdapter {
     if (side || opts.liveInputMode) return run;
     return {
       ...run,
+      steerCapability: () => {
+        const stillActive = (): boolean =>
+          this.liveSessions.diagnostics(scopeKey).generation === opts.runId;
+        return this.liveSessions.steerCapability(scopeKey, opts.runId, stillActive);
+      },
       steer: async (request: AgentSteerRequest): Promise<AgentSteerResult> => {
         const stillActive = (): boolean =>
           this.liveSessions.diagnostics(scopeKey).generation === opts.runId;
