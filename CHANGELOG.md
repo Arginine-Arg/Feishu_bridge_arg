@@ -12,7 +12,9 @@
   `node_modules/mixagents-broker/dist/server.js` now automatically redirects to
   the vendored Broker with a visible notice.
 - Doctor reports `vendorBroker=present|missing` and
-  `legacyNpmBroker=present|missing`, and warns when the legacy entry is absent.
+  `legacyNpmBroker=present|missing`. On Node 20, npm correctly omits the
+  legacy package because it declares Node >=22.19; the vendored Broker remains
+  the supported runtime and doctor reports the engine gate explicitly.
 
 ## 1.11.1
 

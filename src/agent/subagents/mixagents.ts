@@ -705,6 +705,7 @@ export function resolveBundledMixAgentsLaunchConfig(): MixAgentsLaunchConfig | u
 
 /** Legacy npm path retained for pre-1.11 long-running processes. */
 export function resolveLegacyInstalledMixAgentsLaunchConfig(): MixAgentsLaunchConfig | undefined {
+  if (!supportsLegacyInstalledMixAgentsBroker()) return undefined;
   try {
     const server = require.resolve('mixagents-broker/dist/server.js');
     return existsSync(server)
@@ -713,6 +714,21 @@ export function resolveLegacyInstalledMixAgentsLaunchConfig(): MixAgentsLaunchCo
   } catch {
     return undefined;
   }
+}
+
+/**
+ * mixagents-broker@0.1.1 declares Node >=22.19. npm correctly omits that
+ * optional compatibility dependency on Node 20, where the vendored Broker is
+ * the only supported runtime.
+ */
+export function supportsLegacyInstalledMixAgentsBroker(
+  version = process.versions.node,
+): boolean {
+  const match = /^(\d+)\.(\d+)/u.exec(version);
+  if (!match) return false;
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  return major > 22 || (major === 22 && minor >= 19);
 }
 
 function isGeneratedRuntimeBrokerLaunch(launch: MixAgentsLaunchConfig): boolean {

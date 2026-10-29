@@ -113,11 +113,17 @@ try {
     ),
     readFile(join(installedRoot, 'THIRD_PARTY_MIXAGENTS_NOTICE'), 'utf8'),
   ]);
-  const legacyBrokerServer = installedRequire.resolve(
-    'mixagents-broker/dist/server.js',
-  );
-  if (!(await readFile(legacyBrokerServer)).length) {
-    throw new Error('installed legacy MixAgents Broker entry is empty');
+  if (supportsLegacyInstalledMixAgentsBroker()) {
+    const legacyBrokerServer = installedRequire.resolve(
+      'mixagents-broker/dist/server.js',
+    );
+    if (!(await readFile(legacyBrokerServer)).length) {
+      throw new Error('installed legacy MixAgents Broker entry is empty');
+    }
+  } else {
+    process.stdout.write(
+      'Legacy MixAgents Broker dependency skipped by npm: current Node is below 22.19.0\n',
+    );
   }
   const installedModule = await import(
     pathToFileURL(join(installedRoot, 'dist', 'index.js')).href
@@ -182,4 +188,12 @@ async function createInstallConflicts(prefix, destination, packageName) {
     { mode: 0o755 },
   );
   await symlink(missingTarget, join(binRoot, 'lark-channel-bridge'));
+}
+
+function supportsLegacyInstalledMixAgentsBroker(version = process.versions.node) {
+  const match = /^(\d+)\.(\d+)/u.exec(version);
+  if (!match) return false;
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  return major > 22 || (major === 22 && minor >= 19);
 }

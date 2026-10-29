@@ -271,14 +271,18 @@ export async function loadDoctorReport(options: DoctorOptionsWithProbe = {}): Pr
     id: 'mixagents-launch-compatibility',
     status: diagnostics.launchCompatibility.vendor === 'missing'
       ? 'fail'
-      : diagnostics.launchCompatibility.legacyNpm === 'missing'
+      : diagnostics.launchCompatibility.legacyNpm === 'missing' &&
+          diagnostics.launchCompatibility.legacyNpmRuntime === 'supported'
         ? 'warn'
         : 'pass',
     message:
       `vendor=${diagnostics.launchCompatibility.vendor} ` +
-      `legacyNpm=${diagnostics.launchCompatibility.legacyNpm}` +
+      `legacyNpm=${diagnostics.launchCompatibility.legacyNpm} ` +
+      `legacyNpmRuntime=${diagnostics.launchCompatibility.legacyNpmRuntime}` +
       (diagnostics.launchCompatibility.legacyNpm === 'missing'
-        ? '；新进程可用，但升级前仍在运行且依赖旧 node_modules 路径的进程需要重启'
+        ? diagnostics.launchCompatibility.legacyNpmRuntime === 'supported'
+          ? '；新进程可用，但升级前仍在运行且依赖旧 node_modules 路径的进程需要重启'
+          : '；当前 Node 版本低于旧 npm Broker 要求的 22.19，npm 已按 engine 正确跳过该可选依赖；新进程仍使用 vendored Broker'
         : ''),
   });
   checks.push({

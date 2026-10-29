@@ -18,6 +18,7 @@ import {
   saveRootConfig,
 } from '../../../src/config/profile-store';
 import { parseProviderTable } from '../../../src/integrations/cc-switch';
+import { supportsLegacyInstalledMixAgentsBroker } from '../../../src/agent/subagents/mixagents';
 
 const fixture = fileURLToPath(new URL('../../fixtures/fake-mixagents-mcp.mjs', import.meta.url));
 const temporary: string[] = [];
@@ -112,9 +113,14 @@ describe('arg-bridge settings and doctor', () => {
       mode: 'events-v1',
       tool: 'read_agent_events',
     });
+    const legacyNpmRuntime = supportsLegacyInstalledMixAgentsBroker()
+      ? 'supported'
+      : 'unsupported';
+    const legacyNpm = legacyNpmRuntime === 'supported' ? 'present' : 'missing';
     expect(first.subagents.diagnostics.launchCompatibility).toMatchObject({
       vendor: 'present',
-      legacyNpm: 'present',
+      legacyNpm,
+      legacyNpmRuntime,
       purpose: 'new-runtime-plus-running-process-compatibility',
     });
     expect(first.subagents.diagnostics.readRoutes).toEqual(expect.arrayContaining([
@@ -147,7 +153,8 @@ describe('arg-bridge settings and doctor', () => {
     expect(output).toContain('sideTimeoutMs=90000');
     expect(output).toContain('progress=events-v1');
     expect(output).toContain('vendorBroker=present');
-    expect(output).toContain('legacyNpmBroker=present');
+    expect(output).toContain(`legacyNpmBroker=${legacyNpm}`);
+    expect(output).toContain(`legacyNpmRuntime=${legacyNpmRuntime}`);
     expect(output).toContain('web search mode=auto');
   });
 

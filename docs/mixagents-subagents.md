@@ -127,7 +127,10 @@ dependency. New processes never prefer it for generated cc-switch runtimes; it
 exists so a pre-1.11 process that is still running can resolve its old
 `node_modules/mixagents-broker/dist/server.js` path after an in-place upgrade.
 Current processes also map a stale profile path to the vendored entry. Doctor
-reports both `vendorBroker` and `legacyNpmBroker` presence.
+reports both `vendorBroker` and `legacyNpmBroker` presence. Because
+`mixagents-broker@0.1.1` declares Node >=22.19, npm omits this optional
+compatibility dependency on Node 20; doctor reports that engine gate explicitly
+and the vendored Broker remains available.
 
 The controller verifies the six baseline tools before use:
 

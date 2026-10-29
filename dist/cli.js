@@ -15134,12 +15134,20 @@ function resolveBundledMixAgentsLaunchConfig() {
   } : void 0;
 }
 function resolveLegacyInstalledMixAgentsLaunchConfig() {
+  if (!supportsLegacyInstalledMixAgentsBroker()) return void 0;
   try {
     const server = require3.resolve("mixagents-broker/dist/server.js");
     return existsSync6(server) ? { command: process.execPath, args: [server] } : void 0;
   } catch {
     return void 0;
   }
+}
+function supportsLegacyInstalledMixAgentsBroker(version = process.versions.node) {
+  const match = /^(\d+)\.(\d+)/u.exec(version);
+  if (!match) return false;
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  return major > 22 || major === 22 && minor >= 19;
 }
 function isGeneratedRuntimeBrokerLaunch(launch) {
   const candidates = [launch.command, ...launch.args].map((value) => basename5(value).toLowerCase()).filter(Boolean);
@@ -35785,6 +35793,7 @@ async function collectSubagentDiagnostics(input) {
     launchCompatibility: {
       vendor: resolveBundledMixAgentsLaunchConfig() ? "present" : "missing",
       legacyNpm: resolveLegacyInstalledMixAgentsLaunchConfig() ? "present" : "missing",
+      legacyNpmRuntime: supportsLegacyInstalledMixAgentsBroker() ? "supported" : "unsupported",
       purpose: "new-runtime-plus-running-process-compatibility"
     },
     progress: { mode: "unknown" },
@@ -36694,7 +36703,7 @@ function formatSnapshot(snapshot) {
     ).join(" | ") : "(none)"}`,
     `main running with legacy/unknown identity=${snapshot.mainProvider.runningUnknown}`,
     `provider switch=${snapshot.mainProvider.pendingSwitch}; safe point=${snapshot.mainProvider.safeSwitchPoint}`,
-    `MixAgents mode=${snapshot.subagents.config.mode} routeMode=${snapshot.subagents.config.routeMode} provider=${snapshot.subagents.config.ccSwitchProviderId ?? "(follow-current)"} MCP=${diagnostics.mcp.status} version=${diagnostics.packageVersion ?? "(unknown)"} progress=${diagnostics.progress.mode} vendorBroker=${diagnostics.launchCompatibility.vendor} legacyNpmBroker=${diagnostics.launchCompatibility.legacyNpm}`,
+    `MixAgents mode=${snapshot.subagents.config.mode} routeMode=${snapshot.subagents.config.routeMode} provider=${snapshot.subagents.config.ccSwitchProviderId ?? "(follow-current)"} MCP=${diagnostics.mcp.status} version=${diagnostics.packageVersion ?? "(unknown)"} progress=${diagnostics.progress.mode} vendorBroker=${diagnostics.launchCompatibility.vendor} legacyNpmBroker=${diagnostics.launchCompatibility.legacyNpm} legacyNpmRuntime=${diagnostics.launchCompatibility.legacyNpmRuntime}`,
     `Broker tools=${diagnostics.modelTools.brokerWired ? "wired" : "degraded"} namespace=${diagnostics.modelTools.namespace} native=${diagnostics.modelTools.nativeToolPolicy} maxWorkers=${diagnostics.limits.maxConcurrentWorkers} workerTimeoutMs=${diagnostics.limits.workerTimeoutMs} sideTimeoutMs=${diagnostics.limits.sideTimeoutMs} sideReasoning=${diagnostics.limits.sideReasoningEffort} writeWorkers=${diagnostics.limits.allowWriteWorkers}`,
     `web search mode=${diagnostics.webSearch.mode} providerSupported=${diagnostics.webSearch.providerSupported ?? "unknown"} effective=${diagnostics.webSearch.effective} reason=${diagnostics.webSearch.reason}`,
     `Broker tools degraded=${diagnostics.modelTools.degradedReason ?? "(none)"}`,
@@ -36888,8 +36897,8 @@ async function loadDoctorReport(options = {}) {
   });
   checks.push({
     id: "mixagents-launch-compatibility",
-    status: diagnostics.launchCompatibility.vendor === "missing" ? "fail" : diagnostics.launchCompatibility.legacyNpm === "missing" ? "warn" : "pass",
-    message: `vendor=${diagnostics.launchCompatibility.vendor} legacyNpm=${diagnostics.launchCompatibility.legacyNpm}` + (diagnostics.launchCompatibility.legacyNpm === "missing" ? "\uFF1B\u65B0\u8FDB\u7A0B\u53EF\u7528\uFF0C\u4F46\u5347\u7EA7\u524D\u4ECD\u5728\u8FD0\u884C\u4E14\u4F9D\u8D56\u65E7 node_modules \u8DEF\u5F84\u7684\u8FDB\u7A0B\u9700\u8981\u91CD\u542F" : "")
+    status: diagnostics.launchCompatibility.vendor === "missing" ? "fail" : diagnostics.launchCompatibility.legacyNpm === "missing" && diagnostics.launchCompatibility.legacyNpmRuntime === "supported" ? "warn" : "pass",
+    message: `vendor=${diagnostics.launchCompatibility.vendor} legacyNpm=${diagnostics.launchCompatibility.legacyNpm} legacyNpmRuntime=${diagnostics.launchCompatibility.legacyNpmRuntime}` + (diagnostics.launchCompatibility.legacyNpm === "missing" ? diagnostics.launchCompatibility.legacyNpmRuntime === "supported" ? "\uFF1B\u65B0\u8FDB\u7A0B\u53EF\u7528\uFF0C\u4F46\u5347\u7EA7\u524D\u4ECD\u5728\u8FD0\u884C\u4E14\u4F9D\u8D56\u65E7 node_modules \u8DEF\u5F84\u7684\u8FDB\u7A0B\u9700\u8981\u91CD\u542F" : "\uFF1B\u5F53\u524D Node \u7248\u672C\u4F4E\u4E8E\u65E7 npm Broker \u8981\u6C42\u7684 22.19\uFF0Cnpm \u5DF2\u6309 engine \u6B63\u786E\u8DF3\u8FC7\u8BE5\u53EF\u9009\u4F9D\u8D56\uFF1B\u65B0\u8FDB\u7A0B\u4ECD\u4F7F\u7528 vendored Broker" : "")
   });
   checks.push({
     id: "web-search",

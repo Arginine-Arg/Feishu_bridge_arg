@@ -8,6 +8,7 @@ import {
   MixAgentsBrokerBackend,
   resolveLegacyInstalledMixAgentsLaunchConfig,
   resolveMixAgentsLaunchConfig,
+  supportsLegacyInstalledMixAgentsBroker,
 } from '../../../src/agent/subagents/mixagents';
 import { resolveSubagents } from '../../../src/agent/subagents/registry';
 import {
@@ -75,7 +76,14 @@ describe('MixAgentsBrokerBackend', () => {
     expect(launch?.args[0]).toMatch(/[\\/]dist[\\/]server\.js$/u);
   });
 
-  it('retains the legacy npm entry for pre-1.11 running processes', () => {
+  it('gates the legacy npm entry on its declared Node engine', () => {
+    expect(supportsLegacyInstalledMixAgentsBroker('20.20.2')).toBe(false);
+    expect(supportsLegacyInstalledMixAgentsBroker('22.18.0')).toBe(false);
+    expect(supportsLegacyInstalledMixAgentsBroker('22.19.0')).toBe(true);
+    expect(supportsLegacyInstalledMixAgentsBroker('24.16.0')).toBe(true);
+  });
+
+  it.skipIf(!supportsLegacyInstalledMixAgentsBroker())('retains the legacy npm entry for pre-1.11 running processes', () => {
     const launch = resolveLegacyInstalledMixAgentsLaunchConfig();
     expect(launch).toMatchObject({
       command: process.execPath,

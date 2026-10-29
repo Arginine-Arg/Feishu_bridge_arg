@@ -844,7 +844,8 @@ function formatSnapshot(snapshot: SettingsSnapshot): string {
       ` MCP=${diagnostics.mcp.status} version=${diagnostics.packageVersion ?? '(unknown)'}` +
       ` progress=${diagnostics.progress.mode}` +
       ` vendorBroker=${diagnostics.launchCompatibility.vendor}` +
-      ` legacyNpmBroker=${diagnostics.launchCompatibility.legacyNpm}`,
+      ` legacyNpmBroker=${diagnostics.launchCompatibility.legacyNpm}` +
+      ` legacyNpmRuntime=${diagnostics.launchCompatibility.legacyNpmRuntime}`,
     `Broker tools=${diagnostics.modelTools.brokerWired ? 'wired' : 'degraded'}` +
       ` namespace=${diagnostics.modelTools.namespace}` +
       ` native=${diagnostics.modelTools.nativeToolPolicy}` +

@@ -21,6 +21,7 @@ import {
   resolveBundledMixAgentsLaunchConfig,
   resolveLegacyInstalledMixAgentsLaunchConfig,
   resolveMixAgentsLaunchConfig,
+  supportsLegacyInstalledMixAgentsBroker,
 } from './mixagents';
 import { selectSubagentRoute } from './registry';
 import {
@@ -58,6 +59,7 @@ export interface SubagentDiagnostics {
   launchCompatibility: {
     vendor: 'present' | 'missing';
     legacyNpm: 'present' | 'missing';
+    legacyNpmRuntime: 'supported' | 'unsupported';
     purpose: 'new-runtime-plus-running-process-compatibility';
   };
   packageVersion?: string;
@@ -234,6 +236,7 @@ export async function collectSubagentDiagnostics(input: {
     launchCompatibility: {
       vendor: resolveBundledMixAgentsLaunchConfig() ? 'present' : 'missing',
       legacyNpm: resolveLegacyInstalledMixAgentsLaunchConfig() ? 'present' : 'missing',
+      legacyNpmRuntime: supportsLegacyInstalledMixAgentsBroker() ? 'supported' : 'unsupported',
       purpose: 'new-runtime-plus-running-process-compatibility',
     },
     progress: { mode: 'unknown' },
