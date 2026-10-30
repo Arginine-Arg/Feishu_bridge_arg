@@ -225,7 +225,7 @@ async function authorizedSideWorkspace(
   cwd: string,
   requested: string | undefined,
 ): Promise<string> {
-  if (!requested) return cwd;
+  if (!requested) return realpath(cwd);
   if (!isAbsolute(requested)) {
     throw new Error(
       `workspace-write side 需要绝对 canonical workspace 路径：${requested}`,

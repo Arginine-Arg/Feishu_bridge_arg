@@ -19291,7 +19291,7 @@ function routeChangeReason(state, route, cwd, access3) {
   return void 0;
 }
 async function authorizedSideWorkspace(cwd, requested) {
-  if (!requested) return cwd;
+  if (!requested) return realpath8(cwd);
   if (!isAbsolute8(requested)) {
     throw new Error(
       `workspace-write side \u9700\u8981\u7EDD\u5BF9 canonical workspace \u8DEF\u5F84\uFF1A${requested}`
