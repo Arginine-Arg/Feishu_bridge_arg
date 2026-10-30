@@ -2341,13 +2341,6 @@ export class StructuredAdapter implements AgentAdapter {
       }
     })();
     const steerCapability = (): AgentSteerCapability => {
-      if (this.providerIsThirdParty) {
-        return {
-          available: false,
-          kind: 'provider',
-          reason: 'third-party Responses provider uses next-turn queueing instead of turn/steer',
-        };
-      }
       if (side || terminal || options.liveInputMode) {
         return {
           available: false,

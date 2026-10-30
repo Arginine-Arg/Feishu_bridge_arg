@@ -59,6 +59,34 @@ describe('structured first with safe native fallback', () => {
     expect(events).toContainEqual(expect.objectContaining({ type: 'error', message: 'outcome unknown' }));
     expect(h.live.run).not.toHaveBeenCalled();
   });
+  it('forwards steering to the selected structured backend', async () => {
+    const h = await setup();
+    let finish!: () => void;
+    const finished = new Promise<void>(resolve => { finish = resolve; });
+    const steerCapability = vi.fn(() => ({ available: true as const }));
+    const steer = vi.fn(async () => ({ status: 'steered' as const }));
+    vi.mocked(h.structured.run).mockImplementation(opts => ({
+      runId: opts.runId,
+      events: (async function* () {
+        await finished;
+        yield { type: 'done', terminationReason: 'normal' } as AgentEvent;
+      })(),
+      stop: async () => { finish(); },
+      waitForExit: async () => true,
+      steerCapability,
+      steer,
+    }));
+
+    const run = h.adapter.run({ runId: 'r', scopeId: 's', cwd: '/workspace', prompt: 'task' });
+    await vi.waitFor(() => expect(h.structured.run).toHaveBeenCalledTimes(1));
+    expect(run.steerCapability?.()).toEqual({ available: true });
+    await expect(run.steer?.({ text: 'new direction', clientUserMessageId: 'om-steer' })).resolves.toEqual({
+      status: 'steered',
+    });
+    expect(steer).toHaveBeenCalledWith({ text: 'new direction', clientUserMessageId: 'om-steer' });
+    await run.stop({ force: true });
+    for await (const _event of run.events) { /* drain */ }
+  });
   it('keeps the shell free when the bound agent exits and ignores other panes', async () => {
     const h = await setup();
     await h.adapter.tmux.bind('s', '1');

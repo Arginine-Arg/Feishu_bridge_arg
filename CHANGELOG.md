@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.13.1
+
+- Fixes explicit `/steer` when the preferred structured transport is active by
+  forwarding the selected backend's steering capability and request instead of
+  exposing only stop and detach controls.
+- Treats Codex `turn/steer` as a session-protocol capability rather than
+  rejecting third-party Responses providers by name. The active Codex App
+  Server remains authoritative and explicit RPC rejection is still reported
+  without queueing or retrying the message.
+
 ## 1.13.0
 
 - Adds `arg-bridge native --adopt <thread-id> --follow-current-provider`.

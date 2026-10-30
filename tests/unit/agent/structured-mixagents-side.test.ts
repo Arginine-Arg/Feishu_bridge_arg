@@ -233,7 +233,7 @@ function resolved(
 }
 
 describe('structured MixAgents /btw', () => {
-  it('queues next-turn input for third-party structured providers instead of using turn/steer', async () => {
+  it('steers the active Codex turn for third-party structured providers', async () => {
     const profileDir = await mkdtemp(join(tmpdir(), 'arg-bridge-third-party-steer-'));
     const main = session();
     const submit = vi.spyOn(main, 'submit').mockImplementation(async (_options, _emit, signal) => {
@@ -243,6 +243,7 @@ describe('structured MixAgents /btw', () => {
         }, { once: true });
       });
     });
+    const steer = vi.spyOn(main, 'steer').mockResolvedValue({ status: 'steered' });
     const adapter = new StructuredAdapter({
       kind: 'codex',
       binary: 'not-spawned',
@@ -262,15 +263,13 @@ describe('structured MixAgents /btw', () => {
       prompt: 'long provider task',
     });
     await vi.waitFor(() => expect(submit).toHaveBeenCalled());
-    await expect(run.steer?.({ text: 'next-turn input' })).resolves.toMatchObject({
-      status: 'unavailable',
-      reason: expect.stringContaining('next-turn queueing'),
-    });
     expect(run.steerCapability?.()).toMatchObject({
-      available: false,
-      kind: 'provider',
-      reason: expect.stringContaining('next-turn queueing'),
+      available: true,
     });
+    await expect(run.steer?.({ text: 'next-turn input' })).resolves.toEqual({
+      status: 'steered',
+    });
+    expect(steer).toHaveBeenCalledWith({ text: 'next-turn input' });
     await run.stop({ force: true });
     await drain(run);
     await main.close();

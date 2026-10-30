@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.13.0",
+  version: "1.13.1",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -21027,13 +21027,6 @@ ${prompt}
       }
     })();
     const steerCapability = () => {
-      if (this.providerIsThirdParty) {
-        return {
-          available: false,
-          kind: "provider",
-          reason: "third-party Responses provider uses next-turn queueing instead of turn/steer"
-        };
-      }
       if (side || terminal || options.liveInputMode) {
         return {
           available: false,
@@ -21670,6 +21663,27 @@ var PreferredStructuredAdapter = class {
       stop: async (opts) => {
         stopped = true;
         await actual?.stop(opts);
+      },
+      steerCapability: () => {
+        if (stopped || detached) {
+          return { available: false, kind: "run", reason: "selected run is stopping or detached" };
+        }
+        if (!actual) {
+          return { available: false, kind: "run", reason: "selected backend is still starting" };
+        }
+        if (!actual.steer) {
+          return { available: false, kind: "provider", reason: "selected backend does not support turn steering" };
+        }
+        return actual.steerCapability?.() ?? { available: true };
+      },
+      steer: async (request) => {
+        if (stopped || detached) {
+          return { status: "unavailable", reason: "selected run is stopping or detached" };
+        }
+        if (!actual?.steer) {
+          return { status: "unavailable", reason: "selected backend does not support turn steering" };
+        }
+        return actual.steer(request);
       },
       detach: async () => {
         detached = true;

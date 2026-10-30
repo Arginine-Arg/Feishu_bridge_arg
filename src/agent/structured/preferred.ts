@@ -151,6 +151,27 @@ export class PreferredStructuredAdapter implements AgentAdapter {
     })();
     return { runId: options.runId, events,
       stop: async opts => { stopped = true; await actual?.stop(opts); },
+      steerCapability: () => {
+        if (stopped || detached) {
+          return { available: false, kind: 'run', reason: 'selected run is stopping or detached' };
+        }
+        if (!actual) {
+          return { available: false, kind: 'run', reason: 'selected backend is still starting' };
+        }
+        if (!actual.steer) {
+          return { available: false, kind: 'provider', reason: 'selected backend does not support turn steering' };
+        }
+        return actual.steerCapability?.() ?? { available: true };
+      },
+      steer: async request => {
+        if (stopped || detached) {
+          return { status: 'unavailable', reason: 'selected run is stopping or detached' };
+        }
+        if (!actual?.steer) {
+          return { status: 'unavailable', reason: 'selected backend does not support turn steering' };
+        }
+        return actual.steer(request);
+      },
       detach: async () => { detached = true; await actual?.detach?.(); events.close(); },
       waitForExit: async timeout => { if (actual) return actual.waitForExit(timeout); await operation; return true; },
     };
