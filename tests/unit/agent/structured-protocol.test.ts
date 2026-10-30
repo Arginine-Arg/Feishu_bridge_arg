@@ -24,6 +24,7 @@ describe('structured transport contracts', () => {
       method: 'turn/started',
       params: { threadId: 'main', turn: { id: 'turn-1' } },
     });
+    expect(session.steerCapability()).toEqual({ available: true });
     expect(await session.steer({
       text: 'new direction',
       clientUserMessageId: 'om_message',
@@ -42,6 +43,14 @@ describe('structured transport contracts', () => {
     rpc.request.mockRejectedValueOnce(new Error('RPC turn/steer timed out; outcome unknown, not retried'));
     expect(await session.steer({ text: 'uncertain input' })).toMatchObject({
       status: 'uncertain',
+    });
+    rpc.emit('message', {
+      method: 'turn/completed',
+      params: { threadId: 'main', turn: { id: 'turn-1', status: 'completed' } },
+    });
+    expect(session.steerCapability()).toMatchObject({
+      available: false,
+      reason: expect.stringContaining('no active Codex turn'),
     });
     await session.close();
   });

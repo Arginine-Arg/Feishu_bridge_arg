@@ -2341,7 +2341,7 @@ export class StructuredAdapter implements AgentAdapter {
       }
     })();
     const steerCapability = (): AgentSteerCapability => {
-      if (side || terminal || options.liveInputMode) {
+      if (side || terminal) {
         return {
           available: false,
           kind: 'terminal',
@@ -2359,7 +2359,7 @@ export class StructuredAdapter implements AgentAdapter {
           reason: 'no active Codex turn to steer',
         };
       }
-      return { available: true };
+      return activeTarget.steerCapability();
     };
     return { runId: options.runId, events,
       stop: async () => { abort.abort(); },

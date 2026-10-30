@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type {
   AgentEvent,
   AgentRunOptions,
+  AgentSteerCapability,
   AgentSteerRequest,
   AgentSteerResult,
   LiveSessionDiagnostics,
@@ -369,6 +370,22 @@ export class CodexStructuredSession implements StructuredSession {
     return acted;
   }
   diagnostics(): LiveSessionDiagnostics { return { phase: this.goalActive && this.phase === 'idle' ? 'busy' : this.phase, inputState: this.turnId || this.goalActive ? 'submitted' : 'empty', retryCount: 0 }; }
+  steerCapability(): AgentSteerCapability {
+    if (!this.isAlive()) {
+      return { available: false, kind: 'run', reason: 'Codex App Server connection is closed' };
+    }
+    if (!this.turnId) {
+      return { available: false, kind: 'run', reason: 'no active Codex turn to steer' };
+    }
+    if (this.phase === 'picker' || this.pending.size > 0 || this.menus.size > 0) {
+      return {
+        available: false,
+        kind: 'terminal',
+        reason: 'Codex is waiting for an interaction response',
+      };
+    }
+    return { available: true };
+  }
   async steer(request: AgentSteerRequest): Promise<AgentSteerResult> {
     const text = request.text.trim();
     if (!text) return { status: 'unavailable', reason: 'empty input' };

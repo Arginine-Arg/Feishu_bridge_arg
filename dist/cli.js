@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.13.1",
+  version: "1.13.2",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -17546,6 +17546,22 @@ ${options.prompt}` : options.prompt }];
   diagnostics() {
     return { phase: this.goalActive && this.phase === "idle" ? "busy" : this.phase, inputState: this.turnId || this.goalActive ? "submitted" : "empty", retryCount: 0 };
   }
+  steerCapability() {
+    if (!this.isAlive()) {
+      return { available: false, kind: "run", reason: "Codex App Server connection is closed" };
+    }
+    if (!this.turnId) {
+      return { available: false, kind: "run", reason: "no active Codex turn to steer" };
+    }
+    if (this.phase === "picker" || this.pending.size > 0 || this.menus.size > 0) {
+      return {
+        available: false,
+        kind: "terminal",
+        reason: "Codex is waiting for an interaction response"
+      };
+    }
+    return { available: true };
+  }
   async steer(request) {
     const text2 = request.text.trim();
     if (!text2) return { status: "unavailable", reason: "empty input" };
@@ -21027,7 +21043,7 @@ ${prompt}
       }
     })();
     const steerCapability = () => {
-      if (side || terminal || options.liveInputMode) {
+      if (side || terminal) {
         return {
           available: false,
           kind: "terminal",
@@ -21041,7 +21057,7 @@ ${prompt}
           reason: "no active Codex turn to steer"
         };
       }
-      return { available: true };
+      return activeTarget.steerCapability();
     };
     return {
       runId: options.runId,

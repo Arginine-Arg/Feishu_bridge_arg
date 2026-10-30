@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.13.2
+
+- Allows explicit `/steer` on active model turns created by `/goal resume`
+  and other structured control runs. The capability now follows the real
+  Codex turn state instead of rejecting every native command run.
+- Keeps steering unavailable between goal turns and while Codex is waiting
+  for an interaction or approval response. `turn/steer` rejection and timeout
+  behavior remains fail-closed.
+
 ## 1.13.1
 
 - Fixes explicit `/steer` when the preferred structured transport is active by

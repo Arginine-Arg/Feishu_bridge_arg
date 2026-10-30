@@ -207,11 +207,16 @@ const drain = async (run: AgentRun): Promise<AgentEvent[]> => {
   return events;
 };
 
-function session() {
+function sessionWithRpc() {
   const rpc = new EventEmitter() as EventEmitter & { request: ReturnType<typeof vi.fn> };
   rpc.request = vi.fn(async () => ({}));
-  return new CodexStructuredSession('main-thread', '', rpc as unknown as RpcClient);
+  return {
+    rpc,
+    main: new CodexStructuredSession('main-thread', '', rpc as unknown as RpcClient),
+  };
 }
+
+function session() { return sessionWithRpc().main; }
 
 function resolved(
   route: SubagentRoute,
@@ -235,7 +240,7 @@ function resolved(
 describe('structured MixAgents /btw', () => {
   it('steers the active Codex turn for third-party structured providers', async () => {
     const profileDir = await mkdtemp(join(tmpdir(), 'arg-bridge-third-party-steer-'));
-    const main = session();
+    const { main, rpc } = sessionWithRpc();
     const submit = vi.spyOn(main, 'submit').mockImplementation(async (_options, _emit, signal) => {
       await new Promise<void>((_resolve, reject) => {
         signal.addEventListener('abort', () => {
@@ -255,6 +260,10 @@ describe('structured MixAgents /btw', () => {
       cwd: '/workspace',
       view: new StructuredView(profileDir, 'main'),
     });
+    rpc.emit('message', {
+      method: 'turn/started',
+      params: { threadId: 'main-thread', turn: { id: 'main-turn' } },
+    });
 
     const run = adapter.run({
       runId: 'third-party-steer',
@@ -270,6 +279,53 @@ describe('structured MixAgents /btw', () => {
       status: 'steered',
     });
     expect(steer).toHaveBeenCalledWith({ text: 'next-turn input' });
+    await run.stop({ force: true });
+    await drain(run);
+    await main.close();
+    await rm(profileDir, { recursive: true, force: true });
+  });
+
+  it('steers the active turn of a /goal resume command run', async () => {
+    const profileDir = await mkdtemp(join(tmpdir(), 'arg-bridge-goal-steer-'));
+    const rpc = new EventEmitter() as EventEmitter & { request: ReturnType<typeof vi.fn> };
+    rpc.request = vi.fn(async () => ({}));
+    const main = new CodexStructuredSession('goal-thread', '', rpc as unknown as RpcClient);
+    const submit = vi.spyOn(main, 'submit').mockImplementation(async (_options, _emit, signal) => {
+      await new Promise<void>((_resolve, reject) => {
+        signal.addEventListener('abort', () => {
+          reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+        }, { once: true });
+      });
+    });
+    const steer = vi.spyOn(main, 'steer').mockResolvedValue({ status: 'steered' });
+    const adapter = new StructuredAdapter({
+      kind: 'codex',
+      binary: 'not-spawned',
+      profileDir,
+    });
+    Reflect.get(adapter, 'sessions').set('scope', {
+      main,
+      cwd: '/workspace',
+      view: new StructuredView(profileDir, 'main'),
+    });
+    rpc.emit('message', {
+      method: 'turn/started',
+      params: { threadId: 'goal-thread', turn: { id: 'goal-turn' } },
+    });
+
+    const run = adapter.run({
+      runId: 'goal-steer',
+      scopeId: 'scope',
+      cwd: '/workspace',
+      prompt: '/goal resume',
+      liveInputMode: 'command',
+    });
+    await vi.waitFor(() => expect(submit).toHaveBeenCalled());
+    expect(run.steerCapability?.()).toEqual({ available: true });
+    await expect(run.steer?.({ text: 'prioritize the five benchmarks' })).resolves.toEqual({
+      status: 'steered',
+    });
+    expect(steer).toHaveBeenCalledWith({ text: 'prioritize the five benchmarks' });
     await run.stop({ force: true });
     await drain(run);
     await main.close();
