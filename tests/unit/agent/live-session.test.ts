@@ -2680,11 +2680,11 @@ setInterval(() => {}, 1000);
         tmuxScopeId: scopeKey,
         usePty: true,
         backend: 'tmux',
-        // Keep the synthetic idle watchdog alive beyond the first silent-paste
-        // recovery window. A loaded runner can drop the initial paste after a
-        // client disconnect; a 1.5s idle budget closes the fixture before the
-        // 3s recovery attempt can prove whether the agent survived.
-        idleMs: 8_000,
+        // Keep the synthetic idle watchdog alive through both silent-paste
+        // recovery attempts and a slow post-disconnect tmux transition. On a
+        // loaded runner the second paste can arrive around 7s, so an 8s idle
+        // budget still closes the fixture before the agent can render it.
+        idleMs: 15_000,
         outputFlushMs: 30,
         // Match the production no-output budget. A 4s override can expire
         // while a heavily contended CI runner is still scheduling the first
@@ -2729,9 +2729,9 @@ setInterval(() => {}, 1000);
         ).toBe(0);
         await waitForTmuxClient(socketPath, false, 1_000);
       }
-      // Let the long-lived helper publish at least one post-disconnect capture
-      // before the next turn writes into the pane.
-      await testDelay(500);
+      // Let tmux finish the client transition and the long-lived helper publish
+      // a post-disconnect capture before the next turn writes into the pane.
+      await testDelay(2_000);
       await pool.release(scopeKey, 'attached-client-disconnected');
 
       expect(
@@ -2768,7 +2768,7 @@ setInterval(() => {}, 1000);
       await pool.closeAll();
       spawnSync('tmux', ['-S', socketPath, 'kill-server'], { stdio: 'ignore' });
     }
-  }, 45_000);
+  }, 75_000);
 
   tmuxIt('recovers a silently dropped paste and failed literal fallback without replacing the agent', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-tmux-paste-recovery-test-'));
