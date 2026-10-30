@@ -4,6 +4,8 @@
 
 - Stabilizes the tmux client-disconnect regression test by keeping its
   synthetic idle watchdog alive beyond the first silent-paste recovery window.
+  Ubuntu CI runs the complete test set with a bounded worker count so
+  subprocess-heavy tmux fixtures do not contend for the same terminal transition.
   Product behavior is unchanged from 1.13.2.
 
 ## 1.13.2

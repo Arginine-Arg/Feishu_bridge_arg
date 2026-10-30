@@ -29,8 +29,18 @@ jobs:
       - name: Install
         run: pnpm install --frozen-lockfile
 
-      - name: Test
-        if: runner.os != 'Windows'
+      - name: Test (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          # Keep subprocess-heavy tmux fixtures below the hosted runner's
+          # process and terminal-transition contention limits.
+          pnpm build:broker
+          pnpm exec vitest run --maxWorkers=4 --minWorkers=1
+          node scripts/run-vendored-broker-tests.mjs
+
+      - name: Test (macOS)
+        if: runner.os == 'macOS'
         run: pnpm test
 
       - name: Test (Windows)
