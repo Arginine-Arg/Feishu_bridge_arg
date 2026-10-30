@@ -4,7 +4,7 @@ A lightweight bot that bridges Feishu / Lark messenger with your local Claude Co
 
 [中文 README](./README.zh.md)
 
-Version 1.13.2 makes explicit `/steer` available on active model turns created by `/goal resume` and other structured control runs. Version 1.13.1 forwards steering through the preferred structured transport and third-party Responses providers. Version 1.13.0 adds provider-generation migration for existing Codex threads: `--adopt <thread-id> --follow-current-provider` preserves bounded text history while creating the Bridge-managed destination under the provider, model and credential currently selected by cc-switch. Version 1.12.0 introduced explicit `/steer <text>` while ordinary active-task messages queue for the next turn.
+Version 1.13.3 stabilizes the tmux client-disconnect regression test; product behavior is unchanged from 1.13.2. Version 1.13.2 makes explicit `/steer` available on active model turns created by `/goal resume` and other structured control runs. Version 1.13.1 forwards steering through the preferred structured transport and third-party Responses providers. Version 1.13.0 adds provider-generation migration for existing Codex threads: `--adopt <thread-id> --follow-current-provider` preserves bounded text history while creating the Bridge-managed destination under the provider, model and credential currently selected by cc-switch. Version 1.12.0 introduced explicit `/steer <text>` while ordinary active-task messages queue for the next turn.
 
 Version 1.6.7 introduced provider-aware Codex resume, and 1.7.0 added idle-boundary rebinding. Version 1.9.1 narrows reattachment semantics: reconnecting to an existing native or structured thread preserves the provider/model recorded by that thread instead of silently following a newly selected cc-switch route.
 
@@ -60,7 +60,7 @@ Install a pinned release or use a writable custom npm prefix when required:
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.13.2
+sh /tmp/install-arg-bridge.sh --version 1.13.3
 # Example for a machine without permission to write npm's configured global prefix:
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ Release tarballs are preferred. If a Git install is required, keep both compatib
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.13.2"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.13.3"
 ```
 
-`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.13.2`.
+`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.13.3`.
 
 ### 4. Node or npm global-prefix errors
 

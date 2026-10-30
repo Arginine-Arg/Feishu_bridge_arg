@@ -2680,9 +2680,11 @@ setInterval(() => {}, 1000);
         tmuxScopeId: scopeKey,
         usePty: true,
         backend: 'tmux',
-        // Let the helper observe the post-detach tmux redraw before the
-        // synthetic idle watchdog closes this deliberately tiny fixture.
-        idleMs: 1_500,
+        // Keep the synthetic idle watchdog alive beyond the first silent-paste
+        // recovery window. A loaded runner can drop the initial paste after a
+        // client disconnect; a 1.5s idle budget closes the fixture before the
+        // 3s recovery attempt can prove whether the agent survived.
+        idleMs: 8_000,
         outputFlushMs: 30,
         // Match the production no-output budget. A 4s override can expire
         // while a heavily contended CI runner is still scheduling the first

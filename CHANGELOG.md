@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.13.3
+
+- Stabilizes the tmux client-disconnect regression test by keeping its
+  synthetic idle watchdog alive beyond the first silent-paste recovery window.
+  Product behavior is unchanged from 1.13.2.
+
 ## 1.13.2
 
 - Allows explicit `/steer` on active model turns created by `/goal resume`

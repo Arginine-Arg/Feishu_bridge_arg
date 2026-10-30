@@ -4,7 +4,7 @@
 
 [English README](./README.md)
 
-`1.13.2` 让 `/goal resume` 及其他 structured control run 产生的活动模型 turn 可以使用显式 `/steer`。`1.13.1` 修复 Preferred structured transport 和第三方 Responses provider 下的 steer 透传。`1.13.0` 新增旧 Codex thread 的 provider-generation 迁移：`--adopt <thread-id> --follow-current-provider` 只保留有界 user/assistant 文本历史，目标 Bridge thread 使用当前 cc-switch 选中的 provider、model 和凭据 fingerprint。`1.12.0` 引入显式 `/steer <正文>`，普通任务中消息默认排队到下一轮。
+`1.13.3` 稳定 tmux client disconnect 回归测试，产品行为与 `1.13.2` 相同。`1.13.2` 让 `/goal resume` 及其他 structured control run 产生的活动模型 turn 可以使用显式 `/steer`。`1.13.1` 修复 Preferred structured transport 和第三方 Responses provider 下的 steer 透传。`1.13.0` 新增旧 Codex thread 的 provider-generation 迁移：`--adopt <thread-id> --follow-current-provider` 只保留有界 user/assistant 文本历史，目标 Bridge thread 使用当前 cc-switch 选中的 provider、model 和凭据 fingerprint。
 
 `1.6.7` 引入 provider-aware Codex resume，`1.7.0` 增加 idle 边界重绑。`1.9.1` 收紧重连语义：附着已有 native 或 structured thread 时，保留该 thread 记录的 provider/model，不会因为 cc-switch 后来切换了 route 而静默改路。
 
@@ -60,7 +60,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.13.2
+sh /tmp/install-arg-bridge.sh --version 1.13.3
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.13.2"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.13.3"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.13.2`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.13.3`。
 
 ### 4. Node 或 npm 全局目录错误
 
