@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.14.0
+
+- `/btw` now defaults to `workspace-write` for the current project. Use
+  `/btw --read-only` for a reviewer. A user-issued side task no longer depends
+  on the model auto-delegation write-worker setting.
+- MixAgents side workers receive the active `LARK_CHANNEL_*` environment and
+  current artifact-delivery grant, so they can run commands, edit workspace
+  files and send generated files to the Feishu conversation.
+- Provider adoption now follows a linear lineage head. A -> B -> A creates a
+  fresh A generation from B's latest context instead of replaying an older A
+  branch.
+- Bridge-managed threads persist a mode-0600 bounded text-history sidecar.
+  Provider generations merge that snapshot with newer turns, retain up to
+  48k characters, and fall back to a recent-turn tail if full history reading
+  is too large.
+
 ## 1.13.3
 
 - Stabilizes the tmux client-disconnect regression test by keeping its

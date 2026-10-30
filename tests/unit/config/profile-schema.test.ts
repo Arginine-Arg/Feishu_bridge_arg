@@ -71,7 +71,7 @@ describe('profile schema', () => {
       sideTimeoutMs: 90_000,
       sideReasoningEffort: 'low',
       webSearch: 'auto',
-      allowWriteWorkers: false,
+      allowWriteWorkers: true,
       includeProgressSnapshot: true,
       reuse: 'scope-cwd',
       allowForkFallback: true,

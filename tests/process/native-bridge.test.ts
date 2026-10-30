@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
 import { spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -351,7 +351,7 @@ nativeBridge('registers dynamic tools and safely migrates a legacy thread into a
     });
     expect(bridge).toMatchObject({
       mode: 'adopted',
-      oldThreadId,
+      oldThreadId: adoptedThreadId,
       providerSelection: {
         modelProvider: 'native-local-follow',
         model: 'native-follow-model',
@@ -392,6 +392,7 @@ nativeBridge('registers dynamic tools and safely migrates a legacy thread into a
     ));
     expect(followMarker.threads[bridge.threadId]).toMatchObject({
       adoptedFrom: oldThreadId,
+      previousThreadId: adoptedThreadId,
       followCurrentProvider: true,
       modelProvider: 'native-local-follow',
       model: 'native-follow-model',
@@ -416,13 +417,81 @@ nativeBridge('registers dynamic tools and safely migrates a legacy thread into a
     expect(bridge).toMatchObject({
       mode: 'adopted',
       threadId: followThreadId,
-      oldThreadId,
+      oldThreadId: adoptedThreadId,
       reusedAdoption: true,
       providerSelection: {
         modelProvider: 'native-local-follow',
         model: 'native-follow-model',
       },
     });
+    await bridge.close();
+    bridge = undefined;
+
+    await writeFile(join(codexHome, 'config.toml'), [
+      'model = "native-bridge-model"',
+      'model_provider = "native-local"',
+      'approval_policy = "never"',
+      'sandbox_mode = "read-only"',
+      '',
+      '[model_providers.native-local]',
+      'name = "Native Local"',
+      `base_url = "http://127.0.0.1:${address.port}/v1"`,
+      'wire_api = "responses"',
+      'requires_openai_auth = false',
+      'env_key = "OPENAI_API_KEY"',
+    ].join('\n'), { mode: 0o600 });
+    requests.length = 0;
+    bridge = await createNativeBridgeSession({
+      profileName: 'codex',
+      profileDir,
+      cwd: workspace,
+      config: profile,
+      env,
+      binary: 'codex',
+      codexHome,
+      sandbox: 'read-only',
+      adoptThreadId: oldThreadId,
+      followCurrentProvider: true,
+    });
+    expect(bridge).toMatchObject({
+      mode: 'adopted',
+      oldThreadId: followThreadId,
+      providerSelection: {
+        modelProvider: 'native-local',
+        model: 'native-bridge-model',
+      },
+    });
+    expect(bridge.threadId).not.toBe(followThreadId);
+    expect(bridge.threadId).not.toBe(adoptedThreadId);
+    const switchedBackEvents: Array<{ type: string; delta?: string }> = [];
+    await bridge.session!.submit({
+      runId: 'native-switch-back',
+      scopeId: 'native-scope',
+      cwd: workspace,
+      prompt: 'Continue with context from the provider B generation.',
+    }, event => switchedBackEvents.push(event), AbortSignal.timeout(60_000));
+    expect(switchedBackEvents.filter(event => event.type === 'error')).toEqual([]);
+    expect(requests.some(request =>
+      request.model === 'native-bridge-model' &&
+      JSON.stringify(request).includes('FOLLOW_CURRENT_PROVIDER_OK')
+    )).toBe(true);
+    const switchedBackMarker = JSON.parse(await readFile(
+      join(profileDir, 'structured', 'broker-threads.json'),
+      'utf8',
+    ));
+    expect(switchedBackMarker.threads[bridge.threadId]).toMatchObject({
+      adoptedFrom: oldThreadId,
+      previousThreadId: followThreadId,
+      followCurrentProvider: true,
+      modelProvider: 'native-local',
+      model: 'native-bridge-model',
+    });
+    const historyDir = join(profileDir, 'structured', 'broker-thread-history');
+    const historyText = (await Promise.all(
+      (await readdir(historyDir)).map(file => readFile(join(historyDir, file), 'utf8')),
+    )).join('\n');
+    expect(historyText).toContain('LEGACY_THREAD_CONTEXT_ORBIT_731');
+    expect(historyText).toContain('FOLLOW_CURRENT_PROVIDER_OK');
   } finally {
     await bridge?.close();
     await new Promise<void>(resolve => provider.close(() => resolve()));

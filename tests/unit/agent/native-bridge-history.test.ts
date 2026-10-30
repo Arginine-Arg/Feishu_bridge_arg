@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   extractAssistantHistory,
   findAdoptedThreadMarker,
+  findLatestAdoptedThreadMarker,
   resolveFollowCurrentProviderSelection,
   type NativeCodexEnvironment,
   type NativeBridgeProviderSelection,
@@ -69,16 +70,16 @@ describe('Bridge managed native history migration', () => {
   });
 
   it('keeps only a bounded recent tail when the old transcript is large', () => {
-    const turns = Array.from({ length: 100 }, (_, index) => ({
+    const turns = Array.from({ length: 300 }, (_, index) => ({
       items: [{
         type: 'userMessage',
         content: [{ type: 'inputText', text: `${index}:`.padEnd(300, 'x') }],
       }],
     }));
     const history = extractAssistantHistory({ thread: { turns } });
-    expect(history.sourceChars).toBeLessThanOrEqual(12_000);
+    expect(history.sourceChars).toBeLessThanOrEqual(48_000);
     expect(history.items.length).toBeGreaterThan(0);
-    expect(JSON.stringify(history.items)).toContain('99:');
+    expect(JSON.stringify(history.items)).toContain('299:');
   });
 
   it('reuses the newest existing adoption instead of creating another thread', async () => {
@@ -113,7 +114,7 @@ describe('Bridge managed native history migration', () => {
       .resolves.toEqual({ threadId: 'newest', createdAt: 20 });
   });
 
-  it('selects the adoption generation for the requested provider fingerprint', async () => {
+  it('never rewinds to an older provider branch after a newer generation exists', async () => {
     const root = await mkdtemp(join(tmpdir(), 'native-adopt-provider-marker-'));
     temporary.push(root);
     const markerPath = join(root, 'broker-threads.json');
@@ -147,6 +148,7 @@ describe('Bridge managed native history migration', () => {
           modelProvider: 'codex-b',
           model: 'model-b',
           runtimeFingerprint: 'fingerprint-b',
+          previousThreadId: 'providerA',
         },
       },
     }));
@@ -157,16 +159,38 @@ describe('Bridge managed native history migration', () => {
       runtimeFingerprint: 'fingerprint-a',
     };
 
+    await expect(findLatestAdoptedThreadMarker(
+      markerPath,
+      'legacy-thread',
+      'arg_bridge',
+    )).resolves.toMatchObject({
+      threadId: 'providerB',
+      previousThreadId: 'providerA',
+    });
+
     await expect(findAdoptedThreadMarker(
       markerPath,
       'legacy-thread',
       'arg_bridge',
       selector,
+    )).resolves.toBeUndefined();
+
+    const selectorB: NativeBridgeProviderSelection = {
+      ccSwitchProviderId: 'provider-b',
+      modelProvider: 'codex-b',
+      model: 'model-b',
+      runtimeFingerprint: 'fingerprint-b',
+    };
+    await expect(findAdoptedThreadMarker(
+      markerPath,
+      'legacy-thread',
+      'arg_bridge',
+      selectorB,
     )).resolves.toMatchObject({
-      threadId: 'providerA',
+      threadId: 'providerB',
       followCurrentProvider: true,
-      ccSwitchProviderId: 'provider-a',
-      runtimeFingerprint: 'fingerprint-a',
+      ccSwitchProviderId: 'provider-b',
+      runtimeFingerprint: 'fingerprint-b',
     });
   });
 

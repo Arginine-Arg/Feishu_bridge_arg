@@ -364,16 +364,16 @@ The cross-repository dependency is therefore explicit:
 
 ## `/btw` lifecycle
 
-The default access is `read-only`. A larger main-session sandbox never upgrades
-`/btw`. A single task may use explicit write access:
+The default access is `workspace-write` for the current project. A direct user
+`/btw` request authorizes one side task. Use `--read-only` to downgrade:
 
 ```text
-/btw --write --workspace /canonical/project <task>
+/btw --read-only <task>
 ```
 
-This requires `allowWriteWorkers=true`, a compatible write route, and a
-canonical workspace equal to or below the current project. The next `/btw`
-without the flags returns to read-only and replaces the write-capable agent.
+A compatible `workspace-write` route is required. `--workspace` may select a
+canonical path equal to or below the current project; when omitted, the current
+project is used.
 
 First `/btw <text>`:
 

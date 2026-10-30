@@ -448,7 +448,7 @@ export const DEFAULT_SUBAGENT_CONFIG: SubagentConfig = {
   sideTimeoutMs: 90_000,
   sideReasoningEffort: 'low',
   webSearch: 'auto',
-  allowWriteWorkers: false,
+  allowWriteWorkers: true,
   includeProgressSnapshot: true,
   reuse: 'scope-cwd',
   allowForkFallback: true,
@@ -525,7 +525,7 @@ function normalizeSubagents(input: unknown): SubagentConfig {
     webSearch: raw.webSearch === 'native' || raw.webSearch === 'disabled'
       ? raw.webSearch
       : 'auto',
-    allowWriteWorkers: raw.allowWriteWorkers === true,
+    allowWriteWorkers: raw.allowWriteWorkers !== false,
     includeProgressSnapshot: raw.includeProgressSnapshot !== false,
     reuse: 'scope-cwd',
     allowForkFallback: raw.allowForkFallback !== false,

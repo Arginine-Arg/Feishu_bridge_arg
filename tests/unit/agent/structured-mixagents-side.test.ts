@@ -405,7 +405,7 @@ describe('structured MixAgents /btw', () => {
       runId: 'main-fallback',
       scopeId: 'scope',
       cwd: '/workspace',
-      prompt: '/btw 现在什么进度了？',
+      prompt: '/btw --read-only 现在什么进度了？',
       liveInputMode: 'side',
     }));
     expect(events.filter(event => event.type === 'error')).toEqual([]);
@@ -491,7 +491,7 @@ describe('structured MixAgents /btw', () => {
       runId: 'side-1',
       scopeId: 'scope',
       cwd: '/workspace',
-      prompt: '/btw Review the implementation',
+      prompt: '/btw --read-only Review the implementation',
       liveInputMode: 'side',
     }));
     expect(first.filter(event => event.type === 'error')).toEqual([]);
@@ -513,7 +513,7 @@ describe('structured MixAgents /btw', () => {
       runId: 'side-2',
       scopeId: 'scope',
       cwd: '/workspace',
-      prompt: '/btw Check the tests',
+      prompt: '/btw --read-only Check the tests',
       liveInputMode: 'side',
     }));
     expect(second.filter(event => event.type === 'error')).toEqual([]);
@@ -528,7 +528,7 @@ describe('structured MixAgents /btw', () => {
       runId: 'side-3',
       scopeId: 'scope',
       cwd: '/workspace',
-      prompt: '/btw Re-review with the new provider',
+      prompt: '/btw --read-only Re-review with the new provider',
       liveInputMode: 'side',
     }));
     expect(switched.filter(event => event.type === 'error')).toEqual([]);
@@ -575,7 +575,7 @@ describe('structured MixAgents /btw', () => {
       runId: 'first',
       scopeId: 'scope',
       cwd: '/workspace',
-      prompt: '/btw First task',
+      prompt: '/btw --read-only First task',
       liveInputMode: 'side',
     }));
     backend.sendNotFoundOnce = true;
@@ -583,7 +583,7 @@ describe('structured MixAgents /btw', () => {
       runId: 'second',
       scopeId: 'scope',
       cwd: '/workspace',
-      prompt: '/btw Retry after not_found',
+      prompt: '/btw --read-only Retry after not_found',
       liveInputMode: 'side',
     }));
     expect(events.filter(event => event.type === 'error')).toEqual([]);
@@ -621,14 +621,14 @@ describe('structured MixAgents /btw', () => {
       runId: 'owner',
       scopeId: 'scope',
       cwd: '/workspace',
-      prompt: '/btw First task',
+      prompt: '/btw --read-only First task',
       liveInputMode: 'side',
     }));
     const followup = await drain(adapter.runSide({
       runId: 'verification',
       scopeId: 'scope',
       cwd: '/workspace',
-      prompt: '/btw Follow up',
+      prompt: '/btw --read-only Follow up',
       liveInputMode: 'side',
     }));
 
@@ -668,7 +668,7 @@ describe('structured MixAgents /btw', () => {
       runId: 'owner',
       scopeId: 'scope',
       cwd: '/workspace',
-      prompt: '/btw First task',
+      prompt: '/btw --read-only First task',
       liveInputMode: 'side',
     }));
     owner.sendNotFoundOnce = true;
@@ -676,7 +676,7 @@ describe('structured MixAgents /btw', () => {
       runId: 'replacement',
       scopeId: 'scope',
       cwd: '/workspace',
-      prompt: '/btw Recreate after not_found',
+      prompt: '/btw --read-only Recreate after not_found',
       liveInputMode: 'side',
     }));
 
@@ -726,7 +726,7 @@ describe('structured MixAgents /btw', () => {
       runId: 'before',
       scopeId: 'scope',
       cwd: '/workspace',
-      prompt: '/btw Before reload',
+      prompt: '/btw --read-only Before reload',
       liveInputMode: 'side',
     }));
     expect(backend.spawns[0]?.route).toBe(routeA);
@@ -737,7 +737,7 @@ describe('structured MixAgents /btw', () => {
       runId: 'after',
       scopeId: 'scope',
       cwd: '/workspace',
-      prompt: '/btw After reload',
+      prompt: '/btw --read-only After reload',
       liveInputMode: 'side',
     }));
     expect(events.filter(event => event.type === 'error')).toEqual([]);
@@ -769,7 +769,7 @@ describe('structured MixAgents /btw', () => {
       runId: 'revision-1',
       scopeId: 'scope',
       cwd: '/workspace',
-      prompt: '/btw First revision',
+      prompt: '/btw --read-only First revision',
       liveInputMode: 'side',
     }));
     active = { ...routeA, model: 'model-a2', revision: 'rev-2' };
@@ -778,7 +778,7 @@ describe('structured MixAgents /btw', () => {
       runId: 'revision-2',
       scopeId: 'scope',
       cwd: '/workspace',
-      prompt: '/btw Second revision',
+      prompt: '/btw --read-only Second revision',
       liveInputMode: 'side',
     }));
     expect(backend.interruptions).toContain('agent-1');
@@ -1067,7 +1067,7 @@ describe('structured MixAgents /btw', () => {
       runId: 'cancel-side',
       scopeId: 'scope',
       cwd: '/workspace',
-      prompt: '/btw Cancel this side',
+      prompt: '/btw --read-only Cancel this side',
       liveInputMode: 'side',
     });
     await vi.waitFor(() => expect(backend.spawns).toHaveLength(1));
@@ -1120,7 +1120,7 @@ describe('structured MixAgents /btw', () => {
       runId: 'side-timeout',
       scopeId: 'scope',
       cwd: '/workspace',
-      prompt: '/btw This route is too slow',
+      prompt: '/btw --read-only This route is too slow',
       liveInputMode: 'side',
     }));
     expect(events.filter(event => event.type === 'error')).toEqual([]);
@@ -1180,7 +1180,7 @@ describe('structured MixAgents /btw', () => {
       runId: 'side-after-timeout',
       scopeId: 'scope',
       cwd: '/workspace',
-      prompt: '/btw Do not silently replace the timed-out side',
+      prompt: '/btw --read-only Do not silently replace the timed-out side',
       liveInputMode: 'side',
     }));
     expect(blocked).toContainEqual(expect.objectContaining({
@@ -1235,7 +1235,7 @@ describe('structured MixAgents /btw', () => {
       runId: 'side-heartbeat',
       scopeId: 'scope',
       cwd: '/workspace',
-      prompt: '/btw Report status while the worker is slow',
+      prompt: '/btw --read-only Report status while the worker is slow',
       liveInputMode: 'side',
     });
     await vi.waitFor(() => expect(backend.spawns).toHaveLength(1));
@@ -1289,7 +1289,7 @@ describe('structured MixAgents /btw', () => {
       runId: 'side-stream',
       scopeId: 'scope',
       cwd: '/workspace',
-      prompt: '/btw Stream the progress',
+      prompt: '/btw --read-only Stream the progress',
       liveInputMode: 'side',
     }));
     expect(events).toContainEqual(expect.objectContaining({
@@ -1357,7 +1357,7 @@ describe('structured MixAgents /btw', () => {
       runId: 'read-first',
       scopeId: 'scope',
       cwd: workspace,
-      prompt: '/btw Inspect the change',
+      prompt: '/btw --read-only Inspect the change',
       liveInputMode: 'side',
     }));
     const writeEvents = await drain(adapter.runSide({
@@ -1393,7 +1393,7 @@ describe('structured MixAgents /btw', () => {
       runId: 'read-again',
       scopeId: 'scope',
       cwd: workspace,
-      prompt: '/btw Review the result without writing',
+      prompt: '/btw --read-only Review the result without writing',
       liveInputMode: 'side',
     }));
     expect(backend.spawns).toHaveLength(3);
@@ -1411,8 +1411,10 @@ describe('structured MixAgents /btw', () => {
     await rm(root, { recursive: true, force: true });
   });
 
-  it('requires an explicit workspace for a write /btw task', async () => {
+  it('uses the current workspace when /btw --write omits --workspace', async () => {
     const profileDir = await mkdtemp(join(tmpdir(), 'arg-bridge-side-write-missing-'));
+    const workspace = join(profileDir, 'project');
+    await mkdir(workspace, { recursive: true });
     const backend = new FakeBackend(() => routeWrite);
     const resolver = vi.fn(async () => resolved(
       routeWrite,
@@ -1429,28 +1431,31 @@ describe('structured MixAgents /btw', () => {
     });
     Reflect.get(adapter, 'sessions').set('scope', {
       main,
-      cwd: '/workspace',
+      cwd: workspace,
       view: new StructuredView(profileDir, 'main'),
     });
 
     const events = await drain(adapter.runSide({
       runId: 'write-missing',
       scopeId: 'scope',
-      cwd: '/workspace',
+      cwd: workspace,
       prompt: '/btw --write Implement this',
       liveInputMode: 'side',
     }));
-    expect(events).toContainEqual(expect.objectContaining({
-      type: 'error',
-      message: expect.stringContaining('--workspace'),
+    expect(events.filter(event => event.type === 'error')).toEqual([]);
+    expect(backend.spawns).toHaveLength(1);
+    expect(backend.spawns[0]).toMatchObject({
+      cwd: await realpath(workspace),
+      access: 'workspace-write',
+    });
+    expect(resolver).toHaveBeenCalledWith(expect.objectContaining({
+      access: 'workspace-write',
     }));
-    expect(resolver).not.toHaveBeenCalled();
-    expect(backend.spawns).toHaveLength(0);
     await main.close();
     await rm(profileDir, { recursive: true, force: true });
   });
 
-  it('requires the write task body in the same authorized command', async () => {
+  it('defaults /btw to current-workspace write access', async () => {
     const root = await mkdtemp(join(tmpdir(), 'arg-bridge-side-write-empty-'));
     const workspace = join(root, 'project');
     const profileDir = join(root, 'profile');
@@ -1471,6 +1476,11 @@ describe('structured MixAgents /btw', () => {
       profileDir,
       subagents: { ...subagents, allowWriteWorkers: true, writeRoute: routeWrite.id },
       subagentResolver: resolver,
+      larkChannel: {
+        profile: 'codex',
+        rootDir: root,
+        configPath: join(root, 'config.json'),
+      },
     });
     Reflect.get(adapter, 'sessions').set('scope', {
       main,
@@ -1482,20 +1492,42 @@ describe('structured MixAgents /btw', () => {
       runId: 'write-empty',
       scopeId: 'scope',
       cwd: workspace,
-      prompt: `/btw --write --workspace "${workspace}"`,
+      prompt: '/btw Implement this by default',
       liveInputMode: 'side',
+      artifactDelivery: {
+        socketPath: join(root, 'artifact.sock'),
+        token: 'artifact-token',
+      },
     }));
-    expect(events).toContainEqual(expect.objectContaining({
-      type: 'error',
-      message: expect.stringContaining('任务正文必须与授权写在同一条命令中'),
+    expect(events.filter(event => event.type === 'error')).toEqual([]);
+    expect(resolver).toHaveBeenCalledWith(expect.objectContaining({
+      access: 'workspace-write',
+      runtimeRole: 'worker',
+      env: expect.objectContaining({
+        LARK_CHANNEL: '1',
+        LARK_CHANNEL_PROFILE: 'codex',
+        LARK_CHANNEL_HOME: root,
+        LARK_CHANNEL_CONFIG: join(root, 'config.json'),
+        ARG_BRIDGE_ARTIFACT_SOCKET: join(root, 'artifact.sock'),
+        ARG_BRIDGE_ARTIFACT_TOKEN: 'artifact-token',
+      }),
     }));
-    expect(resolver).not.toHaveBeenCalled();
-    expect(backend.spawns).toHaveLength(0);
+    expect(backend.spawns).toHaveLength(1);
+    expect(backend.spawns[0]).toMatchObject({
+      cwd: await realpath(workspace),
+      access: 'workspace-write',
+      writeAuthorization: {
+        workspace: await realpath(workspace),
+        task: expect.stringContaining('Implement this by default'),
+      },
+    });
+    expect(backend.spawns[0]?.task).toContain('lark-cli');
+    expect(backend.spawns[0]?.task).toContain('You may run commands');
     await main.close();
     await rm(root, { recursive: true, force: true });
   });
 
-  it('does not upgrade /btw without profile write-worker enablement', async () => {
+  it('treats an explicit /btw as user authorization for one write side', async () => {
     const root = await mkdtemp(join(tmpdir(), 'arg-bridge-side-write-disabled-'));
     const workspace = join(root, 'project');
     const profileDir = join(root, 'profile');
@@ -1524,12 +1556,15 @@ describe('structured MixAgents /btw', () => {
       prompt: `/btw --write --workspace "${workspace}" Implement this`,
       liveInputMode: 'side',
     }));
-    expect(events).toContainEqual(expect.objectContaining({
-      type: 'error',
-      message: expect.stringContaining('未在 profile 中启用'),
-    }));
-    expect(resolver).not.toHaveBeenCalled();
-    expect(backend.spawns).toHaveLength(0);
+    expect(events.filter(event => event.type === 'error')).toEqual([]);
+    expect(resolver).toHaveBeenCalledTimes(1);
+    expect(backend.spawns).toHaveLength(1);
+    expect(backend.spawns[0]).toMatchObject({
+      access: 'workspace-write',
+      writeAuthorization: {
+        workspace: await realpath(workspace),
+      },
+    });
     await main.close();
     await rm(root, { recursive: true, force: true });
   });

@@ -65,17 +65,17 @@ and timeout rules below.
 
 ## `/btw` permissions
 
-- `/btw` defaults to `read-only`; the main profile's sandbox never upgrades side
-  access.
-- A user may explicitly authorize one write task:
+- `/btw` defaults to `workspace-write` within the current project. A direct
+  user request authorizes one side task.
+- A user can explicitly downgrade the side:
 
   ```text
-  /btw --write --workspace /canonical/project <task>
+  /btw --read-only <task>
   ```
 
-- The profile must enable write workers, the selected write/auto route must
-  support `workspace-write`, and the canonical workspace must be the current
-  project or one of its descendants.
+- The selected route must support `workspace-write`. An explicit
+  `--workspace` must be canonical and equal to or below the current project;
+  omitting it uses the current project.
 - The grant is task-scoped and is not reused by the next `/btw`. A later
   read-only request closes the write-capable worker before continuing.
 - Broker must authorize the canonical `cwd` through configured
@@ -118,9 +118,9 @@ write access:
 
 The directive is consumed outside the model prompt. A model cannot self-grant
 write access by forging fields inside `spawn_agent` or `followup_task`.
-`/btw` defaults to read-only and permits workspace-write only through the exact
-`--write --workspace <canonical-path>` grant described above. It never uses a
-Codex fork fallback for a write task.
+`/btw` defaults to workspace-write for the current project. The exact
+`--workspace` path remains available for an authorized descendant. It never
+uses a Codex fork fallback for a write task.
 
 ## Native collaboration boundary
 

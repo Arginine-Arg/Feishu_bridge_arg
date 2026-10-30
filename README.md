@@ -4,7 +4,7 @@ A lightweight bot that bridges Feishu / Lark messenger with your local Claude Co
 
 [中文 README](./README.zh.md)
 
-Version 1.13.3 stabilizes the tmux client-disconnect regression test; product behavior is unchanged from 1.13.2. Version 1.13.2 makes explicit `/steer` available on active model turns created by `/goal resume` and other structured control runs. Version 1.13.1 forwards steering through the preferred structured transport and third-party Responses providers. Version 1.13.0 adds provider-generation migration for existing Codex threads: `--adopt <thread-id> --follow-current-provider` preserves bounded text history while creating the Bridge-managed destination under the provider, model and credential currently selected by cc-switch. Version 1.12.0 introduced explicit `/steer <text>` while ordinary active-task messages queue for the next turn.
+Version 1.14.0 makes `/btw` workspace-write by default, lets side workers run commands and send files through lark-cli, and turns provider adoption into a linear context lineage. Provider switches such as A -> B -> A now continue from B's latest context instead of rewinding to the old A branch; long histories use a 48k-character snapshot with recent-tail fallback. Version 1.13.2 made explicit `/steer` available for active `/goal resume` turns.
 
 Version 1.6.7 introduced provider-aware Codex resume, and 1.7.0 added idle-boundary rebinding. Version 1.9.1 narrows reattachment semantics: reconnecting to an existing native or structured thread preserves the provider/model recorded by that thread instead of silently following a newly selected cc-switch route.
 
@@ -60,7 +60,7 @@ Install a pinned release or use a writable custom npm prefix when required:
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.13.3
+sh /tmp/install-arg-bridge.sh --version 1.14.0
 # Example for a machine without permission to write npm's configured global prefix:
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ Release tarballs are preferred. If a Git install is required, keep both compatib
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.13.3"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.14.0"
 ```
 
-`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.13.3`.
+`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.14.0`.
 
 ### 4. Node or npm global-prefix errors
 
@@ -307,7 +307,12 @@ fingerprint currently resolved from cc-switch. This mode reads the old thread
 only through its owner/idle boundary, starts a separate provider-specific App
 Server, and passes `modelProvider` and `model` explicitly to `thread/start`.
 Missing provider, model or credential fails before the new thread is created.
-Repeating the command is idempotent per provider/model/credential generation.
+Provider switches form a linear lineage: switching A -> B -> A creates a new A
+generation from B's latest head, so work performed under B is not lost. Bridge
+persists a bounded text-history sidecar for each thread and raises the handoff
+budget to 48k characters; a recent-tail fallback handles exceptionally long
+source histories. Repeating the command is idempotent only when the newest
+lineage head already matches the selected provider generation.
 
 ### Mid-turn messages
 
@@ -372,7 +377,7 @@ See [MixAgents subagents](./docs/mixagents-subagents.md), [Bridge-managed native
 | `/config` | Adjust presentation preferences, access settings, and lark-cli identity policy |
 | `/model` | Choose the model; Codex uses its native model/reasoning picker and syncs the result to the active profile. `/codex model` is a shorthand for `/codex /model`. |
 | `/steer <text>` | Add text to the current main turn at its next model boundary without interrupting the goal or starting a second turn. Fails explicitly for no active turn, side conversations, attachments/quotes, or unsupported providers. |
-| `/btw [--route <id>] [<text>]` | Open or reuse an independent side agent; access is read-only by default. The bundled Broker streams text deltas and safe tool lifecycle progress via `events-v1`; final mailbox results remain authoritative. `sideTimeoutMs` is a soft notice and each `workerTimeoutMs` wait window automatically continues until completion or explicit `/btw out`. `/btw result` is a recovery command for retained timeout state and never resends the task. Write tasks use `/btw --write --workspace <canonical-path> <task>` and never fall back to Codex fork. |
+| `/btw [--route <id>] [--workspace <path>] [<text>]` | Open or reuse an independent side agent with workspace-write access by default. The side can run commands, edit files inside the current workspace and use lark-cli to send files to the current Feishu conversation. Use `/btw --read-only <text>` for a read-only reviewer. The bundled Broker streams text deltas and safe tool lifecycle progress via `events-v1`; final mailbox results remain authoritative. `/btw result` is a recovery command for retained timeout state and never resends the task. Write sides never fall back to Codex fork. |
 | `/session [status\|live\|turn]` | Inspect terminal execution. tmux/live is the default; `turn` remains a legacy compatibility fallback |
 | `/tmux list [socket]` | Admin-only: list every live Codex/Claude tmux pane on this host, including working directory, agent kind, adopted thread, shared App Server endpoint, and attach command. Optional `-S <absolute socket path>` or `-L <socket name>` selects one tmux server; plain shells are never listed |
 | `/tmux bind <number\|pane id\|socket::pane id>` | Admin-only: bind the current chat/topic scope to a listed pane. A pane with a shared Codex endpoint is driven through structured transport; a plain Codex/Claude pane falls back to live transport. `/tmux list` numbers are only valid for the most recent listing |

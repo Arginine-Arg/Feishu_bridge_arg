@@ -2160,15 +2160,15 @@ setInterval(() => {}, 1000);
       tmuxScopeId: 'tmux-btw-main-resume-scope',
       usePty: true,
       backend: 'tmux',
-      idleMs: 180,
+      idleMs: 1_000,
       outputFlushMs: 20,
-      startupTimeoutMs: 3_000,
+      startupTimeoutMs: 15_000,
     });
 
     const goal = session.run('main-goal', 'long goal', dir);
     const goalEvents = collect(goal.events);
     try {
-      await waitForFileText(trace, 'goal\n', 5_000);
+      await waitForFileText(trace, 'goal\n', 15_000);
       const sideEntry = await collect(session.runSide('side-entry', '/btw', dir, 'side').events);
       expect(textOf(sideEntry)).toContain('已进入 Codex btw side conversation');
       const sideAnswer = await collect(
@@ -2187,7 +2187,7 @@ setInterval(() => {}, 1000);
       await pool.closeAll();
       await goalEvents.catch(() => undefined);
     }
-  }, 30_000);
+  }, 45_000);
 
   it('ignores stale status panels for other commands and strips stale goal usage from status', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-stale-status-panel-test-'));

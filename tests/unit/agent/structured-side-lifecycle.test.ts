@@ -42,7 +42,7 @@ it('serializes a slow side opening with exit and never sends its queued body', a
     env: { ...process.env, CC_SWITCH_HOME: '/not-used/cc-switch' },
   });
   Reflect.get(adapter, 'sessions').set('scope', { main, cwd: '/workspace', view: new StructuredView('/not-used', 'main') });
-  const opening = drain(adapter.runSide({ runId: 'open', scopeId: 'scope', cwd: '/workspace', prompt: '/btw never send this after exit', liveInputMode: 'side' }));
+  const opening = drain(adapter.runSide({ runId: 'open', scopeId: 'scope', cwd: '/workspace', prompt: '/btw --read-only never send this after exit', liveInputMode: 'side' }));
   await vi.waitFor(() => expect(resolveFork).toBeTypeOf('function'));
   const exiting = drain(adapter.runSide({ runId: 'exit', scopeId: 'scope', cwd: '/workspace', prompt: '/btw out', liveInputMode: 'side-exit' }));
   const repeatedExit = drain(adapter.runSide({ runId: 'exit-again', scopeId: 'scope', cwd: '/workspace', prompt: '/btw out', liveInputMode: 'side-exit' }));

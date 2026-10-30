@@ -180,7 +180,7 @@ for Claude remote-service transport, not a verified local attach replacement.
 | `/status` | thread metadata and Bridge diagnostics | SDK session/model/phase and Bridge diagnostics |
 | `/goal` | native get/set/pause/resume/clear, with goal relay spanning turns | unsupported; no imitation goal loop |
 | `/stop` | pause active goal and interrupt the exact turn | SDK interrupt |
-| `/btw` | independently routed MixAgents agent; read-only by default, with explicit one-task workspace-write; read-only Codex fork fallback | MixAgents side through the same backend; Codex-specific fork is unavailable |
+| `/btw` | independently routed MixAgents agent with writable current-workspace access by default; `--read-only` explicitly downgrades | MixAgents side through the same backend; Codex-specific fork is unavailable for write sides |
 
 Other slash commands are not forwarded to the model as ordinary task text when
 unsupported. The stable terminal backend remains available for its full native
@@ -274,11 +274,11 @@ equivalent. Ephemeral threads do not support goals; the server rejects combining
 
 `/btw` without text prepares side without a generation; `/btw text` submits only
 after preparation. With MixAgents, text is sent to an independent Broker agent.
-For a read-only task, the auto-mode fallback sends ordinary input to a read-only
-Codex `thread/fork`. Access is `read-only` unless the user supplies
-`/btw --write --workspace <canonical-path> <task>` and the profile enables a
-compatible write route. Write tasks require MixAgents and never use fork
-fallback. The vendored MixAgents Broker streams text deltas and safe tool
+For an explicitly read-only task, the auto-mode fallback sends ordinary input
+to a read-only Codex `thread/fork`. `/btw` otherwise defaults to
+`workspace-write` for the current project; `/btw --read-only` downgrades the
+task. Write tasks require MixAgents and never use fork fallback. The vendored
+MixAgents Broker streams text deltas and safe tool
 lifecycle events through `events-v1`; terminal mailbox text/errors remain
 authoritative. Older Brokers fall back to heartbeat-only progress.
 `sideTimeoutMs` is a soft notice; each `workerTimeoutMs` wait window

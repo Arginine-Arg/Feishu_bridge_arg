@@ -16,7 +16,7 @@ export interface SubagentRoute {
   description?: string;
   provider: string;
   model: string;
-  /** Maximum access the route allows; `/btw` requests read-only unless explicitly authorized. */
+  /** Maximum access the route allows; user `/btw` defaults to workspace-write. */
   maxAccess: SubagentAccess;
   available: boolean;
   missingEnvironment: string[];

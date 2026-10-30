@@ -266,8 +266,9 @@ export function helpCard(agentName = 'Agent'): object {
       [
         '**🪄 Side conversation**',
         '',
-        '- `/btw <内容>` — 开启或继续只读 side conversation；`/codex /btw <内容>` 等价',
-        '- `/btw --write --workspace <canonical 路径> <任务>` — 显式授权一次 workspace-write（需在 settings 高级参数启用）',
+        '- `/btw <内容>` — 开启或继续当前 workspace 的读写 side conversation，可运行命令和发送文件；`/codex /btw <内容>` 等价',
+        '- `/btw --read-only <内容>` — 显式开启只读 reviewer',
+        '- `/btw --workspace <canonical 路径> <任务>` — 在指定子目录执行写任务',
         '- `/btw result` — 收取后台 side 的迟到结果',
         '- `/btw out` — 退出 side；这是 `/btw` 的中断和丢弃入口',
       ].join('\n'),

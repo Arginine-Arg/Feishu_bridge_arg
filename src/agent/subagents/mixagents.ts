@@ -226,7 +226,7 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
       ) {
         throw new SubagentUnavailableError(
           'write-not-authorized',
-          'workspace-write 子代理必须由用户针对该任务和该 workspace 明确授权；/btw 默认只读。',
+          'workspace-write 子代理必须由用户针对该任务和该 workspace 明确授权。',
         );
       }
     }

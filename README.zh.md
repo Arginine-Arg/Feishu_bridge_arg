@@ -4,7 +4,7 @@
 
 [English README](./README.md)
 
-`1.13.3` 稳定 tmux client disconnect 回归测试，产品行为与 `1.13.2` 相同。`1.13.2` 让 `/goal resume` 及其他 structured control run 产生的活动模型 turn 可以使用显式 `/steer`。`1.13.1` 修复 Preferred structured transport 和第三方 Responses provider 下的 steer 透传。`1.13.0` 新增旧 Codex thread 的 provider-generation 迁移：`--adopt <thread-id> --follow-current-provider` 只保留有界 user/assistant 文本历史，目标 Bridge thread 使用当前 cc-switch 选中的 provider、model 和凭据 fingerprint。
+`1.14.0` 将 `/btw` 改为默认 workspace-write，side 可运行命令并通过 lark-cli 发送文件；同时把 provider adoption 改为线性上下文 lineage，A -> B -> A 会继续 B 的最新上下文而不是回到旧 A 分支。超长历史使用 48k 字符快照和 recent-tail 回退。`1.13.2` 让 `/goal resume` 产生的活动模型 turn 可以使用显式 `/steer`。
 
 `1.6.7` 引入 provider-aware Codex resume，`1.7.0` 增加 idle 边界重绑。`1.9.1` 收紧重连语义：附着已有 native 或 structured thread 时，保留该 thread 记录的 provider/model，不会因为 cc-switch 后来切换了 route 而静默改路。
 
@@ -60,7 +60,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.13.3
+sh /tmp/install-arg-bridge.sh --version 1.14.0
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.13.3"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.14.0"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.13.3`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.14.0`。
 
 ### 4. Node 或 npm 全局目录错误
 
@@ -303,7 +303,11 @@ thread 的用户/助手文本，有限截断并脱敏后，创建新 Bridge-mana
 该模式只通过旧 thread 的真实 owner/idle 边界读取历史，另起独立的
 provider-specific App Server，并把 `modelProvider`、`model` 显式传给
 `thread/start`。provider、model 或凭据任一无法解析时会在创建目标 thread
-前 fail closed。重复执行时按 provider/model/credential generation 幂等复用。
+前 fail closed。provider 切换会形成线性 lineage：A -> B -> A 会从 B 的最近
+head 创建新的 A generation，不会回到旧的 A 分支丢失 B 阶段工作。Bridge 为
+每个 thread 保存有界文本历史 sidecar，handoff 预算提高到 48k 字符；超长
+历史使用 recent-tail 回退。只有最新 lineage head 已经匹配当前
+provider/model/credential generation 时才幂等复用。
 
 ### 长任务中途消息
 
@@ -364,7 +368,7 @@ Project RSI 与 MixAgents、历史 Task RSI 是三个不同层次。Bridge 只�
 | `/config` | 调整展示偏好、访问控制和 lark-cli 身份策略 |
 | `/model` | 选择模型；Codex 直接使用 CLI 原生模型/reasoning 选项，并把结果同步到当前 profile。`/codex model` 等价于 `/codex /model`。 |
 | `/steer <正文>` | 只把正文插入当前 main turn 的下一个模型边界；不中断 goal，也不创建第二轮。无活动任务、side 会话、附件/引用或 provider 不支持时明确失败。 |
-| `/btw [--route <id>] [<内容>]` | 开启或复用独立 side agent，默认只读。随包 Broker 通过 `events-v1` 流式转发文本 delta 和安全工具生命周期，最终 mailbox 仍是权威结果。`sideTimeoutMs` 只是软提醒，每个 `workerTimeoutMs` 等待窗口结束后自动续等，直到完成或 `/btw out`。`/btw result` 是异常残留状态的恢复命令且不重发任务。写任务使用 `/btw --write --workspace <canonical 路径> <任务>`，永不回退 Codex fork。 |
+| `/btw [--route <id>] [--workspace <路径>] [<内容>]` | 开启或复用独立 side agent，默认拥有当前 workspace 的读写权限。side 可运行命令、修改当前 workspace，并通过 lark-cli 向当前飞书会话发送文件。只读 reviewer 使用 `/btw --read-only <内容>`。随包 Broker 通过 `events-v1` 流式转发文本 delta 和安全工具生命周期，最终 mailbox 仍是权威结果。`/btw result` 是异常残留状态的恢复命令且不重发任务。写 side 永不回退 Codex fork。 |
 | `/session [status\|live\|turn]` | 查看终端执行状态。tmux/live 为默认模式；`turn` 仅作为兼容回退 |
 | `/tmux list [socket]` | 仅管理员：列出本机所有存活的 Codex/Claude tmux pane，包含工作目录、agent 类型、已识别 thread、共享 App Server endpoint 和 attach 命令。可选 `-S <绝对 socket 路径>` 或 `-L <名称>` 只扫描一个 tmux server；普通 shell 不会列出 |
 | `/tmux bind <编号\|pane id\|socket::pane id>` | 仅管理员：把当前 chat/topic scope 绑定到列表中的 pane。带有共享 Codex endpoint 的 pane 走 structured 转发，普通 Codex/Claude pane 回退到 live 转发。编号只在最近一次 `/tmux list` 结果内有效 |

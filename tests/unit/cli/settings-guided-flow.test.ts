@@ -108,7 +108,7 @@ describe('guided settings flow', () => {
       routeMode: 'follow-cc-switch',
       ccSwitchProviderId: null,
       readRoute: null,
-      allowWriteWorkers: false,
+      allowWriteWorkers: true,
       mixagents: {
         credentialMode: 'inherit-env',
       },

@@ -120,6 +120,7 @@ export class StaleStructuredEndpointError extends Error {
 function parseBtwRequest(prompt: string): {
   body: string;
   access: 'read-only' | 'workspace-write';
+  implicitWrite: boolean;
   route?: string;
   workspace?: string;
   error?: string;
@@ -144,34 +145,26 @@ function parseBtwRequest(prompt: string): {
     body = body.replace(/(?:^|\s)--read-only(?=\s|$)/iu, '').trim();
   }
   if (write && explicitRead) {
-    return { body, access: 'read-only', error: '--write 与 --read-only 不能同时使用' };
-  }
-  if (workspace && !write) {
     return {
       body,
       access: 'read-only',
-      error: '--workspace 只用于 /btw --write 的单任务授权',
+      implicitWrite: false,
+      error: '--write 与 --read-only 不能同时使用',
     };
   }
-  if (write && !workspace) {
+  if (workspace && explicitRead) {
     return {
       body,
-      access: 'workspace-write',
-      error: 'workspace-write 必须显式指定：/btw --write --workspace /canonical/project <task>',
+      access: 'read-only',
+      implicitWrite: false,
+      error: '--workspace 不能与 --read-only 同时使用',
     };
   }
-  if (write && !body) {
-    return {
-      body,
-      access: 'workspace-write',
-      error:
-        'workspace-write 任务正文必须与授权写在同一条命令中：' +
-        '/btw --write --workspace /canonical/project <task>',
-    };
-  }
+  const implicitWrite = !write && !explicitRead;
   return {
     body,
-    access: write ? 'workspace-write' : 'read-only',
+    access: explicitRead ? 'read-only' : 'workspace-write',
+    implicitWrite,
     ...(route ? { route } : {}),
     ...(workspace ? { workspace } : {}),
   };
@@ -906,6 +899,8 @@ export class StructuredAdapter implements AgentAdapter {
     const policy = access === 'workspace-write'
       ? [
           `You are an independent side worker with one-task workspace-write authorization for ${workspace}.`,
+          'You may run commands and make file changes within this workspace as needed for the task.',
+          'You may use lark-cli to send generated files back to the current Feishu conversation.',
           'Make only changes needed for this explicit task. Do not start persistent services or perform unrelated external side effects.',
         ]
       : [
@@ -2155,17 +2150,22 @@ export class StructuredAdapter implements AgentAdapter {
           const btw = parseBtwRequest(options.prompt);
           if (btw.error) throw new Error(btw.error);
           const subagents = await this.currentSubagentsConfig();
-          if (btw.access === 'workspace-write' && !subagents.allowWriteWorkers) {
-            throw new Error(
-              'workspace-write /btw 未在 profile 中启用；请先在 settings 高级参数中允许写子代理并配置 write route。',
-            );
-          }
           const sideWorkspace = btw.access === 'workspace-write'
             ? await authorizedSideWorkspace(options.cwd!, btw.workspace)
             : options.cwd!;
+          const workerEnv = {
+            ...(this.options.env ?? process.env),
+            ...buildLarkChannelEnv(this.options.larkChannel),
+            ...(options.artifactDelivery
+              ? {
+                  ARG_BRIDGE_ARTIFACT_SOCKET: options.artifactDelivery.socketPath,
+                  ARG_BRIDGE_ARTIFACT_TOKEN: options.artifactDelivery.token,
+                }
+              : {}),
+          };
           const resolved = await (this.options.subagentResolver ?? resolveSubagents)({
             subagents,
-            env: this.options.env ?? process.env,
+            env: workerEnv,
             cwd: sideWorkspace,
             access: btw.access,
             stateDir: join(this.options.profileDir, 'structured'),

@@ -41,7 +41,7 @@ import { RpcClient, type Wire } from './rpc';
 import { resolveAppServerSocketPath } from './socket-security';
 import { discoverCodexThreadWriterOwners } from './thread-owner';
 
-const MAX_HANDOFF_CHARS = 12_000;
+const MAX_HANDOFF_CHARS = 48_000;
 
 export interface NativeCodexEnvironment {
   env: NodeJS.ProcessEnv;
@@ -241,14 +241,16 @@ export async function createNativeBridgeSession(
   const providerSelection = input.followCurrentProvider
     ? resolveFollowCurrentProviderSelection(prepared)
     : undefined;
-  const adoptedMarker = adoptThread
-    ? await findAdoptedThreadMarker(
-        markerPath,
-        adoptThread,
-        namespace,
-        providerSelection,
-      )
+  const lineageHead = adoptThread
+    ? await findLatestAdoptedThreadMarker(markerPath, adoptThread, namespace)
     : undefined;
+  const adoptedMarker = lineageHead &&
+    (!providerSelection || adoptedThreadMarkerMatchesProvider(lineageHead, providerSelection))
+    ? lineageHead
+    : undefined;
+  const adoptionSourceThread = providerSelection && lineageHead && !adoptedMarker
+    ? lineageHead.threadId
+    : adoptThread;
   const existingThread = requestedThread ?? adoptedMarker?.threadId;
 
   if (requestedThread) {
@@ -261,8 +263,8 @@ export async function createNativeBridgeSession(
     }
   }
 
-  let sourceHost = providerSelection && adoptThread && !adoptedMarker
-    ? await findLoadedThreadHost(input.profileDir, adoptThread, env)
+  let sourceHost = providerSelection && adoptionSourceThread && !adoptedMarker
+    ? await findLoadedThreadHost(input.profileDir, adoptionSourceThread, env)
     : undefined;
   let host = existingThread
     ? await findLoadedThreadHost(input.profileDir, existingThread, env)
@@ -357,22 +359,40 @@ export async function createNativeBridgeSession(
       markerThreadId = existingThread;
       mode = adoptedMarker ? 'adopted' : 'attached';
       if (adoptedMarker) {
-        oldThreadId = adoptThread;
+        oldThreadId = adoptedMarker.previousThreadId ?? adoptThread;
         reusedAdoption = true;
       }
     }
 
     if (!markerThreadId && adoptThread) {
-      const old = await readIdleThread(sourceHost?.rpc ?? rpc, adoptThread);
-      sourceHost?.rpc.close();
-      sourceHost = undefined;
-      const history = extractAssistantHistory(old);
-      if (history.items.length === 0) {
+      const sourceThreadId = adoptionSourceThread ?? adoptThread;
+      if (sourceThreadId !== adoptThread && !sourceHost) {
         throw new Error(
-          `旧 thread ${adoptThread} 没有可安全注入的 user/assistant 文本历史；已拒绝创建空迁移线程`,
+          `最新 provider lineage head ${sourceThreadId} 的 owner App Server 当前不可用；` +
+            '为避免丢失最近上下文，已拒绝复用更早的 provider branch。请先恢复该 thread 的 owner 后重试。',
         );
       }
-      oldThreadId = adoptThread;
+      const old = await readIdleThread(sourceHost?.rpc ?? rpc, sourceThreadId);
+      sourceHost?.rpc.close();
+      sourceHost = undefined;
+      const sourceSnapshot = await readThreadHistorySnapshot(input.profileDir, sourceThreadId);
+      const extracted = extractAssistantHistory(old, {
+        excludeTurnIds: new Set(sourceSnapshot?.turnIds ?? []),
+      });
+      const history = boundHandoffEntries([
+        ...handoffEntriesFromItems(sourceSnapshot?.items ?? []),
+        ...handoffEntriesFromItems(extracted.items),
+      ]);
+      const historyTurnIds = [
+        ...(sourceSnapshot?.turnIds ?? []),
+        ...turnIdsFromThread(old),
+      ];
+      if (history.items.length === 0) {
+        throw new Error(
+          `旧 thread ${sourceThreadId} 没有可安全注入的 user/assistant 文本历史；已拒绝创建空迁移线程`,
+        );
+      }
+      oldThreadId = sourceThreadId;
       mode = 'adopted';
       const started = await startBridgeThread(rpc, {
         cwd: input.cwd,
@@ -380,15 +400,21 @@ export async function createNativeBridgeSession(
         sandbox: input.sandbox,
         approvalPolicy: input.approvalPolicy,
         namespace,
-        adoptedFrom: adoptThread,
+        adoptedFrom: sourceThreadId,
         ...(providerSelection ? { providerSelection } : {}),
       });
       markerThreadId = started.id;
       await rpc.request('thread/inject_items', {
         threadId: markerThreadId,
         items: history.items,
-      });
-      await materializeBridgeThread(rpc, markerThreadId, adoptThread);
+      }, 180_000);
+      await writeThreadHistorySnapshot(
+        input.profileDir,
+        markerThreadId,
+        history,
+        historyTurnIds,
+      );
+      await materializeBridgeThread(rpc, markerThreadId, sourceThreadId);
     } else if (!markerThreadId) {
       const started = await startBridgeThread(rpc, {
         cwd: input.cwd,
@@ -456,8 +482,9 @@ export async function createNativeBridgeSession(
         markerPath,
         markerThreadId,
         namespace,
-        oldThreadId,
+        adoptThread ?? oldThreadId,
         providerSelection,
+        oldThreadId,
       );
     }
     session = new CodexStructuredSession(markerThreadId, endpoint, rpc, controller);
@@ -487,28 +514,64 @@ export interface HandoffHistory {
   sourceChars: number;
 }
 
-/**
- * Convert persisted Codex thread items into ordinary Responses input items.
- * Tool calls, reasoning, encrypted agent messages and images are deliberately
- * omitted: the new thread receives bounded user/assistant text only.
- */
-export function extractAssistantHistory(threadValue: Wire): HandoffHistory {
-  const thread = threadValue.thread ?? threadValue;
-  const turns: Wire[] = Array.isArray(thread?.turns) ? thread.turns : [];
-  const entries: Array<{ role: 'user' | 'assistant'; text: string }> = [];
-  for (const turn of turns) {
-    for (const item of Array.isArray(turn?.items) ? turn.items : []) {
-      if (!item || typeof item !== 'object') continue;
-      if (item.type === 'userMessage') {
-        const text = textFromUserContent(item.content);
-        if (text) entries.push({ role: 'user', text });
-      } else if (item.type === 'agentMessage' && typeof item.text === 'string') {
-        const text = redactSecrets(item.text.trim());
-        if (text) entries.push({ role: 'assistant', text });
-      }
-    }
+interface ThreadHistorySnapshot {
+  version: 1;
+  threadId: string;
+  updatedAt: number;
+  turnIds: string[];
+  items: Array<Record<string, unknown>>;
+}
+
+type HandoffEntry = { role: 'user' | 'assistant'; text: string };
+
+function historySnapshotPath(profileDir: string, threadId: string): string {
+  return join(
+    profileDir,
+    'structured',
+    'broker-thread-history',
+    `${createHash('sha256').update(threadId).digest('hex')}.json`,
+  );
+}
+
+async function readThreadHistorySnapshot(
+  profileDir: string,
+  threadId: string,
+): Promise<ThreadHistorySnapshot | undefined> {
+  try {
+    const parsed = JSON.parse(
+      await readFile(historySnapshotPath(profileDir, threadId), 'utf8'),
+    ) as ThreadHistorySnapshot;
+    return parsed.version === 1 &&
+      parsed.threadId === threadId &&
+      Array.isArray(parsed.items) &&
+      Array.isArray(parsed.turnIds)
+      ? parsed
+      : undefined;
+  } catch {
+    return undefined;
   }
-  const selected: Array<{ role: 'user' | 'assistant'; text: string }> = [];
+}
+
+async function writeThreadHistorySnapshot(
+  profileDir: string,
+  threadId: string,
+  history: HandoffHistory,
+  turnIds: readonly string[],
+): Promise<void> {
+  const path = historySnapshotPath(profileDir, threadId);
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const snapshot: ThreadHistorySnapshot = {
+    version: 1,
+    threadId,
+    updatedAt: Date.now(),
+    turnIds: [...new Set(turnIds)],
+    items: history.items,
+  };
+  await writeFileAtomic(path, `${JSON.stringify(snapshot, null, 2)}\n`, { mode: 0o600 });
+}
+
+function boundHandoffEntries(entries: readonly HandoffEntry[]): HandoffHistory {
+  const selected: HandoffEntry[] = [];
   let chars = 0;
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const entry = entries[index]!;
@@ -530,6 +593,55 @@ export function extractAssistantHistory(threadValue: Wire): HandoffHistory {
       }],
     })),
   };
+}
+
+function handoffEntriesFromItems(items: readonly Record<string, unknown>[]): HandoffEntry[] {
+  const entries: HandoffEntry[] = [];
+  for (const item of items) {
+    if (item.type !== 'message' || (item.role !== 'user' && item.role !== 'assistant')) continue;
+    const content = Array.isArray(item.content) ? item.content : [];
+    const text = content.flatMap(entry => {
+      if (!entry || typeof entry !== 'object') return [];
+      const value = (entry as Record<string, unknown>).text;
+      return typeof value === 'string' ? [value] : [];
+    }).join('\n').trim();
+    if (text) entries.push({ role: item.role, text });
+  }
+  return entries;
+}
+
+/**
+ * Convert persisted Codex thread items into ordinary Responses input items.
+ * Tool calls, reasoning, encrypted agent messages and images are deliberately
+ * omitted: the new thread receives bounded user/assistant text only.
+ */
+export function extractAssistantHistory(
+  threadValue: Wire,
+  options: { excludeTurnIds?: ReadonlySet<string> } = {},
+): HandoffHistory {
+  const thread = threadValue.thread ?? threadValue;
+  const turns: Wire[] = Array.isArray(thread?.turns) ? thread.turns : [];
+  const entries: HandoffEntry[] = [];
+  for (const turn of turns) {
+    if (options.excludeTurnIds?.has(String(turn?.id ?? ''))) continue;
+    for (const item of Array.isArray(turn?.items) ? turn.items : []) {
+      if (!item || typeof item !== 'object') continue;
+      if (item.type === 'userMessage') {
+        const text = textFromUserContent(item.content);
+        if (text) entries.push({ role: 'user', text });
+      } else if (item.type === 'agentMessage' && typeof item.text === 'string') {
+        const text = redactSecrets(item.text.trim());
+        if (text) entries.push({ role: 'assistant', text });
+      }
+    }
+  }
+  return boundHandoffEntries(entries);
+}
+
+function turnIdsFromThread(threadValue: Wire): string[] {
+  const thread = threadValue.thread ?? threadValue;
+  const turns: Wire[] = Array.isArray(thread?.turns) ? thread.turns : [];
+  return turns.flatMap(turn => typeof turn?.id === 'string' && turn.id ? [turn.id] : []);
 }
 
 async function startBridgeThread(
@@ -626,11 +738,11 @@ async function materializeBridgeThread(
 }
 
 async function readIdleThread(rpc: RpcClient, threadId: string): Promise<Wire> {
-  const result = await rpc.request('thread/read', {
+  const statusResult = await rpc.request('thread/read', {
     threadId,
-    includeTurns: true,
-  });
-  const thread = result.thread ?? result;
+    includeTurns: false,
+  }, 180_000);
+  const thread = statusResult.thread ?? statusResult;
   if (!thread || typeof thread !== 'object') {
     throw new Error(`无法读取旧 thread ${threadId}`);
   }
@@ -640,7 +752,40 @@ async function readIdleThread(rpc: RpcClient, threadId: string): Promise<Wire> {
   if (active) {
     throw new Error(`旧 thread ${threadId} 仍在运行；请等当前 turn 完成后再执行 --adopt`);
   }
-  return result;
+  if (turns.length > 0) return statusResult;
+
+  try {
+    return await rpc.request('thread/read', {
+      threadId,
+      includeTurns: true,
+    }, 180_000);
+  } catch (error) {
+    log.warn('agent', 'native-adopt-full-history-unavailable', {
+      threadId,
+      reason: error instanceof Error ? error.message : String(error),
+      fallback: 'recent-tail',
+    });
+  }
+
+  // Full `thread/read` can exceed the RPC budget for very long histories.
+  // Recent turns are sufficient because the handoff itself keeps only a
+  // bounded text tail.
+  const recent: Wire = await rpc.request('thread/turns/list', {
+    threadId,
+    limit: 200,
+    sortDirection: 'desc',
+  }, 180_000).catch(() => ({}));
+  const newest = Array.isArray(recent.data) ? recent.data : [];
+  if (newest.length === 0) {
+    throw new Error(`无法读取旧 thread ${threadId} 的最近历史；完整读取超时且 recent-tail 为空`);
+  }
+  return {
+    ...statusResult,
+    thread: {
+      ...thread,
+      turns: [...newest].reverse(),
+    },
+  };
 }
 
 export async function findLoadedThreadHost(
@@ -744,6 +889,7 @@ interface ThreadMarker {
   namespace: string;
   createdAt: number;
   adoptedFrom?: string;
+  previousThreadId?: string;
   followCurrentProvider?: boolean;
   ccSwitchProviderId?: string;
   modelProvider?: string;
@@ -754,6 +900,7 @@ interface ThreadMarker {
 export interface AdoptedThreadMarker {
   threadId: string;
   createdAt: number;
+  previousThreadId?: string;
   followCurrentProvider?: boolean;
   ccSwitchProviderId?: string;
   modelProvider?: string;
@@ -761,23 +908,18 @@ export interface AdoptedThreadMarker {
   runtimeFingerprint?: string;
 }
 
-/**
- * `--adopt` is idempotent: a second invocation must continue the existing
- * Bridge-managed migration instead of manufacturing another thread.
- */
-export async function findAdoptedThreadMarker(
+async function readAdoptionMarkers(
   path: string,
   adoptedFrom: string,
   namespace: string,
-  providerSelection?: NativeBridgeProviderSelection,
-): Promise<AdoptedThreadMarker | undefined> {
+): Promise<AdoptedThreadMarker[]> {
   try {
     const parsed = JSON.parse(await readFile(path, 'utf8')) as {
       version?: number;
       threads?: Record<string, ThreadMarker>;
     };
     if (parsed.version !== 1 || !parsed.threads || typeof parsed.threads !== 'object') {
-      return undefined;
+      return [];
     }
     return Object.entries(parsed.threads)
       .flatMap(([threadId, marker]): AdoptedThreadMarker[] => {
@@ -785,18 +927,12 @@ export async function findAdoptedThreadMarker(
           !threadId ||
           marker?.version !== BROKER_TOOL_VERSION ||
           marker.namespace !== namespace ||
-          marker.adoptedFrom !== adoptedFrom ||
-          (providerSelection && (
-            marker.followCurrentProvider !== true ||
-            marker.ccSwitchProviderId !== providerSelection.ccSwitchProviderId ||
-            marker.modelProvider !== providerSelection.modelProvider ||
-            marker.model !== providerSelection.model ||
-            marker.runtimeFingerprint !== providerSelection.runtimeFingerprint
-          ))
+          marker.adoptedFrom !== adoptedFrom
         ) return [];
         return [{
           threadId,
           createdAt: Number.isFinite(marker.createdAt) ? marker.createdAt : 0,
+          ...(marker.previousThreadId ? { previousThreadId: marker.previousThreadId } : {}),
           ...(marker.followCurrentProvider ? { followCurrentProvider: true } : {}),
           ...(marker.ccSwitchProviderId ? { ccSwitchProviderId: marker.ccSwitchProviderId } : {}),
           ...(marker.modelProvider ? { modelProvider: marker.modelProvider } : {}),
@@ -806,10 +942,52 @@ export async function findAdoptedThreadMarker(
       })
       .sort((left, right) =>
         right.createdAt - left.createdAt || right.threadId.localeCompare(left.threadId)
-      )[0];
+      );
   } catch {
+    return [];
+  }
+}
+
+export function adoptedThreadMarkerMatchesProvider(
+  marker: Pick<
+    AdoptedThreadMarker,
+    'followCurrentProvider' | 'ccSwitchProviderId' | 'modelProvider' | 'model' | 'runtimeFingerprint'
+  >,
+  providerSelection: NativeBridgeProviderSelection,
+): boolean {
+  return marker.followCurrentProvider === true &&
+    marker.ccSwitchProviderId === providerSelection.ccSwitchProviderId &&
+    marker.modelProvider === providerSelection.modelProvider &&
+    marker.model === providerSelection.model &&
+    marker.runtimeFingerprint === providerSelection.runtimeFingerprint;
+}
+
+/** Latest thread in one adopted lineage, regardless of the provider that created it. */
+export async function findLatestAdoptedThreadMarker(
+  path: string,
+  adoptedFrom: string,
+  namespace: string,
+): Promise<AdoptedThreadMarker | undefined> {
+  return (await readAdoptionMarkers(path, adoptedFrom, namespace))[0];
+}
+
+/**
+ * Reuse is safe only when the newest branch already uses the selected
+ * provider. Returning an older branch here would discard context appended by a
+ * newer provider generation.
+ */
+export async function findAdoptedThreadMarker(
+  path: string,
+  adoptedFrom: string,
+  namespace: string,
+  providerSelection?: NativeBridgeProviderSelection,
+): Promise<AdoptedThreadMarker | undefined> {
+  const latest = await findLatestAdoptedThreadMarker(path, adoptedFrom, namespace);
+  if (!latest) return undefined;
+  if (providerSelection && !adoptedThreadMarkerMatchesProvider(latest, providerSelection)) {
     return undefined;
   }
+  return latest;
 }
 
 async function readThreadMarker(
@@ -836,6 +1014,7 @@ async function writeThreadMarker(
   namespace: string,
   adoptedFrom?: string,
   providerSelection?: NativeBridgeProviderSelection,
+  previousThreadId?: string,
 ): Promise<void> {
   let parsed: {
     version?: number;
@@ -862,6 +1041,7 @@ async function writeThreadMarker(
     namespace,
     createdAt: Date.now(),
     ...(adoptedFrom ? { adoptedFrom } : {}),
+    ...(previousThreadId && previousThreadId !== adoptedFrom ? { previousThreadId } : {}),
     ...(providerSelection ? {
       followCurrentProvider: true,
       ...(providerSelection.ccSwitchProviderId

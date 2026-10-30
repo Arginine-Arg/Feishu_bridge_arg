@@ -30,7 +30,8 @@ arg-bridge native --adopt <old-thread-id> --follow-current-provider
 
 1. reads the old thread at an idle boundary;
 2. starts a new Codex thread with `arg_bridge.*` dynamic tools;
-3. injects a bounded text-only handoff from the old user/assistant messages;
+3. injects a bounded 48k-character text-only handoff from the old
+   user/assistant messages;
 4. verifies Broker route preflight;
 5. writes the Bridge thread marker and attaches the TUI.
 
@@ -40,10 +41,11 @@ The command prints both IDs:
 Bridge-managed migration: <old-thread-id> -> <new-thread-id>
 ```
 
-Repeating the same `--adopt` is idempotent after 1.9.3: the newest existing
-marker for that source thread is resumed instead of allocating another target
-thread. The marker is also reloaded by a running Bridge daemon on a cache miss,
-so `/tmux bind` can use the adopted thread without restarting the daemon.
+Repeating the same provider adoption is idempotent: when the newest lineage
+head already uses the requested provider generation it is resumed instead of
+allocating another target thread. The marker is also reloaded by a running
+Bridge daemon on a cache miss, so `/tmux bind` can use the adopted thread
+without restarting the daemon.
 
 `--follow-current-provider` is an explicit provider-generation migration:
 
@@ -54,9 +56,19 @@ so `/tmux bind` can use the adopted thread without restarting the daemon.
 - `thread/start` receives explicit `modelProvider` and `model` values, and the
   response is verified before the TUI starts;
 - missing provider id, `model_provider`, model or credential fails closed;
-- the resulting marker records the provider generation, so repeating the same
-  migration for that generation is idempotent, while switching providers can
-  create a distinct destination without overwriting the previous migration.
+- the resulting marker records the provider generation and immediate
+  `previousThreadId`, so repeating the same migration for the latest generation
+  is idempotent;
+- switching A -> B -> A creates a new A generation from B's latest head instead
+  of rewinding to the earlier A thread;
+- each Bridge thread has a mode-0600, bounded text-history sidecar. The next
+  provider generation merges that snapshot with newer turns, preserving context
+  produced by the previous provider.
+
+Very long histories no longer require one unbounded `thread/read` response.
+Status is read separately, then a 180-second full-history attempt is used when
+possible; if it times out, Bridge falls back to the recent turn tail before
+applying the bounded handoff.
 
 Plain `--adopt` continues to preserve the source thread's provider/model.
 

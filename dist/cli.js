@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.13.3",
+  version: "1.14.0",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -718,7 +718,7 @@ var DEFAULT_SUBAGENT_CONFIG = {
   sideTimeoutMs: 9e4,
   sideReasoningEffort: "low",
   webSearch: "auto",
-  allowWriteWorkers: false,
+  allowWriteWorkers: true,
   includeProgressSnapshot: true,
   reuse: "scope-cwd",
   allowForkFallback: true
@@ -765,7 +765,7 @@ function normalizeSubagents(input) {
     sideTimeoutMs: boundedInteger(raw.sideTimeoutMs, 15e3, 30 * 6e4, 9e4),
     sideReasoningEffort: normalizeSideReasoningEffort(raw.sideReasoningEffort),
     webSearch: raw.webSearch === "native" || raw.webSearch === "disabled" ? raw.webSearch : "auto",
-    allowWriteWorkers: raw.allowWriteWorkers === true,
+    allowWriteWorkers: raw.allowWriteWorkers !== false,
     includeProgressSnapshot: raw.includeProgressSnapshot !== false,
     reuse: "scope-cwd",
     allowForkFallback: raw.allowForkFallback !== false,
@@ -14803,7 +14803,7 @@ var MixAgentsBrokerBackend = class {
       if (!authorization || authorization.workspace !== input.cwd || authorization.task !== input.task) {
         throw new SubagentUnavailableError(
           "write-not-authorized",
-          "workspace-write \u5B50\u4EE3\u7406\u5FC5\u987B\u7531\u7528\u6237\u9488\u5BF9\u8BE5\u4EFB\u52A1\u548C\u8BE5 workspace \u660E\u786E\u6388\u6743\uFF1B/btw \u9ED8\u8BA4\u53EA\u8BFB\u3002"
+          "workspace-write \u5B50\u4EE3\u7406\u5FC5\u987B\u7531\u7528\u6237\u9488\u5BF9\u8BE5\u4EFB\u52A1\u548C\u8BE5 workspace \u660E\u786E\u6388\u6743\u3002"
         );
       }
     }
@@ -15330,12 +15330,6 @@ async function resolveSubagents(input) {
     ccSwitch,
     ...routeState.config ? { routeMap: routeState.config } : {}
   };
-  if (input.access === "workspace-write" && !config.allowWriteWorkers) {
-    throw new SubagentUnavailableError(
-      "write-not-authorized",
-      "workspace-write \u5B50\u4EE3\u7406\u672A\u5728 profile \u4E2D\u542F\u7528\uFF1B/btw \u9ED8\u8BA4\u53EA\u8BFB\u3002"
-    );
-  }
   if (!config.enabled || config.mode === "off") {
     return { ...base, kind: "off", routes: [] };
   }
@@ -15480,7 +15474,7 @@ function selectSubagentRoute(input) {
     return route2 && (access3 === "read-only" || route2.maxAccess === "workspace-write") ? { route: route2 } : { error: `\u663E\u5F0F\u6307\u5B9A\u7684 MixAgents route \u4E0D\u5B58\u5728\uFF1A${input.requestedRoute}` };
   }
   if (input.config.routeMode === "manual") {
-    const configured = access3 === "workspace-write" ? input.config.writeRoute : input.config.readRoute;
+    const configured = access3 === "workspace-write" ? input.config.writeRoute ?? input.config.readRoute : input.config.readRoute;
     if (!configured) {
       return {
         error: access3 === "workspace-write" ? "routeMode=manual \u4F46\u672A\u914D\u7F6E subagents.writeRoute" : "routeMode=manual \u4F46\u672A\u914D\u7F6E subagents.readRoute"
@@ -18224,7 +18218,7 @@ function processOwnedByCurrentUser(pid) {
 }
 
 // src/agent/structured/native-bridge.ts
-var MAX_HANDOFF_CHARS = 12e3;
+var MAX_HANDOFF_CHARS = 48e3;
 async function prepareNativeCodexEnvironment(input) {
   const sourceEnv = { ...input.env ?? process.env };
   const activeHome = input.codexHome ?? defaultCodexHome(sourceEnv);
@@ -18324,12 +18318,9 @@ async function createNativeBridgeSession(input) {
     throw new Error("--follow-current-provider migration \u4E0D\u80FD\u540C\u65F6\u6307\u5B9A positional thread");
   }
   const providerSelection = input.followCurrentProvider ? resolveFollowCurrentProviderSelection(prepared) : void 0;
-  const adoptedMarker = adoptThread ? await findAdoptedThreadMarker(
-    markerPath,
-    adoptThread,
-    namespace,
-    providerSelection
-  ) : void 0;
+  const lineageHead = adoptThread ? await findLatestAdoptedThreadMarker(markerPath, adoptThread, namespace) : void 0;
+  const adoptedMarker = lineageHead && (!providerSelection || adoptedThreadMarkerMatchesProvider(lineageHead, providerSelection)) ? lineageHead : void 0;
+  const adoptionSourceThread = providerSelection && lineageHead && !adoptedMarker ? lineageHead.threadId : adoptThread;
   const existingThread = requestedThread ?? adoptedMarker?.threadId;
   if (requestedThread) {
     const marker = await readThreadMarker(markerPath, requestedThread);
@@ -18339,7 +18330,7 @@ async function createNativeBridgeSession(input) {
       );
     }
   }
-  let sourceHost = providerSelection && adoptThread && !adoptedMarker ? await findLoadedThreadHost(input.profileDir, adoptThread, env) : void 0;
+  let sourceHost = providerSelection && adoptionSourceThread && !adoptedMarker ? await findLoadedThreadHost(input.profileDir, adoptionSourceThread, env) : void 0;
   let host = existingThread ? await findLoadedThreadHost(input.profileDir, existingThread, env) : void 0;
   if (!host && adoptThread && !providerSelection) {
     host = await findLoadedThreadHost(input.profileDir, adoptThread, env);
@@ -18416,21 +18407,38 @@ async function createNativeBridgeSession(input) {
       markerThreadId = existingThread;
       mode = adoptedMarker ? "adopted" : "attached";
       if (adoptedMarker) {
-        oldThreadId = adoptThread;
+        oldThreadId = adoptedMarker.previousThreadId ?? adoptThread;
         reusedAdoption = true;
       }
     }
     if (!markerThreadId && adoptThread) {
-      const old = await readIdleThread(sourceHost?.rpc ?? rpc, adoptThread);
-      sourceHost?.rpc.close();
-      sourceHost = void 0;
-      const history = extractAssistantHistory(old);
-      if (history.items.length === 0) {
+      const sourceThreadId = adoptionSourceThread ?? adoptThread;
+      if (sourceThreadId !== adoptThread && !sourceHost) {
         throw new Error(
-          `\u65E7 thread ${adoptThread} \u6CA1\u6709\u53EF\u5B89\u5168\u6CE8\u5165\u7684 user/assistant \u6587\u672C\u5386\u53F2\uFF1B\u5DF2\u62D2\u7EDD\u521B\u5EFA\u7A7A\u8FC1\u79FB\u7EBF\u7A0B`
+          `\u6700\u65B0 provider lineage head ${sourceThreadId} \u7684 owner App Server \u5F53\u524D\u4E0D\u53EF\u7528\uFF1B\u4E3A\u907F\u514D\u4E22\u5931\u6700\u8FD1\u4E0A\u4E0B\u6587\uFF0C\u5DF2\u62D2\u7EDD\u590D\u7528\u66F4\u65E9\u7684 provider branch\u3002\u8BF7\u5148\u6062\u590D\u8BE5 thread \u7684 owner \u540E\u91CD\u8BD5\u3002`
         );
       }
-      oldThreadId = adoptThread;
+      const old = await readIdleThread(sourceHost?.rpc ?? rpc, sourceThreadId);
+      sourceHost?.rpc.close();
+      sourceHost = void 0;
+      const sourceSnapshot = await readThreadHistorySnapshot(input.profileDir, sourceThreadId);
+      const extracted = extractAssistantHistory(old, {
+        excludeTurnIds: new Set(sourceSnapshot?.turnIds ?? [])
+      });
+      const history = boundHandoffEntries([
+        ...handoffEntriesFromItems(sourceSnapshot?.items ?? []),
+        ...handoffEntriesFromItems(extracted.items)
+      ]);
+      const historyTurnIds = [
+        ...sourceSnapshot?.turnIds ?? [],
+        ...turnIdsFromThread(old)
+      ];
+      if (history.items.length === 0) {
+        throw new Error(
+          `\u65E7 thread ${sourceThreadId} \u6CA1\u6709\u53EF\u5B89\u5168\u6CE8\u5165\u7684 user/assistant \u6587\u672C\u5386\u53F2\uFF1B\u5DF2\u62D2\u7EDD\u521B\u5EFA\u7A7A\u8FC1\u79FB\u7EBF\u7A0B`
+        );
+      }
+      oldThreadId = sourceThreadId;
       mode = "adopted";
       const started = await startBridgeThread(rpc, {
         cwd: input.cwd,
@@ -18438,15 +18446,21 @@ async function createNativeBridgeSession(input) {
         sandbox: input.sandbox,
         approvalPolicy: input.approvalPolicy,
         namespace,
-        adoptedFrom: adoptThread,
+        adoptedFrom: sourceThreadId,
         ...providerSelection ? { providerSelection } : {}
       });
       markerThreadId = started.id;
       await rpc.request("thread/inject_items", {
         threadId: markerThreadId,
         items: history.items
-      });
-      await materializeBridgeThread(rpc, markerThreadId, adoptThread);
+      }, 18e4);
+      await writeThreadHistorySnapshot(
+        input.profileDir,
+        markerThreadId,
+        history,
+        historyTurnIds
+      );
+      await materializeBridgeThread(rpc, markerThreadId, sourceThreadId);
     } else if (!markerThreadId) {
       const started = await startBridgeThread(rpc, {
         cwd: input.cwd,
@@ -18507,8 +18521,9 @@ async function createNativeBridgeSession(input) {
         markerPath,
         markerThreadId,
         namespace,
-        oldThreadId,
-        providerSelection
+        adoptThread ?? oldThreadId,
+        providerSelection,
+        oldThreadId
       );
     }
     session = new CodexStructuredSession(markerThreadId, endpoint, rpc, controller);
@@ -18532,22 +18547,38 @@ async function createNativeBridgeSession(input) {
     throw error;
   }
 }
-function extractAssistantHistory(threadValue) {
-  const thread = threadValue.thread ?? threadValue;
-  const turns = Array.isArray(thread?.turns) ? thread.turns : [];
-  const entries = [];
-  for (const turn of turns) {
-    for (const item of Array.isArray(turn?.items) ? turn.items : []) {
-      if (!item || typeof item !== "object") continue;
-      if (item.type === "userMessage") {
-        const text2 = textFromUserContent(item.content);
-        if (text2) entries.push({ role: "user", text: text2 });
-      } else if (item.type === "agentMessage" && typeof item.text === "string") {
-        const text2 = redactSecrets(item.text.trim());
-        if (text2) entries.push({ role: "assistant", text: text2 });
-      }
-    }
+function historySnapshotPath(profileDir, threadId) {
+  return join32(
+    profileDir,
+    "structured",
+    "broker-thread-history",
+    `${createHash8("sha256").update(threadId).digest("hex")}.json`
+  );
+}
+async function readThreadHistorySnapshot(profileDir, threadId) {
+  try {
+    const parsed = JSON.parse(
+      await readFile19(historySnapshotPath(profileDir, threadId), "utf8")
+    );
+    return parsed.version === 1 && parsed.threadId === threadId && Array.isArray(parsed.items) && Array.isArray(parsed.turnIds) ? parsed : void 0;
+  } catch {
+    return void 0;
   }
+}
+async function writeThreadHistorySnapshot(profileDir, threadId, history, turnIds) {
+  const path = historySnapshotPath(profileDir, threadId);
+  await mkdir19(dirname19(path), { recursive: true, mode: 448 });
+  const snapshot = {
+    version: 1,
+    threadId,
+    updatedAt: Date.now(),
+    turnIds: [...new Set(turnIds)],
+    items: history.items
+  };
+  await writeFileAtomic(path, `${JSON.stringify(snapshot, null, 2)}
+`, { mode: 384 });
+}
+function boundHandoffEntries(entries) {
   const selected = [];
   let chars = 0;
   for (let index = entries.length - 1; index >= 0; index -= 1) {
@@ -18568,6 +18599,44 @@ function extractAssistantHistory(threadValue) {
       }]
     }))
   };
+}
+function handoffEntriesFromItems(items) {
+  const entries = [];
+  for (const item of items) {
+    if (item.type !== "message" || item.role !== "user" && item.role !== "assistant") continue;
+    const content = Array.isArray(item.content) ? item.content : [];
+    const text2 = content.flatMap((entry) => {
+      if (!entry || typeof entry !== "object") return [];
+      const value = entry.text;
+      return typeof value === "string" ? [value] : [];
+    }).join("\n").trim();
+    if (text2) entries.push({ role: item.role, text: text2 });
+  }
+  return entries;
+}
+function extractAssistantHistory(threadValue, options = {}) {
+  const thread = threadValue.thread ?? threadValue;
+  const turns = Array.isArray(thread?.turns) ? thread.turns : [];
+  const entries = [];
+  for (const turn of turns) {
+    if (options.excludeTurnIds?.has(String(turn?.id ?? ""))) continue;
+    for (const item of Array.isArray(turn?.items) ? turn.items : []) {
+      if (!item || typeof item !== "object") continue;
+      if (item.type === "userMessage") {
+        const text2 = textFromUserContent(item.content);
+        if (text2) entries.push({ role: "user", text: text2 });
+      } else if (item.type === "agentMessage" && typeof item.text === "string") {
+        const text2 = redactSecrets(item.text.trim());
+        if (text2) entries.push({ role: "assistant", text: text2 });
+      }
+    }
+  }
+  return boundHandoffEntries(entries);
+}
+function turnIdsFromThread(threadValue) {
+  const thread = threadValue.thread ?? threadValue;
+  const turns = Array.isArray(thread?.turns) ? thread.turns : [];
+  return turns.flatMap((turn) => typeof turn?.id === "string" && turn.id ? [turn.id] : []);
 }
 async function startBridgeThread(rpc, input) {
   const configRead = await rpc.request("config/read", { cwd: input.cwd }).catch(() => ({}));
@@ -18631,11 +18700,11 @@ async function materializeBridgeThread(rpc, threadId, adoptedFrom) {
   });
 }
 async function readIdleThread(rpc, threadId) {
-  const result = await rpc.request("thread/read", {
+  const statusResult = await rpc.request("thread/read", {
     threadId,
-    includeTurns: true
-  });
-  const thread = result.thread ?? result;
+    includeTurns: false
+  }, 18e4);
+  const thread = statusResult.thread ?? statusResult;
   if (!thread || typeof thread !== "object") {
     throw new Error(`\u65E0\u6CD5\u8BFB\u53D6\u65E7 thread ${threadId}`);
   }
@@ -18644,7 +18713,35 @@ async function readIdleThread(rpc, threadId) {
   if (active2) {
     throw new Error(`\u65E7 thread ${threadId} \u4ECD\u5728\u8FD0\u884C\uFF1B\u8BF7\u7B49\u5F53\u524D turn \u5B8C\u6210\u540E\u518D\u6267\u884C --adopt`);
   }
-  return result;
+  if (turns.length > 0) return statusResult;
+  try {
+    return await rpc.request("thread/read", {
+      threadId,
+      includeTurns: true
+    }, 18e4);
+  } catch (error) {
+    log.warn("agent", "native-adopt-full-history-unavailable", {
+      threadId,
+      reason: error instanceof Error ? error.message : String(error),
+      fallback: "recent-tail"
+    });
+  }
+  const recent = await rpc.request("thread/turns/list", {
+    threadId,
+    limit: 200,
+    sortDirection: "desc"
+  }, 18e4).catch(() => ({}));
+  const newest = Array.isArray(recent.data) ? recent.data : [];
+  if (newest.length === 0) {
+    throw new Error(`\u65E0\u6CD5\u8BFB\u53D6\u65E7 thread ${threadId} \u7684\u6700\u8FD1\u5386\u53F2\uFF1B\u5B8C\u6574\u8BFB\u53D6\u8D85\u65F6\u4E14 recent-tail \u4E3A\u7A7A`);
+  }
+  return {
+    ...statusResult,
+    thread: {
+      ...thread,
+      turns: [...newest].reverse()
+    }
+  };
 }
 async function findLoadedThreadHost(profileDir, threadId, env) {
   if (!threadId) return void 0;
@@ -18719,17 +18816,18 @@ async function probeLoadedEndpoints(socketPaths, threadId, env) {
   }
   return loaded;
 }
-async function findAdoptedThreadMarker(path, adoptedFrom, namespace, providerSelection) {
+async function readAdoptionMarkers(path, adoptedFrom, namespace) {
   try {
     const parsed = JSON.parse(await readFile19(path, "utf8"));
     if (parsed.version !== 1 || !parsed.threads || typeof parsed.threads !== "object") {
-      return void 0;
+      return [];
     }
     return Object.entries(parsed.threads).flatMap(([threadId, marker]) => {
-      if (!threadId || marker?.version !== BROKER_TOOL_VERSION || marker.namespace !== namespace || marker.adoptedFrom !== adoptedFrom || providerSelection && (marker.followCurrentProvider !== true || marker.ccSwitchProviderId !== providerSelection.ccSwitchProviderId || marker.modelProvider !== providerSelection.modelProvider || marker.model !== providerSelection.model || marker.runtimeFingerprint !== providerSelection.runtimeFingerprint)) return [];
+      if (!threadId || marker?.version !== BROKER_TOOL_VERSION || marker.namespace !== namespace || marker.adoptedFrom !== adoptedFrom) return [];
       return [{
         threadId,
         createdAt: Number.isFinite(marker.createdAt) ? marker.createdAt : 0,
+        ...marker.previousThreadId ? { previousThreadId: marker.previousThreadId } : {},
         ...marker.followCurrentProvider ? { followCurrentProvider: true } : {},
         ...marker.ccSwitchProviderId ? { ccSwitchProviderId: marker.ccSwitchProviderId } : {},
         ...marker.modelProvider ? { modelProvider: marker.modelProvider } : {},
@@ -18738,10 +18836,16 @@ async function findAdoptedThreadMarker(path, adoptedFrom, namespace, providerSel
       }];
     }).sort(
       (left, right) => right.createdAt - left.createdAt || right.threadId.localeCompare(left.threadId)
-    )[0];
+    );
   } catch {
-    return void 0;
+    return [];
   }
+}
+function adoptedThreadMarkerMatchesProvider(marker, providerSelection) {
+  return marker.followCurrentProvider === true && marker.ccSwitchProviderId === providerSelection.ccSwitchProviderId && marker.modelProvider === providerSelection.modelProvider && marker.model === providerSelection.model && marker.runtimeFingerprint === providerSelection.runtimeFingerprint;
+}
+async function findLatestAdoptedThreadMarker(path, adoptedFrom, namespace) {
+  return (await readAdoptionMarkers(path, adoptedFrom, namespace))[0];
 }
 async function readThreadMarker(path, threadId) {
   try {
@@ -18752,7 +18856,7 @@ async function readThreadMarker(path, threadId) {
     return void 0;
   }
 }
-async function writeThreadMarker(path, threadId, namespace, adoptedFrom, providerSelection) {
+async function writeThreadMarker(path, threadId, namespace, adoptedFrom, providerSelection, previousThreadId) {
   let parsed = { version: 1, threads: {} };
   try {
     const current = JSON.parse(await readFile19(path, "utf8"));
@@ -18769,6 +18873,7 @@ async function writeThreadMarker(path, threadId, namespace, adoptedFrom, provide
     namespace,
     createdAt: Date.now(),
     ...adoptedFrom ? { adoptedFrom } : {},
+    ...previousThreadId && previousThreadId !== adoptedFrom ? { previousThreadId } : {},
     ...providerSelection ? {
       followCurrentProvider: true,
       ...providerSelection.ccSwitchProviderId ? { ccSwitchProviderId: providerSelection.ccSwitchProviderId } : {},
@@ -19124,32 +19229,26 @@ function parseBtwRequest(prompt) {
     body = body.replace(/(?:^|\s)--read-only(?=\s|$)/iu, "").trim();
   }
   if (write && explicitRead) {
-    return { body, access: "read-only", error: "--write \u4E0E --read-only \u4E0D\u80FD\u540C\u65F6\u4F7F\u7528" };
-  }
-  if (workspace && !write) {
     return {
       body,
       access: "read-only",
-      error: "--workspace \u53EA\u7528\u4E8E /btw --write \u7684\u5355\u4EFB\u52A1\u6388\u6743"
+      implicitWrite: false,
+      error: "--write \u4E0E --read-only \u4E0D\u80FD\u540C\u65F6\u4F7F\u7528"
     };
   }
-  if (write && !workspace) {
+  if (workspace && explicitRead) {
     return {
       body,
-      access: "workspace-write",
-      error: "workspace-write \u5FC5\u987B\u663E\u5F0F\u6307\u5B9A\uFF1A/btw --write --workspace /canonical/project <task>"
+      access: "read-only",
+      implicitWrite: false,
+      error: "--workspace \u4E0D\u80FD\u4E0E --read-only \u540C\u65F6\u4F7F\u7528"
     };
   }
-  if (write && !body) {
-    return {
-      body,
-      access: "workspace-write",
-      error: "workspace-write \u4EFB\u52A1\u6B63\u6587\u5FC5\u987B\u4E0E\u6388\u6743\u5199\u5728\u540C\u4E00\u6761\u547D\u4EE4\u4E2D\uFF1A/btw --write --workspace /canonical/project <task>"
-    };
-  }
+  const implicitWrite = !write && !explicitRead;
   return {
     body,
-    access: write ? "workspace-write" : "read-only",
+    access: explicitRead ? "read-only" : "workspace-write",
+    implicitWrite,
     ...route ? { route } : {},
     ...workspace ? { workspace } : {}
   };
@@ -19724,6 +19823,8 @@ var StructuredAdapter = class {
   buildMixagentsTask(current, body, config, access3, workspace) {
     const policy = access3 === "workspace-write" ? [
       `You are an independent side worker with one-task workspace-write authorization for ${workspace}.`,
+      "You may run commands and make file changes within this workspace as needed for the task.",
+      "You may use lark-cli to send generated files back to the current Feishu conversation.",
       "Make only changes needed for this explicit task. Do not start persistent services or perform unrelated external side effects."
     ] : [
       "You are an independent read-only side reviewer.",
@@ -20856,15 +20957,18 @@ ${truncateSnapshot(redactDiagnosticText(redactSecrets(manifest)), 8e3)}
           const btw = parseBtwRequest(options.prompt);
           if (btw.error) throw new Error(btw.error);
           const subagents = await this.currentSubagentsConfig();
-          if (btw.access === "workspace-write" && !subagents.allowWriteWorkers) {
-            throw new Error(
-              "workspace-write /btw \u672A\u5728 profile \u4E2D\u542F\u7528\uFF1B\u8BF7\u5148\u5728 settings \u9AD8\u7EA7\u53C2\u6570\u4E2D\u5141\u8BB8\u5199\u5B50\u4EE3\u7406\u5E76\u914D\u7F6E write route\u3002"
-            );
-          }
           const sideWorkspace = btw.access === "workspace-write" ? await authorizedSideWorkspace(options.cwd, btw.workspace) : options.cwd;
+          const workerEnv = {
+            ...this.options.env ?? process.env,
+            ...buildLarkChannelEnv(this.options.larkChannel),
+            ...options.artifactDelivery ? {
+              ARG_BRIDGE_ARTIFACT_SOCKET: options.artifactDelivery.socketPath,
+              ARG_BRIDGE_ARTIFACT_TOKEN: options.artifactDelivery.token
+            } : {}
+          };
           const resolved = await (this.options.subagentResolver ?? resolveSubagents)({
             subagents,
-            env: this.options.env ?? process.env,
+            env: workerEnv,
             cwd: sideWorkspace,
             access: btw.access,
             stateDir: join34(this.options.profileDir, "structured"),
@@ -22997,8 +23101,9 @@ function helpCard(agentName = "Agent") {
       [
         "**\u{1FA84} Side conversation**",
         "",
-        "- `/btw <\u5185\u5BB9>` \u2014 \u5F00\u542F\u6216\u7EE7\u7EED\u53EA\u8BFB side conversation\uFF1B`/codex /btw <\u5185\u5BB9>` \u7B49\u4EF7",
-        "- `/btw --write --workspace <canonical \u8DEF\u5F84> <\u4EFB\u52A1>` \u2014 \u663E\u5F0F\u6388\u6743\u4E00\u6B21 workspace-write\uFF08\u9700\u5728 settings \u9AD8\u7EA7\u53C2\u6570\u542F\u7528\uFF09",
+        "- `/btw <\u5185\u5BB9>` \u2014 \u5F00\u542F\u6216\u7EE7\u7EED\u5F53\u524D workspace \u7684\u8BFB\u5199 side conversation\uFF0C\u53EF\u8FD0\u884C\u547D\u4EE4\u548C\u53D1\u9001\u6587\u4EF6\uFF1B`/codex /btw <\u5185\u5BB9>` \u7B49\u4EF7",
+        "- `/btw --read-only <\u5185\u5BB9>` \u2014 \u663E\u5F0F\u5F00\u542F\u53EA\u8BFB reviewer",
+        "- `/btw --workspace <canonical \u8DEF\u5F84> <\u4EFB\u52A1>` \u2014 \u5728\u6307\u5B9A\u5B50\u76EE\u5F55\u6267\u884C\u5199\u4EFB\u52A1",
         "- `/btw result` \u2014 \u6536\u53D6\u540E\u53F0 side \u7684\u8FDF\u5230\u7ED3\u679C",
         "- `/btw out` \u2014 \u9000\u51FA side\uFF1B\u8FD9\u662F `/btw` \u7684\u4E2D\u65AD\u548C\u4E22\u5F03\u5165\u53E3"
       ].join("\n")
@@ -36341,7 +36446,7 @@ async function collectSubagentDiagnostics(input) {
         model: route.model,
         access: "workspace-write",
         available: route.available,
-        notice: "\u53EF\u7528\u4E8E /btw --write\uFF1B\u5FC5\u987B\u7531\u7528\u6237\u9488\u5BF9\u5177\u4F53\u4EFB\u52A1\u548C workspace \u9010\u6B21\u6388\u6743"
+        notice: "\u53EF\u7528\u4E8E /btw\uFF1B\u7528\u6237\u53D1\u9001\u4EFB\u52A1\u65F6\u6309\u5177\u4F53 workspace \u9010\u6B21\u6388\u6743\uFF0C--read-only \u53EF\u663E\u5F0F\u964D\u6743"
       }))
     };
   } catch (error) {

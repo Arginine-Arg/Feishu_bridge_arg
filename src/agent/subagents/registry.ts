@@ -29,7 +29,7 @@ export interface ResolveSubagentInput {
   cwd: string;
   /** Explicit per-command route (highest priority). */
   requestedRoute?: string;
-  /** Access requested for the worker. /btw supplies read-only unless --write is authorized. */
+  /** Access requested for the worker. /btw defaults to workspace-write and supports --read-only. */
   access?: SubagentAccess;
   /** Profile-scoped structured state directory for generated runtime files. */
   stateDir?: string;
@@ -67,12 +67,6 @@ export async function resolveSubagents(input: ResolveSubagentInput): Promise<Res
     ccSwitch,
     ...(routeState.config ? { routeMap: routeState.config } : {}),
   };
-  if (input.access === 'workspace-write' && !config.allowWriteWorkers) {
-    throw new SubagentUnavailableError(
-      'write-not-authorized',
-      'workspace-write 子代理未在 profile 中启用；/btw 默认只读。',
-    );
-  }
   if (!config.enabled || config.mode === 'off') {
     return { ...base, kind: 'off', routes: [] };
   }
@@ -262,7 +256,7 @@ export function selectSubagentRoute(input: {
   }
   if (input.config.routeMode === 'manual') {
     const configured = access === 'workspace-write'
-      ? input.config.writeRoute
+      ? input.config.writeRoute ?? input.config.readRoute
       : input.config.readRoute;
     if (!configured) {
       return {

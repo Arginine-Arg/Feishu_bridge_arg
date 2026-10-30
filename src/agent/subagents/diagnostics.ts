@@ -463,7 +463,7 @@ export async function collectSubagentDiagnostics(input: {
           model: route.model,
           access: 'workspace-write' as const,
           available: route.available,
-          notice: '可用于 /btw --write；必须由用户针对具体任务和 workspace 逐次授权',
+          notice: '可用于 /btw；用户发送任务时按具体 workspace 逐次授权，--read-only 可显式降权',
         })),
     };
   } catch (error) {
