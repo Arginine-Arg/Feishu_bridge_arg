@@ -161,7 +161,7 @@ const NORMAL_SUBMIT_RETRY_MAX_WAIT_MS = 120_000;
 // prevent duplicate task submission.
 const NORMAL_SILENT_PASTE_RETRY_DELAY_MS = 3_000;
 const NORMAL_SILENT_PASTE_RETRY_INTERVAL_MS = 1_200;
-const NORMAL_SILENT_PASTE_RETRY_MAX_ATTEMPTS = 2;
+const NORMAL_SILENT_PASTE_RETRY_MAX_ATTEMPTS = 3;
 // tmux capture is a screen/history stream rather than an end-of-process
 // signal. Keep the listener alive for several capture ticks after the native
 // editor becomes ready so a final scrollback frame cannot arrive after the
@@ -1261,7 +1261,7 @@ export class LiveTerminalSession {
               this.write(
                 `${turnPrompt}\r`,
                 !concurrentSide,
-                silentPasteRetryAttempts === 1 ? 'keys' : 'text',
+                silentPasteRetryAttempts % 2 === 1 ? 'keys' : 'text',
               );
             }
             normalSubmitRetryTimer = setTimeout(retryIfDraftAppears, NORMAL_SUBMIT_RETRY_POLL_MS);

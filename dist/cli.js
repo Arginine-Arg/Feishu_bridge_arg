@@ -8125,7 +8125,7 @@ var NORMAL_SUBMIT_RETRY_MAX_CHECKS = 12;
 var NORMAL_SUBMIT_RETRY_MAX_WAIT_MS = 12e4;
 var NORMAL_SILENT_PASTE_RETRY_DELAY_MS = 3e3;
 var NORMAL_SILENT_PASTE_RETRY_INTERVAL_MS = 1200;
-var NORMAL_SILENT_PASTE_RETRY_MAX_ATTEMPTS = 2;
+var NORMAL_SILENT_PASTE_RETRY_MAX_ATTEMPTS = 3;
 var TMUX_FINAL_SETTLE_MS = 2500;
 var TMUX_FINAL_SETTLE_MAX_MS = 15e3;
 var MAX_TURN_OUTPUT_CHARS = 12e4;
@@ -8962,7 +8962,7 @@ var LiveTerminalSession = class {
               this.write(
                 `${turnPrompt}\r`,
                 !concurrentSide,
-                silentPasteRetryAttempts === 1 ? "keys" : "text"
+                silentPasteRetryAttempts % 2 === 1 ? "keys" : "text"
               );
             }
             normalSubmitRetryTimer = setTimeout(retryIfDraftAppears, NORMAL_SUBMIT_RETRY_POLL_MS);
