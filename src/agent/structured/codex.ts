@@ -240,6 +240,11 @@ export class CodexStructuredSession implements StructuredSession {
   setBrokerWriteAuthorization(authorization: WriteAuthorization | undefined): void {
     this.brokerTools?.setWriteAuthorization?.(authorization);
   }
+  async refreshBrokerArtifactDelivery(
+    artifact: { socketPath: string; token: string } | undefined,
+  ): Promise<void> {
+    await this.brokerTools?.refreshArtifactDelivery?.(artifact);
+  }
   async command(input: string): Promise<AgentEvent[]> {
     const [name, ...args] = input.trim().split(/\s+/);
     if (name === '/status') return [textEvent(JSON.stringify(await this.rpc.request('thread/read', { threadId: this.id, includeTurns: false }), null, 2))];

@@ -46,8 +46,11 @@ describe('ArtifactBroker', () => {
   it('keeps a live scope token stable while refreshing its delivery target', async () => {
     const root = await mkdtemp(join(tmpdir(), 'artifact-broker-live-'));
     const workspace = join(root, 'workspace');
+    const sideWorkspace = join(root, 'side-workspace');
     await mkdir(workspace);
+    await mkdir(sideWorkspace);
     await writeFile(join(workspace, 'report.txt'), 'done');
+    await writeFile(join(sideWorkspace, 'side.txt'), 'done');
     const reportPath = await realpath(join(workspace, 'report.txt'));
     const send = vi.fn(async () => ({ messageId: 'om-file' }));
     const broker = new ArtifactBroker(join(root, 'broker.sock'), { send } as never, async () => true);
@@ -79,7 +82,16 @@ describe('ArtifactBroker', () => {
       { scope: 'chat-live', socketPath: first.socketPath, token: first.token },
     ]);
     expect(broker.activate(second.token, [workspace])).toBe(true);
+    expect(broker.activate(second.token, [sideWorkspace])).toBe(true);
     await expect(request(second.socketPath, { token: first.token, path: 'report.txt' })).resolves.toMatchObject({ ok: true });
+    await expect(request(second.socketPath, {
+      token: first.token,
+      path: '../side-workspace/side.txt',
+    })).resolves.toMatchObject({ ok: false });
+    await expect(request(second.socketPath, {
+      token: first.token,
+      path: 'side.txt',
+    })).resolves.toMatchObject({ ok: true });
     expect(send).toHaveBeenCalledWith(
       'oc-1',
       { file: { source: reportPath, fileName: 'report.txt' } },

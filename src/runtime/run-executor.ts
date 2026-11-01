@@ -36,7 +36,7 @@ export interface SubmitRunInput {
   model?: string;
   reasoningEffort?: CodexReasoningEffort;
   images?: readonly string[];
-  artifactDelivery?: { socketPath: string; token: string };
+  artifactDelivery?: { scope?: string; socketPath: string; token: string };
   stopGraceMs?: number;
   nowait?: boolean;
   observability?: {

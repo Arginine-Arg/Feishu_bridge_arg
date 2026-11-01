@@ -1495,6 +1495,7 @@ describe('structured MixAgents /btw', () => {
       prompt: '/btw Implement this by default',
       liveInputMode: 'side',
       artifactDelivery: {
+        scope: 'scope',
         socketPath: join(root, 'artifact.sock'),
         token: 'artifact-token',
       },
@@ -1508,6 +1509,7 @@ describe('structured MixAgents /btw', () => {
         LARK_CHANNEL_PROFILE: 'codex',
         LARK_CHANNEL_HOME: root,
         LARK_CHANNEL_CONFIG: join(root, 'config.json'),
+        ARG_BRIDGE_ARTIFACT_SCOPE: 'scope',
         ARG_BRIDGE_ARTIFACT_SOCKET: join(root, 'artifact.sock'),
         ARG_BRIDGE_ARTIFACT_TOKEN: 'artifact-token',
       }),
@@ -1523,6 +1525,53 @@ describe('structured MixAgents /btw', () => {
     });
     expect(backend.spawns[0]?.task).toContain('lark-cli');
     expect(backend.spawns[0]?.task).toContain('You may run commands');
+    await main.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it('recreates a reusable side when the artifact capability generation changes', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'arg-bridge-side-artifact-refresh-'));
+    const workspace = join(root, 'project');
+    const profileDir = join(root, 'profile');
+    await Promise.all([
+      mkdir(workspace, { recursive: true }),
+      mkdir(profileDir, { recursive: true }),
+    ]);
+    const backend = new FakeBackend(() => routeWrite);
+    const config = { ...subagents, allowWriteWorkers: true, writeRoute: routeWrite.id };
+    const resolver = vi.fn(async () => resolved(routeWrite, backend, config));
+    const main = session();
+    const adapter = new StructuredAdapter({
+      kind: 'codex',
+      binary: 'not-spawned',
+      profileDir,
+      subagents: config,
+      subagentResolver: resolver,
+      larkChannel: { profile: 'codex', rootDir: root },
+    });
+    Reflect.get(adapter, 'sessions').set('scope', {
+      main,
+      cwd: workspace,
+      view: new StructuredView(profileDir, 'main'),
+    });
+
+    for (const [runId, token] of [['artifact-1', 'token-one'], ['artifact-2', 'token-two']] as const) {
+      await drain(adapter.runSide({
+        runId,
+        scopeId: 'scope',
+        cwd: workspace,
+        prompt: `/btw task for ${runId}`,
+        liveInputMode: 'side',
+        artifactDelivery: {
+          scope: 'scope',
+          socketPath: join(root, 'artifact.sock'),
+          token,
+        },
+      }));
+    }
+
+    expect(backend.spawns).toHaveLength(2);
+    expect(backend.closes).toContain('agent-1');
     await main.close();
     await rm(root, { recursive: true, force: true });
   });

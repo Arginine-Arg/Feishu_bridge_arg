@@ -4,7 +4,7 @@
 
 [English README](./README.md)
 
-`1.14.0` 将 `/btw` 改为默认 workspace-write，side 可运行命令并通过 lark-cli 发送文件；同时把 provider adoption 改为线性上下文 lineage，A -> B -> A 会继续 B 的最新上下文而不是回到旧 A 分支。超长历史使用 48k 字符快照和 recent-tail 回退。`1.13.2` 让 `/goal resume` 产生的活动模型 turn 可以使用显式 `/steer`。
+`1.15.0` 把文件发送能力改为按 chat scope 持久，并让 live tmux、structured 主会话、`/btw` worker 和模型可见 subagent 在 token 过期时通过 broker 恢复最新授权。主/子 workspace 会合并到同一授权，但普通文件、符号链接、realpath、回复目标和大小校验仍全部执行。`1.14.0` 将 `/btw` 改为默认 workspace-write，并让 provider adoption 形成 A -> B -> A 的线性上下文。
 
 `1.6.7` 引入 provider-aware Codex resume，`1.7.0` 增加 idle 边界重绑。`1.9.1` 收紧重连语义：附着已有 native 或 structured thread 时，保留该 thread 记录的 provider/model，不会因为 cc-switch 后来切换了 route 而静默改路。
 
@@ -60,7 +60,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.14.0
+sh /tmp/install-arg-bridge.sh --version 1.15.0
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.14.0"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.15.0"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.14.0`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.15.0`。
 
 ### 4. Node 或 npm 全局目录错误
 
@@ -492,7 +492,7 @@ bridge 会检查所选目录存在、是目录，并且不是 `/`、Home 根、�
 
 每个目录都会经过与工作目录相同的宽泛根目录检查。bridge 和 channel SDK 仍会执行普通文件、符号链接、realpath 目录归属及 `attachments.maxFileBytes` 双重校验。不要加入 `/`、Home 根或整个共享磁盘。
 
-agent 在任务中产出文件时，应调用 bridge 能力而不是直接上传：`arg-bridge sendfile <相对当前 cwd 的路径> [--caption "..."]`。bridge 会把请求固定到当前 scope、回复目标、工作目录根和文件大小策略。live 终端可跨轮次和 bridge 重启保留 profile 本地的不透明能力令牌，而 bridge 会在每个获准运行开始时刷新允许目录和回复目标。对于 bridge 托管的 tmux session，后续在同一 session 新建的 pane 也会继承这个受限能力；因此关闭原 pane 后在分屏 pane 中运行 `codex --resume` 不会丢失文件发送能力。外部绑定的 tmux session 和无关 shell 不会获得该能力。
+agent 在任务中产出文件时，应调用 bridge 能力而不是直接上传：`arg-bridge sendfile <相对当前 cwd 的路径> [--caption "..."]`。bridge 会把请求固定到当前 scope、回复目标、允许的工作目录根和文件大小策略。每个 chat scope 现在都跨轮次、bridge 重启、structured 主会话、可复用 `/btw` worker、模型可见 subagent 和托管 tmux pane 保留稳定的 profile 本地不透明能力；主/子会话的当前 workspace 会合并进 broker 授权。若长寿命进程仍持有旧 token，CLI 会从同一 profile 的 0600 授权状态中选择当前 cwd 匹配的最新授权并重试一次。这仍是 broker 内的续期，不是绕过沙箱直接上传。
 
 ### 内置 Codex skill
 

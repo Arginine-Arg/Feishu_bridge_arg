@@ -7,6 +7,7 @@ import { log } from '../core/logger';
 import { writeFileAtomic } from '../platform/atomic-write';
 
 export interface ArtifactDeliveryGrant {
+  scope: string;
   socketPath: string;
   token: string;
 }
@@ -28,6 +29,7 @@ export interface ArtifactBrokerIssueInput {
 
 interface ActiveGrant extends ArtifactBrokerIssueInput {
   token: string;
+  updatedAt?: number;
 }
 
 interface PersistentGrantsFile {
@@ -48,8 +50,8 @@ interface ArtifactResponse {
 
 /**
  * The only process allowed to upload an agent-produced file.  Agents receive
- * a short-lived opaque token; they cannot select a chat, reply target or
- * bypass the run's workspace/media policy.
+ * an opaque profile-scope token; they cannot select a chat, reply target or
+ * bypass the workspace/media policy.
  */
 export class ArtifactBroker {
   private readonly grants = new Map<string, ActiveGrant>();
@@ -67,7 +69,8 @@ export class ArtifactBroker {
      * A managed tmux agent inherits its environment only once. Persisting its
      * opaque capability is therefore necessary for a restarted bridge to
      * continue serving that same terminal. This is intentionally profile-local
-     * and written 0600; short turn-mode grants are never persisted.
+     * and written 0600. Every chat scope now uses this stable capability so
+     * tmux, structured main sessions and reusable side workers can recover.
      */
     private readonly persistentStatePath?: string,
   ) {
@@ -105,18 +108,22 @@ export class ArtifactBroker {
         existing.replyTo = input.replyTo;
         existing.replyInThread = input.replyInThread;
         existing.maxFileBytes = input.maxFileBytes;
+        existing.updatedAt = Date.now();
+        existing.allowedRoots = [
+          ...new Set([...existing.allowedRoots, ...input.allowedRoots]),
+        ];
         this.schedulePersist();
-        return { socketPath: this.socketPath, token: existing.token };
+        return { scope: existing.scope, socketPath: this.socketPath, token: existing.token };
       }
       this.persistentTokensByScope.delete(input.scope);
     }
     const token = randomBytes(32).toString('base64url');
-    this.grants.set(token, { ...input, token });
+    this.grants.set(token, { ...input, token, updatedAt: Date.now() });
     if (input.persistent) {
       this.persistentTokensByScope.set(input.scope, token);
       this.schedulePersist();
     }
-    return { socketPath: this.socketPath, token };
+    return { scope: input.scope, socketPath: this.socketPath, token };
   }
 
   revoke(token: string | undefined): void {
@@ -134,7 +141,10 @@ export class ArtifactBroker {
   activate(token: string, allowedRoots: readonly string[]): boolean {
     const grant = this.grants.get(token);
     if (!grant) return false;
-    grant.allowedRoots = [...new Set(allowedRoots)];
+    grant.allowedRoots = [
+      ...new Set([...grant.allowedRoots, ...allowedRoots]),
+    ];
+    grant.updatedAt = Date.now();
     if (grant.persistent) this.schedulePersist();
     return true;
   }
@@ -192,7 +202,7 @@ export class ArtifactBroker {
   private async deliver(request: ArtifactRequest): Promise<ArtifactResponse> {
     if (typeof request.token !== 'string') throw new Error('无效的 bridge 文件能力令牌');
     const grant = this.grants.get(request.token);
-    if (!grant) throw new Error('文件能力令牌已失效；请在当前任务内重新请求发送');
+    if (!grant) throw new Error('文件能力令牌已失效；客户端会尝试从当前 profile 的最新授权恢复');
     if (typeof request.path !== 'string' || !request.path.trim()) {
       throw new Error('请提供要发送的文件路径');
     }
@@ -203,13 +213,21 @@ export class ArtifactBroker {
     if (grant.allowedRoots.length === 0) {
       throw new Error('当前任务尚未授权文件目录；请在当前任务中重新请求发送');
     }
-    const requested = resolve(grant.allowedRoots[0]!, request.path);
-    const entry = await lstat(requested).catch(() => undefined);
+    let requested: string | undefined;
+    let entry: Awaited<ReturnType<typeof lstat>> | undefined;
+    for (const root of grant.allowedRoots) {
+      const candidate = resolve(root, request.path);
+      const candidateEntry = await lstat(candidate).catch(() => undefined);
+      if (!candidateEntry) continue;
+      requested = candidate;
+      entry = candidateEntry;
+      break;
+    }
     if (!entry) throw new Error('文件不存在或不可访问');
     if (entry.isSymbolicLink()) throw new Error('不允许发送符号链接');
     if (!entry.isFile()) throw new Error('只能发送普通文件');
     if (entry.size > grant.maxFileBytes) throw new Error(`文件超过发送上限（${grant.maxFileBytes} B）`);
-    const resolved = await realpath(requested);
+    const resolved = await realpath(requested!);
     const root = await findCanonicalAllowedRoot(resolved, grant.allowedRoots);
     if (!root) throw new Error('文件不在当前任务允许的目录内');
     if (!(await this.allowLocalFileRoot(root))) throw new Error('bridge 未允许该文件目录');

@@ -44,7 +44,7 @@ export interface StartRunFlowInput {
   executor: RunExecutor;
   now: number;
   stopGraceMs?: number;
-  artifactDelivery?: { socketPath: string; token: string };
+  artifactDelivery?: { scope?: string; socketPath: string; token: string };
   observability?: {
     profile: string;
     agent: string;

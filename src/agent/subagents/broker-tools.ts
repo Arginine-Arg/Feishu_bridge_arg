@@ -57,6 +57,9 @@ export interface BrokerToolHost {
   readonly specs: DynamicToolNamespaceSpec[];
   call(tool: string, args: unknown, signal?: AbortSignal): Promise<DynamicToolCallResult>;
   setWriteAuthorization?(authorization: WriteAuthorization | undefined): void;
+  refreshArtifactDelivery?(
+    artifact: { socketPath: string; token: string } | undefined,
+  ): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -99,6 +102,7 @@ interface BrokerWorkerRecord {
   /** Plaintext messages accepted by send_message and delivered by the next followup_task. */
   queuedMessages: string[];
   backend?: SubagentBackend;
+  artifactToken?: string;
 }
 
 interface PersistedState {
@@ -147,6 +151,7 @@ export class BrokerToolController implements BrokerToolHost {
   private backend?: SubagentBackend;
   private backendConfigKey?: string;
   private currentRuntime?: MixAgentsRuntimeOverrides;
+  private artifactToken?: string;
   private writeChain = Promise.resolve();
   private workerTimers = new Map<string, NodeJS.Timeout>();
   private restoredTimeoutsArmed = false;
@@ -222,6 +227,30 @@ export class BrokerToolController implements BrokerToolHost {
 
   setWriteAuthorization(authorization: WriteAuthorization | undefined): void {
     this.writeAuthorization = authorization;
+  }
+
+  async refreshArtifactDelivery(
+    artifact: { socketPath: string; token: string } | undefined,
+  ): Promise<void> {
+    const next: Record<string, string | undefined> = {
+      ARG_BRIDGE_ARTIFACT_SOCKET: artifact?.socketPath,
+      ARG_BRIDGE_ARTIFACT_TOKEN: artifact?.token,
+    };
+    let changed = false;
+    for (const [key, value] of Object.entries(next)) {
+      if ((this.env[key] ?? undefined) !== value) {
+        changed = true;
+        if (value === undefined) delete this.env[key];
+        else this.env[key] = value;
+      }
+    }
+    this.artifactToken = artifact?.token;
+    if (!changed || !this.backend) return;
+    const backend = this.backend;
+    this.backend = undefined;
+    this.backendConfigKey = undefined;
+    this.currentRuntime = undefined;
+    await backend.closeBackend?.().catch(() => {});
   }
 
   async close(): Promise<void> {
@@ -339,7 +368,10 @@ export class BrokerToolController implements BrokerToolHost {
       return failure(`followup_task combined task is larger than ${MAX_TASK_BYTES} bytes`);
     }
     const nextFingerprint = subagentRouteFingerprint(resolved.route);
-    if (nextFingerprint !== target.routeFingerprint) {
+    if (
+      nextFingerprint !== target.routeFingerprint ||
+      target.artifactToken !== this.artifactToken
+    ) {
       await this.closeRecord(target);
       const replacement = await this.createWorker({
         name: target.logicalName,
@@ -351,7 +383,9 @@ export class BrokerToolController implements BrokerToolHost {
       });
       return success(JSON.stringify({
         recreated: true,
-        reason: 'route/provider/model fingerprint changed; the old Broker agent was closed',
+        reason: nextFingerprint !== target.routeFingerprint
+          ? 'route/provider/model fingerprint changed; the old Broker agent was closed'
+          : 'artifact capability generation changed; the old Broker agent was closed',
         ...workerInvocation(replacement),
       }, null, 2));
     }
@@ -595,6 +629,7 @@ export class BrokerToolController implements BrokerToolHost {
       updatedAt: Date.now(),
       idempotencyKeys: [],
       queuedMessages: [],
+      ...(this.artifactToken ? { artifactToken: this.artifactToken } : {}),
     };
     this.workers.set(workerKey(input.name), record);
     this.rebuildAliases();

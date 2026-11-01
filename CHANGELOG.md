@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.15.0
+
+- Makes artifact-delivery capabilities persistent per chat scope instead of
+  revoking turn-mode grants when a run ends.
+- Merges active main and side workspace roots into the same scope grant and
+  tries every allowed root when resolving a cwd-relative artifact path.
+- Injects current `LARK_CHANNEL_*` and artifact delivery into model-visible
+  subagent controller environments, refreshes side/worker capability
+  generations, and recreates workers whose stale token cannot be renewed.
+- Adds one broker-mediated stale-token recovery: the CLI prefers the managed
+  tmux session token, then reads the newest persistent profile grant whose
+  allowed roots contain the current cwd and retries once. Regular-file,
+  symlink, realpath, chat, reply-target and size checks remain enforced.
+
 ## 1.14.0
 
 - `/btw` now defaults to `workspace-write` for the current project. Use

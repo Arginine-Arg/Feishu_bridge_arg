@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.14.0",
+  version: "1.15.0",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -152,7 +152,7 @@ async function checkAgentVersion(input) {
   const args = input.args ?? ["--version"];
   const timeoutMs = input.timeoutMs ?? 5e3;
   const executable = input.realpath ?? input.binaryPath;
-  return new Promise((resolve10, reject4) => {
+  return new Promise((resolve11, reject4) => {
     let settled = false;
     let stdout = "";
     let stderr = "";
@@ -257,7 +257,7 @@ async function checkAgentVersion(input) {
           );
           return;
         }
-        resolve10(version);
+        resolve11(version);
       });
     });
   });
@@ -1043,7 +1043,7 @@ function codexBootstrapBinaryErrorCode(errno) {
 import { createInterface } from "readline";
 import { Writable } from "stream";
 async function promptLine(prompt) {
-  return new Promise((resolve10) => {
+  return new Promise((resolve11) => {
     const rl = createInterface({
       input: process.stdin,
       output: process.stdout,
@@ -1051,13 +1051,13 @@ async function promptLine(prompt) {
     });
     rl.question(prompt, (answer) => {
       rl.close();
-      resolve10(answer.trim());
+      resolve11(answer.trim());
     });
   });
 }
 async function promptPassword(prompt) {
   const isTTY = Boolean(process.stdin.isTTY);
-  return new Promise((resolve10) => {
+  return new Promise((resolve11) => {
     const muted = new Writable({
       write(_chunk, _enc, cb) {
         cb();
@@ -1072,7 +1072,7 @@ async function promptPassword(prompt) {
     rl.question("", (answer) => {
       rl.close();
       process.stdout.write("\n");
-      resolve10(answer.trim());
+      resolve11(answer.trim());
     });
   });
 }
@@ -1242,7 +1242,7 @@ async function fsyncDir(path) {
   }
 }
 function sleep(ms) {
-  return new Promise((resolve10) => setTimeout(resolve10, ms));
+  return new Promise((resolve11) => setTimeout(resolve11, ms));
 }
 
 // src/runtime/locks.ts
@@ -2803,13 +2803,13 @@ async function listSecretProfiles(rootDir) {
 }
 async function readAllStdin() {
   if (process.stdin.isTTY) return "";
-  return new Promise((resolve10, reject4) => {
+  return new Promise((resolve11, reject4) => {
     let data = "";
     process.stdin.setEncoding("utf8");
     process.stdin.on("data", (chunk) => {
       data += chunk;
     });
-    process.stdin.on("end", () => resolve10(data));
+    process.stdin.on("end", () => resolve11(data));
     process.stdin.on("error", reject4);
   });
 }
@@ -2908,7 +2908,7 @@ async function spawnExecProvider(pc, ref) {
   const timeoutMs = pc.noOutputTimeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
   const maxOutput = pc.maxOutputBytes ?? DEFAULT_EXEC_MAX_OUTPUT;
   const providerName = ref.provider ?? DEFAULT_PROVIDER;
-  return new Promise((resolve10, reject4) => {
+  return new Promise((resolve11, reject4) => {
     const env = {};
     if (pc.passEnv) {
       for (const k of pc.passEnv) {
@@ -2966,7 +2966,7 @@ async function spawnExecProvider(pc, ref) {
         const parsed = JSON.parse(stdout);
         const value = parsed.values?.[ref.id];
         if (typeof value === "string") {
-          resolve10(value);
+          resolve11(value);
           return;
         }
         const err = parsed.errors?.[ref.id]?.message;
@@ -2993,7 +2993,7 @@ import * as p from "@clack/prompts";
 import { registerApp } from "@larksuite/channel";
 import qrcode from "qrcode-terminal";
 async function requestScopeGrantLink(opts) {
-  return new Promise((resolve10, reject4) => {
+  return new Promise((resolve11, reject4) => {
     let urlDelivered = false;
     const completion = registerApp({
       source: "arg-bridge",
@@ -3002,7 +3002,7 @@ async function requestScopeGrantLink(opts) {
       ...opts.signal ? { signal: opts.signal } : {},
       onQRCodeReady: (info) => {
         urlDelivered = true;
-        resolve10({ url: info.url, expireIn: info.expireIn, completion });
+        resolve11({ url: info.url, expireIn: info.expireIn, completion });
       }
     }).then(() => void 0);
     completion.catch((err) => {
@@ -4953,6 +4953,7 @@ function withArtifactDeliveryEnv(base, artifact) {
   if (!artifact) return base;
   return {
     ...base,
+    ...artifact.scope ? { ARG_BRIDGE_ARTIFACT_SCOPE: artifact.scope } : {},
     ARG_BRIDGE_ARTIFACT_SOCKET: artifact.socketPath,
     ARG_BRIDGE_ARTIFACT_TOKEN: artifact.token
   };
@@ -5000,7 +5001,7 @@ async function applyLarkCliIdentityPolicy(context, identityPreset) {
 }
 async function runQuiet(cmd, args, env) {
   let timedOut = false;
-  const exitCode = await new Promise((resolve10) => {
+  const exitCode = await new Promise((resolve11) => {
     const child = spawnProcess(cmd, args, {
       env: mergeProcessEnv(process.env, env),
       stdio: ["ignore", "ignore", "ignore"]
@@ -5011,11 +5012,11 @@ async function runQuiet(cmd, args, env) {
     }, POLICY_TIMEOUT_MS);
     child.once("error", () => {
       clearTimeout(timer);
-      resolve10(null);
+      resolve11(null);
     });
     child.once("exit", (code) => {
       clearTimeout(timer);
-      resolve10(code);
+      resolve11(code);
     });
   });
   return !timedOut && exitCode === 0;
@@ -5603,7 +5604,7 @@ function isLarkCliInstalled() {
 async function runCapture(cmd, args, timeoutMs, env) {
   let captured = "";
   let timedOut = false;
-  const exitCode = await new Promise((resolve10) => {
+  const exitCode = await new Promise((resolve11) => {
     const child = spawnProcess(cmd, args, {
       env: env ? mergeProcessEnv(process.env, env) : void 0,
       stdio: ["ignore", "pipe", "pipe"]
@@ -5620,11 +5621,11 @@ async function runCapture(cmd, args, timeoutMs, env) {
     }, timeoutMs);
     child.once("error", () => {
       clearTimeout(timer);
-      resolve10(null);
+      resolve11(null);
     });
     child.once("exit", (code) => {
       clearTimeout(timer);
-      resolve10(code);
+      resolve11(code);
     });
   });
   return { success: !timedOut && exitCode === 0, output: captured };
@@ -5793,7 +5794,7 @@ async function waitForIdleSocket(directory, timeoutMs = 1500) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (!hostHasActiveClients(directory)) return true;
-    await new Promise((resolve10) => setTimeout(resolve10, 100));
+    await new Promise((resolve11) => setTimeout(resolve11, 100));
   }
   return !hostHasActiveClients(directory);
 }
@@ -5852,7 +5853,7 @@ async function waitForExit(pid, timeoutMs = 2e3) {
   if (!processAlive(pid)) return true;
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    await new Promise((resolve10) => setTimeout(resolve10, 100));
+    await new Promise((resolve11) => setTimeout(resolve11, 100));
     if (!processAlive(pid)) return true;
   }
   terminateHost(pid, "SIGKILL");
@@ -5978,7 +5979,7 @@ async function confirmStopRuntimeLockProcess() {
   const rl = createInterface2({ input: process.stdin, output: process.stdout });
   try {
     const answer = await new Promise(
-      (resolve10) => rl.question("\u662F\u5426\u505C\u6B62\u65E7\u8FDB\u7A0B\u5E76\u7EE7\u7EED\u542F\u52A8\u540E\u53F0\u670D\u52A1? [y/N]: ", resolve10)
+      (resolve11) => rl.question("\u662F\u5426\u505C\u6B62\u65E7\u8FDB\u7A0B\u5E76\u7EE7\u7EED\u542F\u52A8\u540E\u53F0\u670D\u52A1? [y/N]: ", resolve11)
     );
     const normalized = answer.trim().toLowerCase();
     return normalized === "y" || normalized === "yes";
@@ -6219,7 +6220,7 @@ var AsyncEventQueue = class {
         const value = this.values.shift();
         if (value !== void 0) return Promise.resolve({ value, done: false });
         if (this.closed) return Promise.resolve({ value: void 0, done: true });
-        return new Promise((resolve10) => this.waiters.push(resolve10));
+        return new Promise((resolve11) => this.waiters.push(resolve11));
       }
     };
   }
@@ -7564,9 +7565,11 @@ var TmuxBindingController = class {
       return false;
     }
     for (const [key, value] of [
+      ["ARG_BRIDGE_ARTIFACT_SCOPE", artifact.scope],
       ["ARG_BRIDGE_ARTIFACT_SOCKET", artifact.socketPath],
       ["ARG_BRIDGE_ARTIFACT_TOKEN", artifact.token]
     ]) {
+      if (!value) continue;
       const result = spawnProcessSync(
         "tmux",
         ["-S", terminal.socketPath, "set-environment", "-t", saved.sessionName, key, value],
@@ -8507,14 +8510,14 @@ var LiveTerminalSession = class {
     if (child && child.exitCode === null && child.signalCode === null) {
       log.info("agent-live", "close", { pid: child.pid ?? null, reason });
       child.kill("SIGTERM");
-      await new Promise((resolve10) => {
+      await new Promise((resolve11) => {
         const timer = setTimeout(() => {
           if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-          resolve10();
+          resolve11();
         }, 2e3);
         child.once("exit", () => {
           clearTimeout(timer);
-          resolve10();
+          resolve11();
         });
       });
     }
@@ -8530,11 +8533,11 @@ var LiveTerminalSession = class {
     if (this.isAlive()) return;
     if (this.closed) throw new Error("live session is closed");
     const spawned = spawnLiveProcess(this.opts);
-    this.terminalReady = new Promise((resolve10) => {
-      this.resolveTerminalReady = resolve10;
+    this.terminalReady = new Promise((resolve11) => {
+      this.resolveTerminalReady = resolve11;
     });
-    this.firstTerminalOutput = new Promise((resolve10) => {
-      this.resolveFirstTerminalOutput = resolve10;
+    this.firstTerminalOutput = new Promise((resolve11) => {
+      this.resolveFirstTerminalOutput = resolve11;
     });
     this.child = spawned.child;
     this.terminalInfo = spawned.terminal;
@@ -9353,8 +9356,8 @@ var LiveTerminalSession = class {
       }
       while (!done || queue.length > 0) {
         if (queue.length === 0) {
-          await new Promise((resolve10) => {
-            wake = resolve10;
+          await new Promise((resolve11) => {
+            wake = resolve11;
           });
           wake = void 0;
           continue;
@@ -9792,6 +9795,7 @@ function setManagedMetadata() {
 
 function setManagedArtifactDeliveryEnvironment() {
   if (!managed) return;
+  const scope = artifactEnv.ARG_BRIDGE_ARTIFACT_SCOPE || process.env.ARG_BRIDGE_ARTIFACT_SCOPE;
   const socket = artifactEnv.ARG_BRIDGE_ARTIFACT_SOCKET || process.env.ARG_BRIDGE_ARTIFACT_SOCKET;
   const token = artifactEnv.ARG_BRIDGE_ARTIFACT_TOKEN || process.env.ARG_BRIDGE_ARTIFACT_TOKEN;
   if (!socket || !token) return;
@@ -9801,9 +9805,11 @@ function setManagedArtifactDeliveryEnvironment() {
   // codex --resume without losing artifact delivery. Never do this for an
   // externally bound pane: one user tmux session can contain several scopes.
   for (const [key, value] of [
+    ['ARG_BRIDGE_ARTIFACT_SCOPE', scope],
     ['ARG_BRIDGE_ARTIFACT_SOCKET', socket],
     ['ARG_BRIDGE_ARTIFACT_TOKEN', token],
   ]) {
+    if (!value) continue;
     const result = tmux(['set-environment', '-t', session, key, value]);
     if (result.status !== 0) writeError('failed to restore managed artifact capability', result);
   }
@@ -11657,7 +11663,7 @@ function isIncompleteEscapeSequence(seq) {
   return false;
 }
 function delay(ms) {
-  return new Promise((resolve10) => setTimeout(resolve10, ms));
+  return new Promise((resolve11) => setTimeout(resolve11, ms));
 }
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
@@ -11852,14 +11858,14 @@ function isLoopbackHost(host) {
   return normalized === "localhost" || normalized === "::1" || normalized === "0:0:0:0:0:0:0:1" || /^127(?:\.\d{1,3}){3}$/u.test(normalized);
 }
 function probeProxy(host, port, timeoutMs) {
-  return new Promise((resolve10) => {
+  return new Promise((resolve11) => {
     const socket = connect({ host, port });
     let settled = false;
     const finish = (result) => {
       if (settled) return;
       settled = true;
       socket.destroy();
-      resolve10(result);
+      resolve11(result);
     };
     socket.setTimeout(timeoutMs);
     socket.once("connect", () => finish("open"));
@@ -12055,7 +12061,7 @@ var ClaudeAdapter = class {
         if (child.exitCode !== null || child.signalCode !== null) return;
         log.info("agent", "stop-sigterm", { pid: child.pid ?? null, graceMs: stopGraceMs });
         child.kill("SIGTERM");
-        await new Promise((resolve10) => {
+        await new Promise((resolve11) => {
           const timer = setTimeout(() => {
             if (child.exitCode === null && child.signalCode === null) {
               log.warn("agent", "stop-sigkill", {
@@ -12065,11 +12071,11 @@ var ClaudeAdapter = class {
               });
               child.kill("SIGKILL");
             }
-            resolve10();
+            resolve11();
           }, stopGraceMs);
           child.once("exit", () => {
             clearTimeout(timer);
-            resolve10();
+            resolve11();
           });
         });
       },
@@ -12077,14 +12083,14 @@ var ClaudeAdapter = class {
         if (child.exitCode !== null || child.signalCode !== null) {
           return Promise.resolve(true);
         }
-        return new Promise((resolve10) => {
+        return new Promise((resolve11) => {
           const onExit = () => {
             clearTimeout(timer);
-            resolve10(true);
+            resolve11(true);
           };
           const timer = setTimeout(() => {
             child.removeListener("exit", onExit);
-            resolve10(false);
+            resolve11(false);
           }, timeoutMs);
           child.once("exit", onExit);
         });
@@ -12875,7 +12881,7 @@ var CodexAdapter = class {
         stopReason = "interrupted";
         log.info("agent", "stop-sigterm", { pid: child.pid ?? null, graceMs: stopGraceMs });
         child.kill("SIGTERM");
-        await new Promise((resolve10) => {
+        await new Promise((resolve11) => {
           const timer = setTimeout(() => {
             if (child.exitCode === null && child.signalCode === null) {
               log.warn("agent", "stop-sigkill", {
@@ -12885,11 +12891,11 @@ var CodexAdapter = class {
               });
               child.kill("SIGKILL");
             }
-            resolve10();
+            resolve11();
           }, stopGraceMs);
           child.once("exit", () => {
             clearTimeout(timer);
-            resolve10();
+            resolve11();
           });
         });
       },
@@ -12897,14 +12903,14 @@ var CodexAdapter = class {
         if (child.exitCode !== null || child.signalCode !== null) {
           return Promise.resolve(true);
         }
-        return new Promise((resolve10) => {
+        return new Promise((resolve11) => {
           const onExit = () => {
             clearTimeout(timer);
-            resolve10(true);
+            resolve11(true);
           };
           const timer = setTimeout(() => {
             child.removeListener("exit", onExit);
-            resolve10(false);
+            resolve11(false);
           }, timeoutMs);
           child.once("exit", onExit);
         });
@@ -13180,8 +13186,8 @@ var RpcClient = class _RpcClient extends EventEmitter2 {
     const socket = new WebSocket(url, { handshakeTimeout: 5e3, maxPayload: 32 * 1024 * 1024, perMessageDeflate: false });
     const client = new _RpcClient(socket);
     if (options.codexHome) client.codexHome = options.codexHome;
-    await new Promise((resolve10, reject4) => {
-      socket.once("open", resolve10);
+    await new Promise((resolve11, reject4) => {
+      socket.once("open", resolve11);
       socket.once("error", reject4);
     });
     return client;
@@ -13207,12 +13213,12 @@ var RpcClient = class _RpcClient extends EventEmitter2 {
   request(method, params, timeoutMs = 3e4) {
     if (this.failure || this.socket.readyState !== WebSocket.OPEN) return Promise.reject(this.failure ?? new Error("RPC connection is not open"));
     const id = this.nextId++;
-    return new Promise((resolve10, reject4) => {
+    return new Promise((resolve11, reject4) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject4(new Error(`RPC ${method} timed out; outcome unknown, not retried`));
       }, timeoutMs);
-      this.pending.set(id, { resolve: resolve10, reject: reject4, timer });
+      this.pending.set(id, { resolve: resolve11, reject: reject4, timer });
       this.socket.send(JSON.stringify({ id, method, params }), (error) => {
         if (!error) return;
         clearTimeout(timer);
@@ -13351,7 +13357,7 @@ async function connectCodexHostInternal(options, attempt) {
         connected = await RpcClient.connect(url, { codexHome: options.env.CODEX_HOME });
         break;
       } catch {
-        await new Promise((resolve10) => setTimeout(resolve10, 150));
+        await new Promise((resolve11) => setTimeout(resolve11, 150));
       }
     }
     if (!connected) {
@@ -13501,10 +13507,10 @@ async function listProviders(env, timeoutMs) {
   const stderr = [];
   child.stdout?.on("data", (chunk) => stdout.push(Buffer.from(chunk)));
   child.stderr?.on("data", (chunk) => stderr.push(Buffer.from(chunk)));
-  const code = await new Promise((resolve10, reject4) => {
+  const code = await new Promise((resolve11, reject4) => {
     const timer = setTimeout(() => {
       child.kill("SIGTERM");
-      resolve10(null);
+      resolve11(null);
     }, timeoutMs);
     timer.unref?.();
     child.once("error", (error) => {
@@ -13513,7 +13519,7 @@ async function listProviders(env, timeoutMs) {
     });
     child.once("exit", (exitCode) => {
       clearTimeout(timer);
-      resolve10(exitCode);
+      resolve11(exitCode);
     });
   });
   if (code !== 0) {
@@ -14547,14 +14553,14 @@ var McpStdioClient = class _McpStdioClient {
     if (this.closedError) return Promise.reject(this.closedError);
     if (signal?.aborted) return Promise.reject(abortError());
     const id = `arg-bridge-${this.nextId++}`;
-    return new Promise((resolve10, reject4) => {
+    return new Promise((resolve11, reject4) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         this.notify("notifications/cancelled", { requestId: id, reason: "timeout" });
         reject4(new McpRequestError(void 0, `${method} timed out after ${timeoutMs}ms`));
       }, timeoutMs);
       timer.unref?.();
-      const pending = { resolve: resolve10, reject: reject4, timer };
+      const pending = { resolve: resolve11, reject: reject4, timer };
       if (signal) {
         const onAbort = () => {
           this.pending.delete(id);
@@ -15535,6 +15541,7 @@ var BrokerToolController = class {
   backend;
   backendConfigKey;
   currentRuntime;
+  artifactToken;
   writeChain = Promise.resolve();
   workerTimers = /* @__PURE__ */ new Map();
   restoredTimeoutsArmed = false;
@@ -15594,6 +15601,28 @@ var BrokerToolController = class {
   }
   setWriteAuthorization(authorization) {
     this.writeAuthorization = authorization;
+  }
+  async refreshArtifactDelivery(artifact) {
+    const next = {
+      ARG_BRIDGE_ARTIFACT_SOCKET: artifact?.socketPath,
+      ARG_BRIDGE_ARTIFACT_TOKEN: artifact?.token
+    };
+    let changed = false;
+    for (const [key, value] of Object.entries(next)) {
+      if ((this.env[key] ?? void 0) !== value) {
+        changed = true;
+        if (value === void 0) delete this.env[key];
+        else this.env[key] = value;
+      }
+    }
+    this.artifactToken = artifact?.token;
+    if (!changed || !this.backend) return;
+    const backend = this.backend;
+    this.backend = void 0;
+    this.backendConfigKey = void 0;
+    this.currentRuntime = void 0;
+    await backend.closeBackend?.().catch(() => {
+    });
   }
   async close() {
     if (this.closed) return;
@@ -15698,7 +15727,7 @@ var BrokerToolController = class {
       return failure(`followup_task combined task is larger than ${MAX_TASK_BYTES} bytes`);
     }
     const nextFingerprint = subagentRouteFingerprint(resolved.route);
-    if (nextFingerprint !== target.routeFingerprint) {
+    if (nextFingerprint !== target.routeFingerprint || target.artifactToken !== this.artifactToken) {
       await this.closeRecord(target);
       const replacement = await this.createWorker({
         name: target.logicalName,
@@ -15710,7 +15739,7 @@ var BrokerToolController = class {
       });
       return success(JSON.stringify({
         recreated: true,
-        reason: "route/provider/model fingerprint changed; the old Broker agent was closed",
+        reason: nextFingerprint !== target.routeFingerprint ? "route/provider/model fingerprint changed; the old Broker agent was closed" : "artifact capability generation changed; the old Broker agent was closed",
         ...workerInvocation(replacement)
       }, null, 2));
     }
@@ -15925,7 +15954,8 @@ var BrokerToolController = class {
       task: input.task,
       updatedAt: Date.now(),
       idempotencyKeys: [],
-      queuedMessages: []
+      queuedMessages: [],
+      ...this.artifactToken ? { artifactToken: this.artifactToken } : {}
     };
     this.workers.set(workerKey(input.name), record);
     this.rebuildAliases();
@@ -17328,8 +17358,8 @@ ${p4.command ?? JSON.stringify(p4.changes ?? {})}`,
     for (const event of this.deferredInteractions.splice(0)) {
       if (event.type === "interactive" && event.interaction && this.pending.has(event.interaction.id)) emit2(event);
     }
-    let completion = new Promise((resolve10) => {
-      this.complete = resolve10;
+    let completion = new Promise((resolve11) => {
+      this.complete = resolve11;
     });
     const abort = () => {
       void this.interrupt().catch((error) => this.disconnected(error));
@@ -17346,8 +17376,8 @@ ${p4.command ?? JSON.stringify(p4.changes ?? {})}`,
         if (this.turnId || this.goalActive) {
           await completion;
           if (signal.aborted) return;
-          completion = new Promise((resolve10) => {
-            this.complete = resolve10;
+          completion = new Promise((resolve11) => {
+            this.complete = resolve11;
           });
         }
         this.phase = "submitted";
@@ -17375,6 +17405,9 @@ ${options.prompt}` : options.prompt }];
   }
   setBrokerWriteAuthorization(authorization) {
     this.brokerTools?.setWriteAuthorization?.(authorization);
+  }
+  async refreshBrokerArtifactDelivery(artifact) {
+    await this.brokerTools?.refreshArtifactDelivery?.(artifact);
   }
   async command(input) {
     const [name, ...args] = input.trim().split(/\s+/);
@@ -17484,8 +17517,8 @@ ${options.prompt}` : options.prompt }];
     const key = String(id);
     let timer;
     try {
-      await new Promise((resolve10, reject4) => {
-        this.acknowledgements.set(key, { resolve: resolve10, reject: reject4 });
+      await new Promise((resolve11, reject4) => {
+        this.acknowledgements.set(key, { resolve: resolve11, reject: reject4 });
         timer = setTimeout(() => reject4(new Error("\u5BA1\u6279\u56DE\u590D\u5C1A\u672A\u83B7\u5F97\u670D\u52A1\u7AEF\u786E\u8BA4\uFF1B\u4E0D\u4F1A\u81EA\u52A8\u91CD\u53D1")), 1e4);
         this.rpc.respond(id, result);
       });
@@ -17678,10 +17711,10 @@ var ClaudeStructuredSession = class _ClaudeStructuredSession {
       canUseTool: async (tool, input, context) => {
         const id2 = context.toolUseID;
         if (tool === "AskUserQuestion" && Array.isArray(input.questions)) return this.askQuestions(id2, input, context.signal);
-        return new Promise((resolve10) => {
+        return new Promise((resolve11) => {
           const cancel3 = () => {
             this.pending.delete(id2);
-            resolve10({ behavior: "deny", message: "\u64CD\u4F5C\u5DF2\u53D6\u6D88" });
+            resolve11({ behavior: "deny", message: "\u64CD\u4F5C\u5DF2\u53D6\u6D88" });
           };
           if (context.signal.aborted) {
             cancel3();
@@ -17690,7 +17723,7 @@ var ClaudeStructuredSession = class _ClaudeStructuredSession {
           context.signal.addEventListener("abort", cancel3, { once: true });
           this.pending.set(id2, { values: /* @__PURE__ */ new Set(["allow", "deny"]), answer: async (value) => {
             context.signal.removeEventListener("abort", cancel3);
-            resolve10(value === "allow" ? { behavior: "allow", updatedInput: input } : { behavior: "deny", message: "\u7528\u6237\u62D2\u7EDD\u6B64\u64CD\u4F5C" });
+            resolve11(value === "allow" ? { behavior: "allow", updatedInput: input } : { behavior: "deny", message: "\u7528\u6237\u62D2\u7EDD\u6B64\u64CD\u4F5C" });
             return [];
           } });
           this.phase = "picker";
@@ -17808,8 +17841,8 @@ ${JSON.stringify(input, null, 2)}`,
     this.streamingMessages.clear();
     this.streamingThinking.clear();
     emit2({ type: "system", sessionId: this.id, cwd: options.cwd });
-    const done = new Promise((resolve10) => {
-      this.complete = resolve10;
+    const done = new Promise((resolve11) => {
+      this.complete = resolve11;
     });
     const abort = () => {
       void this.interrupt().catch((error) => {
@@ -17921,12 +17954,12 @@ ${JSON.stringify(input, null, 2)}`,
   askQuestions(id, input, signal) {
     const questions = input.questions;
     if (!questions.length) return Promise.resolve({ behavior: "deny", message: "\u6CA1\u6709\u53EF\u56DE\u7B54\u7684\u95EE\u9898" });
-    return new Promise((resolve10) => {
+    return new Promise((resolve11) => {
       const ids = questions.map((_, index) => `${id}.q${index}`);
       const answers = {};
       const cancel3 = () => {
         for (const key of ids) this.pending.delete(key);
-        resolve10({ behavior: "deny", message: "\u95EE\u9898\u5DF2\u53D6\u6D88" });
+        resolve11({ behavior: "deny", message: "\u95EE\u9898\u5DF2\u53D6\u6D88" });
       };
       if (signal.aborted) {
         cancel3();
@@ -17940,7 +17973,7 @@ ${JSON.stringify(input, null, 2)}`,
           answers[question.question] = options[Number(value) - 1]?.label ?? value;
           if (Object.keys(answers).length === questions.length) {
             signal.removeEventListener("abort", cancel3);
-            resolve10({ behavior: "allow", updatedInput: { ...input, answers } });
+            resolve11({ behavior: "allow", updatedInput: { ...input, answers } });
           }
           return [];
         } });
@@ -19323,6 +19356,7 @@ function isHighImpactConclusion(text2) {
 }
 function artifactEnvFrom(options) {
   return options.artifactDelivery ? {
+    ...options.artifactDelivery.scope ? { ARG_BRIDGE_ARTIFACT_SCOPE: options.artifactDelivery.scope } : {},
     ARG_BRIDGE_ARTIFACT_SOCKET: options.artifactDelivery.socketPath,
     ARG_BRIDGE_ARTIFACT_TOKEN: options.artifactDelivery.token
   } : void 0;
@@ -19633,6 +19667,8 @@ var StructuredAdapter = class {
           route: side.route,
           routeFingerprint: side.routeFingerprint ?? subagentRouteFingerprint(side.route),
           ...side.progressCursor !== void 0 ? { progressCursor: side.progressCursor } : {},
+          ...side.artifactSocketPath ? { artifactSocketPath: side.artifactSocketPath } : {},
+          ...side.artifactToken ? { artifactToken: side.artifactToken } : {},
           ...side.scopeCwd ? { scopeCwd: side.scopeCwd } : {},
           cwd: side.cwd,
           scope: side.scope,
@@ -19652,6 +19688,8 @@ var StructuredAdapter = class {
           route: side.route,
           routeFingerprint: side.routeFingerprint,
           ...side.progressCursor !== void 0 ? { progressCursor: side.progressCursor } : {},
+          ...side.artifactSocketPath ? { artifactSocketPath: side.artifactSocketPath } : {},
+          ...side.artifactToken ? { artifactToken: side.artifactToken } : {},
           ...side.scopeCwd ? { scopeCwd: side.scopeCwd } : {},
           cwd: side.cwd,
           scope: side.scope,
@@ -19734,7 +19772,10 @@ var StructuredAdapter = class {
         "structured",
         `broker-workers-${createHash10("sha256").update(threadId).digest("hex").slice(0, 24)}.json`
       ),
-      env: this.options.env ?? process.env,
+      env: {
+        ...this.options.env ?? process.env,
+        ...buildLarkChannelEnv(this.options.larkChannel)
+      },
       namespace,
       getConfig: () => this.currentSubagentsConfig(),
       runtimeResolver: async () => {
@@ -19787,7 +19828,15 @@ var StructuredAdapter = class {
     );
     const backend = new MixAgentsBrokerBackend(
       config,
-      this.options.env ?? process.env,
+      {
+        ...this.options.env ?? process.env,
+        ...buildLarkChannelEnv(this.options.larkChannel),
+        ...state.artifactSocketPath && state.artifactToken ? {
+          ARG_BRIDGE_ARTIFACT_SCOPE: state.scope,
+          ARG_BRIDGE_ARTIFACT_SOCKET: state.artifactSocketPath,
+          ARG_BRIDGE_ARTIFACT_TOKEN: state.artifactToken
+        } : {}
+      },
       runtime
     );
     state.backend = backend;
@@ -19946,6 +19995,16 @@ var StructuredAdapter = class {
       return;
     }
     let existing = this.sideStateFor(scope, scopeCwd);
+    const artifactSocketPath = input.options.artifactDelivery?.socketPath;
+    const artifactToken = input.options.artifactDelivery?.token;
+    if (existing && (existing.artifactSocketPath !== artifactSocketPath || existing.artifactToken !== artifactToken)) {
+      emit2(textEvent(
+        `side artifact capability changed; recreating ${existing.agent.agentId} with the current file-delivery token.
+`
+      ));
+      await this.closeMixagentsSide(existing, signal);
+      existing = void 0;
+    }
     const changeReason = existing ? routeChangeReason(existing, route, workspace, access3) : void 0;
     if (existing && changeReason) {
       emit2(textEvent(`side route/workspace \u5DF2\u53D8\u5316\uFF08${changeReason}\uFF09\uFF1B\u6B63\u5728\u7ED3\u675F\u65E7 MixAgents agent ${existing.agent.agentId}\uFF0C\u968F\u540E\u521B\u5EFA\u65B0 agent\u3002`));
@@ -20129,6 +20188,8 @@ var StructuredAdapter = class {
       backend: resolvedBackend,
       route,
       routeFingerprint: subagentRouteFingerprint(route),
+      ...artifactSocketPath ? { artifactSocketPath } : {},
+      ...artifactToken ? { artifactToken } : {},
       scopeCwd,
       cwd: workspace,
       scope,
@@ -20690,7 +20751,7 @@ ${truncateSnapshot(redactDiagnosticText(redactSecrets(manifest)), 8e3)}
       for (let attempt = 0; attempt < 50; attempt += 1) {
         current = listStructuredTmuxPanes(target.socketPath).find((pane) => pane.paneId === paneId && pane.structured?.threadId === target.structured.threadId && pane.structured.endpoint === endpoint);
         if (current) break;
-        await new Promise((resolve10) => setTimeout(resolve10, 200));
+        await new Promise((resolve11) => setTimeout(resolve11, 200));
       }
       if (!current?.structured?.endpoint) throw new Error("structured pane \u542F\u52A8\u8D85\u65F6\uFF0C\u8BF7\u68C0\u67E5\u65B0 pane \u8F93\u51FA");
       const binding = { target: current, endpoint, threadId: target.structured.threadId, cwd: current.paneCurrentPath, updatedAt: Date.now() };
@@ -20740,7 +20801,7 @@ ${truncateSnapshot(redactDiagnosticText(redactSecrets(manifest)), 8e3)}
             }
           }
         }
-        await new Promise((resolve10) => setTimeout(resolve10, 500));
+        await new Promise((resolve11) => setTimeout(resolve11, 500));
       }
       if (observer !== rpc) observer.close();
       throw new Error(`RPC thread/resume timed out; old thread state is still unconfirmed after ${Math.round(LEGACY_RESUME_RECONCILE_MS / 1e3)}s; no pane was created`);
@@ -20889,6 +20950,9 @@ ${truncateSnapshot(redactDiagnosticText(redactSecrets(manifest)), 8e3)}
         }
         const current = await this.session(options);
         if (abort.signal.aborted) return;
+        if (current.main instanceof CodexStructuredSession) {
+          await current.main.refreshBrokerArtifactDelivery(options.artifactDelivery);
+        }
         if (side && /^\/btw\s+result\s*$/iu.test(options.prompt.trim())) {
           await this.collectLateMixagentsResult({
             scope,
@@ -20962,6 +21026,7 @@ ${truncateSnapshot(redactDiagnosticText(redactSecrets(manifest)), 8e3)}
             ...this.options.env ?? process.env,
             ...buildLarkChannelEnv(this.options.larkChannel),
             ...options.artifactDelivery ? {
+              ...options.artifactDelivery.scope ? { ARG_BRIDGE_ARTIFACT_SCOPE: options.artifactDelivery.scope } : {},
               ARG_BRIDGE_ARTIFACT_SOCKET: options.artifactDelivery.socketPath,
               ARG_BRIDGE_ARTIFACT_TOKEN: options.artifactDelivery.token
             } : {}
@@ -21109,6 +21174,7 @@ ${prompt}
         }
         if (!side && target === current.main && this.id === "codex" && this.options.nativeView !== false) {
           const artifactEnv = options.artifactDelivery ? {
+            ...options.artifactDelivery.scope ? { ARG_BRIDGE_ARTIFACT_SCOPE: options.artifactDelivery.scope } : {},
             ARG_BRIDGE_ARTIFACT_SOCKET: options.artifactDelivery.socketPath,
             ARG_BRIDGE_ARTIFACT_TOKEN: options.artifactDelivery.token
           } : void 0;
@@ -24404,7 +24470,7 @@ async function listCodexThreadHistory(options) {
   const timeoutMs = options.timeoutMs ?? DEFAULT_HISTORY_TIMEOUT_MS;
   const stderrChunks = [];
   let settled = false;
-  const result = await new Promise((resolve10, reject4) => {
+  const result = await new Promise((resolve11, reject4) => {
     const rl = createInterface7({ input: child.stdout, crlfDelay: Infinity });
     let timer;
     const fail = (err) => {
@@ -24461,7 +24527,7 @@ async function listCodexThreadHistory(options) {
         cleanup({ kill: true });
         return;
       }
-      resolve10(parsed.entries);
+      resolve11(parsed.entries);
       cleanup({ kill: true });
     });
     child.once("exit", (code) => {
@@ -24567,14 +24633,14 @@ function normalizeThread(input) {
 }
 async function waitForChildExit(child, timeoutMs) {
   if (child.exitCode !== null || child.signalCode !== null) return;
-  await new Promise((resolve10) => {
+  await new Promise((resolve11) => {
     const timer = setTimeout(() => {
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
-      resolve10();
+      resolve11();
     }, timeoutMs);
     child.once("exit", () => {
       clearTimeout(timer);
-      resolve10();
+      resolve11();
     });
   });
 }
@@ -25541,8 +25607,8 @@ async function boundedStopSideDiagnostic(operation) {
   try {
     const diagnostics = await Promise.race([
       operation.catch(() => void 0),
-      new Promise((resolve10) => {
-        timer = setTimeout(() => resolve10(void 0), 1500);
+      new Promise((resolve11) => {
+        timer = setTimeout(() => resolve11(void 0), 1500);
       })
     ]);
     return diagnostics?.sideConversation === true;
@@ -27415,8 +27481,8 @@ async function acknowledgeLiveInput(deps, payload, scope, threadId, mode) {
   try {
     const result = await Promise.race([
       operation,
-      new Promise((resolve10) => {
-        timer = setTimeout(() => resolve10(pending), 200);
+      new Promise((resolve11) => {
+        timer = setTimeout(() => resolve11(pending), 200);
       })
     ]);
     if (result !== pending) return result;
@@ -27497,7 +27563,7 @@ async function forwardLiveInput(deps, payload, scope, threadId, mode) {
     try {
       const diagnostics = await Promise.race([
         deps.liveDiagnostics(scope),
-        new Promise((resolve10) => setTimeout(() => resolve10(void 0), 2e3))
+        new Promise((resolve11) => setTimeout(() => resolve11(void 0), 2e3))
       ]);
       if (!diagnostics) {
         log.info("cardAction", "live-input-diagnostics-timeout", { scope });
@@ -28871,7 +28937,7 @@ var ActiveRuns = class {
     if (!this.sideHandles.has(chatId)) return true;
     const waiters = this.sideReleaseWaiters.get(chatId) ?? /* @__PURE__ */ new Set();
     this.sideReleaseWaiters.set(chatId, waiters);
-    return new Promise((resolve10) => {
+    return new Promise((resolve11) => {
       let settled = false;
       let timer;
       const onRelease = () => {
@@ -28880,7 +28946,7 @@ var ActiveRuns = class {
         if (timer) clearTimeout(timer);
         waiters.delete(onRelease);
         if (waiters.size === 0) this.sideReleaseWaiters.delete(chatId);
-        resolve10(!this.sideHandles.has(chatId));
+        resolve11(!this.sideHandles.has(chatId));
       };
       timer = setTimeout(onRelease, Math.max(0, timeoutMs));
       waiters.add(onRelease);
@@ -29016,7 +29082,7 @@ var ActiveRuns = class {
   notifySideReleased(chatId) {
     const waiters = this.sideReleaseWaiters.get(chatId);
     if (!waiters) return;
-    for (const resolve10 of [...waiters]) resolve10();
+    for (const resolve11 of [...waiters]) resolve11();
   }
   durableStopKey(chatId, target) {
     return `${target}:${chatId}`;
@@ -29050,7 +29116,7 @@ var ProcessPool = class {
     }
     log.info("pool", "wait", { active: this.active, cap: this.cap(), waiting: this.waiters.length + 1 });
     reportMetric("pool_waiting", this.waiters.length + 1);
-    await new Promise((resolve10) => this.waiters.push(resolve10));
+    await new Promise((resolve11) => this.waiters.push(resolve11));
     this.active++;
     log.info("pool", "acquired", { active: this.active, cap: this.cap() });
     reportMetric("pool_active", this.active);
@@ -29408,11 +29474,11 @@ var EventFanout = class {
               release();
               return { done: true, value: void 0 };
             }
-            await new Promise((resolve10) => {
+            await new Promise((resolve11) => {
               waiter = () => {
                 if (waiter) this.waiters.delete(waiter);
                 waiter = void 0;
-                resolve10();
+                resolve11();
               };
               this.waiters.add(waiter);
             });
@@ -30184,8 +30250,8 @@ async function nextCommentEvent(iterator, expiresAt) {
   try {
     return await Promise.race([
       iterator.next(),
-      new Promise((resolve10) => {
-        timer = setTimeout(() => resolve10("expired"), delayMs);
+      new Promise((resolve11) => {
+        timer = setTimeout(() => resolve11("expired"), delayMs);
       })
     ]);
   } finally {
@@ -30722,12 +30788,12 @@ var ArtifactBroker = class {
     this.server = createServer((socket) => {
       void this.handle(socket);
     });
-    await new Promise((resolve10, reject4) => {
+    await new Promise((resolve11, reject4) => {
       const server = this.server;
       server.once("error", reject4);
       server.listen(this.socketPath, () => {
         server.off("error", reject4);
-        resolve10();
+        resolve11();
       });
     });
   }
@@ -30740,18 +30806,22 @@ var ArtifactBroker = class {
         existing.replyTo = input.replyTo;
         existing.replyInThread = input.replyInThread;
         existing.maxFileBytes = input.maxFileBytes;
+        existing.updatedAt = Date.now();
+        existing.allowedRoots = [
+          .../* @__PURE__ */ new Set([...existing.allowedRoots, ...input.allowedRoots])
+        ];
         this.schedulePersist();
-        return { socketPath: this.socketPath, token: existing.token };
+        return { scope: existing.scope, socketPath: this.socketPath, token: existing.token };
       }
       this.persistentTokensByScope.delete(input.scope);
     }
     const token = randomBytes5(32).toString("base64url");
-    this.grants.set(token, { ...input, token });
+    this.grants.set(token, { ...input, token, updatedAt: Date.now() });
     if (input.persistent) {
       this.persistentTokensByScope.set(input.scope, token);
       this.schedulePersist();
     }
-    return { socketPath: this.socketPath, token };
+    return { scope: input.scope, socketPath: this.socketPath, token };
   }
   revoke(token) {
     if (!token) return;
@@ -30767,7 +30837,10 @@ var ArtifactBroker = class {
   activate(token, allowedRoots) {
     const grant = this.grants.get(token);
     if (!grant) return false;
-    grant.allowedRoots = [...new Set(allowedRoots)];
+    grant.allowedRoots = [
+      .../* @__PURE__ */ new Set([...grant.allowedRoots, ...allowedRoots])
+    ];
+    grant.updatedAt = Date.now();
     if (grant.persistent) this.schedulePersist();
     return true;
   }
@@ -30783,7 +30856,7 @@ var ArtifactBroker = class {
     const server = this.server;
     this.server = void 0;
     if (server) {
-      await new Promise((resolve10) => server.close(() => resolve10()));
+      await new Promise((resolve11) => server.close(() => resolve11()));
     }
     if (process.platform !== "win32") await rm15(this.socketPath, { force: true }).catch(() => {
     });
@@ -30821,7 +30894,7 @@ var ArtifactBroker = class {
   async deliver(request) {
     if (typeof request.token !== "string") throw new Error("\u65E0\u6548\u7684 bridge \u6587\u4EF6\u80FD\u529B\u4EE4\u724C");
     const grant = this.grants.get(request.token);
-    if (!grant) throw new Error("\u6587\u4EF6\u80FD\u529B\u4EE4\u724C\u5DF2\u5931\u6548\uFF1B\u8BF7\u5728\u5F53\u524D\u4EFB\u52A1\u5185\u91CD\u65B0\u8BF7\u6C42\u53D1\u9001");
+    if (!grant) throw new Error("\u6587\u4EF6\u80FD\u529B\u4EE4\u724C\u5DF2\u5931\u6548\uFF1B\u5BA2\u6237\u7AEF\u4F1A\u5C1D\u8BD5\u4ECE\u5F53\u524D profile \u7684\u6700\u65B0\u6388\u6743\u6062\u590D");
     if (typeof request.path !== "string" || !request.path.trim()) {
       throw new Error("\u8BF7\u63D0\u4F9B\u8981\u53D1\u9001\u7684\u6587\u4EF6\u8DEF\u5F84");
     }
@@ -30832,8 +30905,16 @@ var ArtifactBroker = class {
     if (grant.allowedRoots.length === 0) {
       throw new Error("\u5F53\u524D\u4EFB\u52A1\u5C1A\u672A\u6388\u6743\u6587\u4EF6\u76EE\u5F55\uFF1B\u8BF7\u5728\u5F53\u524D\u4EFB\u52A1\u4E2D\u91CD\u65B0\u8BF7\u6C42\u53D1\u9001");
     }
-    const requested = resolve8(grant.allowedRoots[0], request.path);
-    const entry = await lstat8(requested).catch(() => void 0);
+    let requested;
+    let entry;
+    for (const root2 of grant.allowedRoots) {
+      const candidate = resolve8(root2, request.path);
+      const candidateEntry = await lstat8(candidate).catch(() => void 0);
+      if (!candidateEntry) continue;
+      requested = candidate;
+      entry = candidateEntry;
+      break;
+    }
     if (!entry) throw new Error("\u6587\u4EF6\u4E0D\u5B58\u5728\u6216\u4E0D\u53EF\u8BBF\u95EE");
     if (entry.isSymbolicLink()) throw new Error("\u4E0D\u5141\u8BB8\u53D1\u9001\u7B26\u53F7\u94FE\u63A5");
     if (!entry.isFile()) throw new Error("\u53EA\u80FD\u53D1\u9001\u666E\u901A\u6587\u4EF6");
@@ -32684,8 +32765,8 @@ async function withBoundedSideDiagnostic(operation, timeoutMs) {
   try {
     return await Promise.race([
       operation.catch(() => void 0),
-      new Promise((resolve10) => {
-        timer = setTimeout(() => resolve10(void 0), timeoutMs);
+      new Promise((resolve11) => {
+        timer = setTimeout(() => resolve11(void 0), timeoutMs);
       })
     ]);
   } finally {
@@ -33001,7 +33082,7 @@ async function runAgentBatch(deps) {
     ...mode === "topic" && threadId ? { replyInThread: true } : {},
     allowedRoots: [],
     maxFileBytes: controls.profileConfig.attachments.maxFileBytes,
-    persistent: useLiveSession
+    persistent: true
   });
   const flow = await startRunFlow({
     scopeId: scope,
@@ -33033,13 +33114,11 @@ async function runAgentBatch(deps) {
   if (!flow.ok) {
     if (flow.rejectReason.code === "stop-requested" || stopRequested("flow-rejected")) {
       if (firstInputMode === "side") clearSideConversationState(sideConversationByScope, scope);
-      artifactBroker.revoke(artifactGrant.token);
       return;
     }
     if (sideInputMode) {
       clearSideConversationState(sideConversationByScope, scope);
     }
-    if (!useLiveSession) artifactBroker.revoke(artifactGrant.token);
     log.info("run-flow", "rejected", { scope, code: flow.rejectReason.code });
     log.warn("policy", "denied", {
       scope,
@@ -33503,16 +33582,16 @@ ${delta}`.slice(-64e3);
       let segmentTextReadyFlag = true;
       const armSegmentTextWait = () => {
         segmentTextReadyFlag = false;
-        segmentTextReady = new Promise((resolve10) => {
-          resolveSegmentText = resolve10;
+        segmentTextReady = new Promise((resolve11) => {
+          resolveSegmentText = resolve11;
         });
       };
       const signalSegmentText = (state) => {
         if (resolveSegmentText && runStateTextCursor(prepareStateForReply(state)) !== segmentBaseText) {
-          const resolve10 = resolveSegmentText;
+          const resolve11 = resolveSegmentText;
           resolveSegmentText = void 0;
           segmentTextReadyFlag = true;
-          resolve10();
+          resolve11();
         }
       };
       const stateForSegment = (state) => projectRunStateFromCursor(prepareStateForReply(state), segmentBaseText);
@@ -33698,16 +33777,16 @@ ${delta}`.slice(-64e3);
       let segmentTextReadyFlag = true;
       const armSegmentTextWait = () => {
         segmentTextReadyFlag = false;
-        segmentTextReady = new Promise((resolve10) => {
-          resolveSegmentText = resolve10;
+        segmentTextReady = new Promise((resolve11) => {
+          resolveSegmentText = resolve11;
         });
       };
       const signalSegmentText = (state) => {
         if (resolveSegmentText && runStateTextCursor(prepareStateForReply(state)) !== segmentBaseText) {
-          const resolve10 = resolveSegmentText;
+          const resolve11 = resolveSegmentText;
           resolveSegmentText = void 0;
           segmentTextReadyFlag = true;
-          resolve10();
+          resolve11();
         }
       };
       const stateForSegment = (state) => projectRunStateFromCursor(prepareStateForReply(state), segmentBaseText);
@@ -33892,7 +33971,6 @@ ${delta}`.slice(-64e3);
   } catch (err) {
     log.fail("stream", err);
   } finally {
-    if (!useLiveSession) artifactBroker.revoke(artifactGrant.token);
     await promptBridge;
     await Promise.allSettled(interactionSends);
     if (useLiveSession && nativeCommand && controls.profileConfig.agentKind === "codex" && observedNativeModelSelection && !pickerObservedAfterInput) {
@@ -34284,8 +34362,8 @@ async function runRollingReplyStream(input) {
     segment += 1;
     let producerStarted = false;
     let rolloverTimer;
-    const rollover = new Promise((resolve10) => {
-      rolloverTimer = setTimeout(resolve10, rolloverMs);
+    const rollover = new Promise((resolve11) => {
+      rolloverTimer = setTimeout(resolve11, rolloverMs);
     });
     const segmentDone = Promise.race([
       renderResult.then(() => void 0),
@@ -34392,7 +34470,7 @@ function scheduleWorkingReactionCleanup(channel, messageId, reactionPromise) {
   })();
 }
 function delay2(ms) {
-  return new Promise((resolve10) => setTimeout(resolve10, ms));
+  return new Promise((resolve11) => setTimeout(resolve11, ms));
 }
 function buildPrompt(batch, attachments, quotes = [], topicContext = []) {
   const first = batch[0];
@@ -35826,7 +35904,7 @@ async function resolveConflict(conflicts) {
     return false;
   }
   const rl = createInterface8({ input: process.stdin, output: process.stdout });
-  const ask = (q) => new Promise((resolve10) => rl.question(q, resolve10));
+  const ask = (q) => new Promise((resolve11) => rl.question(q, resolve11));
   try {
     const verb = conflicts.length > 1 ? "\u5B83\u4EEC" : "\u90A3\u4E2A";
     const answer = (await ask(`\u7EE7\u7EED\u542F\u52A8\u4F1A\u5148\u5173\u6389${verb},\u662F\u5426\u7EE7\u7EED? [y/N]: `)).trim().toLowerCase();
@@ -35881,7 +35959,7 @@ async function confirmStopRuntimeLockProcess2(err) {
   const rl = createInterface8({ input: process.stdin, output: process.stdout });
   try {
     const answer = (await new Promise(
-      (resolve10) => rl.question("\u662F\u5426\u505C\u6B62\u65E7\u8FDB\u7A0B\u5E76\u91CD\u65B0\u542F\u52A8? [y/N]: ", resolve10)
+      (resolve11) => rl.question("\u662F\u5426\u505C\u6B62\u65E7\u8FDB\u7A0B\u5E76\u91CD\u65B0\u542F\u52A8? [y/N]: ", resolve11)
     )).trim().toLowerCase();
     return answer === "y" || answer === "yes";
   } finally {
@@ -35913,21 +35991,46 @@ function formatAgo3(ms) {
 
 // src/cli/commands/agent-sendfile.ts
 import { spawnSync as spawnSync4 } from "child_process";
+import { readFile as readFile28 } from "fs/promises";
 import { connect as connect2 } from "net";
+import { dirname as dirname25, isAbsolute as isAbsolute11, join as join40, relative as relative6, resolve as resolve9, sep as sep4 } from "path";
 function resolveAgentArtifactDelivery(env = process.env, readTmuxEnvironment = readTmuxSessionEnvironment) {
+  const scope = env.ARG_BRIDGE_ARTIFACT_SCOPE;
   const socketPath = env.ARG_BRIDGE_ARTIFACT_SOCKET;
   const token = env.ARG_BRIDGE_ARTIFACT_TOKEN;
-  if (socketPath && token) return { socketPath, token };
-  const resumedSocketPath = readTmuxEnvironment("ARG_BRIDGE_ARTIFACT_SOCKET", env);
-  const resumedToken = readTmuxEnvironment("ARG_BRIDGE_ARTIFACT_TOKEN", env);
-  return resumedSocketPath && resumedToken ? { socketPath: resumedSocketPath, token: resumedToken } : void 0;
+  if (env.TMUX && env.TMUX_PANE && /^%\d+$/u.test(env.TMUX_PANE)) {
+    const resumedScope = readTmuxEnvironment("ARG_BRIDGE_ARTIFACT_SCOPE", env);
+    const resumedSocketPath = readTmuxEnvironment("ARG_BRIDGE_ARTIFACT_SOCKET", env);
+    const resumedToken = readTmuxEnvironment("ARG_BRIDGE_ARTIFACT_TOKEN", env);
+    if (resumedSocketPath && resumedToken) {
+      return {
+        ...resumedScope ? { scope: resumedScope } : {},
+        socketPath: resumedSocketPath,
+        token: resumedToken
+      };
+    }
+  }
+  return socketPath && token ? { ...scope ? { scope } : {}, socketPath, token } : void 0;
 }
 async function runAgentSendFile(path, caption) {
   const artifact = resolveAgentArtifactDelivery();
   if (!artifact) {
     throw new Error("\u5F53\u524D\u8FDB\u7A0B\u6CA1\u6709 bridge \u6587\u4EF6\u53D1\u9001\u80FD\u529B\uFF1B\u8BF7\u4ECE bridge agent \u4EFB\u52A1\u5185\u8C03\u7528\uFF0C\u6216\u5728\u6258\u7BA1 tmux session \u4E2D\u91CD\u542F bridge \u540E\u91CD\u8BD5");
   }
-  const response = await new Promise((resolve10, reject4) => {
+  let response = await requestArtifactDelivery(artifact, path, caption);
+  const message = typeof response.message === "string" ? response.message : "";
+  if (response.ok !== true && /令牌已失效|capability.*expired/iu.test(message)) {
+    const renewed = await recoverArtifactDelivery(artifact);
+    if (renewed && renewed.token !== artifact.token) {
+      response = await requestArtifactDelivery(renewed, path, caption);
+    }
+  }
+  if (response.ok !== true) throw new Error(typeof response.message === "string" ? response.message : "bridge \u6587\u4EF6\u53D1\u9001\u5931\u8D25");
+  process.stdout.write(`${typeof response.message === "string" ? response.message : "\u6587\u4EF6\u5DF2\u53D1\u9001"}
+`);
+}
+function requestArtifactDelivery(artifact, path, caption) {
+  return new Promise((resolve11, reject4) => {
     const socket = connect2(artifact.socketPath);
     let data = "";
     socket.setEncoding("utf8");
@@ -35937,7 +36040,7 @@ async function runAgentSendFile(path, caption) {
       data += chunk;
       if (!data.includes("\n")) return;
       try {
-        resolve10(JSON.parse(data.slice(0, data.indexOf("\n"))));
+        resolve11(JSON.parse(data.slice(0, data.indexOf("\n"))));
       } catch (err) {
         reject4(err);
       }
@@ -35948,9 +36051,34 @@ async function runAgentSendFile(path, caption) {
 `);
     });
   });
-  if (response.ok !== true) throw new Error(typeof response.message === "string" ? response.message : "bridge \u6587\u4EF6\u53D1\u9001\u5931\u8D25");
-  process.stdout.write(`${typeof response.message === "string" ? response.message : "\u6587\u4EF6\u5DF2\u53D1\u9001"}
-`);
+}
+async function recoverArtifactDelivery(stale, cwd = process.cwd()) {
+  if (!stale.scope) return void 0;
+  const statePath = join40(dirname25(stale.socketPath), "artifact-grants.json");
+  let parsed;
+  try {
+    parsed = JSON.parse(await readFile28(statePath, "utf8"));
+  } catch {
+    return void 0;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return void 0;
+  const root = parsed;
+  if (root.version !== 1 || !Array.isArray(root.grants)) return void 0;
+  const currentCwd = resolve9(cwd);
+  const candidates = root.grants.flatMap((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+    const grant = entry;
+    if (grant.persistent !== true || grant.scope !== stale.scope || typeof grant.token !== "string" || !/^[A-Za-z0-9_-]{16,200}$/u.test(grant.token) || !Array.isArray(grant.allowedRoots)) return [];
+    const allowed = grant.allowedRoots.some(
+      (value) => typeof value === "string" && isAbsolute11(value) && isWithin2(currentCwd, resolve9(value))
+    );
+    return allowed ? [{
+      token: grant.token,
+      updatedAt: typeof grant.updatedAt === "number" && Number.isFinite(grant.updatedAt) ? grant.updatedAt : 0
+    }] : [];
+  }).sort((left, right) => right.updatedAt - left.updatedAt);
+  const token = candidates[0]?.token;
+  return token ? { scope: stale.scope, socketPath: stale.socketPath, token } : void 0;
 }
 function readTmuxSessionEnvironment(name, env) {
   const pane = env.TMUX_PANE;
@@ -35965,13 +36093,17 @@ function readTmuxSessionEnvironment(name, env) {
   const line = result.stdout.trim();
   return line.startsWith(prefix) ? line.slice(prefix.length) || void 0 : void 0;
 }
+function isWithin2(path, root) {
+  const rel = relative6(root, path);
+  return rel === "" || rel !== ".." && !rel.startsWith(`..${sep4}`) && !isAbsolute11(rel);
+}
 
 // src/cli/commands/native.ts
-import { readFile as readFile28 } from "fs/promises";
-import { join as join40 } from "path";
+import { readFile as readFile29 } from "fs/promises";
+import { join as join41 } from "path";
 async function runNative(thread, opts) {
   const rootPaths = resolveAppPaths();
-  const root = JSON.parse(await readFile28(rootPaths.configFile, "utf8"));
+  const root = JSON.parse(await readFile29(rootPaths.configFile, "utf8"));
   const profileName = opts.profile ?? root.activeProfile;
   const paths2 = resolveAppPaths({ profile: profileName });
   if (!root.profiles?.[profileName]) throw new Error(`Unknown profile: ${profileName}`);
@@ -36092,9 +36224,9 @@ async function runNative(thread, opts) {
       }
     }
   }
-  for (const file of [join40(paths2.profileDir, "structured", "tmux-bindings.json"), join40(paths2.profileDir, "preferred-panes.json")]) {
+  for (const file of [join41(paths2.profileDir, "structured", "tmux-bindings.json"), join41(paths2.profileDir, "preferred-panes.json")]) {
     try {
-      const stored = JSON.parse(await readFile28(file, "utf8"));
+      const stored = JSON.parse(await readFile29(file, "utf8"));
       for (const entry of Object.values(stored.bindings ?? stored.targets ?? {})) {
         const identity = entry.structured ?? entry;
         if (identity.threadId === thread && identity.endpoint) candidates.add(identity.endpoint);
@@ -36145,8 +36277,8 @@ async function runNative(thread, opts) {
     fingerprint: {
       credentials: fingerprintCredentialEnv(credential.env),
       networkMode: thirdParty ? "inherit:third-party-direct" : config.network?.mode ?? "inherit",
-      configStamp: env.CODEX_HOME ? fileStamp(join40(env.CODEX_HOME, "config.toml")) : void 0,
-      authStamp: env.CODEX_HOME ? fileStamp(join40(env.CODEX_HOME, "auth.json")) : void 0
+      configStamp: env.CODEX_HOME ? fileStamp(join41(env.CODEX_HOME, "config.toml")) : void 0,
+      authStamp: env.CODEX_HOME ? fileStamp(join41(env.CODEX_HOME, "auth.json")) : void 0
     },
     ...runtimeIdentity ? { runtimeIdentity } : {}
   }));
@@ -36177,11 +36309,11 @@ async function waitChild(child) {
   };
   process.on("SIGINT", handle);
   try {
-    await new Promise((resolve10, reject4) => {
+    await new Promise((resolve11, reject4) => {
       child.once("error", reject4);
       child.once("exit", (code) => {
         process.exitCode = code ?? 0;
-        resolve10();
+        resolve11();
       });
     });
   } finally {
@@ -36192,13 +36324,13 @@ async function waitChild(child) {
 // src/cli/commands/settings.ts
 import { realpath as realpath11 } from "fs/promises";
 import { homedir as homedir17 } from "os";
-import { dirname as dirname26, join as join42, parse as parse4, resolve as resolve9 } from "path";
+import { dirname as dirname27, join as join43, parse as parse4, resolve as resolve10 } from "path";
 import * as p3 from "@clack/prompts";
 
 // src/agent/subagents/diagnostics.ts
 import { homedir as homedir16 } from "os";
-import { basename as basename10, dirname as dirname25, join as join41 } from "path";
-import { readFile as readFile29 } from "fs/promises";
+import { basename as basename10, dirname as dirname26, join as join42 } from "path";
+import { readFile as readFile30 } from "fs/promises";
 async function collectSubagentDiagnostics(input) {
   const env = input.env ?? process.env;
   const signal = input.signal ?? new AbortController().signal;
@@ -36288,7 +36420,7 @@ async function collectSubagentDiagnostics(input) {
       loaded: Boolean(routeMapState.config),
       ...routeMapState.error ? { error: redactSecrets(routeMapState.error) } : {}
     },
-    brokerConfigPath: env.MIXAGENTS_BROKER_CONFIG?.trim() || join41(env.XDG_CONFIG_HOME?.trim() || join41(homedir16(), ".config"), "mixagents", "broker.json"),
+    brokerConfigPath: env.MIXAGENTS_BROKER_CONFIG?.trim() || join42(env.XDG_CONFIG_HOME?.trim() || join42(homedir16(), ".config"), "mixagents", "broker.json"),
     selectedRoute: { id: null },
     selectedWriteRoute: { id: null },
     readRoutes: [],
@@ -36520,7 +36652,7 @@ async function inspectStructuredRuntime(stateDir, _namespace) {
   }
   let markers = [];
   try {
-    const parsed = JSON.parse(await readFile29(join41(stateDir, "broker-threads.json"), "utf8"));
+    const parsed = JSON.parse(await readFile30(join42(stateDir, "broker-threads.json"), "utf8"));
     if (isRecord6(parsed) && parsed.version === 1 && isRecord6(parsed.threads)) {
       markers = Object.entries(parsed.threads).flatMap(([threadId, value]) => {
         if (!isRecord6(value)) return [];
@@ -36532,7 +36664,7 @@ async function inspectStructuredRuntime(stateDir, _namespace) {
     }
   } catch {
   }
-  const hosts = await readHostRegistry(dirname25(stateDir));
+  const hosts = await readHostRegistry(dirname26(stateDir));
   return {
     brokerThreadMarkers: markers,
     appServerHosts: hosts.length,
@@ -37061,7 +37193,7 @@ async function loadSettingsSnapshot(options = {}) {
   const profileName = options.profile ?? root.activeProfile;
   const profile2 = root.profiles[profileName];
   if (!profile2) throw new Error(`profile \u4E0D\u5B58\u5728\uFF1A${profileName}`);
-  const cwd = resolve9(options.cwd ?? profile2.workspaces.default ?? process.cwd());
+  const cwd = resolve10(options.cwd ?? profile2.workspaces.default ?? process.cwd());
   const subagentConfig = profile2.subagents ?? DEFAULT_SUBAGENT_CONFIG;
   const rsiConfig = profile2.rsi ?? DEFAULT_RSI_CONFIG;
   const codexHome = profile2.codex?.codexHome ?? (profile2.codex?.inheritCodexHome === false ? `${paths2.profileDir}/codex-home` : defaultCodexHome());
@@ -37070,7 +37202,7 @@ async function loadSettingsSnapshot(options = {}) {
       config: subagentConfig,
       cwd,
       env,
-      stateDir: join42(paths2.profileDir, "structured"),
+      stateDir: join43(paths2.profileDir, "structured"),
       codexHome,
       codexBin: profile2.codex?.binaryPath ?? "codex"
     }),
@@ -37219,9 +37351,9 @@ function boundedNumberInput(value, minimum, maximum, label) {
 }
 async function validatedRsiRoot(input) {
   if (!input || input.includes("\0")) throw new Error("Project RSI root \u65E0\u6548");
-  const candidate = await realpath11(resolve9(input)).catch(() => void 0);
+  const candidate = await realpath11(resolve10(input)).catch(() => void 0);
   if (!candidate) throw new Error(`Project RSI root \u4E0D\u5B58\u5728\uFF1A${input}`);
-  if (candidate === parse4(candidate).root || candidate === resolve9(homedir17()) || dirname26(candidate) === parse4(candidate).root) {
+  if (candidate === parse4(candidate).root || candidate === resolve10(homedir17()) || dirname27(candidate) === parse4(candidate).root) {
     throw new Error("Project RSI root \u4E0D\u80FD\u662F /\u3001home \u6216\u5BBD\u6CDB\u7236\u76EE\u5F55");
   }
   const project = await discoverProjectRsi(candidate, candidate);
@@ -37263,7 +37395,7 @@ function providerSwitchState(running, configuredCcSwitchProviderId, configured, 
 
 // src/cli/commands/doctor.ts
 import { createHash as createHash17 } from "crypto";
-import { join as join43 } from "path";
+import { join as join44 } from "path";
 async function runDoctor(options = {}) {
   const report = await loadDoctorReport(options);
   if (options.json || !process.stdout.isTTY) {
@@ -37533,9 +37665,9 @@ async function probeSubagentRoute(options, requestedRoute) {
       },
       env,
       cwd: options.cwd ?? profile2.workspaces.default ?? process.cwd(),
-      stateDir: join43(paths2.profileDir, "structured"),
+      stateDir: join44(paths2.profileDir, "structured"),
       codexBin: profile2.codex?.binaryPath ?? "codex",
-      ...profile2.codex?.codexHome ? { codexHome: profile2.codex.codexHome } : profile2.codex?.inheritCodexHome === false ? { codexHome: join43(paths2.profileDir, "codex-home") } : {},
+      ...profile2.codex?.codexHome ? { codexHome: profile2.codex.codexHome } : profile2.codex?.inheritCodexHome === false ? { codexHome: join44(paths2.profileDir, "codex-home") } : {},
       requestedRoute,
       signal: controller.signal
     });
@@ -37600,11 +37732,11 @@ import {
   copyFile as copyFile3,
   lstat as lstat9,
   mkdir as mkdir27,
-  readFile as readFile30,
+  readFile as readFile31,
   readdir as readdir8,
   writeFile as writeFile10
 } from "fs/promises";
-import { basename as basename11, dirname as dirname27, join as join44 } from "path";
+import { basename as basename11, dirname as dirname28, join as join45 } from "path";
 import { fileURLToPath as fileURLToPath3 } from "url";
 var POC_MARKERS = [
   "ARG_BRIDGE_LOCAL_POC_MANAGED",
@@ -37652,13 +37784,13 @@ async function migrateLocalPoc(options = {}) {
     conflicts: [],
     rollback: []
   };
-  for (const relative6 of ["dist/cli.js", "dist/broker-side.js"]) {
-    const path = join44(packageDir, relative6);
-    const body = await readFile30(path, "utf8").catch(() => void 0);
+  for (const relative7 of ["dist/cli.js", "dist/broker-side.js"]) {
+    const path = join45(packageDir, relative7);
+    const body = await readFile31(path, "utf8").catch(() => void 0);
     if (body === void 0) continue;
     const marker = POC_MARKERS.some((item) => body.includes(item));
     const sha2562 = createHash18("sha256").update(body).digest("hex");
-    const expectedHash = packageVersion ? KNOWN_CLEAN_HASHES[packageVersion]?.[relative6] : void 0;
+    const expectedHash = packageVersion ? KNOWN_CLEAN_HASHES[packageVersion]?.[relative7] : void 0;
     const unknownOneVersionSevenFile = packageVersion === "1.6.7" && !expectedHash;
     const unknownModifiedKnownVersion = Boolean(expectedHash && expectedHash !== sha2562);
     if (!marker) {
@@ -37697,7 +37829,7 @@ async function migrateLocalPoc(options = {}) {
       action: "restore-backup"
     });
   }
-  const sideMapPath = join44(paths2.profileDir, "structured", "subagent-sides.json");
+  const sideMapPath = join45(paths2.profileDir, "structured", "subagent-sides.json");
   let sideMap = await migrateSideMap(sideMapPath, false, timestamp);
   if (sideMap) {
     report.sideMap = sideMap;
@@ -37728,8 +37860,8 @@ async function migrateLocalPoc(options = {}) {
     }
   }
   if (apply && report.conflicts.length === 0 && changes) {
-    const markerFile = join44(paths2.profileDir, ".arg-bridge", "migrations", "local-poc-v1.json");
-    await mkdir27(dirname27(markerFile), { recursive: true, mode: 448 });
+    const markerFile = join45(paths2.profileDir, ".arg-bridge", "migrations", "local-poc-v1.json");
+    await mkdir27(dirname28(markerFile), { recursive: true, mode: 448 });
     await writeFile10(markerFile, `${JSON.stringify({
       version: 1,
       appliedAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -37743,7 +37875,7 @@ async function migrateLocalPoc(options = {}) {
   return report;
 }
 async function migrateSideMap(path, apply, timestamp) {
-  const raw = await readFile30(path, "utf8").catch(() => void 0);
+  const raw = await readFile31(path, "utf8").catch(() => void 0);
   if (raw === void 0) return void 0;
   let parsed;
   try {
@@ -37809,7 +37941,7 @@ function normalizeSideMap(input) {
   };
 }
 async function findOriginalBackup(path) {
-  const names = await readdir8(dirname27(path)).catch(() => []);
+  const names = await readdir8(dirname28(path)).catch(() => []);
   const stem = basename11(path);
   const candidates = names.filter(
     (name) => [
@@ -37818,13 +37950,13 @@ async function findOriginalBackup(path) {
       `${stem}.arg-bridge-original`,
       `${stem}.bak`
     ].includes(name)
-  ).map((name) => join44(dirname27(path), name));
+  ).map((name) => join45(dirname28(path), name));
   return candidates.length === 1 ? candidates[0] : void 0;
 }
 async function locatePackageDir() {
-  let current = dirname27(fileURLToPath3(import.meta.url));
+  let current = dirname28(fileURLToPath3(import.meta.url));
   for (; ; ) {
-    const packageFile = await readFile30(join44(current, "package.json"), "utf8").catch(() => void 0);
+    const packageFile = await readFile31(join45(current, "package.json"), "utf8").catch(() => void 0);
     if (packageFile) {
       try {
         const parsed = JSON.parse(packageFile);
@@ -37832,14 +37964,14 @@ async function locatePackageDir() {
       } catch {
       }
     }
-    const parent = dirname27(current);
+    const parent = dirname28(current);
     if (parent === current) throw new Error("\u65E0\u6CD5\u5B9A\u4F4D\u5DF2\u5B89\u88C5\u7684 arg-bridge package");
     current = parent;
   }
 }
 async function readPackageVersion(packageDir) {
   try {
-    const parsed = JSON.parse(await readFile30(join44(packageDir, "package.json"), "utf8"));
+    const parsed = JSON.parse(await readFile31(join45(packageDir, "package.json"), "utf8"));
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) && typeof parsed.version === "string" ? parsed.version : void 0;
   } catch {
     return void 0;

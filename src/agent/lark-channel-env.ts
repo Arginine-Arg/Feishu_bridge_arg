@@ -9,6 +9,7 @@ export interface LarkChannelEnvContext {
 }
 
 export interface ArtifactDeliveryEnv {
+  scope?: string;
   socketPath: string;
   token: string;
 }
@@ -42,6 +43,7 @@ export function withArtifactDeliveryEnv(
   if (!artifact) return base;
   return {
     ...base,
+    ...(artifact.scope ? { ARG_BRIDGE_ARTIFACT_SCOPE: artifact.scope } : {}),
     ARG_BRIDGE_ARTIFACT_SOCKET: artifact.socketPath,
     ARG_BRIDGE_ARTIFACT_TOKEN: artifact.token,
   };

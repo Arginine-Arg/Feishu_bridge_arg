@@ -262,6 +262,9 @@ function isHighImpactConclusion(text: string): boolean {
 function artifactEnvFrom(options: AgentRunOptions): NodeJS.ProcessEnv | undefined {
   return options.artifactDelivery
     ? {
+        ...(options.artifactDelivery.scope
+          ? { ARG_BRIDGE_ARTIFACT_SCOPE: options.artifactDelivery.scope }
+          : {}),
         ARG_BRIDGE_ARTIFACT_SOCKET: options.artifactDelivery.socketPath,
         ARG_BRIDGE_ARTIFACT_TOKEN: options.artifactDelivery.token,
       }
@@ -426,6 +429,8 @@ interface MixAgentsSideState {
   backend?: SubagentBackend;
   route: SubagentRoute;
   routeFingerprint: string;
+  artifactSocketPath?: string;
+  artifactToken?: string;
   /** Last progress callback consumed by this Bridge. */
   progressCursor?: number;
   /** Stable scope/cwd key; worker cwd can be an explicitly authorized child. */
@@ -674,6 +679,8 @@ export class StructuredAdapter implements AgentAdapter {
           route: side.route,
           routeFingerprint: side.routeFingerprint ?? subagentRouteFingerprint(side.route),
           ...(side.progressCursor !== undefined ? { progressCursor: side.progressCursor } : {}),
+          ...(side.artifactSocketPath ? { artifactSocketPath: side.artifactSocketPath } : {}),
+          ...(side.artifactToken ? { artifactToken: side.artifactToken } : {}),
           ...(side.scopeCwd ? { scopeCwd: side.scopeCwd } : {}),
           cwd: side.cwd,
           scope: side.scope,
@@ -692,6 +699,8 @@ export class StructuredAdapter implements AgentAdapter {
           route: side.route,
           routeFingerprint: side.routeFingerprint,
           ...(side.progressCursor !== undefined ? { progressCursor: side.progressCursor } : {}),
+          ...(side.artifactSocketPath ? { artifactSocketPath: side.artifactSocketPath } : {}),
+          ...(side.artifactToken ? { artifactToken: side.artifactToken } : {}),
           ...(side.scopeCwd ? { scopeCwd: side.scopeCwd } : {}),
           cwd: side.cwd,
           scope: side.scope,
@@ -790,7 +799,10 @@ export class StructuredAdapter implements AgentAdapter {
         'structured',
         `broker-workers-${createHash('sha256').update(threadId).digest('hex').slice(0, 24)}.json`,
       ),
-      env: this.options.env ?? process.env,
+      env: {
+        ...(this.options.env ?? process.env),
+        ...buildLarkChannelEnv(this.options.larkChannel),
+      },
       namespace,
       getConfig: () => this.currentSubagentsConfig(),
       runtimeResolver: async () => {
@@ -856,7 +868,17 @@ export class StructuredAdapter implements AgentAdapter {
     );
     const backend = new MixAgentsBrokerBackend(
       config,
-      this.options.env ?? process.env,
+      {
+        ...(this.options.env ?? process.env),
+        ...buildLarkChannelEnv(this.options.larkChannel),
+        ...(state.artifactSocketPath && state.artifactToken
+          ? {
+              ARG_BRIDGE_ARTIFACT_SCOPE: state.scope,
+              ARG_BRIDGE_ARTIFACT_SOCKET: state.artifactSocketPath,
+              ARG_BRIDGE_ARTIFACT_TOKEN: state.artifactToken,
+            }
+          : {}),
+      },
       runtime,
     );
     state.backend = backend;
@@ -1046,6 +1068,19 @@ export class StructuredAdapter implements AgentAdapter {
     }
 
     let existing = this.sideStateFor(scope, scopeCwd);
+    const artifactSocketPath = input.options.artifactDelivery?.socketPath;
+    const artifactToken = input.options.artifactDelivery?.token;
+    if (
+      existing &&
+      (existing.artifactSocketPath !== artifactSocketPath ||
+        existing.artifactToken !== artifactToken)
+    ) {
+      emit(textEvent(
+        `side artifact capability changed; recreating ${existing.agent.agentId} with the current file-delivery token.\n`,
+      ));
+      await this.closeMixagentsSide(existing, signal);
+      existing = undefined;
+    }
     const changeReason = existing
       ? routeChangeReason(existing, route, workspace, access)
       : undefined;
@@ -1238,6 +1273,8 @@ export class StructuredAdapter implements AgentAdapter {
       backend: resolvedBackend,
       route,
       routeFingerprint: subagentRouteFingerprint(route),
+      ...(artifactSocketPath ? { artifactSocketPath } : {}),
+      ...(artifactToken ? { artifactToken } : {}),
       scopeCwd,
       cwd: workspace,
       scope,
@@ -2077,6 +2114,9 @@ export class StructuredAdapter implements AgentAdapter {
         }
         const current = await this.session(options);
         if (abort.signal.aborted) return;
+        if (current.main instanceof CodexStructuredSession) {
+          await current.main.refreshBrokerArtifactDelivery(options.artifactDelivery);
+        }
         if (side && /^\/btw\s+result\s*$/iu.test(options.prompt.trim())) {
           await this.collectLateMixagentsResult({
             scope,
@@ -2158,6 +2198,9 @@ export class StructuredAdapter implements AgentAdapter {
             ...buildLarkChannelEnv(this.options.larkChannel),
             ...(options.artifactDelivery
               ? {
+                  ...(options.artifactDelivery.scope
+                    ? { ARG_BRIDGE_ARTIFACT_SCOPE: options.artifactDelivery.scope }
+                    : {}),
                   ARG_BRIDGE_ARTIFACT_SOCKET: options.artifactDelivery.socketPath,
                   ARG_BRIDGE_ARTIFACT_TOKEN: options.artifactDelivery.token,
                 }
@@ -2300,6 +2343,9 @@ export class StructuredAdapter implements AgentAdapter {
         if (!side && target === current.main && this.id === 'codex' && this.options.nativeView !== false) {
           const artifactEnv = options.artifactDelivery
             ? {
+                ...(options.artifactDelivery.scope
+                  ? { ARG_BRIDGE_ARTIFACT_SCOPE: options.artifactDelivery.scope }
+                  : {}),
                 ARG_BRIDGE_ARTIFACT_SOCKET: options.artifactDelivery.socketPath,
                 ARG_BRIDGE_ARTIFACT_TOKEN: options.artifactDelivery.token,
               }

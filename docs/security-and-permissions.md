@@ -49,6 +49,24 @@ non-secret table:
 cc-switch -a codex provider list
 ```
 
+## File delivery capability
+
+- The artifact broker is the only component allowed to upload agent files.
+- Each chat scope has one opaque persistent capability, stored in the
+  profile-local mode-0600 grant file. The token does not contain a chat ID,
+  path, credential or provider key.
+- Main and side workspaces are merged into the broker's allowed-root set.
+  Every send still requires a cwd-relative regular file, no `..`, no symlink,
+  realpath containment, the profile media-root policy and the configured size
+  limit.
+- A long-lived tmux, structured or subagent process may retain an older token
+  across upgrades. The CLI first reads the managed tmux session capability; if
+  the broker rejects a stale token, it may recover only the newest persistent
+  grant whose allowed roots contain the current cwd and retry once.
+- Recovery still runs through the broker socket and repeats every file,
+  callback, chat, reply-target and size check. It cannot select another chat or
+  bypass the sandbox.
+
 ## Provider capabilities and web search
 
 Native Responses `web_search` is a provider capability, not a Bridge

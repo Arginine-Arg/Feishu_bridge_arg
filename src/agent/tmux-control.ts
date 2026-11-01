@@ -356,9 +356,11 @@ export class TmuxBindingController {
       return false;
     }
     for (const [key, value] of [
+      ['ARG_BRIDGE_ARTIFACT_SCOPE', artifact.scope],
       ['ARG_BRIDGE_ARTIFACT_SOCKET', artifact.socketPath],
       ['ARG_BRIDGE_ARTIFACT_TOKEN', artifact.token],
     ] as const) {
+      if (!value) continue;
       const result = spawnProcessSync(
         'tmux',
         ['-S', terminal.socketPath, 'set-environment', '-t', saved.sessionName, key, value],

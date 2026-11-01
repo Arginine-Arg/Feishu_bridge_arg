@@ -4,7 +4,7 @@ A lightweight bot that bridges Feishu / Lark messenger with your local Claude Co
 
 [中文 README](./README.zh.md)
 
-Version 1.14.0 makes `/btw` workspace-write by default, lets side workers run commands and send files through lark-cli, and turns provider adoption into a linear context lineage. Provider switches such as A -> B -> A now continue from B's latest context instead of rewinding to the old A branch; long histories use a 48k-character snapshot with recent-tail fallback. Version 1.13.2 made explicit `/steer` available for active `/goal resume` turns.
+Version 1.15.0 makes file delivery capabilities persistent per chat scope and renews stale tokens through the broker for live tmux, structured main sessions, `/btw` workers and model-visible subagents. Main and side workspaces are merged into the grant while every regular-file, symlink, realpath, reply-target and size check remains enforced. Version 1.14.0 made `/btw` workspace-write by default and provider adoption linear across A -> B -> A switches.
 
 Version 1.6.7 introduced provider-aware Codex resume, and 1.7.0 added idle-boundary rebinding. Version 1.9.1 narrows reattachment semantics: reconnecting to an existing native or structured thread preserves the provider/model recorded by that thread instead of silently following a newly selected cc-switch route.
 
@@ -60,7 +60,7 @@ Install a pinned release or use a writable custom npm prefix when required:
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.14.0
+sh /tmp/install-arg-bridge.sh --version 1.15.0
 # Example for a machine without permission to write npm's configured global prefix:
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ Release tarballs are preferred. If a Git install is required, keep both compatib
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.14.0"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.15.0"
 ```
 
-`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.14.0`.
+`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.15.0`.
 
 ### 4. Node or npm global-prefix errors
 
@@ -496,7 +496,7 @@ The bridge checks that a selected directory exists, is a directory, and is not a
 
 Every directory is resolved through the same broad-root policy as a workspace. Files remain subject to regular-file, symlink, realpath containment, and `attachments.maxFileBytes` checks in both the bridge and channel SDK. Do not add `/`, the home root, or an entire shared volume.
 
-When an agent produces a file during a task, it uses the bridge capability rather than a direct Lark upload: `arg-bridge sendfile <cwd-relative-path> [--caption "..."]`. The bridge binds that request to the current scope, reply target, workspace root, and file-size policy. Live terminals retain a profile-local opaque capability across turns and bridge restarts; the bridge refreshes its permitted root and reply target for each accepted run. A bridge-managed tmux session also passes that scoped capability to panes created later in the same session, so closing a pane and running `codex --resume` in a split pane does not lose file delivery. This does not apply to an externally bound tmux session or an unrelated shell.
+When an agent produces a file during a task, it uses the bridge capability rather than a direct Lark upload: `arg-bridge sendfile <cwd-relative-path> [--caption "..."]`. The bridge binds that request to the current scope, reply target, allowed workspace roots, and file-size policy. Every chat scope now keeps a stable profile-local opaque capability across turns, bridge restarts, structured main sessions, reusable `/btw` workers, model-visible subagents, and bridge-managed tmux panes. Active main and side workspaces are merged into the broker grant. If a long-lived process still holds a stale token, the CLI retries once with the newest matching 0600 profile grant for its current cwd; this is renewal through the existing broker, not a direct upload or sandbox bypass.
 
 ### Bundled Codex skill
 

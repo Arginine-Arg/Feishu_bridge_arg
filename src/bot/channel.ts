@@ -2333,7 +2333,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     ...(mode === 'topic' && threadId ? { replyInThread: true } : {}),
     allowedRoots: [],
     maxFileBytes: controls.profileConfig.attachments.maxFileBytes,
-    persistent: useLiveSession,
+    persistent: true,
   });
   const flow = await startRunFlow({
     scopeId: scope,
@@ -2365,13 +2365,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   if (!flow.ok) {
     if (flow.rejectReason.code === 'stop-requested' || stopRequested('flow-rejected')) {
       if (firstInputMode === 'side') clearSideConversationState(sideConversationByScope, scope);
-      artifactBroker.revoke(artifactGrant.token);
       return;
     }
     if (sideInputMode) {
       clearSideConversationState(sideConversationByScope, scope);
     }
-    if (!useLiveSession) artifactBroker.revoke(artifactGrant.token);
     log.info('run-flow', 'rejected', { scope, code: flow.rejectReason.code });
     log.warn('policy', 'denied', {
       scope,
@@ -3435,7 +3433,6 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   } catch (err) {
     log.fail('stream', err);
   } finally {
-    if (!useLiveSession) artifactBroker.revoke(artifactGrant.token);
     // Let the interactive-prompt subscriber drain (it resolves when the event
     // stream ends); it never rejects, so this can't mask a run error.
     await promptBridge;

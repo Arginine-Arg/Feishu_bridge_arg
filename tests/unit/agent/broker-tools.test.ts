@@ -250,6 +250,35 @@ describe('Bridge Broker dynamic tools', () => {
     await tool.close();
   });
 
+  it('recreates a worker after the artifact capability generation changes', async () => {
+    const { backend, tool } = await controller();
+    await tool.refreshArtifactDelivery?.({
+      socketPath: '/tmp/artifact.sock',
+      token: 'artifact-token-one',
+    });
+    await tool.call('spawn_agent', {
+      name: 'artifact-worker',
+      task: 'Create a report',
+    });
+    await tool.refreshArtifactDelivery?.({
+      socketPath: '/tmp/artifact.sock',
+      token: 'artifact-token-two',
+    });
+    const followup = await tool.call('followup_task', {
+      logical_name: 'artifact-worker',
+      task: 'Send the report',
+    });
+
+    expect(JSON.parse(followup.text)).toMatchObject({
+      recreated: true,
+      reason: expect.stringContaining('artifact capability generation changed'),
+      agent_id: 'agent-2',
+    });
+    expect(backend.spawns).toHaveLength(2);
+    expect(backend.closes).toContain('agent-1');
+    await tool.close();
+  });
+
   it('fans out three concurrent routes and preserves plaintext followup', async () => {
     const { backend, tool } = await controller({ config: { maxConcurrentWorkers: 3 } });
     for (const [name, task, route] of [
