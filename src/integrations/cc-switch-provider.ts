@@ -4,6 +4,7 @@ import { chmod, mkdir, readFile, realpath } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { join, parse, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   parseCodexConfigSummary,
   isOfficialBaseUrl,
@@ -548,7 +549,9 @@ async function materializeManagedCodexLauncher(input: {
   const launcherPath = join(wrapperDir, `${name}.mjs`);
   const launcher = [
     '#!/usr/bin/env node',
-    "import { spawn } from 'node:child_process';",
+    // Native spawn cannot launch npm .cmd shims on Windows. Resolve from the
+    // installed Bridge package because this generated file lives in stateDir.
+    `import spawn from ${JSON.stringify(pathToFileURL(require.resolve('cross-spawn')).href)};`,
     '',
     `const codexBin = ${JSON.stringify(input.codexBin)};`,
     `const managedArgs = ${JSON.stringify(overrides)};`,

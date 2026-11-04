@@ -13581,6 +13581,7 @@ import { chmod as chmod6, mkdir as mkdir16, readFile as readFile15, realpath as 
 import { createRequire } from "module";
 import { homedir as homedir9 } from "os";
 import { join as join26, parse, resolve as resolve4 } from "path";
+import { pathToFileURL } from "url";
 var DEFAULT_CODEX_ENV_KEY = "OPENAI_API_KEY";
 var MAX_DB_ROW_BYTES = 8 * 1024 * 1024;
 var require2 = createRequire(import.meta.url);
@@ -13937,7 +13938,9 @@ async function materializeManagedCodexLauncher(input) {
   const launcherPath = join26(wrapperDir, `${name}.mjs`);
   const launcher = [
     "#!/usr/bin/env node",
-    "import { spawn } from 'node:child_process';",
+    // Native spawn cannot launch npm .cmd shims on Windows. Resolve from the
+    // installed Bridge package because this generated file lives in stateDir.
+    `import spawn from ${JSON.stringify(pathToFileURL(require2.resolve("cross-spawn")).href)};`,
     "",
     `const codexBin = ${JSON.stringify(input.codexBin)};`,
     `const managedArgs = ${JSON.stringify(overrides)};`,
