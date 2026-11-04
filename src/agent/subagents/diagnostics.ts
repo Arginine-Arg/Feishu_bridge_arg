@@ -357,6 +357,7 @@ export async function collectSubagentDiagnostics(input: {
           role: 'side',
           webSearch: input.config.webSearch,
           sideReasoningEffort: input.config.sideReasoningEffort,
+          providerOverrides: input.config.providerOverrides,
         },
       });
       brokerRuntime = {

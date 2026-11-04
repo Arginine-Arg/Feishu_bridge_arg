@@ -40,6 +40,12 @@ export interface CodexConfigSummary {
   modelReasoningEffort?: string;
   modelContextWindow?: number;
   modelMaxOutputTokens?: number;
+  modelProfiles?: Array<{
+    name: string;
+    model?: string;
+    modelProvider?: string;
+    reasoningEffort?: string;
+  }>;
   providers: Map<string, CodexProviderEntry>;
 }
 
@@ -314,7 +320,7 @@ export function parseCodexConfigSummary(raw: string): CodexConfigSummary {
       profiles.set(profileName, profile);
       continue;
     }
-    topLevel.set(key, value);
+    if (!section) topLevel.set(key, value);
   }
   finishProvider();
 
@@ -331,9 +337,17 @@ export function parseCodexConfigSummary(raw: string): CodexConfigSummary {
     ...(positiveInteger(topLevel.get('model_max_output_tokens'))
       ? { modelMaxOutputTokens: positiveInteger(topLevel.get('model_max_output_tokens')) }
       : {}),
-    ...(topLevel.get('model_reasoning_effort')
-      ? { modelReasoningEffort: topLevel.get('model_reasoning_effort') }
+    ...(profile?.get('model_reasoning_effort') ?? topLevel.get('model_reasoning_effort')
+      ? { modelReasoningEffort: profile?.get('model_reasoning_effort') ?? topLevel.get('model_reasoning_effort') }
       : {}),
+    ...(profiles.size > 0 ? {
+      modelProfiles: [...profiles].map(([name, values]) => ({
+        name,
+        model: values.get('model'),
+        modelProvider: values.get('model_provider') ?? topLevel.get('model_provider'),
+        reasoningEffort: values.get('model_reasoning_effort'),
+      })),
+    } : {}),
     providers,
   };
 }

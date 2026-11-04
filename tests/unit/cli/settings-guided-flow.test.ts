@@ -34,7 +34,11 @@ afterEach(async () => {
 });
 
 describe('guided settings flow', () => {
-  it('lets the user choose a cc-switch provider without hand-writing routes or credentials', async () => {
+  it.each([
+    { provider: '__follow_current__', model: 'model-a-v2', effort: 'high', selected: 'provider-a', expected: 'model-a-v2' },
+    { provider: 'provider-b', model: '__custom_model__', effort: 'medium', selected: 'provider-b', expected: 'custom/model-v3' },
+    { provider: '__follow_current__', model: '__provider_default__', effort: 'inherit', selected: 'provider-a', expected: null },
+  ])('saves provider-scoped model/effort selections: $provider $model', async ({ provider, model, effort, selected, expected }) => {
     const root = await mkdtemp(join(tmpdir(), 'arg-bridge-guided-settings-'));
     temporary.push(root);
     const ccHome = join(root, 'cc-switch');
@@ -45,6 +49,16 @@ describe('guided settings flow', () => {
     ]);
     await writeFile(join(ccHome, 'settings.json'), JSON.stringify({
       currentProviderCodex: 'provider-a',
+      providers: { codex: ['a', 'b'].map(id => ({
+        id: `provider-${id}`,
+        name: `Provider ${id}`,
+        settings_config: {
+          auth: { OPENAI_API_KEY: 'sk-super-secret-value' },
+          config: `model = "model-${id}"\nmodel_provider = "custom"\nmodel_reasoning_effort = "max"\n` +
+            `[model_providers.custom]\nbase_url = "https://example.test/v1"\n` +
+            `[profiles.upgrade]\nmodel = "model-${id}-v2"\n`,
+        },
+      })) },
     }), { mode: 0o600 });
     const env: NodeJS.ProcessEnv = {
       ...process.env,
@@ -63,6 +77,7 @@ describe('guided settings flow', () => {
     profile.subagents = {
       ...DEFAULT_SUBAGENT_CONFIG,
       mode: 'auto',
+      providerOverrides: { untouched: { model: 'keep-model', reasoningEffort: 'low' } },
       mixagents: {
         mcpCommand: process.execPath,
         mcpArgs: [fixture],
@@ -82,8 +97,11 @@ describe('guided settings flow', () => {
 
     prompts.select
       .mockResolvedValueOnce('auto')
-      .mockResolvedValueOnce('__follow_current__')
+      .mockResolvedValueOnce(provider)
+      .mockResolvedValueOnce(model)
+      .mockResolvedValueOnce(effort)
       .mockResolvedValueOnce('off');
+    if (model === '__custom_model__') prompts.text.mockResolvedValueOnce('custom/model-v3');
     prompts.confirm
       .mockResolvedValueOnce(true)
       .mockResolvedValueOnce(false)
@@ -106,7 +124,11 @@ describe('guided settings flow', () => {
     expect(savedProfile!.subagents).toMatchObject({
       mode: 'auto',
       routeMode: 'follow-cc-switch',
-      ccSwitchProviderId: null,
+      ccSwitchProviderId: provider === '__follow_current__' ? null : provider,
+      providerOverrides: {
+        untouched: { model: 'keep-model', reasoningEffort: 'low' },
+        [selected]: { model: expected, reasoningEffort: effort },
+      },
       readRoute: null,
       allowWriteWorkers: true,
       mixagents: {
@@ -125,6 +147,10 @@ describe('guided settings flow', () => {
     ]));
     expect(JSON.stringify(prompts.note.mock.calls)).toContain('provider-a');
     expect(JSON.stringify(prompts.select.mock.calls)).toContain('__follow_current__');
+    const modelPrompt = prompts.select.mock.calls.find(([input]) => input.message === '子代理使用哪个模型版本？')![0];
+    expect(modelPrompt.options).toContainEqual({ value: selected === 'provider-a' ? 'model-a-v2' : 'model-b-v2', label: selected === 'provider-a' ? 'model-a-v2' : 'model-b-v2' });
+    expect(JSON.stringify(modelPrompt)).not.toContain(selected === 'provider-a' ? 'model-b' : 'model-a');
     expect(JSON.stringify(prompts.note.mock.calls)).not.toContain('sk-super-secret-value');
+    expect(await readFile(paths.configFile, 'utf8')).not.toContain('sk-super-secret-value');
   });
 });

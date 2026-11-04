@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.16.0
+
+- Settings now offers model version and reasoning effort immediately after
+  choosing a cc-switch provider. Model choices come from the selected provider's
+  default model, same-provider TOML profiles and explicit local model lists;
+  custom model IDs and live provider defaults are also supported.
+- Stores preferences per provider, applying them to `/btw`, automatic workers
+  and reviewers. Switching providers never carries a foreign model override.
+  Model/effort changes invalidate reusable worker runtime fingerprints.
+- Parses selected TOML profile reasoning correctly and ignores model-like
+  fields in unrelated TOML sections. Model changes do not inherit the original
+  model's context-window override.
+
 ## 1.15.0
 
 - Makes artifact-delivery capabilities persistent per chat scope instead of

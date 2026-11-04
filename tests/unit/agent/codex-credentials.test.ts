@@ -51,16 +51,24 @@ describe('codex config summary parsing', () => {
   it('ignores comments and honors the selected profile override', () => {
     const summary = parseCodexConfigSummary(`
 model_provider = "openai" # default stays official
+model_reasoning_effort = "low"
 profile = "work"
 
 [profiles.work]
 model_provider = "deepseek"
+model = "model-v2"
+model_reasoning_effort = "high"
 
 [model_providers.deepseek]
 base_url = "https://third-party.example.com/v1" # inline comment
+[unrelated]
+model = "ignore-me"
+model_reasoning_effort = "max"
 `);
 
     expect(summary.modelProvider).toBe('deepseek');
+    expect(summary.model).toBe('model-v2');
+    expect(summary.modelReasoningEffort).toBe('high');
     expect(summary.providers.get('deepseek')?.baseUrl).toBe('https://third-party.example.com/v1');
   });
 

@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.15.0",
+  version: "1.16.0",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -556,6 +556,9 @@ function isClaudePermissionMode(value) {
 }
 
 // src/config/profile-schema.ts
+function validSubagentModel(value) {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,199}$/u.test(value);
+}
 function createDefaultProfileConfig(input) {
   return normalizeProfileConfig({
     schemaVersion: 2,
@@ -708,6 +711,7 @@ var DEFAULT_SUBAGENT_CONFIG = {
   mode: "auto",
   routeMode: "follow-cc-switch",
   ccSwitchProviderId: null,
+  providerOverrides: {},
   readRoute: null,
   writeRoute: null,
   modelTools: true,
@@ -755,6 +759,7 @@ function normalizeSubagents(input) {
     mode,
     routeMode,
     ccSwitchProviderId: ccSwitchProviderId(raw.ccSwitchProviderId),
+    providerOverrides: normalizeProviderOverrides(raw.providerOverrides),
     readRoute: nonEmptyString(raw.readRoute) ?? null,
     writeRoute: nonEmptyString(raw.writeRoute) ?? null,
     modelTools: raw.modelTools !== false,
@@ -772,8 +777,23 @@ function normalizeSubagents(input) {
     ...mixagents && Object.keys(mixagents).length > 0 ? { mixagents } : {}
   };
 }
-function normalizeSideReasoningEffort(value) {
-  return value === "inherit" || value === "low" || value === "medium" || value === "high" || value === "xhigh" || value === "max" ? value : DEFAULT_SUBAGENT_CONFIG.sideReasoningEffort;
+function normalizeSideReasoningEffort(value, fallback = DEFAULT_SUBAGENT_CONFIG.sideReasoningEffort) {
+  return value === "inherit" || value === "low" || value === "medium" || value === "high" || value === "xhigh" || value === "max" ? value : fallback;
+}
+function normalizeProviderOverrides(value) {
+  if (!isRecord(value)) return {};
+  return Object.fromEntries(Object.entries(value).map(([id, settings]) => {
+    ccSwitchProviderId(id);
+    if (!isRecord(settings)) throw new Error("subagents.providerOverrides entries must be objects");
+    const model = nonEmptyString(settings.model) ?? null;
+    if (model !== null && !validSubagentModel(model)) {
+      throw new Error("subagents.providerOverrides model must be a model ID (no whitespace or credentials)");
+    }
+    return [id, {
+      model,
+      reasoningEffort: normalizeSideReasoningEffort(settings.reasoningEffort, "inherit")
+    }];
+  }));
 }
 function ccSwitchProviderId(value) {
   const text2 = nonEmptyString(value);
@@ -6433,7 +6453,7 @@ function parseCodexConfigSummary(raw) {
       profiles.set(profileName, profile3);
       continue;
     }
-    topLevel.set(key, value);
+    if (!section) topLevel.set(key, value);
   }
   finishProvider();
   const selectedProfile = nonEmpty2(topLevel.get("profile"));
@@ -6444,7 +6464,15 @@ function parseCodexConfigSummary(raw) {
     preferredAuthMethod: topLevel.get("preferred_auth_method") ?? profile2?.get("preferred_auth_method"),
     ...positiveInteger(topLevel.get("model_context_window")) ? { modelContextWindow: positiveInteger(topLevel.get("model_context_window")) } : {},
     ...positiveInteger(topLevel.get("model_max_output_tokens")) ? { modelMaxOutputTokens: positiveInteger(topLevel.get("model_max_output_tokens")) } : {},
-    ...topLevel.get("model_reasoning_effort") ? { modelReasoningEffort: topLevel.get("model_reasoning_effort") } : {},
+    ...profile2?.get("model_reasoning_effort") ?? topLevel.get("model_reasoning_effort") ? { modelReasoningEffort: profile2?.get("model_reasoning_effort") ?? topLevel.get("model_reasoning_effort") } : {},
+    ...profiles.size > 0 ? {
+      modelProfiles: [...profiles].map(([name, values]) => ({
+        name,
+        model: values.get("model"),
+        modelProvider: values.get("model_provider") ?? topLevel.get("model_provider"),
+        reasoningEffort: values.get("model_reasoning_effort")
+      }))
+    } : {},
     providers
   };
 }
@@ -13721,6 +13749,7 @@ async function resolveCurrentCcSwitchCodexProvider(input = {}) {
     source: metadata.source,
     codexProviderId: providerId,
     model,
+    configuredModels: configuredProviderModels(record.settingsConfig, parsed.config, providerId),
     baseUrl,
     baseUrlHost: safeHostname(baseUrl),
     wireApi,
@@ -13775,20 +13804,28 @@ async function materializeCcSwitchBrokerRuntime(input) {
     role: "worker",
     webSearch: "auto"
   };
+  const preference = Object.hasOwn(runtimePolicy.providerOverrides ?? {}, summary.id) ? runtimePolicy.providerOverrides[summary.id] : void 0;
+  const model = preference?.model ?? summary.model;
+  if (!validSubagentModel(model)) {
+    throw new CcSwitchProviderError("config-invalid", "\u5B50\u4EE3\u7406\u6A21\u578B\u5FC5\u987B\u662F\u6709\u6548\u7684 model ID");
+  }
+  const selectedEffort = preference?.reasoningEffort ?? (runtimePolicy.role === "side" ? runtimePolicy.sideReasoningEffort : void 0);
+  const reasoningEffort = selectedEffort && selectedEffort !== "inherit" ? normalizeReasoningEffort(selectedEffort) : summary.reasoningEffort ? normalizeReasoningEffort(summary.reasoningEffort) : void 0;
   const webSearch = resolveWebSearchPolicy(summary, runtimePolicy.webSearch);
   const policyFingerprint2 = createHash4("sha256").update(JSON.stringify({
     config: summary.configFingerprint,
     role: runtimePolicy.role,
     webSearch: runtimePolicy.webSearch,
     effectiveWebSearch: webSearch.effective,
-    sideReasoningEffort: runtimePolicy.sideReasoningEffort ?? null
+    model,
+    reasoningEffort: reasoningEffort ?? null
   })).digest("hex");
   const routeId2 = ccSwitchRouteId(summary);
   const route = {
     id: routeId2,
     description: `${summary.name} current cc-switch Codex provider`,
     provider: summary.codexProviderId,
-    model: summary.model,
+    model,
     maxAccess: "workspace-write",
     available: true,
     missingEnvironment: [],
@@ -13839,7 +13876,7 @@ async function materializeCcSwitchBrokerRuntime(input) {
       summary.codexProviderId.toLowerCase()
     ),
     webSearch: webSearch.effective,
-    sideReasoningEffort: runtimePolicy.sideReasoningEffort
+    reasoningEffort
   });
   const brokerConfig = {
     version: 1,
@@ -13853,7 +13890,7 @@ async function materializeCcSwitchBrokerRuntime(input) {
         provider: route.provider,
         providerName: summary.name,
         model: route.model,
-        ...summary.contextWindow ? { contextWindow: summary.contextWindow } : {},
+        ...model === summary.model && summary.contextWindow ? { contextWindow: summary.contextWindow } : {},
         baseUrl: summary.baseUrl,
         ...summary.envKey ? { envKey: summary.envKey } : {},
         ...Object.keys(summary.envHttpHeaders).length > 0 ? { envHttpHeaders: summary.envHttpHeaders } : {},
@@ -13861,7 +13898,7 @@ async function materializeCcSwitchBrokerRuntime(input) {
         maxAccess: "workspace-write",
         ccSwitchProviderId: summary.id,
         source: "cc-switch",
-        ...runtimePolicy.role === "side" && runtimePolicy.sideReasoningEffort && runtimePolicy.sideReasoningEffort !== "inherit" ? { reasoningEffort: runtimePolicy.sideReasoningEffort } : summary.reasoningEffort ? { reasoningEffort: normalizeReasoningEffort(summary.reasoningEffort) } : {}
+        ...reasoningEffort ? { reasoningEffort } : {}
       }
     }
   };
@@ -13885,7 +13922,7 @@ async function materializeManagedCodexLauncher(input) {
   });
   const overrides = [
     ...input.webSearch === "disabled" ? ["-c", 'web_search="disabled"'] : [],
-    ...input.role === "side" && input.sideReasoningEffort && input.sideReasoningEffort !== "inherit" ? ["-c", `model_reasoning_effort="${input.sideReasoningEffort}"`] : [],
+    ...input.reasoningEffort ? ["-c", `model_reasoning_effort="${input.reasoningEffort}"`] : [],
     ...input.role === "side" && input.providerConfigurable ? [
       "-c",
       `model_providers.${input.provider}.request_max_retries=1`,
@@ -14238,6 +14275,23 @@ function settingsConfigText(settingsConfig) {
   const config = settingsConfig.config;
   if (typeof config === "string") return config;
   return void 0;
+}
+function configuredProviderModels(settings, config, providerId) {
+  const models = /* @__PURE__ */ new Set();
+  const add = (value) => {
+    if (validSubagentModel(value)) models.add(value);
+  };
+  add(config.model);
+  for (const profile2 of config.modelProfiles ?? []) {
+    if (!profile2.modelProvider || profile2.modelProvider === providerId) add(profile2.model);
+  }
+  for (const list of [settings.models, settings.availableModels, settings.available_models]) {
+    if (!Array.isArray(list)) continue;
+    for (const entry of list) {
+      add(isRecord3(entry) ? entry.id ?? entry.model : entry);
+    }
+  }
+  return [...models];
 }
 function extractConfigBearerToken(configText, providerId) {
   const summary = parseCodexConfigSummary(configText);
@@ -15364,7 +15418,8 @@ async function resolveSubagents(input) {
         runtimePolicy: {
           role: input.runtimeRole ?? "worker",
           webSearch: config.webSearch,
-          sideReasoningEffort: config.sideReasoningEffort
+          sideReasoningEffort: config.sideReasoningEffort,
+          providerOverrides: config.providerOverrides
         }
       });
       runtime = {
@@ -19797,7 +19852,8 @@ var StructuredAdapter = class {
       runtimePolicy: {
         role,
         webSearch: config.webSearch,
-        sideReasoningEffort: config.sideReasoningEffort
+        sideReasoningEffort: config.sideReasoningEffort,
+        providerOverrides: config.providerOverrides
       }
     });
     return {
@@ -36490,7 +36546,8 @@ async function collectSubagentDiagnostics(input) {
         runtimePolicy: {
           role: "side",
           webSearch: input.config.webSearch,
-          sideReasoningEffort: input.config.sideReasoningEffort
+          sideReasoningEffort: input.config.sideReasoningEffort,
+          providerOverrides: input.config.providerOverrides
         }
       });
       brokerRuntime = {
@@ -36759,6 +36816,8 @@ async function runSettings(options = {}) {
   let routeMode = currentSubagents.routeMode;
   let readRoute = currentSubagents.readRoute;
   let selectedCcProvider = currentSubagents.ccSwitchProviderId;
+  const providerOverrides = { ...currentSubagents.providerOverrides };
+  let selectedModelSummary = "(\u7531 route/provider \u51B3\u5B9A)";
   let selectedReadRoute = readRoute;
   const routeMapState = await loadBrokerRouteMap(settingsEnv);
   if (routeMapState.error) throw new Error(routeMapState.error);
@@ -36792,6 +36851,74 @@ async function runSettings(options = {}) {
     });
     assertPrompt(providerChoice);
     selectedCcProvider = providerChoice === followCurrent ? null : providerChoice;
+    const effectiveProviderId = selectedCcProvider ?? diagnostics.ccSwitch.currentProviderCodex;
+    if (effectiveProviderId) {
+      let configuredModels = [];
+      let defaultModel;
+      let defaultEffort = null;
+      try {
+        const resolved = await resolveCurrentCcSwitchCodexProvider({
+          env: settingsEnv,
+          providerId: effectiveProviderId
+        });
+        configuredModels = resolved.summary.configuredModels ?? [resolved.summary.model];
+        defaultModel = resolved.summary.model;
+        defaultEffort = resolved.summary.reasoningEffort;
+      } catch {
+        p3.note("\u6682\u65F6\u65E0\u6CD5\u8BFB\u53D6\u8BE5 provider \u7684\u6A21\u578B\u914D\u7F6E\uFF1B\u53EF\u4EE5\u8DDF\u968F\u9ED8\u8BA4\u503C\u6216\u624B\u586B\u6A21\u578B ID\u3002", "\u6A21\u578B\u914D\u7F6E");
+      }
+      const previous = Object.hasOwn(providerOverrides, effectiveProviderId) ? providerOverrides[effectiveProviderId] : void 0;
+      if (previous?.model && !configuredModels.includes(previous.model)) {
+        configuredModels.push(previous.model);
+      }
+      p3.note([
+        "\u6A21\u578B\u6765\u81EA\u6240\u9009 provider \u7684 cc-switch \u914D\u7F6E\uFF08\u9ED8\u8BA4 model\u3001\u540C provider \u7684 profiles\u3001\u663E\u5F0F\u6A21\u578B\u5217\u8868\uFF09\u3002",
+        "\u8FD9\u91CC\u5217\u51FA\u7684\u662F\u672C\u5730\u914D\u7F6E\uFF0C\u4E0D\u662F\u670D\u52A1\u7AEF\u652F\u6301\u5217\u8868\uFF1B\u6A21\u578B\u548C\u63A8\u7406\u5F3A\u5EA6\u662F\u5426\u652F\u6301\u7531 provider \u51B3\u5B9A\u3002",
+        "\u9009\u62E9\u6309 provider \u4FDD\u5B58\uFF0C\u5E94\u7528\u4E8E /btw\u3001\u666E\u901A subagent \u548C\u81EA\u52A8 reviewer\uFF1B\u4E3B\u4F1A\u8BDD\u4FDD\u6301\u539F\u914D\u7F6E\u3002",
+        "\u8DDF\u968F\u5F53\u524D provider \u65F6\uFF0C\u5207\u6362\u540E\u4F7F\u7528\u65B0 provider \u81EA\u5DF1\u7684\u9009\u62E9\u6216\u9ED8\u8BA4\u914D\u7F6E\u3002"
+      ].join("\n"), "\u5B50\u4EE3\u7406\u6A21\u578B\u4E0E\u63A8\u7406\u5F3A\u5EA6");
+      const modelChoice = await p3.select({
+        message: "\u5B50\u4EE3\u7406\u4F7F\u7528\u54EA\u4E2A\u6A21\u578B\u7248\u672C\uFF1F",
+        initialValue: previous?.model ?? "__provider_default__",
+        options: [
+          { value: "__provider_default__", label: "\u8DDF\u968F provider \u914D\u7F6E\uFF08\u63A8\u8350\uFF09", hint: defaultModel ?? "\u6D3E\u53D1\u65F6\u8BFB\u53D6" },
+          ...configuredModels.map((model2) => ({ value: model2, label: model2 })),
+          { value: "__custom_model__", label: "\u624B\u52A8\u8F93\u5165\u6A21\u578B ID", hint: "\u7528\u4E8E provider \u5DF2\u652F\u6301\u4F46\u672C\u5730\u914D\u7F6E\u672A\u5217\u51FA\u7684\u6A21\u578B" }
+        ]
+      });
+      assertPrompt(modelChoice);
+      let model = modelChoice === "__provider_default__" ? null : modelChoice;
+      if (modelChoice === "__custom_model__") {
+        const custom = await p3.text({
+          message: "\u6A21\u578B ID\uFF08\u4F7F\u7528 provider \u7684\u51C6\u786E\u540D\u79F0\uFF09",
+          initialValue: previous?.model ?? defaultModel ?? "",
+          validate: (value) => validSubagentModel(value?.trim()) ? void 0 : "\u8BF7\u8F93\u5165\u6709\u6548\u7684\u6A21\u578B ID\uFF0C\u4E0D\u80FD\u5305\u542B\u7A7A\u767D\u6216\u5F15\u53F7"
+        });
+        assertPrompt(custom);
+        model = custom.trim();
+      }
+      if (model !== null && !validSubagentModel(model)) throw new Error("\u65E0\u6548\u7684\u5B50\u4EE3\u7406\u6A21\u578B ID");
+      const effort = await p3.select({
+        message: "\u5B50\u4EE3\u7406\u4F7F\u7528\u54EA\u4E2A\u63A8\u7406\u5F3A\u5EA6\uFF1F",
+        initialValue: previous?.reasoningEffort ?? "inherit",
+        options: [
+          { value: "inherit", label: "\u8DDF\u968F provider \u914D\u7F6E\uFF08\u63A8\u8350\uFF09", hint: defaultEffort ?? "provider \u9ED8\u8BA4" },
+          { value: "low", label: "low \xB7 \u4F4E" },
+          { value: "medium", label: "medium \xB7 \u4E2D" },
+          { value: "high", label: "high \xB7 \u9AD8" },
+          { value: "xhigh", label: "xhigh \xB7 \u5F88\u9AD8" },
+          { value: "max", label: "max \xB7 \u6700\u9AD8\uFF08\u9700 provider \u652F\u6301\uFF09" }
+        ]
+      });
+      assertPrompt(effort);
+      Object.defineProperty(providerOverrides, effectiveProviderId, {
+        value: { model, reasoningEffort: effort },
+        enumerable: true,
+        configurable: true,
+        writable: true
+      });
+      selectedModelSummary = `${effectiveProviderId}: model=${model ?? "(\u8DDF\u968F provider)"} reasoning=${effort}`;
+    }
     routeMode = "follow-cc-switch";
     selectedReadRoute = null;
     readRoute = null;
@@ -36995,13 +37122,13 @@ async function runSettings(options = {}) {
       boundedNumberInput(sideTimeoutText, 15, 1800, "/btw \u5FEB\u901F\u7B49\u5F85\u63D0\u793A\u79D2\u6570") * 1e3
     );
     const sideEffort = await p3.select({
-      message: "/btw \u7684\u63A8\u7406\u901F\u5EA6",
+      message: "\u672A\u5355\u72EC\u914D\u7F6E provider \u65F6\uFF0C/btw \u7684\u5907\u7528\u63A8\u7406\u5F3A\u5EA6",
       initialValue: sideReasoningEffort,
       options: [
         {
           value: "low",
           label: "\u4F4E\uFF08\u63A8\u8350\uFF09",
-          hint: "\u66F4\u5FEB\u6062\u590D\u8FDB\u5EA6\uFF1B\u81EA\u52A8\u5B50\u4EE3\u7406\u4ECD\u4FDD\u6301\u539F\u63A8\u7406\u7B49\u7EA7"
+          hint: "\u4EC5\u5BF9\u6CA1\u6709\u6A21\u578B/\u63A8\u7406\u504F\u597D\u7684 provider \u751F\u6548"
         },
         { value: "medium", label: "\u4E2D", hint: "\u901F\u5EA6\u4E0E\u8D28\u91CF\u5E73\u8861" },
         { value: "high", label: "\u9AD8", hint: "\u66F4\u6162\uFF0C\u9002\u5408\u590D\u6742\u590D\u6838" },
@@ -37106,9 +37233,10 @@ async function runSettings(options = {}) {
     `\u4E3B\u5BF9\u8BDD\uFF1A${diagnostics.ccSwitch.currentProviderName ?? "(unknown)"}\uFF08\u4FDD\u6301\u4E0D\u53D8\uFF09`,
     `\u5B50\u4EE3\u7406\uFF1A${modeText}`,
     `\u5B50\u4EE3\u7406\u7EBF\u8DEF\uFF1A${routeText}`,
+    `\u5B50\u4EE3\u7406\u6A21\u578B\uFF1A${selectedModelSummary}`,
     `Key\uFF1A${credentialText}`,
     `\u5B50\u4EE3\u7406 Web Search\uFF1A${webSearch === "auto" ? `\u6309 provider \u80FD\u529B\uFF08\u5F53\u524D ${diagnostics.webSearch.effective}\uFF09` : webSearch === "native" ? "\u5F3A\u5236\u539F\u751F" : "\u5173\u95ED"}`,
-    `/btw \u53EA\u8BFB\uFF1Areasoning=${sideReasoningEffort} fast-notice=${sideTimeoutMs / 1e3}s\uFF1B\u6BCF ${workerTimeoutMs / 6e4} \u5206\u949F\u7B49\u5F85\u7A97\u53E3\u81EA\u52A8\u7EED\u7B49\uFF1B/btw out \u53D6\u6D88\uFF0C/btw result \u7528\u4E8E\u5F02\u5E38\u6062\u590D`,
+    `/btw\uFF1A\u5907\u7528 reasoning=${sideReasoningEffort} fast-notice=${sideTimeoutMs / 1e3}s\uFF1B\u6BCF ${workerTimeoutMs / 6e4} \u5206\u949F\u7B49\u5F85\u7A97\u53E3\u81EA\u52A8\u7EED\u7B49\uFF1B/btw out \u53D6\u6D88\uFF0C/btw result \u7528\u4E8E\u5F02\u5E38\u6062\u590D`,
     `\u9879\u76EE\u8BC1\u636E\u6821\u9A8C\uFF1A${rsiMode === "off" ? "\u5173\u95ED" : "\u81EA\u52A8\uFF08\u53EA\u5BF9\u5DF2\u521D\u59CB\u5316\u9879\u76EE\uFF09"}`,
     advanced ? "\u9AD8\u7EA7\u53C2\u6570\uFF1A\u5DF2\u5C55\u5F00\u7F16\u8F91" : "\u9AD8\u7EA7\u53C2\u6570\uFF1A\u4FDD\u6301\u539F\u503C"
   ].join("\n"), "\u6B65\u9AA4 5 / 5 \xB7 \u4FDD\u5B58\u524D\u786E\u8BA4");
@@ -37152,6 +37280,7 @@ async function runSettings(options = {}) {
         mode: selectedMode,
         routeMode,
         ccSwitchProviderId: routeMode === "follow-cc-switch" ? selectedCcProvider : currentSubagents.ccSwitchProviderId ?? null,
+        providerOverrides,
         readRoute,
         writeRoute: routeMode === "manual" ? writeRoute : null,
         modelTools,
@@ -37299,6 +37428,7 @@ function formatSnapshot(snapshot) {
     `main running with legacy/unknown identity=${snapshot.mainProvider.runningUnknown}`,
     `provider switch=${snapshot.mainProvider.pendingSwitch}; safe point=${snapshot.mainProvider.safeSwitchPoint}`,
     `MixAgents mode=${snapshot.subagents.config.mode} routeMode=${snapshot.subagents.config.routeMode} provider=${snapshot.subagents.config.ccSwitchProviderId ?? "(follow-current)"} MCP=${diagnostics.mcp.status} version=${diagnostics.packageVersion ?? "(unknown)"} progress=${diagnostics.progress.mode} vendorBroker=${diagnostics.launchCompatibility.vendor} legacyNpmBroker=${diagnostics.launchCompatibility.legacyNpm} legacyNpmRuntime=${diagnostics.launchCompatibility.legacyNpmRuntime}`,
+    `subagent model preferences=${JSON.stringify(snapshot.subagents.config.providerOverrides ?? {})}`,
     `Broker tools=${diagnostics.modelTools.brokerWired ? "wired" : "degraded"} namespace=${diagnostics.modelTools.namespace} native=${diagnostics.modelTools.nativeToolPolicy} maxWorkers=${diagnostics.limits.maxConcurrentWorkers} workerTimeoutMs=${diagnostics.limits.workerTimeoutMs} sideTimeoutMs=${diagnostics.limits.sideTimeoutMs} sideReasoning=${diagnostics.limits.sideReasoningEffort} writeWorkers=${diagnostics.limits.allowWriteWorkers}`,
     `web search mode=${diagnostics.webSearch.mode} providerSupported=${diagnostics.webSearch.providerSupported ?? "unknown"} effective=${diagnostics.webSearch.effective} reason=${diagnostics.webSearch.reason}`,
     `Broker tools degraded=${diagnostics.modelTools.degradedReason ?? "(none)"}`,

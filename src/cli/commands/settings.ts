@@ -9,6 +9,7 @@ import {
 import {
   DEFAULT_RSI_CONFIG,
   DEFAULT_SUBAGENT_CONFIG,
+  validSubagentModel,
   type RsiConfig,
   type SubagentConfig,
   type SubagentMode,
@@ -31,6 +32,7 @@ import {
   type CodexActiveConfigIdentity,
 } from '../../agent/codex/provider';
 import { defaultCodexHome } from '../../agent/codex/credentials';
+import { resolveCurrentCcSwitchCodexProvider } from '../../integrations/cc-switch-provider';
 import {
   processAlive,
   readHostRegistry,
@@ -159,6 +161,8 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
   let routeMode: SubagentRouteMode = currentSubagents.routeMode;
   let readRoute = currentSubagents.readRoute;
   let selectedCcProvider = currentSubagents.ccSwitchProviderId;
+  const providerOverrides = { ...currentSubagents.providerOverrides };
+  let selectedModelSummary = '(由 route/provider 决定)';
   let selectedReadRoute = readRoute;
   const routeMapState = await loadBrokerRouteMap(settingsEnv);
   if (routeMapState.error) throw new Error(routeMapState.error);
@@ -219,6 +223,73 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
     });
     assertPrompt(providerChoice);
     selectedCcProvider = providerChoice === followCurrent ? null : providerChoice;
+
+    const effectiveProviderId = selectedCcProvider ?? diagnostics.ccSwitch.currentProviderCodex;
+    if (effectiveProviderId) {
+      let configuredModels: string[] = [];
+      let defaultModel: string | undefined;
+      let defaultEffort: string | null = null;
+      try {
+        const resolved = await resolveCurrentCcSwitchCodexProvider({
+          env: settingsEnv,
+          providerId: effectiveProviderId,
+        });
+        configuredModels = resolved.summary.configuredModels ?? [resolved.summary.model];
+        defaultModel = resolved.summary.model;
+        defaultEffort = resolved.summary.reasoningEffort;
+      } catch {
+        p.note('暂时无法读取该 provider 的模型配置；可以跟随默认值或手填模型 ID。', '模型配置');
+      }
+      const previous = Object.hasOwn(providerOverrides, effectiveProviderId)
+        ? providerOverrides[effectiveProviderId] : undefined;
+      if (previous?.model && !configuredModels.includes(previous.model)) {
+        configuredModels.push(previous.model);
+      }
+      p.note([
+        '模型来自所选 provider 的 cc-switch 配置（默认 model、同 provider 的 profiles、显式模型列表）。',
+        '这里列出的是本地配置，不是服务端支持列表；模型和推理强度是否支持由 provider 决定。',
+        '选择按 provider 保存，应用于 /btw、普通 subagent 和自动 reviewer；主会话保持原配置。',
+        '跟随当前 provider 时，切换后使用新 provider 自己的选择或默认配置。',
+      ].join('\n'), '子代理模型与推理强度');
+      const modelChoice = await p.select<string>({
+        message: '子代理使用哪个模型版本？',
+        initialValue: previous?.model ?? '__provider_default__',
+        options: [
+          { value: '__provider_default__', label: '跟随 provider 配置（推荐）', hint: defaultModel ?? '派发时读取' },
+          ...configuredModels.map(model => ({ value: model, label: model })),
+          { value: '__custom_model__', label: '手动输入模型 ID', hint: '用于 provider 已支持但本地配置未列出的模型' },
+        ],
+      });
+      assertPrompt(modelChoice);
+      let model: string | null = modelChoice === '__provider_default__' ? null : modelChoice;
+      if (modelChoice === '__custom_model__') {
+        const custom = await p.text({
+          message: '模型 ID（使用 provider 的准确名称）',
+          initialValue: previous?.model ?? defaultModel ?? '',
+          validate: value => validSubagentModel(value?.trim()) ? undefined : '请输入有效的模型 ID，不能包含空白或引号',
+        });
+        assertPrompt(custom);
+        model = custom.trim();
+      }
+      if (model !== null && !validSubagentModel(model)) throw new Error('无效的子代理模型 ID');
+      const effort = await p.select<SubagentConfig['sideReasoningEffort']>({
+        message: '子代理使用哪个推理强度？',
+        initialValue: previous?.reasoningEffort ?? 'inherit',
+        options: [
+          { value: 'inherit', label: '跟随 provider 配置（推荐）', hint: defaultEffort ?? 'provider 默认' },
+          { value: 'low', label: 'low · 低' },
+          { value: 'medium', label: 'medium · 中' },
+          { value: 'high', label: 'high · 高' },
+          { value: 'xhigh', label: 'xhigh · 很高' },
+          { value: 'max', label: 'max · 最高（需 provider 支持）' },
+        ],
+      });
+      assertPrompt(effort);
+      Object.defineProperty(providerOverrides, effectiveProviderId, {
+        value: { model, reasoningEffort: effort }, enumerable: true, configurable: true, writable: true,
+      });
+      selectedModelSummary = `${effectiveProviderId}: model=${model ?? '(跟随 provider)'} reasoning=${effort}`;
+    }
 
     routeMode = 'follow-cc-switch';
     selectedReadRoute = null;
@@ -446,13 +517,13 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
       boundedNumberInput(sideTimeoutText, 15, 1800, '/btw 快速等待提示秒数') * 1_000,
     );
     const sideEffort = await p.select<SubagentConfig['sideReasoningEffort']>({
-      message: '/btw 的推理速度',
+      message: '未单独配置 provider 时，/btw 的备用推理强度',
       initialValue: sideReasoningEffort,
       options: [
         {
           value: 'low',
           label: '低（推荐）',
-          hint: '更快恢复进度；自动子代理仍保持原推理等级',
+          hint: '仅对没有模型/推理偏好的 provider 生效',
         },
         { value: 'medium', label: '中', hint: '速度与质量平衡' },
         { value: 'high', label: '高', hint: '更慢，适合复杂复核' },
@@ -582,13 +653,14 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
     `主对话：${diagnostics.ccSwitch.currentProviderName ?? '(unknown)'}（保持不变）`,
     `子代理：${modeText}`,
     `子代理线路：${routeText}`,
+    `子代理模型：${selectedModelSummary}`,
     `Key：${credentialText}`,
     `子代理 Web Search：${webSearch === 'auto'
       ? `按 provider 能力（当前 ${diagnostics.webSearch.effective}）`
       : webSearch === 'native'
         ? '强制原生'
         : '关闭'}`,
-    `/btw 只读：reasoning=${sideReasoningEffort} fast-notice=${sideTimeoutMs / 1_000}s；` +
+    `/btw：备用 reasoning=${sideReasoningEffort} fast-notice=${sideTimeoutMs / 1_000}s；` +
     `每 ${workerTimeoutMs / 60_000} 分钟等待窗口自动续等；/btw out 取消，/btw result 用于异常恢复`,
     `项目证据校验：${rsiMode === 'off' ? '关闭' : '自动（只对已初始化项目）'}`,
     advanced ? '高级参数：已展开编辑' : '高级参数：保持原值',
@@ -645,6 +717,7 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
         ccSwitchProviderId: routeMode === 'follow-cc-switch'
           ? selectedCcProvider
           : currentSubagents.ccSwitchProviderId ?? null,
+        providerOverrides,
         readRoute,
         writeRoute: routeMode === 'manual' ? writeRoute : null,
         modelTools,
@@ -846,6 +919,7 @@ function formatSnapshot(snapshot: SettingsSnapshot): string {
       ` vendorBroker=${diagnostics.launchCompatibility.vendor}` +
       ` legacyNpmBroker=${diagnostics.launchCompatibility.legacyNpm}` +
       ` legacyNpmRuntime=${diagnostics.launchCompatibility.legacyNpmRuntime}`,
+    `subagent model preferences=${JSON.stringify(snapshot.subagents.config.providerOverrides ?? {})}`,
     `Broker tools=${diagnostics.modelTools.brokerWired ? 'wired' : 'degraded'}` +
       ` namespace=${diagnostics.modelTools.namespace}` +
       ` native=${diagnostics.modelTools.nativeToolPolicy}` +

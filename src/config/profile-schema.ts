@@ -83,6 +83,16 @@ export type SubagentReasoningEffort =
   | 'xhigh'
   | 'max';
 
+export interface SubagentProviderOverride {
+  /** null follows this provider's configured model on every dispatch. */
+  model: string | null;
+  reasoningEffort: SubagentReasoningEffort;
+}
+
+export function validSubagentModel(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,199}$/u.test(value);
+}
+
 export interface SubagentMixAgentsConfig {
   /**
    * Stable MCP server command. Until MixAgents publishes a public package this
@@ -112,6 +122,8 @@ export interface SubagentConfig {
    * current cc-switch provider on every dispatch.
    */
   ccSwitchProviderId?: string | null;
+  /** Model/effort preferences keyed by cc-switch provider ID, never shared across providers. */
+  providerOverrides?: Record<string, SubagentProviderOverride>;
   readRoute: string | null;
   writeRoute: string | null;
   /**
@@ -126,8 +138,8 @@ export interface SubagentConfig {
   /** When to tell the user that a read-only /btw side is still running. */
   sideTimeoutMs: number;
   /**
-   * Reasoning effort for interactive /btw side turns. Automatic workers keep
-   * the provider/cc-switch setting.
+   * Legacy /btw effort, used only when the selected provider has no entry in
+   * providerOverrides. Settings now configures all subagents together.
    */
   sideReasoningEffort: SubagentReasoningEffort;
   /**
@@ -438,6 +450,7 @@ export const DEFAULT_SUBAGENT_CONFIG: SubagentConfig = {
   mode: 'auto',
   routeMode: 'follow-cc-switch',
   ccSwitchProviderId: null,
+  providerOverrides: {},
   readRoute: null,
   writeRoute: null,
   modelTools: true,
@@ -513,6 +526,7 @@ function normalizeSubagents(input: unknown): SubagentConfig {
     mode,
     routeMode,
     ccSwitchProviderId: ccSwitchProviderId(raw.ccSwitchProviderId),
+    providerOverrides: normalizeProviderOverrides(raw.providerOverrides),
     readRoute: nonEmptyString(raw.readRoute) ?? null,
     writeRoute: nonEmptyString(raw.writeRoute) ?? null,
     modelTools: raw.modelTools !== false,
@@ -533,7 +547,10 @@ function normalizeSubagents(input: unknown): SubagentConfig {
   };
 }
 
-function normalizeSideReasoningEffort(value: unknown): SubagentReasoningEffort {
+function normalizeSideReasoningEffort(
+  value: unknown,
+  fallback: SubagentReasoningEffort = DEFAULT_SUBAGENT_CONFIG.sideReasoningEffort,
+): SubagentReasoningEffort {
   return value === 'inherit' ||
     value === 'low' ||
     value === 'medium' ||
@@ -541,7 +558,23 @@ function normalizeSideReasoningEffort(value: unknown): SubagentReasoningEffort {
     value === 'xhigh' ||
     value === 'max'
     ? value
-    : DEFAULT_SUBAGENT_CONFIG.sideReasoningEffort;
+    : fallback;
+}
+
+function normalizeProviderOverrides(value: unknown): Record<string, SubagentProviderOverride> {
+  if (!isRecord(value)) return {};
+  return Object.fromEntries(Object.entries(value).map(([id, settings]) => {
+    ccSwitchProviderId(id);
+    if (!isRecord(settings)) throw new Error('subagents.providerOverrides entries must be objects');
+    const model = nonEmptyString(settings.model) ?? null;
+    if (model !== null && !validSubagentModel(model)) {
+      throw new Error('subagents.providerOverrides model must be a model ID (no whitespace or credentials)');
+    }
+    return [id, {
+      model,
+      reasoningEffort: normalizeSideReasoningEffort(settings.reasoningEffort, 'inherit'),
+    }];
+  }));
 }
 
 function ccSwitchProviderId(value: unknown): string | null {

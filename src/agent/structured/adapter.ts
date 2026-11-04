@@ -835,6 +835,7 @@ export class StructuredAdapter implements AgentAdapter {
         role,
         webSearch: config.webSearch,
         sideReasoningEffort: config.sideReasoningEffort,
+        providerOverrides: config.providerOverrides,
       },
     });
     return {

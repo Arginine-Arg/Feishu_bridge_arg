@@ -100,6 +100,7 @@ export async function resolveSubagents(input: ResolveSubagentInput): Promise<Res
           role: input.runtimeRole ?? 'worker',
           webSearch: config.webSearch,
           sideReasoningEffort: config.sideReasoningEffort,
+          providerOverrides: config.providerOverrides,
         },
       });
       runtime = {

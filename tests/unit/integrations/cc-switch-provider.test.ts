@@ -25,6 +25,68 @@ afterEach(async () => {
 });
 
 describe('cc-switch provider resolver', () => {
+  it('discovers only declared models for the selected provider and isolates runtime overrides', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'arg-bridge-model-choice-'));
+    temporary.push(root);
+    const ccHome = join(root, 'cc-switch');
+    const workspace = join(root, 'workspace');
+    await Promise.all([mkdir(ccHome), mkdir(workspace)]);
+    const config = [
+      'model = "base-v1"',
+      'model_provider = "custom"',
+      'model_reasoning_effort = "high"',
+      'model_context_window = 200000',
+      '[model_providers.custom]',
+      'base_url = "https://example.test/v1"',
+      '[profiles.fast]',
+      'model = "fast-v2"',
+      '[profiles.foreign]',
+      'model_provider = "other"',
+      'model = "foreign-model"',
+      '[unrelated]',
+      'model = "not-a-model-declaration"',
+    ].join('\n');
+    const settings = {
+      currentProviderCodex: 'provider-a',
+      providers: { codex: ['a', 'b'].map(id => ({
+        id: `provider-${id}`, name: `Provider ${id}`,
+        settings_config: {
+          auth: { OPENAI_API_KEY: 'sk-secret-not-a-model', model: 'hidden-auth-value' },
+          models: ['base-v1', { id: 'listed-v3' }, { model: 'listed-v4' }, 'bad model'],
+          config,
+        },
+      })) },
+    };
+    await writeFile(join(ccHome, 'settings.json'), JSON.stringify(settings));
+    const base = { env: { ...process.env, CC_SWITCH_HOME: ccHome }, cwd: workspace, codexBin: 'codex', stateDir: join(root, 'state') };
+    const resolved = await resolveCurrentCcSwitchCodexProvider(base);
+    expect(resolved.summary.configuredModels).toEqual(['base-v1', 'fast-v2', 'listed-v3', 'listed-v4']);
+    expect(JSON.stringify(resolved.summary)).not.toContain('hidden-auth-value');
+    expect(JSON.stringify(resolved.summary)).not.toContain('sk-secret-not-a-model');
+    const providerOverrides = { 'provider-a': { model: 'fast-v2', reasoningEffort: 'medium' as const } };
+    for (const role of ['worker', 'side', 'reviewer'] as const) {
+      const runtime = await materializeCcSwitchBrokerRuntime({ ...base, runtimePolicy: { role, webSearch: 'auto', sideReasoningEffort: 'low', providerOverrides } });
+      expect(runtime.route.model).toBe('fast-v2');
+      const broker = JSON.parse(await readFile(runtime.brokerConfigPath, 'utf8'));
+      expect(broker.routes[runtime.route.id]).toMatchObject({ model: 'fast-v2', reasoningEffort: 'medium' });
+      expect(broker.routes[runtime.route.id]).not.toHaveProperty('contextWindow');
+      const wrapper = await readFile(broker.codexBin.replace(/\.cmd$/u, '.mjs'), 'utf8');
+      expect(wrapper).toContain('model_reasoning_effort=\\"medium\\"');
+      const inherit = await materializeCcSwitchBrokerRuntime({ ...base, runtimePolicy: { role, webSearch: 'auto', sideReasoningEffort: 'low', providerOverrides: { 'provider-a': { model: null, reasoningEffort: 'inherit' } } } });
+      const inherited = JSON.parse(await readFile(inherit.brokerConfigPath, 'utf8'));
+      expect(inherited.routes[inherit.route.id]).toMatchObject({ model: 'base-v1', reasoningEffort: 'high', contextWindow: 200000 });
+      expect(runtime.fingerprint).not.toBe(inherit.fingerprint);
+    }
+    settings.currentProviderCodex = 'provider-b';
+    await writeFile(join(ccHome, 'settings.json'), JSON.stringify(settings));
+    const other = await materializeCcSwitchBrokerRuntime({ ...base, runtimePolicy: { role: 'worker', webSearch: 'auto', providerOverrides } });
+    expect(other.route.model).toBe('base-v1');
+    settings.currentProviderCodex = 'provider-a';
+    await writeFile(join(ccHome, 'settings.json'), JSON.stringify(settings));
+    const returned = await materializeCcSwitchBrokerRuntime({ ...base, runtimePolicy: { role: 'worker', webSearch: 'auto', providerOverrides } });
+    expect(returned.route.model).toBe('fast-v2');
+  });
+
   sqliteRuntime('resolves the selected SQLite provider into a secret-free Broker runtime', async () => {
     const setup = await sqliteSetup();
     const resolved = await resolveCurrentCcSwitchCodexProvider({

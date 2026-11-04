@@ -61,6 +61,7 @@ describe('profile schema', () => {
       mode: 'auto',
       routeMode: 'follow-cc-switch',
       ccSwitchProviderId: null,
+      providerOverrides: {},
       readRoute: null,
       writeRoute: null,
       modelTools: true,
@@ -96,6 +97,10 @@ describe('profile schema', () => {
         mode: 'broker',
         routeMode: 'manual',
         ccSwitchProviderId: 'provider-a',
+        providerOverrides: {
+          'provider-a': { model: 'model/v2', reasoningEffort: 'xhigh', secret: 'must-not-survive' },
+          'provider-b': { model: null, reasoningEffort: 'inherit' },
+        },
         readRoute: 'route-a',
         writeRoute: 'route-write',
         sideTimeoutMs: 45_000,
@@ -126,6 +131,10 @@ describe('profile schema', () => {
       mode: 'broker',
       routeMode: 'manual',
       ccSwitchProviderId: 'provider-a',
+      providerOverrides: {
+        'provider-a': { model: 'model/v2', reasoningEffort: 'xhigh' },
+        'provider-b': { model: null, reasoningEffort: 'inherit' },
+      },
       readRoute: 'route-a',
       writeRoute: 'route-write',
       sideTimeoutMs: 45_000,
@@ -140,6 +149,7 @@ describe('profile schema', () => {
       },
     });
     expect(cfg.subagents?.mixagents).not.toHaveProperty('token');
+    expect(cfg.subagents?.providerOverrides?.['provider-a']).not.toHaveProperty('secret');
     expect(cfg.rsi).toMatchObject({
       runnerCommand: 'runner',
       runnerArgs: ['--json'],

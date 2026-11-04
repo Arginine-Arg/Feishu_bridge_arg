@@ -4,7 +4,7 @@
 
 [English README](./README.md)
 
-`1.15.0` 把文件发送能力改为按 chat scope 持久，并让 live tmux、structured 主会话、`/btw` worker 和模型可见 subagent 在 token 过期时通过 broker 恢复最新授权。主/子 workspace 会合并到同一授权，但普通文件、符号链接、realpath、回复目标和大小校验仍全部执行。`1.14.0` 将 `/btw` 改为默认 workspace-write，并让 provider adoption 形成 A -> B -> A 的线性上下文。
+`1.16.0` 在 settings 选择 cc-switch provider 后增加模型版本和推理强度选择。模型来自所选 provider 的本地配置，也可手填模型 ID 或跟随默认值；选择按 provider 保存，对 `/btw`、普通 subagent 和 reviewer 生效。`1.15.0` 修复文件发送令牌失效；`1.14.0` 将 `/btw` 改为默认 workspace-write，并让 provider adoption 形成 A -> B -> A 的线性上下文。
 
 `1.6.7` 引入 provider-aware Codex resume，`1.7.0` 增加 idle 边界重绑。`1.9.1` 收紧重连语义：附着已有 native 或 structured thread 时，保留该 thread 记录的 provider/model，不会因为 cc-switch 后来切换了 route 而静默改路。
 
@@ -60,7 +60,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.15.0
+sh /tmp/install-arg-bridge.sh --version 1.16.0
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.15.0"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.16.0"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.15.0`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.16.0`。
 
 ### 4. Node 或 npm 全局目录错误
 
@@ -274,7 +274,7 @@ codex plugin marketplace add Utopia-V/mixagents
 codex plugin add mixagents-broker@mixagents
 ```
 
-`arg-bridge settings` 现在会用五步向导说明：当前主对话、是否允许降级、子代理跟随当前 provider 还是固定某个 cc-switch provider、Key 自动由 cc-switch 解析、是否启用项目证据校验。用户不需要填写 route ID 或 Key；并发、native 工具遮蔽、写权限和自定义 MCP 等参数收在“高级设置”里。默认不创建 `broker-routes.json`，也不会切换主 provider。
+`arg-bridge settings` 现在会用五步向导说明：当前主对话、是否允许降级、子代理跟随当前 provider 还是固定某个 cc-switch provider、模型版本和推理强度、Key 自动由 cc-switch 解析、是否启用项目证据校验。模型选项来自所选 provider 的本地配置，也可手填或跟随默认值；选择按 provider 保存，下一次子代理派发时生效。用户不需要填写 route ID 或 Key；并发、native 工具遮蔽、写权限和自定义 MCP 等参数收在“高级设置”里。默认不创建 `broker-routes.json`，也不会切换主 provider。
 
 `1.9.1` 新增两个显式终端入口：
 

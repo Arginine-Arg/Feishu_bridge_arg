@@ -13,9 +13,11 @@ import {
 } from '../agent/codex/credentials';
 import type { SubagentRoute } from '../agent/subagents/types';
 import type {
+  SubagentProviderOverride,
   SubagentReasoningEffort,
   SubagentWebSearchMode,
 } from '../config/profile-schema';
+import { validSubagentModel } from '../config/profile-schema';
 import { spawnProcess } from '../platform/spawn';
 import { writeFileAtomic } from '../platform/atomic-write';
 
@@ -56,6 +58,8 @@ export interface CcSwitchProviderSummary {
   source: CcSwitchProviderSource;
   codexProviderId: string;
   model: string;
+  /** Locally declared models only; not a claim of API availability. */
+  configuredModels?: string[];
   baseUrl: string;
   baseUrlHost: string | null;
   wireApi: string;
@@ -102,6 +106,7 @@ export interface CcSwitchRuntimePolicy {
   role: 'side' | 'worker' | 'reviewer';
   webSearch: SubagentWebSearchMode;
   sideReasoningEffort?: SubagentReasoningEffort;
+  providerOverrides?: Record<string, SubagentProviderOverride>;
 }
 
 export class CcSwitchProviderError extends Error {
@@ -317,6 +322,7 @@ export async function resolveCurrentCcSwitchCodexProvider(input: {
     source: metadata.source,
     codexProviderId: providerId,
     model,
+    configuredModels: configuredProviderModels(record.settingsConfig, parsed.config, providerId),
     baseUrl,
     baseUrlHost: safeHostname(baseUrl),
     wireApi,
@@ -385,20 +391,33 @@ export async function materializeCcSwitchBrokerRuntime(input: {
     role: 'worker' as const,
     webSearch: 'auto' as const,
   };
+  const preference = Object.hasOwn(runtimePolicy.providerOverrides ?? {}, summary.id)
+    ? runtimePolicy.providerOverrides![summary.id]
+    : undefined;
+  const model = preference?.model ?? summary.model;
+  if (!validSubagentModel(model)) {
+    throw new CcSwitchProviderError('config-invalid', '子代理模型必须是有效的 model ID');
+  }
+  const selectedEffort = preference?.reasoningEffort ??
+    (runtimePolicy.role === 'side' ? runtimePolicy.sideReasoningEffort : undefined);
+  const reasoningEffort = selectedEffort && selectedEffort !== 'inherit'
+    ? normalizeReasoningEffort(selectedEffort)
+    : summary.reasoningEffort ? normalizeReasoningEffort(summary.reasoningEffort) : undefined;
   const webSearch = resolveWebSearchPolicy(summary, runtimePolicy.webSearch);
   const policyFingerprint = createHash('sha256').update(JSON.stringify({
     config: summary.configFingerprint,
     role: runtimePolicy.role,
     webSearch: runtimePolicy.webSearch,
     effectiveWebSearch: webSearch.effective,
-    sideReasoningEffort: runtimePolicy.sideReasoningEffort ?? null,
+    model,
+    reasoningEffort: reasoningEffort ?? null,
   })).digest('hex');
   const routeId = ccSwitchRouteId(summary);
   const route: SubagentRoute = {
     id: routeId,
     description: `${summary.name} current cc-switch Codex provider`,
     provider: summary.codexProviderId,
-    model: summary.model,
+    model,
     maxAccess: 'workspace-write',
     available: true,
     missingEnvironment: [],
@@ -451,7 +470,7 @@ export async function materializeCcSwitchBrokerRuntime(input: {
       summary.codexProviderId.toLowerCase(),
     ),
     webSearch: webSearch.effective,
-    sideReasoningEffort: runtimePolicy.sideReasoningEffort,
+    reasoningEffort,
   });
   const brokerConfig = {
     version: 1,
@@ -465,7 +484,8 @@ export async function materializeCcSwitchBrokerRuntime(input: {
         provider: route.provider,
         providerName: summary.name,
         model: route.model,
-        ...(summary.contextWindow ? { contextWindow: summary.contextWindow } : {}),
+        ...(model === summary.model && summary.contextWindow
+          ? { contextWindow: summary.contextWindow } : {}),
         baseUrl: summary.baseUrl,
         ...(summary.envKey ? { envKey: summary.envKey } : {}),
         ...(Object.keys(summary.envHttpHeaders).length > 0
@@ -475,13 +495,7 @@ export async function materializeCcSwitchBrokerRuntime(input: {
         maxAccess: 'workspace-write',
         ccSwitchProviderId: summary.id,
         source: 'cc-switch',
-        ...(runtimePolicy.role === 'side' &&
-            runtimePolicy.sideReasoningEffort &&
-            runtimePolicy.sideReasoningEffort !== 'inherit'
-          ? { reasoningEffort: runtimePolicy.sideReasoningEffort }
-          : summary.reasoningEffort
-          ? { reasoningEffort: normalizeReasoningEffort(summary.reasoningEffort) }
-          : {}),
+        ...(reasoningEffort ? { reasoningEffort } : {}),
       },
     },
   };
@@ -506,7 +520,7 @@ async function materializeManagedCodexLauncher(input: {
   provider: string;
   providerConfigurable: boolean;
   webSearch: 'enabled' | 'disabled';
-  sideReasoningEffort?: SubagentReasoningEffort;
+  reasoningEffort?: string;
 }): Promise<string> {
   const wrapperDir = join(input.stateDir, 'cc-switch', 'codex-wrapper');
   await mkdir(wrapperDir, { recursive: true, mode: 0o700 });
@@ -515,10 +529,8 @@ async function materializeManagedCodexLauncher(input: {
     ...(input.webSearch === 'disabled'
       ? ['-c', 'web_search="disabled"']
       : []),
-    ...(input.role === 'side' &&
-        input.sideReasoningEffort &&
-        input.sideReasoningEffort !== 'inherit'
-      ? ['-c', `model_reasoning_effort="${input.sideReasoningEffort}"`]
+    ...(input.reasoningEffort
+      ? ['-c', `model_reasoning_effort="${input.reasoningEffort}"`]
       : []),
     ...(input.role === 'side' && input.providerConfigurable
       ? [
@@ -983,6 +995,29 @@ function settingsConfigText(settingsConfig: Record<string, unknown>): string | u
   const config = settingsConfig.config;
   if (typeof config === 'string') return config;
   return undefined;
+}
+
+function configuredProviderModels(
+  settings: Record<string, unknown>,
+  config: CodexConfigSummary,
+  providerId: string,
+): string[] {
+  const models = new Set<string>();
+  const add = (value: unknown): void => {
+    if (validSubagentModel(value)) models.add(value);
+  };
+  add(config.model);
+  // Parse model declarations only. Never walk auth, headers or arbitrary config values.
+  for (const profile of config.modelProfiles ?? []) {
+    if (!profile.modelProvider || profile.modelProvider === providerId) add(profile.model);
+  }
+  for (const list of [settings.models, settings.availableModels, settings.available_models]) {
+    if (!Array.isArray(list)) continue;
+    for (const entry of list) {
+      add(isRecord(entry) ? entry.id ?? entry.model : entry);
+    }
+  }
+  return [...models];
 }
 
 function extractConfigBearerToken(configText: string, providerId: string): string | undefined {

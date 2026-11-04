@@ -4,7 +4,7 @@ A lightweight bot that bridges Feishu / Lark messenger with your local Claude Co
 
 [中文 README](./README.zh.md)
 
-Version 1.15.0 makes file delivery capabilities persistent per chat scope and renews stale tokens through the broker for live tmux, structured main sessions, `/btw` workers and model-visible subagents. Main and side workspaces are merged into the grant while every regular-file, symlink, realpath, reply-target and size check remains enforced. Version 1.14.0 made `/btw` workspace-write by default and provider adoption linear across A -> B -> A switches.
+Version 1.16.0 adds model version and reasoning effort selection after the cc-switch provider in settings. Models come from the selected provider's local configuration, with manual model IDs and provider defaults also available. Preferences apply to `/btw`, workers and reviewers, and are saved separately for each provider. Version 1.15.0 fixed stale file delivery tokens; 1.14.0 made `/btw` workspace-write by default and provider adoption linear across A -> B -> A switches.
 
 Version 1.6.7 introduced provider-aware Codex resume, and 1.7.0 added idle-boundary rebinding. Version 1.9.1 narrows reattachment semantics: reconnecting to an existing native or structured thread preserves the provider/model recorded by that thread instead of silently following a newly selected cc-switch route.
 
@@ -60,7 +60,7 @@ Install a pinned release or use a writable custom npm prefix when required:
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.15.0
+sh /tmp/install-arg-bridge.sh --version 1.16.0
 # Example for a machine without permission to write npm's configured global prefix:
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ Release tarballs are preferred. If a Git install is required, keep both compatib
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.15.0"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.16.0"
 ```
 
-`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.15.0`.
+`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.16.0`.
 
 ### 4. Node or npm global-prefix errors
 
@@ -277,7 +277,7 @@ codex plugin marketplace add Utopia-V/mixagents
 codex plugin add mixagents-broker@mixagents
 ```
 
-`arg-bridge settings` now guides the user through main-account context, fallback policy, **follow current provider or a fixed cc-switch provider**, automatic cc-switch credential resolution, Project RSI, and a plain-language confirmation. No route ID or Key entry is required. Technical concurrency/native-tool/write-worker controls are behind an explicit advanced prompt. The default flow does not create `broker-routes.json` and never changes the main provider. `arg-bridge doctor --json` is read-only and must not spend money. Only an explicit `--probe-route <id>` sends one read-only generation probe and never retries or falls back.
+`arg-bridge settings` now guides the user through main-account context, fallback policy, **follow current provider or a fixed cc-switch provider**, model version and reasoning effort, automatic cc-switch credential resolution, Project RSI, and a plain-language confirmation. Model choices are read from the selected provider's local configuration; manual model IDs and provider defaults are available. Preferences are saved per provider and apply on the next subagent dispatch. No route ID or Key entry is required. Technical concurrency/native-tool/write-worker controls are behind an explicit advanced prompt. The default flow does not create `broker-routes.json` and never changes the main provider. `arg-bridge doctor --json` is read-only and must not spend money. Only an explicit `--probe-route <id>` sends one read-only generation probe and never retries or falls back.
 
 Version 1.9.1 adds two explicit terminal entry points:
 
