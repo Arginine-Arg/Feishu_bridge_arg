@@ -122,6 +122,7 @@ export interface AgentRunOptions {
   permissionMode?: ClaudePermissionMode;
   /** Run-scoped capability for asking the bridge to deliver a local file. */
   artifactDelivery?: {
+    statePath?: string;
     scope?: string;
     socketPath: string;
     token: string;

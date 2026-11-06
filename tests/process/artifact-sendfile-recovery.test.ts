@@ -12,7 +12,7 @@ it('sends from a separate process with no inherited capability after broker rest
   const root = await mkdtemp(join(tmpdir(), 'ab-file-process-'));
   const workspace = join(root, 'workspace');
   const env: NodeJS.ProcessEnv = { ...process.env, CODEX_THREAD_ID: 'old-native-thread', ARG_BRIDGE_ARTIFACT_CONTEXT_DIR: join(root, 'contexts') };
-  for (const key of ['ARG_BRIDGE_ARTIFACT_SCOPE', 'ARG_BRIDGE_ARTIFACT_SOCKET', 'ARG_BRIDGE_ARTIFACT_TOKEN', 'TMUX', 'TMUX_PANE']) delete env[key];
+  for (const key of ['ARG_BRIDGE_ARTIFACT_SCOPE', 'ARG_BRIDGE_ARTIFACT_STATE', 'ARG_BRIDGE_ARTIFACT_SOCKET', 'ARG_BRIDGE_ARTIFACT_TOKEN', 'TMUX', 'TMUX_PANE']) delete env[key];
   let broker: ArtifactBroker | undefined;
   try {
     await mkdir(workspace);

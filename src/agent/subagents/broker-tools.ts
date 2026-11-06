@@ -241,6 +241,7 @@ export class BrokerToolController implements BrokerToolHost {
   ): Promise<void> {
     const next: Record<string, string | undefined> = {
       ARG_BRIDGE_ARTIFACT_SCOPE: artifact?.scope,
+      ARG_BRIDGE_ARTIFACT_STATE: artifact?.statePath,
       ARG_BRIDGE_ARTIFACT_SOCKET: artifact?.socketPath,
       ARG_BRIDGE_ARTIFACT_TOKEN: artifact?.token,
     };
@@ -925,7 +926,10 @@ export class BrokerToolController implements BrokerToolHost {
     if (!scope || !socketPath || !token) return;
     await Promise.all([...this.workers.values()].map(worker => {
       const threadId = subagentThreadId(worker.agent);
-      return threadId ? bindThreadArtifactDelivery(threadId, { scope, socketPath, token }, [worker.workspace], this.env) : undefined;
+      return threadId ? bindThreadArtifactDelivery(threadId, {
+        scope, socketPath, token,
+        ...(this.env.ARG_BRIDGE_ARTIFACT_STATE ? { statePath: this.env.ARG_BRIDGE_ARTIFACT_STATE } : {}),
+      }, [worker.workspace], this.env) : undefined;
     }));
   }
 }

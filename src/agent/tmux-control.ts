@@ -357,6 +357,7 @@ export class TmuxBindingController {
     }
     for (const [key, value] of [
       ['ARG_BRIDGE_ARTIFACT_SCOPE', artifact.scope],
+      ['ARG_BRIDGE_ARTIFACT_STATE', artifact.statePath],
       ['ARG_BRIDGE_ARTIFACT_SOCKET', artifact.socketPath],
       ['ARG_BRIDGE_ARTIFACT_TOKEN', artifact.token],
     ] as const) {

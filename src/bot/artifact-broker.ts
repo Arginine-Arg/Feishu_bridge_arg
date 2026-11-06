@@ -8,6 +8,7 @@ import { writeFileAtomic } from '../platform/atomic-write';
 import { ArtifactRelayReader, claimArtifactRelayRequest, verifiedArtifactRelayRequests, type ArtifactRelaySource } from '../agent/artifact-relay';
 
 export interface ArtifactDeliveryGrant {
+  statePath?: string;
   scope: string;
   socketPath: string;
   token: string;
@@ -123,7 +124,7 @@ export class ArtifactBroker {
           ...new Set([...existing.allowedRoots, ...input.allowedRoots]),
         ];
         this.schedulePersist();
-        return { scope: existing.scope, socketPath: this.socketPath, token: existing.token };
+        return this.delivery(existing.scope, existing.token);
       }
       this.persistentTokensByScope.delete(input.scope);
     }
@@ -133,7 +134,12 @@ export class ArtifactBroker {
       this.persistentTokensByScope.set(input.scope, token);
       this.schedulePersist();
     }
-    return { scope: input.scope, socketPath: this.socketPath, token };
+    return this.delivery(input.scope, token);
+  }
+
+  private delivery(scope: string, token: string): ArtifactDeliveryGrant {
+    return { scope, socketPath: this.socketPath, token,
+      ...(this.persistentStatePath ? { statePath: this.persistentStatePath } : {}) };
   }
 
   revoke(token: string | undefined): void {
@@ -160,10 +166,10 @@ export class ArtifactBroker {
   }
 
   /** Persistent grants are restored only into their matching managed tmux scope. */
-  persistentDeliveries(): Array<{ scope: string; socketPath: string; token: string }> {
+  persistentDeliveries(): ArtifactDeliveryGrant[] {
     return [...this.persistentTokensByScope.entries()].flatMap(([scope, token]) => {
       const grant = this.grants.get(token);
-      return grant?.persistent ? [{ scope, socketPath: this.socketPath, token }] : [];
+      return grant?.persistent ? [this.delivery(scope, token)] : [];
     });
   }
 
@@ -351,6 +357,7 @@ export function isPathWithinRoot(path: string, root: string): boolean {
  */
 export function artifactBrokerSocketPath(socketPath: string): string {
   if (process.platform !== 'win32') return socketPath;
+  if (socketPath.startsWith('\\\\.\\pipe\\arg-bridge-artifact-')) return socketPath;
   const digest = createHash('sha256').update(resolve(socketPath)).digest('hex').slice(0, 32);
   return `\\\\.\\pipe\\arg-bridge-artifact-${digest}`;
 }

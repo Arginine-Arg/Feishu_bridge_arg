@@ -28,7 +28,7 @@ async function setup() {
   await mkdir(directory, { recursive: true });
   await writeFile(join(workspace, 'prompt.md'), 'ready');
   vi.stubEnv('ARG_BRIDGE_ARTIFACT_CONTEXT_DIR', contexts);
-  for (const key of ['ARG_BRIDGE_ARTIFACT_SCOPE', 'ARG_BRIDGE_ARTIFACT_SOCKET', 'ARG_BRIDGE_ARTIFACT_TOKEN', 'CODEX_THREAD_ID', 'TMUX', 'TMUX_PANE']) vi.stubEnv(key, '');
+  for (const key of ['ARG_BRIDGE_ARTIFACT_SCOPE', 'ARG_BRIDGE_ARTIFACT_STATE', 'ARG_BRIDGE_ARTIFACT_SOCKET', 'ARG_BRIDGE_ARTIFACT_TOKEN', 'CODEX_THREAD_ID', 'TMUX', 'TMUX_PANE']) vi.stubEnv(key, '');
   vi.spyOn(process, 'cwd').mockReturnValue(workspace);
   const send = vi.fn(async (_chatId: string, _content: unknown, _options: unknown) => ({ messageId: 'file-response' }));
   const broker = new ArtifactBroker(join(profileDir, 'artifact-broker.sock'), { send } as never,
@@ -92,6 +92,7 @@ it('recovers a token filtered from the shell while keeping scope and socket exac
   const h = await setup();
   vi.stubEnv('ARG_BRIDGE_ARTIFACT_SCOPE', h.grant.scope);
   vi.stubEnv('ARG_BRIDGE_ARTIFACT_SOCKET', h.grant.socketPath);
+  vi.stubEnv('ARG_BRIDGE_ARTIFACT_STATE', h.grant.statePath!);
   await expect(runAgentSendFile('prompt.md')).resolves.toBeUndefined();
   expect(h.send).toHaveBeenCalledOnce();
 });

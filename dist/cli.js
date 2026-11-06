@@ -4974,6 +4974,7 @@ function withArtifactDeliveryEnv(base, artifact) {
   return {
     ...base,
     ...artifact.scope ? { ARG_BRIDGE_ARTIFACT_SCOPE: artifact.scope } : {},
+    ...artifact.statePath ? { ARG_BRIDGE_ARTIFACT_STATE: artifact.statePath } : {},
     ARG_BRIDGE_ARTIFACT_SOCKET: artifact.socketPath,
     ARG_BRIDGE_ARTIFACT_TOKEN: artifact.token
   };
@@ -7594,6 +7595,7 @@ var TmuxBindingController = class {
     }
     for (const [key, value] of [
       ["ARG_BRIDGE_ARTIFACT_SCOPE", artifact.scope],
+      ["ARG_BRIDGE_ARTIFACT_STATE", artifact.statePath],
       ["ARG_BRIDGE_ARTIFACT_SOCKET", artifact.socketPath],
       ["ARG_BRIDGE_ARTIFACT_TOKEN", artifact.token]
     ]) {
@@ -9824,6 +9826,7 @@ function setManagedMetadata() {
 function setManagedArtifactDeliveryEnvironment() {
   if (!managed) return;
   const scope = artifactEnv.ARG_BRIDGE_ARTIFACT_SCOPE || process.env.ARG_BRIDGE_ARTIFACT_SCOPE;
+  const state = artifactEnv.ARG_BRIDGE_ARTIFACT_STATE || process.env.ARG_BRIDGE_ARTIFACT_STATE;
   const socket = artifactEnv.ARG_BRIDGE_ARTIFACT_SOCKET || process.env.ARG_BRIDGE_ARTIFACT_SOCKET;
   const token = artifactEnv.ARG_BRIDGE_ARTIFACT_TOKEN || process.env.ARG_BRIDGE_ARTIFACT_TOKEN;
   if (!socket || !token) return;
@@ -9834,6 +9837,7 @@ function setManagedArtifactDeliveryEnvironment() {
   // externally bound pane: one user tmux session can contain several scopes.
   for (const [key, value] of [
     ['ARG_BRIDGE_ARTIFACT_SCOPE', scope],
+    ['ARG_BRIDGE_ARTIFACT_STATE', state],
     ['ARG_BRIDGE_ARTIFACT_SOCKET', socket],
     ['ARG_BRIDGE_ARTIFACT_TOKEN', token],
   ]) {
@@ -13149,6 +13153,7 @@ function artifactDeliveryEnv(artifact) {
   return {
     artifactEnv: {
       ...artifact.scope ? { ARG_BRIDGE_ARTIFACT_SCOPE: artifact.scope } : {},
+      ...artifact.statePath ? { ARG_BRIDGE_ARTIFACT_STATE: artifact.statePath } : {},
       ARG_BRIDGE_ARTIFACT_SOCKET: artifact.socketPath,
       ARG_BRIDGE_ARTIFACT_TOKEN: artifact.token
     }
@@ -15850,6 +15855,7 @@ var BrokerToolController = class {
   async refreshArtifactDelivery(artifact) {
     const next = {
       ARG_BRIDGE_ARTIFACT_SCOPE: artifact?.scope,
+      ARG_BRIDGE_ARTIFACT_STATE: artifact?.statePath,
       ARG_BRIDGE_ARTIFACT_SOCKET: artifact?.socketPath,
       ARG_BRIDGE_ARTIFACT_TOKEN: artifact?.token
     };
@@ -16450,7 +16456,12 @@ var BrokerToolController = class {
     if (!scope || !socketPath || !token) return;
     await Promise.all([...this.workers.values()].map((worker) => {
       const threadId = subagentThreadId(worker.agent);
-      return threadId ? bindThreadArtifactDelivery(threadId, { scope, socketPath, token }, [worker.workspace], this.env) : void 0;
+      return threadId ? bindThreadArtifactDelivery(threadId, {
+        scope,
+        socketPath,
+        token,
+        ...this.env.ARG_BRIDGE_ARTIFACT_STATE ? { statePath: this.env.ARG_BRIDGE_ARTIFACT_STATE } : {}
+      }, [worker.workspace], this.env) : void 0;
     }));
   }
 };
@@ -19613,6 +19624,7 @@ function isHighImpactConclusion(text2) {
 function artifactEnvFrom(options) {
   return options.artifactDelivery ? {
     ...options.artifactDelivery.scope ? { ARG_BRIDGE_ARTIFACT_SCOPE: options.artifactDelivery.scope } : {},
+    ...options.artifactDelivery.statePath ? { ARG_BRIDGE_ARTIFACT_STATE: options.artifactDelivery.statePath } : {},
     ARG_BRIDGE_ARTIFACT_SOCKET: options.artifactDelivery.socketPath,
     ARG_BRIDGE_ARTIFACT_TOKEN: options.artifactDelivery.token
   } : void 0;
@@ -20011,7 +20023,8 @@ var StructuredAdapter = class {
         await bindThreadArtifactDelivery(threadId, {
           scope: side.scope,
           socketPath: side.artifactSocketPath,
-          token: side.artifactToken
+          token: side.artifactToken,
+          statePath: join35(this.options.profileDir, "artifact-grants.json")
         }, [side.cwd], this.options.env ?? process.env);
       }
     }
@@ -21352,6 +21365,7 @@ ${truncateSnapshot(redactDiagnosticText(redactSecrets(manifest)), 8e3)}
             ...buildLarkChannelEnv(this.options.larkChannel),
             ...options.artifactDelivery ? {
               ...options.artifactDelivery.scope ? { ARG_BRIDGE_ARTIFACT_SCOPE: options.artifactDelivery.scope } : {},
+              ...options.artifactDelivery.statePath ? { ARG_BRIDGE_ARTIFACT_STATE: options.artifactDelivery.statePath } : {},
               ARG_BRIDGE_ARTIFACT_SOCKET: options.artifactDelivery.socketPath,
               ARG_BRIDGE_ARTIFACT_TOKEN: options.artifactDelivery.token
             } : {}
@@ -21500,6 +21514,7 @@ ${prompt}
         if (!side && target === current.main && this.id === "codex" && this.options.nativeView !== false) {
           const artifactEnv = options.artifactDelivery ? {
             ...options.artifactDelivery.scope ? { ARG_BRIDGE_ARTIFACT_SCOPE: options.artifactDelivery.scope } : {},
+            ...options.artifactDelivery.statePath ? { ARG_BRIDGE_ARTIFACT_STATE: options.artifactDelivery.statePath } : {},
             ARG_BRIDGE_ARTIFACT_SOCKET: options.artifactDelivery.socketPath,
             ARG_BRIDGE_ARTIFACT_TOKEN: options.artifactDelivery.token
           } : void 0;
@@ -31290,7 +31305,7 @@ var ArtifactBroker = class {
           .../* @__PURE__ */ new Set([...existing.allowedRoots, ...input.allowedRoots])
         ];
         this.schedulePersist();
-        return { scope: existing.scope, socketPath: this.socketPath, token: existing.token };
+        return this.delivery(existing.scope, existing.token);
       }
       this.persistentTokensByScope.delete(input.scope);
     }
@@ -31300,7 +31315,15 @@ var ArtifactBroker = class {
       this.persistentTokensByScope.set(input.scope, token);
       this.schedulePersist();
     }
-    return { scope: input.scope, socketPath: this.socketPath, token };
+    return this.delivery(input.scope, token);
+  }
+  delivery(scope, token) {
+    return {
+      scope,
+      socketPath: this.socketPath,
+      token,
+      ...this.persistentStatePath ? { statePath: this.persistentStatePath } : {}
+    };
   }
   revoke(token) {
     if (!token) return;
@@ -31327,7 +31350,7 @@ var ArtifactBroker = class {
   persistentDeliveries() {
     return [...this.persistentTokensByScope.entries()].flatMap(([scope, token]) => {
       const grant = this.grants.get(token);
-      return grant?.persistent ? [{ scope, socketPath: this.socketPath, token }] : [];
+      return grant?.persistent ? [this.delivery(scope, token)] : [];
     });
   }
   async close() {
@@ -31506,6 +31529,7 @@ function isPathWithinRoot2(path, root) {
 }
 function artifactBrokerSocketPath(socketPath) {
   if (process.platform !== "win32") return socketPath;
+  if (socketPath.startsWith("\\\\.\\pipe\\arg-bridge-artifact-")) return socketPath;
   const digest2 = createHash16("sha256").update(resolve8(socketPath)).digest("hex").slice(0, 32);
   return `\\\\.\\pipe\\arg-bridge-artifact-${digest2}`;
 }
@@ -36525,6 +36549,7 @@ function resolveAgentArtifactDelivery(env = process.env, readTmuxEnvironment = r
   const scope = env.ARG_BRIDGE_ARTIFACT_SCOPE;
   const socketPath = env.ARG_BRIDGE_ARTIFACT_SOCKET;
   const token = env.ARG_BRIDGE_ARTIFACT_TOKEN;
+  const statePath = env.ARG_BRIDGE_ARTIFACT_STATE;
   if (env.TMUX && env.TMUX_PANE && /^%\d+$/u.test(env.TMUX_PANE)) {
     const resumedScope = readTmuxEnvironment("ARG_BRIDGE_ARTIFACT_SCOPE", env);
     const resumedSocketPath = readTmuxEnvironment("ARG_BRIDGE_ARTIFACT_SOCKET", env);
@@ -36533,11 +36558,12 @@ function resolveAgentArtifactDelivery(env = process.env, readTmuxEnvironment = r
       return {
         ...resumedScope ? { scope: resumedScope } : {},
         socketPath: resumedSocketPath,
-        token: resumedToken
+        token: resumedToken,
+        ...statePath && socketPath === resumedSocketPath ? { statePath } : {}
       };
     }
   }
-  return socketPath && token ? { ...scope ? { scope } : {}, socketPath, token } : void 0;
+  return socketPath && token ? { ...scope ? { scope } : {}, ...statePath ? { statePath } : {}, socketPath, token } : void 0;
 }
 async function runAgentSendFile(path, caption) {
   let artifact = await readThreadArtifactDelivery() ?? resolveAgentArtifactDelivery();
@@ -36545,6 +36571,7 @@ async function runAgentSendFile(path, caption) {
     artifact = await recoverArtifactDelivery({
       scope: process.env.ARG_BRIDGE_ARTIFACT_SCOPE,
       socketPath: process.env.ARG_BRIDGE_ARTIFACT_SOCKET,
+      statePath: process.env.ARG_BRIDGE_ARTIFACT_STATE,
       token: ""
     });
   }
@@ -36598,7 +36625,7 @@ function requestArtifactDelivery(artifact, path, caption) {
 }
 async function recoverArtifactDelivery(stale, cwd = process.cwd()) {
   if (!stale.scope) return void 0;
-  const statePath = join42(dirname25(stale.socketPath), "artifact-grants.json");
+  const statePath = stale.statePath ?? join42(dirname25(stale.socketPath), "artifact-grants.json");
   let parsed;
   try {
     parsed = JSON.parse(await readFile30(statePath, "utf8"));
@@ -36622,7 +36649,7 @@ async function recoverArtifactDelivery(stale, cwd = process.cwd()) {
     }] : [];
   }).sort((left, right) => right.updatedAt - left.updatedAt);
   const token = candidates[0]?.token;
-  return token ? { scope: stale.scope, socketPath: stale.socketPath, token } : void 0;
+  return token ? { scope: stale.scope, ...stale.statePath ? { statePath: stale.statePath } : {}, socketPath: stale.socketPath, token } : void 0;
 }
 function readTmuxSessionEnvironment(name, env) {
   const pane = env.TMUX_PANE;

@@ -2370,6 +2370,7 @@ function setManagedMetadata() {
 function setManagedArtifactDeliveryEnvironment() {
   if (!managed) return;
   const scope = artifactEnv.ARG_BRIDGE_ARTIFACT_SCOPE || process.env.ARG_BRIDGE_ARTIFACT_SCOPE;
+  const state = artifactEnv.ARG_BRIDGE_ARTIFACT_STATE || process.env.ARG_BRIDGE_ARTIFACT_STATE;
   const socket = artifactEnv.ARG_BRIDGE_ARTIFACT_SOCKET || process.env.ARG_BRIDGE_ARTIFACT_SOCKET;
   const token = artifactEnv.ARG_BRIDGE_ARTIFACT_TOKEN || process.env.ARG_BRIDGE_ARTIFACT_TOKEN;
   if (!socket || !token) return;
@@ -2380,6 +2381,7 @@ function setManagedArtifactDeliveryEnvironment() {
   // externally bound pane: one user tmux session can contain several scopes.
   for (const [key, value] of [
     ['ARG_BRIDGE_ARTIFACT_SCOPE', scope],
+    ['ARG_BRIDGE_ARTIFACT_STATE', state],
     ['ARG_BRIDGE_ARTIFACT_SOCKET', socket],
     ['ARG_BRIDGE_ARTIFACT_TOKEN', token],
   ]) {

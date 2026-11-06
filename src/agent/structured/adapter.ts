@@ -267,6 +267,7 @@ function artifactEnvFrom(options: AgentRunOptions): NodeJS.ProcessEnv | undefine
         ...(options.artifactDelivery.scope
           ? { ARG_BRIDGE_ARTIFACT_SCOPE: options.artifactDelivery.scope }
           : {}),
+        ...(options.artifactDelivery.statePath ? { ARG_BRIDGE_ARTIFACT_STATE: options.artifactDelivery.statePath } : {}),
         ARG_BRIDGE_ARTIFACT_SOCKET: options.artifactDelivery.socketPath,
         ARG_BRIDGE_ARTIFACT_TOKEN: options.artifactDelivery.token,
       }
@@ -765,6 +766,7 @@ export class StructuredAdapter implements AgentAdapter {
       if (threadId && side.artifactSocketPath && side.artifactToken) {
         await bindThreadArtifactDelivery(threadId, {
           scope: side.scope, socketPath: side.artifactSocketPath, token: side.artifactToken,
+          statePath: join(this.options.profileDir, 'artifact-grants.json'),
         }, [side.cwd], this.options.env ?? process.env);
       }
     }
@@ -2267,6 +2269,7 @@ export class StructuredAdapter implements AgentAdapter {
                   ...(options.artifactDelivery.scope
                     ? { ARG_BRIDGE_ARTIFACT_SCOPE: options.artifactDelivery.scope }
                     : {}),
+                  ...(options.artifactDelivery.statePath ? { ARG_BRIDGE_ARTIFACT_STATE: options.artifactDelivery.statePath } : {}),
                   ARG_BRIDGE_ARTIFACT_SOCKET: options.artifactDelivery.socketPath,
                   ARG_BRIDGE_ARTIFACT_TOKEN: options.artifactDelivery.token,
                 }
@@ -2412,6 +2415,7 @@ export class StructuredAdapter implements AgentAdapter {
                 ...(options.artifactDelivery.scope
                   ? { ARG_BRIDGE_ARTIFACT_SCOPE: options.artifactDelivery.scope }
                   : {}),
+                ...(options.artifactDelivery.statePath ? { ARG_BRIDGE_ARTIFACT_STATE: options.artifactDelivery.statePath } : {}),
                 ARG_BRIDGE_ARTIFACT_SOCKET: options.artifactDelivery.socketPath,
                 ARG_BRIDGE_ARTIFACT_TOKEN: options.artifactDelivery.token,
               }

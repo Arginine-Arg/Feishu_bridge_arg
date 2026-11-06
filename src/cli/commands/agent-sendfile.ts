@@ -15,10 +15,11 @@ type TmuxEnvironmentReader = (name: string, env: NodeJS.ProcessEnv) => string | 
 export function resolveAgentArtifactDelivery(
   env: NodeJS.ProcessEnv = process.env,
   readTmuxEnvironment: TmuxEnvironmentReader = readTmuxSessionEnvironment,
-): { scope?: string; socketPath: string; token: string } | undefined {
+): { scope?: string; statePath?: string; socketPath: string; token: string } | undefined {
   const scope = env.ARG_BRIDGE_ARTIFACT_SCOPE;
   const socketPath = env.ARG_BRIDGE_ARTIFACT_SOCKET;
   const token = env.ARG_BRIDGE_ARTIFACT_TOKEN;
+  const statePath = env.ARG_BRIDGE_ARTIFACT_STATE;
 
   // A bridge-managed tmux session is one scope. Existing Codex processes
   // cannot have their environment mutated after codex --resume, but their
@@ -33,10 +34,11 @@ export function resolveAgentArtifactDelivery(
         ...(resumedScope ? { scope: resumedScope } : {}),
         socketPath: resumedSocketPath,
         token: resumedToken,
+        ...(statePath && socketPath === resumedSocketPath ? { statePath } : {}),
       };
     }
   }
-  return socketPath && token ? { ...(scope ? { scope } : {}), socketPath, token } : undefined;
+  return socketPath && token ? { ...(scope ? { scope } : {}), ...(statePath ? { statePath } : {}), socketPath, token } : undefined;
 }
 
 /** Client half of the run-scoped artifact capability exposed to agents. */
@@ -49,6 +51,7 @@ export async function runAgentSendFile(path: string, caption?: string): Promise<
     artifact = await recoverArtifactDelivery({
       scope: process.env.ARG_BRIDGE_ARTIFACT_SCOPE,
       socketPath: process.env.ARG_BRIDGE_ARTIFACT_SOCKET,
+      statePath: process.env.ARG_BRIDGE_ARTIFACT_STATE,
       token: '',
     });
   }
@@ -103,11 +106,11 @@ function requestArtifactDelivery(
 }
 
 export async function recoverArtifactDelivery(
-  stale: { scope?: string; socketPath: string; token: string },
+  stale: { scope?: string; statePath?: string; socketPath: string; token: string },
   cwd = process.cwd(),
-): Promise<{ scope: string; socketPath: string; token: string } | undefined> {
+): Promise<{ scope: string; statePath?: string; socketPath: string; token: string } | undefined> {
   if (!stale.scope) return undefined;
-  const statePath = join(dirname(stale.socketPath), 'artifact-grants.json');
+  const statePath = stale.statePath ?? join(dirname(stale.socketPath), 'artifact-grants.json');
   let parsed: unknown;
   try {
     parsed = JSON.parse(await readFile(statePath, 'utf8'));
@@ -146,7 +149,7 @@ export async function recoverArtifactDelivery(
       : [];
   }).sort((left, right) => right.updatedAt - left.updatedAt);
   const token = candidates[0]?.token;
-  return token ? { scope: stale.scope, socketPath: stale.socketPath, token } : undefined;
+  return token ? { scope: stale.scope, ...(stale.statePath ? { statePath: stale.statePath } : {}), socketPath: stale.socketPath, token } : undefined;
 }
 
 function readTmuxSessionEnvironment(name: string, env: NodeJS.ProcessEnv): string | undefined {
