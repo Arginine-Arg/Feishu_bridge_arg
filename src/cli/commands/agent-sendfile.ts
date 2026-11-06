@@ -2,6 +2,8 @@ import { spawnSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { connect } from 'node:net';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { readThreadArtifactDelivery } from '../../agent/artifact-context';
+import { artifactRelayRequest } from '../../agent/artifact-relay';
 
 interface BrokerResponse {
   ok?: unknown;
@@ -39,11 +41,29 @@ export function resolveAgentArtifactDelivery(
 
 /** Client half of the run-scoped artifact capability exposed to agents. */
 export async function runAgentSendFile(path: string, caption?: string): Promise<void> {
-  const artifact = resolveAgentArtifactDelivery();
+  // Native/adopted App Servers can predate the bot and never inherit its
+  // capability. CODEX_THREAD_ID identifies an exact persisted chat binding;
+  // workspace alone is deliberately insufficient to select a recipient.
+  let artifact = await readThreadArtifactDelivery() ?? resolveAgentArtifactDelivery();
+  if (!artifact && process.env.ARG_BRIDGE_ARTIFACT_SCOPE && process.env.ARG_BRIDGE_ARTIFACT_SOCKET) {
+    artifact = await recoverArtifactDelivery({
+      scope: process.env.ARG_BRIDGE_ARTIFACT_SCOPE,
+      socketPath: process.env.ARG_BRIDGE_ARTIFACT_SOCKET,
+      token: '',
+    });
+  }
   if (!artifact) {
     throw new Error('当前进程没有 bridge 文件发送能力；请从 bridge agent 任务内调用，或在托管 tmux session 中重启 bridge 后重试');
   }
-  let response = await requestArtifactDelivery(artifact, path, caption);
+  let response: BrokerResponse;
+  try {
+    response = await requestArtifactDelivery(artifact, path, caption);
+  } catch (err) {
+    if (!['EPERM', 'EACCES'].includes((err as NodeJS.ErrnoException).code ?? '')) throw err;
+    const renewed = await recoverArtifactDelivery(artifact) ?? artifact;
+    process.stdout.write(`${artifactRelayRequest(renewed, path, caption)}\n文件发送请求已提交到 Bridge；以飞书附件或失败回执为准。\n`);
+    return;
+  }
   const message = typeof response.message === 'string' ? response.message : '';
   if (response.ok !== true && /令牌已失效|capability.*expired/iu.test(message)) {
     const renewed = await recoverArtifactDelivery(artifact);
@@ -77,7 +97,7 @@ function requestArtifactDelivery(
       socket.end();
     });
     socket.on('connect', () => {
-      socket.write(`${JSON.stringify({ token: artifact.token, path, ...(caption ? { caption } : {}) })}\n`);
+      socket.write(`${JSON.stringify({ token: artifact.token, cwd: process.cwd(), path, ...(caption ? { caption } : {}) })}\n`);
     });
   });
 }

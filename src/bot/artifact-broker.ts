@@ -5,6 +5,7 @@ import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path
 import type { LarkChannel } from '@larksuite/channel';
 import { log } from '../core/logger';
 import { writeFileAtomic } from '../platform/atomic-write';
+import { ArtifactRelayReader, claimArtifactRelayRequest, verifiedArtifactRelayRequests, type ArtifactRelaySource } from '../agent/artifact-relay';
 
 export interface ArtifactDeliveryGrant {
   scope: string;
@@ -39,6 +40,7 @@ interface PersistentGrantsFile {
 
 interface ArtifactRequest {
   token?: unknown;
+  cwd?: unknown;
   path?: unknown;
   caption?: unknown;
 }
@@ -58,6 +60,9 @@ export class ArtifactBroker {
   private readonly persistentTokensByScope = new Map<string, string>();
   private server: Server | undefined;
   private saving: Promise<void> = Promise.resolve();
+  private relayTimer?: NodeJS.Timeout;
+  private relaying: Promise<void> | undefined;
+  private readonly relayReader = new ArtifactRelayReader();
 
   private readonly socketPath: string;
 
@@ -73,6 +78,7 @@ export class ArtifactBroker {
      * tmux, structured main sessions and reusable side workers can recover.
      */
     private readonly persistentStatePath?: string,
+    private readonly relaySources?: (socketPath: string, scopes: ReadonlySet<string>) => Promise<ArtifactRelaySource[]>,
   ) {
     this.socketPath = artifactBrokerSocketPath(socketPath);
   }
@@ -94,6 +100,10 @@ export class ArtifactBroker {
         resolve();
       });
     });
+    if (this.relaySources) {
+      this.relayTimer = setInterval(() => { void this.pollRelay(); }, 1000);
+      this.relayTimer.unref();
+    }
   }
 
   issue(input: ArtifactBrokerIssueInput): ArtifactDeliveryGrant {
@@ -158,6 +168,8 @@ export class ArtifactBroker {
   }
 
   async close(): Promise<void> {
+    if (this.relayTimer) clearInterval(this.relayTimer);
+    await this.relaying;
     await this.flush();
     const server = this.server;
     this.server = undefined;
@@ -169,6 +181,32 @@ export class ArtifactBroker {
 
   async flush(): Promise<void> {
     await this.saving;
+  }
+
+  /** Signed tool-output relay keeps read-only/offline sandboxes intact. */
+  async pollRelay(): Promise<void> {
+    if (!this.relaySources || this.relaying) return;
+    this.relaying = (async () => {
+      const tokens = new Map([...this.grants.values()].map(grant => [grant.scope, grant]));
+      if (!tokens.size) return;
+      for (const source of await this.relaySources!(this.socketPath, new Set(tokens.keys()))) {
+        const output = await this.relayReader.read(source).catch(() => '');
+        for (const request of verifiedArtifactRelayRequests(output, source.threadId, tokens)) {
+          if (!(await claimArtifactRelayRequest(request.nonce))) continue;
+          const grant = tokens.get(request.scope)!;
+          try {
+            await this.deliver({ token: grant.token, cwd: request.cwd, path: request.path, caption: request.caption });
+          } catch (err) {
+            const message = err instanceof Error ? err.message : '文件发送失败';
+            await this.channel.send(grant.chatId, { markdown: `飞书附件未发送成功：${message}` },
+              { replyTo: grant.replyTo, ...(grant.replyInThread ? { replyInThread: true } : {}) });
+          }
+        }
+      }
+    })().catch(err => {
+      log.warn('artifact', 'sandbox-relay-failed', { message: err instanceof Error ? err.message : String(err) });
+    });
+    try { await this.relaying; } finally { this.relaying = undefined; }
   }
 
   private async handle(socket: Socket): Promise<void> {
@@ -213,9 +251,16 @@ export class ArtifactBroker {
     if (grant.allowedRoots.length === 0) {
       throw new Error('当前任务尚未授权文件目录；请在当前任务中重新请求发送');
     }
+    let roots = grant.allowedRoots;
+    if (request.cwd !== undefined) {
+      if (typeof request.cwd !== 'string' || !isAbsolute(request.cwd)) throw new Error('无效的文件发送工作目录');
+      const cwd = await realpath(request.cwd);
+      if (!(await findCanonicalAllowedRoot(cwd, grant.allowedRoots))) throw new Error('文件发送工作目录不在当前任务允许的目录内');
+      roots = [cwd];
+    }
     let requested: string | undefined;
     let entry: Awaited<ReturnType<typeof lstat>> | undefined;
-    for (const root of grant.allowedRoots) {
+    for (const root of roots) {
       const candidate = resolve(root, request.path);
       const candidateEntry = await lstat(candidate).catch(() => undefined);
       if (!candidateEntry) continue;

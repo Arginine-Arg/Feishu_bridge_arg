@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { readFile, mkdir, lstat, realpath, stat } from 'node:fs/promises';
+import { readFile, readdir, mkdir, lstat, realpath, stat } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -18,7 +18,8 @@ import type {
 import { checkAgentAvailability } from '../preflight';
 import { ensureBundledCodexSkill } from '../bundled-skill';
 import { captureTmuxPaneTail, discoverTmuxSockets, listTmuxAgentPanes, type AgentTmuxControl, type TmuxPaneTarget } from '../tmux-control';
-import { buildLarkChannelEnv, withArtifactDeliveryEnv, type LarkChannelEnvContext } from '../lark-channel-env';
+import { buildLarkChannelEnv, withArtifactDeliveryEnv, type LarkChannelEnvContext, type ArtifactDeliveryEnv } from '../lark-channel-env';
+import { bindArtifactWorkerState, bindThreadArtifactDelivery } from '../artifact-context';
 import { writeFileAtomic } from '../../platform/atomic-write';
 import { connectCodexHost, shutdownProfileHosts } from './host';
 import {
@@ -56,6 +57,7 @@ import { redactSecrets } from '../subagents/mcp-client';
 import {
   SubagentAgentNotFoundError,
   subagentRouteFingerprint,
+  subagentThreadId,
   type SideAgent,
   type SideAgentProgress,
   type SideAgentResult,
@@ -488,6 +490,7 @@ export class StructuredAdapter implements AgentAdapter {
     this.loadMixagentsSides();
     this.loadBrokerThreads();
     this.tmux = {
+      restoreArtifactDelivery: (scope, artifact) => this.restoreArtifactDelivery(scope, artifact),
       list: async (socket?: string) => this.listStructuredPanes(socket),
       bind: async (scope, selector) => this.bindTmuxPane(scope, selector),
       unbind: async scope => {
@@ -652,6 +655,55 @@ export class StructuredAdapter implements AgentAdapter {
       }
     } catch { /* first run or stale state */ }
   }
+  /** Restore exact thread bindings without resuming, interrupting or spawning a turn. */
+  private async restoreArtifactDelivery(scope: string, artifact: ArtifactDeliveryEnv): Promise<boolean> {
+    if (this.id !== 'codex') return false;
+    const threads = new Map<string, string>();
+    const binding = this.bindings.get(scope);
+    if (binding) {
+      threads.set(binding.threadId, binding.cwd);
+      const pane = listStructuredTmuxPanes(binding.target.socketPath).find(candidate =>
+        candidate.paneId === binding.target.paneId && candidate.sessionName === binding.target.sessionName,
+      );
+      if (pane?.structured?.threadId && pane.structured.endpoint) threads.set(pane.structured.threadId, pane.paneCurrentPath);
+    }
+    const current = this.sessions.get(scope);
+    if (current?.main instanceof CodexStructuredSession) threads.set(current.main.id, current.cwd);
+    const directory = join(this.options.profileDir, 'structured');
+    for (const name of await readdir(directory).catch(() => [] as string[])) {
+      if (!/^[a-f0-9]{64}\.json$/u.test(name)) continue;
+      try {
+        const saved = JSON.parse(await readFile(join(directory, name), 'utf8')) as SavedStructuredState;
+        if (saved.scope === scope && saved.kind === 'codex' && saved.id && saved.cwd) threads.set(saved.id, saved.cwd);
+      } catch { /* Ignore unrelated/stale state. */ }
+    }
+    const env = this.options.env ?? process.env;
+    for (const [threadId, cwd] of threads) {
+      await bindThreadArtifactDelivery(threadId, artifact, [cwd], env);
+      const workerStateFile = join(directory, `broker-workers-${createHash('sha256').update(threadId).digest('hex').slice(0, 24)}.json`);
+      await bindArtifactWorkerState(workerStateFile, artifact, env);
+      try {
+        const state = JSON.parse(await readFile(workerStateFile, 'utf8'));
+        if (state.version === 1 && Array.isArray(state.workers)) {
+          for (const worker of state.workers) {
+            const workerThreadId = worker.agent && subagentThreadId(worker.agent);
+            if (workerThreadId && typeof worker.workspace === 'string') {
+              await bindThreadArtifactDelivery(workerThreadId, artifact, [worker.workspace], env);
+            }
+          }
+        }
+      } catch { /* No persisted workers for this thread. */ }
+    }
+    for (const side of this.mixagentsSides.values()) {
+      const threadId = subagentThreadId(side.agent);
+      if (side.scope !== scope || !threadId) continue;
+      await bindThreadArtifactDelivery(threadId, artifact, [side.cwd], env);
+      side.artifactSocketPath = artifact.socketPath;
+      side.artifactToken = artifact.token;
+    }
+    if (current?.main instanceof CodexStructuredSession) await current.main.refreshBrokerArtifactDelivery(artifact);
+    return threads.size > 0 || [...this.mixagentsSides.values()].some(side => side.scope === scope && subagentThreadId(side.agent));
+  }
   private loadCandidates(): void {
     try {
       const parsed = JSON.parse(readFileSync(this.candidatesFile, 'utf8')) as { version?: number; candidates?: Record<string, StructuredCandidate> };
@@ -708,6 +760,14 @@ export class StructuredAdapter implements AgentAdapter {
         },
       ]),
     );
+    for (const side of this.mixagentsSides.values()) {
+      const threadId = subagentThreadId(side.agent);
+      if (threadId && side.artifactSocketPath && side.artifactToken) {
+        await bindThreadArtifactDelivery(threadId, {
+          scope: side.scope, socketPath: side.artifactSocketPath, token: side.artifactToken,
+        }, [side.cwd], this.options.env ?? process.env);
+      }
+    }
     await writeFileAtomic(this.sidesFile, `${JSON.stringify({ version: 1, sides }, null, 2)}\n`, { mode: 0o600 });
   }
   private sideStateFor(scope: string, cwd: string): MixAgentsSideState | undefined {
@@ -2116,6 +2176,11 @@ export class StructuredAdapter implements AgentAdapter {
         const current = await this.session(options);
         if (abort.signal.aborted) return;
         if (current.main instanceof CodexStructuredSession) {
+          await bindThreadArtifactDelivery(current.main.id, options.artifactDelivery, [current.cwd], this.options.env ?? process.env);
+          if (options.artifactDelivery) await bindArtifactWorkerState(
+            join(this.options.profileDir, 'structured', `broker-workers-${createHash('sha256').update(current.main.id).digest('hex').slice(0, 24)}.json`),
+            options.artifactDelivery, this.options.env ?? process.env,
+          );
           await current.main.refreshBrokerArtifactDelivery(options.artifactDelivery);
         }
         if (side && /^\/btw\s+result\s*$/iu.test(options.prompt.trim())) {

@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.16.1
+
+- Restores file delivery after a bot restart for already-bound native/adopted
+  App Server threads, reusable `/btw` sessions and Broker workers without
+  restarting Codex or repeating native/adopt.
+- Rehydrates private exact-thread capabilities from persisted chat bindings,
+  and resolves new children of pre-upgrade native controllers through their
+  authoritative persisted worker IDs. Workspace alone never selects a chat.
+- Forwards restart restoration through the preferred adapter, includes scope
+  in refreshed worker/tmux environments and recovers filtered shell tokens.
+- Adds a signed tool-output delivery relay when a Codex sandbox prohibits IPC.
+  The broker validates exact thread/scope, enforces the same file policy and
+  persists nonce receipts to prevent duplicate uploads across restarts.
+- Resolves relative artifacts from the caller cwd within broker-approved roots;
+  ambiguous recipients, unbound threads, unsafe files and paths stay rejected.
+
 ## 1.16.0
 
 - Settings now offers model version and reasoning effort immediately after

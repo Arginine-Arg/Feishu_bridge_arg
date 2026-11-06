@@ -7,6 +7,7 @@ import { McpStdioClient, McpToolError, redactSecrets } from './mcp-client';
 import {
   SubagentAgentNotFoundError,
   SubagentUnavailableError,
+  subagentThreadId,
   type SideAgent,
   type SideAgentInput,
   type SideAgentProgressHandler,
@@ -772,6 +773,7 @@ function agentFromSnapshot(
       'MixAgents spawn_agent 未返回 agentId',
     );
   }
+  const threadId = subagentThreadId({ agentId, threadId: stringValue(value.threadId) ?? stringValue(value.thread_id) });
   return {
     agentId,
     route: stringValue(value.route) ?? fallback.route,
@@ -783,9 +785,7 @@ function agentFromSnapshot(
     backendId: 'mixagents',
     status: sideStatus(value.status),
     createdAt: Date.now(),
-    ...(stringValue(value.threadId) ?? stringValue(value.thread_id)
-      ? { threadId: stringValue(value.threadId) ?? stringValue(value.thread_id) }
-      : {}),
+    ...(threadId ? { threadId } : {}),
   };
 }
 

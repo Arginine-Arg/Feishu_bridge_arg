@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.16.0",
+  version: "1.16.1",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -9679,15 +9679,15 @@ function ensureDefaultTmuxSocketDirectory(socketPath) {
 function isDefaultTmuxSocket(socketPath) {
   return resolve3(socketPath) === resolve3(defaultTmuxSocketPath({ ...process.env, TMUX: void 0 }));
 }
-function liveTmuxIdentity(cwd, sessionKey, signature, preferredSessionName) {
-  const hash = createHash3("sha256").update(cwd).update("\0").update(sessionKey).update("\0").update(signature).digest("hex").slice(0, 20);
+function liveTmuxIdentity(cwd, sessionKey, signature2, preferredSessionName) {
+  const hash = createHash3("sha256").update(cwd).update("\0").update(sessionKey).update("\0").update(signature2).digest("hex").slice(0, 20);
   return {
     socketPath: join19(cwd, `.ab-live-${hash.slice(0, 12)}.sock`),
     sessionName: preferredSessionName ?? `argbridge-live-${hash}`
   };
 }
-function managedTmuxIdentity(cwd, sessionKey, signature, preferredSessionName) {
-  const identity = liveTmuxIdentity(cwd, sessionKey, signature, preferredSessionName);
+function managedTmuxIdentity(cwd, sessionKey, signature2, preferredSessionName) {
+  const identity = liveTmuxIdentity(cwd, sessionKey, signature2, preferredSessionName);
   return {
     socketPath: defaultTmuxSocketPath({ ...process.env, TMUX: void 0 }),
     sessionName: identity.sessionName
@@ -10753,7 +10753,7 @@ var VirtualTerminalScreen = class {
   }
   applyCsi(seq) {
     const final = seq.at(-1) ?? "";
-    const privateMode = seq.includes("?");
+    const privateMode2 = seq.includes("?");
     const raw = seq.slice(0, -1).replace(/[?=>]/g, "");
     const nums = raw.split(";").filter((item) => item !== "").map((item) => Number.parseInt(item, 10)).map((item) => Number.isFinite(item) ? item : 0);
     const first = nums[0] ?? 0;
@@ -10777,7 +10777,7 @@ var VirtualTerminalScreen = class {
     } else if (final === "u") {
       this.row = this.savedRow;
       this.col = this.savedCol;
-    } else if ((final === "h" || final === "l") && privateMode && nums.some(isAlternateScreenMode)) {
+    } else if ((final === "h" || final === "l") && privateMode2 && nums.some(isAlternateScreenMode)) {
       this.clearScreen(2);
     }
   }
@@ -12140,14 +12140,14 @@ var ClaudeAdapter = class {
       opts.permissionMode ?? CLAUDE_DEFAULT_PERMISSION_MODE
     ];
     if (opts.model) args.push("--model", opts.model);
-    const signature = JSON.stringify({
+    const signature2 = JSON.stringify({
       cwd: opts.cwd,
       model: opts.model ?? null,
       permissionMode: opts.permissionMode ?? CLAUDE_DEFAULT_PERMISSION_MODE
     });
     const scopeKey = opts.scopeId ?? opts.cwd;
     const tmuxTarget = this.tmuxBindings.bindingFor(scopeKey, opts.cwd);
-    const liveSignature = `${signature}:${tmuxTarget ? `${tmuxTarget.socketPath}:${tmuxTarget.paneId}` : "managed"}`;
+    const liveSignature = `${signature2}:${tmuxTarget ? `${tmuxTarget.socketPath}:${tmuxTarget.paneId}` : "managed"}`;
     const managedTerminal = tmuxTarget ? void 0 : this.tmuxBindings.managedTerminalFor(scopeKey, opts.cwd, liveSignature);
     const session = this.liveSessions.getOrCreate(scopeKey, {
       command: this.binary,
@@ -12976,14 +12976,14 @@ var CodexAdapter = class {
     const codexHome = this.effectiveCodexHome();
     if (codexHome) envOverrides.CODEX_HOME = codexHome;
     this.applyCredentialOverride(envOverrides);
-    const signature = JSON.stringify({
+    const signature2 = JSON.stringify({
       cwd: opts.cwd,
       sandbox,
       codexHome: envOverrides.CODEX_HOME ?? null
     });
     const scopeKey = opts.scopeId ?? opts.cwd;
     const tmuxTarget = this.tmuxBindings.bindingFor(scopeKey, opts.cwd);
-    const liveSignature = `${signature}:${tmuxTarget ? `${tmuxTarget.socketPath}:${tmuxTarget.paneId}` : "managed"}`;
+    const liveSignature = `${signature2}:${tmuxTarget ? `${tmuxTarget.socketPath}:${tmuxTarget.paneId}` : "managed"}`;
     const managedTerminal = tmuxTarget ? void 0 : this.tmuxBindings.managedTerminalFor(scopeKey, opts.cwd, liveSignature);
     const session = this.liveSessions.getOrCreate(scopeKey, {
       command: this.binary,
@@ -13148,6 +13148,7 @@ function artifactDeliveryEnv(artifact) {
   if (!artifact) return {};
   return {
     artifactEnv: {
+      ...artifact.scope ? { ARG_BRIDGE_ARTIFACT_SCOPE: artifact.scope } : {},
       ARG_BRIDGE_ARTIFACT_SOCKET: artifact.socketPath,
       ARG_BRIDGE_ARTIFACT_TOKEN: artifact.token
     }
@@ -13155,15 +13156,229 @@ function artifactDeliveryEnv(artifact) {
 }
 
 // src/agent/structured/adapter.ts
-import { createHash as createHash10, randomUUID as randomUUID3 } from "crypto";
-import { readFile as readFile20, mkdir as mkdir21, lstat as lstat6, realpath as realpath8, stat as stat8 } from "fs/promises";
+import { createHash as createHash11, randomUUID as randomUUID3 } from "crypto";
+import { readFile as readFile21, readdir as readdir7, mkdir as mkdir22, lstat as lstat7, realpath as realpath9, stat as stat8 } from "fs/promises";
 import { readFileSync as readFileSync10 } from "fs";
 import { tmpdir as tmpdir4 } from "os";
-import { isAbsolute as isAbsolute8, join as join34, relative as relative3, resolve as resolve7, sep } from "path";
+import { isAbsolute as isAbsolute9, join as join35, relative as relative4, resolve as resolve7, sep as sep2 } from "path";
+
+// src/agent/artifact-context.ts
+import { createHash as createHash5 } from "crypto";
+import { chmod as chmod5, lstat, mkdir as mkdir15, readFile as readFile14, readdir as readdir5, realpath as realpath4 } from "fs/promises";
+import { homedir as homedir8 } from "os";
+import { isAbsolute as isAbsolute5, join as join24, relative, sep } from "path";
+
+// src/agent/subagents/types.ts
+import { createHash as createHash4 } from "crypto";
+function subagentThreadId(agent) {
+  if (agent.threadId) return agent.threadId;
+  const match = /^broker:[^:]+:([^:\s]{1,200})$/u.exec(agent.agentId);
+  return match?.[1];
+}
+var SubagentUnavailableError = class extends Error {
+  constructor(code, message, details) {
+    super(message);
+    this.code = code;
+    this.details = details;
+    this.name = "SubagentUnavailableError";
+  }
+  code;
+  details;
+};
+var SubagentAgentNotFoundError = class extends Error {
+  constructor(agentId) {
+    super(`\u5B50\u4EE3\u7406\u5DF2\u4E0D\u5B58\u5728\uFF08agentId=${agentId}\uFF09\uFF1B\u5C06\u521B\u5EFA\u65B0\u7684 side agent\u3002`);
+    this.agentId = agentId;
+    this.name = "SubagentAgentNotFoundError";
+  }
+  agentId;
+};
+function subagentRouteFingerprint(route) {
+  return createHash4("sha256").update(JSON.stringify({
+    id: route.id,
+    provider: route.provider,
+    model: route.model,
+    backend: route.backend ?? null,
+    revision: route.revision ?? null,
+    targetFingerprint: route.targetFingerprint ?? null,
+    description: route.description ?? null,
+    tags: [...route.tags].sort(),
+    maxAccess: route.maxAccess
+  })).digest("hex");
+}
+
+// src/agent/artifact-context.ts
+function artifactContextDirectory(env = process.env) {
+  return env.ARG_BRIDGE_ARTIFACT_CONTEXT_DIR || join24(homedir8(), ".lark-channel", "artifact-contexts");
+}
+async function bindThreadArtifactDelivery(threadId, delivery, allowedRoots, env = process.env) {
+  if (!threadId || !delivery?.scope || !delivery.socketPath || !delivery.token) return;
+  const directory = join24(artifactContextDirectory(env), digest(threadId));
+  await mkdir15(directory, { recursive: true, mode: 448 });
+  for (const path of [artifactContextDirectory(env), directory]) {
+    const info = await lstat(path);
+    if (!info.isDirectory() || info.isSymbolicLink() || !ownedByCurrentUser(info.uid)) {
+      throw new Error("Unsafe Bridge artifact context directory");
+    }
+    await chmod5(path, 448);
+  }
+  const context = {
+    version: 1,
+    threadId,
+    delivery: { ...delivery, scope: delivery.scope },
+    allowedRoots: [...new Set(allowedRoots)]
+  };
+  await writeFileAtomic(
+    join24(directory, `${digest(`${delivery.socketPath}\0${delivery.scope}`)}.json`),
+    `${JSON.stringify(context)}
+`,
+    { mode: 384 }
+  );
+}
+async function readThreadArtifactDelivery(env = process.env, cwd = process.cwd()) {
+  const threadId = env.CODEX_THREAD_ID;
+  if (!threadId) return void 0;
+  const directory = join24(artifactContextDirectory(env), digest(threadId));
+  if (!await privateDirectory(artifactContextDirectory(env))) return void 0;
+  const current = await realpath4(cwd).catch(() => void 0);
+  if (!current) return void 0;
+  const candidates = [];
+  const names = await privateDirectory(directory) ? await readdir5(directory) : [];
+  for (const name of names) {
+    if (!/^[a-f0-9]{64}\.json$/u.test(name)) continue;
+    try {
+      const path = join24(directory, name);
+      const info = await lstat(path);
+      if (!info.isFile() || info.isSymbolicLink() || !ownedByCurrentUser(info.uid) || !privateMode(info.mode) || info.size > 65536) continue;
+      const context = JSON.parse(await readFile14(path, "utf8"));
+      const delivery = context.delivery;
+      if (context.version !== 1 || context.threadId !== threadId || !delivery || typeof delivery.scope !== "string" || !delivery.scope || typeof delivery.socketPath !== "string" || !delivery.socketPath || typeof delivery.token !== "string" || !delivery.token || !Array.isArray(context.allowedRoots)) continue;
+      if (env.ARG_BRIDGE_ARTIFACT_SCOPE && delivery.scope !== env.ARG_BRIDGE_ARTIFACT_SCOPE) continue;
+      if (env.ARG_BRIDGE_ARTIFACT_SOCKET && delivery.socketPath !== env.ARG_BRIDGE_ARTIFACT_SOCKET) continue;
+      for (const root of context.allowedRoots) {
+        if (typeof root !== "string" || !isAbsolute5(root)) continue;
+        const canonical = await realpath4(root).catch(() => void 0);
+        if (canonical && within(current, canonical)) {
+          candidates.push(delivery);
+          break;
+        }
+      }
+    } catch {
+    }
+  }
+  if (candidates.length === 0) candidates.push(...await readWorkerArtifactDeliveries(threadId, env, current));
+  if (candidates.length > 1) {
+    throw new Error("\u5F53\u524D thread \u7ED1\u5B9A\u4E86\u591A\u4E2A Bridge \u6587\u4EF6\u53D1\u9001\u4F1A\u8BDD\uFF0C\u65E0\u6CD5\u786E\u5B9A\u6536\u4EF6\u804A\u5929\uFF1B\u8BF7\u5728\u76EE\u6807\u98DE\u4E66\u4F1A\u8BDD\u4E2D\u91CD\u65B0\u8BF7\u6C42\u53D1\u9001");
+  }
+  return candidates[0];
+}
+async function bindArtifactWorkerState(stateFile, delivery, env = process.env) {
+  if (!delivery.scope) return;
+  const directory = join24(artifactContextDirectory(env), "workers");
+  await mkdir15(directory, { recursive: true, mode: 448 });
+  for (const path of [artifactContextDirectory(env), directory]) {
+    const info = await lstat(path);
+    if (!info.isDirectory() || info.isSymbolicLink() || !ownedByCurrentUser(info.uid)) throw new Error("Unsafe Bridge worker context directory");
+    await chmod5(path, 448);
+  }
+  await writeFileAtomic(
+    join24(directory, `${digest(`${stateFile}\0${delivery.socketPath}\0${delivery.scope}`)}.json`),
+    `${JSON.stringify({ version: 1, stateFile, delivery })}
+`,
+    { mode: 384 }
+  );
+}
+async function readWorkerArtifactDeliveries(threadId, env, cwd) {
+  const directory = join24(artifactContextDirectory(env), "workers");
+  const candidates = [];
+  if (!await privateDirectory(directory)) return candidates;
+  const names = await readdir5(directory).catch(() => []);
+  for (const name of names) {
+    if (!/^[a-f0-9]{64}\.json$/u.test(name)) continue;
+    try {
+      const entry = JSON.parse(await readPrivateFile(join24(directory, name), 65536));
+      const delivery = entry.delivery;
+      if (entry.version !== 1 || typeof entry.stateFile !== "string" || !isAbsolute5(entry.stateFile) || typeof delivery?.scope !== "string" || !delivery.scope || typeof delivery.socketPath !== "string" || !delivery.socketPath || typeof delivery.token !== "string" || !delivery.token) continue;
+      if (env.ARG_BRIDGE_ARTIFACT_SCOPE && delivery.scope !== env.ARG_BRIDGE_ARTIFACT_SCOPE) continue;
+      if (env.ARG_BRIDGE_ARTIFACT_SOCKET && delivery.socketPath !== env.ARG_BRIDGE_ARTIFACT_SOCKET) continue;
+      const state = JSON.parse(await readPrivateFile(entry.stateFile, 32 * 1024 * 1024));
+      if (state.version !== 1 || !Array.isArray(state.workers)) continue;
+      for (const worker of state.workers) {
+        if (!worker?.agent || typeof worker.agent.agentId !== "string" || subagentThreadId(worker.agent) !== threadId || typeof worker.workspace !== "string") continue;
+        const root = await realpath4(worker.workspace).catch(() => void 0);
+        if (root && within(cwd, root)) candidates.push(delivery);
+      }
+    } catch {
+    }
+  }
+  return [...new Map(candidates.map((delivery) => [`${delivery.socketPath}\0${delivery.scope}`, delivery])).values()];
+}
+async function readPrivateFile(path, maxBytes) {
+  const info = await lstat(path);
+  if (!info.isFile() || info.isSymbolicLink() || !ownedByCurrentUser(info.uid) || !privateMode(info.mode) || info.size > maxBytes) throw new Error("Unsafe Bridge artifact context file");
+  return readFile14(path, "utf8");
+}
+async function privateDirectory(path) {
+  try {
+    const info = await lstat(path);
+    return info.isDirectory() && !info.isSymbolicLink() && ownedByCurrentUser(info.uid) && privateMode(info.mode);
+  } catch {
+    return false;
+  }
+}
+async function artifactRelayThreadIds(socketPath, scopes, env = process.env) {
+  const directory = artifactContextDirectory(env);
+  if (!await privateDirectory(directory)) return [];
+  const ids = /* @__PURE__ */ new Set();
+  const matches = (delivery) => delivery?.socketPath === socketPath && Boolean(delivery.scope && scopes.has(delivery.scope));
+  for (const name of await readdir5(directory)) {
+    if (!/^[a-f0-9]{64}$/u.test(name)) continue;
+    const child = join24(directory, name);
+    if (!await privateDirectory(child)) continue;
+    for (const file of await readdir5(child)) {
+      if (!/^[a-f0-9]{64}\.json$/u.test(file)) continue;
+      try {
+        const context = JSON.parse(await readPrivateFile(join24(child, file), 65536));
+        if (context.version === 1 && typeof context.threadId === "string" && matches(context.delivery)) ids.add(context.threadId);
+      } catch {
+      }
+    }
+  }
+  const workers = join24(directory, "workers");
+  if (await privateDirectory(workers)) for (const file of await readdir5(workers)) {
+    if (!/^[a-f0-9]{64}\.json$/u.test(file)) continue;
+    try {
+      const entry = JSON.parse(await readPrivateFile(join24(workers, file), 65536));
+      if (entry.version !== 1 || !matches(entry.delivery) || typeof entry.stateFile !== "string" || !isAbsolute5(entry.stateFile)) continue;
+      const state = JSON.parse(await readPrivateFile(entry.stateFile, 32 * 1024 * 1024));
+      if (state.version !== 1 || !Array.isArray(state.workers)) continue;
+      for (const worker of state.workers) {
+        if (!worker?.agent || typeof worker.agent.agentId !== "string") continue;
+        const id = subagentThreadId(worker.agent);
+        if (id) ids.add(id);
+      }
+    } catch {
+    }
+  }
+  return [...ids];
+}
+function digest(value) {
+  return createHash5("sha256").update(value).digest("hex");
+}
+function ownedByCurrentUser(uid) {
+  return !process.getuid || uid === process.getuid();
+}
+function privateMode(mode) {
+  return process.platform === "win32" || (mode & 63) === 0;
+}
+function within(path, root) {
+  const rel = relative(root, path);
+  return rel === "" || rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute5(rel);
+}
 
 // src/agent/structured/host.ts
-import { mkdir as mkdir15, lstat, chmod as chmod5, open as open3, rm as rm12 } from "fs/promises";
-import { join as join24 } from "path";
+import { mkdir as mkdir16, lstat as lstat2, chmod as chmod6, open as open3, rm as rm12 } from "fs/promises";
+import { join as join25 } from "path";
 
 // src/agent/structured/rpc.ts
 import { EventEmitter as EventEmitter2 } from "events";
@@ -13324,11 +13539,11 @@ async function connectCodexHostInternal(options, attempt) {
     options.cwd,
     { env: options.env }
   );
-  await mkdir15(directory, { recursive: true, mode: 448 });
-  const stat11 = await lstat(directory);
+  await mkdir16(directory, { recursive: true, mode: 448 });
+  const stat11 = await lstat2(directory);
   if (stat11.isSymbolicLink() || !stat11.isDirectory() || process.getuid && stat11.uid !== process.getuid()) throw new Error("Unsafe structured runtime directory");
-  await chmod5(directory, 448);
-  const path = join24(directory, "server.sock");
+  await chmod6(directory, 448);
+  const path = join25(directory, "server.sock");
   const endpoint = `unix://${path}`;
   const url = `ws+unix://${path}:/`;
   let stale;
@@ -13363,9 +13578,9 @@ async function connectCodexHostInternal(options, attempt) {
     if (stale) {
       await rm12(path, { force: true }).catch(() => {
       });
-      await mkdir15(directory, { recursive: true, mode: 448 });
+      await mkdir16(directory, { recursive: true, mode: 448 });
     }
-    const logFile = await open3(join24(directory, "server.log"), "a", 384);
+    const logFile = await open3(join25(directory, "server.log"), "a", 384);
     const child = spawnProcess(options.binary, ["app-server", "--listen", endpoint], {
       cwd: options.cwd,
       env: options.env,
@@ -13393,7 +13608,7 @@ async function connectCodexHostInternal(options, attempt) {
       const breaker = recordHostFailure(directory);
       const retryInMs = Math.max(0, breaker.nextAttemptAt - Date.now());
       throw failure2 ?? new Error(
-        `Codex App Server did not become ready (failure ${breaker.failures}); next attempt in ${Math.ceil(retryInMs / 1e3)}s; inspect ${join24(directory, "server.log")}`
+        `Codex App Server did not become ready (failure ${breaker.failures}); next attempt in ${Math.ceil(retryInMs / 1e3)}s; inspect ${join25(directory, "server.log")}`
       );
     }
     clearHostFailure(directory);
@@ -13476,18 +13691,18 @@ async function findStaleHost(profileDir, directory, binary, fingerprint) {
 }
 
 // src/integrations/cc-switch.ts
-import { readFile as readFile14 } from "fs/promises";
-import { homedir as homedir8 } from "os";
-import { join as join25 } from "path";
+import { readFile as readFile15 } from "fs/promises";
+import { homedir as homedir9 } from "os";
+import { join as join26 } from "path";
 async function readCcSwitchState(env = process.env, options = {}) {
-  const settingsPath = join25(
-    env.CC_SWITCH_HOME?.trim() || join25(homedir8(), ".cc-switch"),
+  const settingsPath = join26(
+    env.CC_SWITCH_HOME?.trim() || join26(homedir9(), ".cc-switch"),
     "settings.json"
   );
   let currentProviderCodex;
   let error;
   try {
-    const parsed = JSON.parse(await readFile14(settingsPath, "utf8"));
+    const parsed = JSON.parse(await readFile15(settingsPath, "utf8"));
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
       const value = parsed.currentProviderCodex;
       if (typeof value === "string" && value.trim()) currentProviderCodex = value.trim();
@@ -13507,12 +13722,12 @@ async function readCcSwitchState(env = process.env, options = {}) {
   };
 }
 async function readCcSwitchCurrentProvider(env = process.env) {
-  const settingsPath = join25(
-    env.CC_SWITCH_HOME?.trim() || join25(homedir8(), ".cc-switch"),
+  const settingsPath = join26(
+    env.CC_SWITCH_HOME?.trim() || join26(homedir9(), ".cc-switch"),
     "settings.json"
   );
   try {
-    const parsed = JSON.parse(await readFile14(settingsPath, "utf8"));
+    const parsed = JSON.parse(await readFile15(settingsPath, "utf8"));
     const value = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed.currentProviderCodex : void 0;
     return {
       providerId: typeof value === "string" && value.trim() ? value.trim() : null,
@@ -13575,12 +13790,12 @@ function errorMessage3(error) {
 }
 
 // src/integrations/cc-switch-provider.ts
-import { createHash as createHash4 } from "crypto";
+import { createHash as createHash6 } from "crypto";
 import { readFileSync as readFileSync6 } from "fs";
-import { chmod as chmod6, mkdir as mkdir16, readFile as readFile15, realpath as realpath4 } from "fs/promises";
+import { chmod as chmod7, mkdir as mkdir17, readFile as readFile16, realpath as realpath5 } from "fs/promises";
 import { createRequire } from "module";
-import { homedir as homedir9 } from "os";
-import { join as join26, parse, resolve as resolve4 } from "path";
+import { homedir as homedir10 } from "os";
+import { join as join27, parse, resolve as resolve4 } from "path";
 import { pathToFileURL } from "url";
 var DEFAULT_CODEX_ENV_KEY = "OPENAI_API_KEY";
 var MAX_DB_ROW_BYTES = 8 * 1024 * 1024;
@@ -13596,11 +13811,11 @@ var CcSwitchProviderError = class extends Error {
   details;
 };
 function ccSwitchPaths(env = process.env) {
-  const root = resolve4(env.CC_SWITCH_HOME?.trim() || join26(homedir9(), ".cc-switch"));
+  const root = resolve4(env.CC_SWITCH_HOME?.trim() || join27(homedir10(), ".cc-switch"));
   return {
     root,
-    settingsPath: join26(root, "settings.json"),
-    databasePath: join26(root, "cc-switch.db")
+    settingsPath: join27(root, "settings.json"),
+    databasePath: join27(root, "cc-switch.db")
   };
 }
 async function readCcSwitchProviderCatalog(env = process.env) {
@@ -13704,7 +13919,7 @@ async function resolveCurrentCcSwitchCodexProvider(input = {}) {
   if (provider.httpHeaders && Object.keys(provider.httpHeaders).length > 0) {
     for (const [header, value] of Object.entries(provider.httpHeaders)) {
       if (!value.trim()) continue;
-      const envName = `ARG_BRIDGE_CCSWITCH_HEADER_${createHash4("sha256").update(header).digest("hex").slice(0, 12).toUpperCase()}`;
+      const envName = `ARG_BRIDGE_CCSWITCH_HEADER_${createHash6("sha256").update(header).digest("hex").slice(0, 12).toUpperCase()}`;
       credential.envHttpHeaders[header] = envName;
       credential.credentials[envName] = value;
     }
@@ -13728,9 +13943,9 @@ async function resolveCurrentCcSwitchCodexProvider(input = {}) {
   const activeConfig = parsed.activeConfig;
   const mismatches = configMismatches(parsed.config, activeConfig, providerId);
   const credentialStatus = credential.status;
-  const credentialFingerprint = credential.value ? createHash4("sha256").update(credential.value).digest("hex").slice(0, 16) : null;
-  const credentialSetFingerprint = createHash4("sha256").update(JSON.stringify(Object.entries(credential.credentials).sort())).digest("hex").slice(0, 16);
-  const configFingerprint = createHash4("sha256").update(JSON.stringify({
+  const credentialFingerprint = credential.value ? createHash6("sha256").update(credential.value).digest("hex").slice(0, 16) : null;
+  const credentialSetFingerprint = createHash6("sha256").update(JSON.stringify(Object.entries(credential.credentials).sort())).digest("hex").slice(0, 16);
+  const configFingerprint = createHash6("sha256").update(JSON.stringify({
     providerId: selectedId,
     codexProviderId: providerId,
     model,
@@ -13813,7 +14028,7 @@ async function materializeCcSwitchBrokerRuntime(input) {
   const selectedEffort = preference?.reasoningEffort ?? (runtimePolicy.role === "side" ? runtimePolicy.sideReasoningEffort : void 0);
   const reasoningEffort = selectedEffort && selectedEffort !== "inherit" ? normalizeReasoningEffort(selectedEffort) : summary.reasoningEffort ? normalizeReasoningEffort(summary.reasoningEffort) : void 0;
   const webSearch = resolveWebSearchPolicy(summary, runtimePolicy.webSearch);
-  const policyFingerprint2 = createHash4("sha256").update(JSON.stringify({
+  const policyFingerprint2 = createHash6("sha256").update(JSON.stringify({
     config: summary.configFingerprint,
     role: runtimePolicy.role,
     webSearch: runtimePolicy.webSearch,
@@ -13843,29 +14058,29 @@ async function materializeCcSwitchBrokerRuntime(input) {
     ccSwitchProviderId: summary.id,
     source: "cc-switch"
   };
-  const workspaceRoot = await realpath4(input.cwd).catch(() => resolve4(input.cwd));
-  if (!workspaceRoot || workspaceRoot === parse(workspaceRoot).root || workspaceRoot === resolve4(homedir9())) {
+  const workspaceRoot = await realpath5(input.cwd).catch(() => resolve4(input.cwd));
+  if (!workspaceRoot || workspaceRoot === parse(workspaceRoot).root || workspaceRoot === resolve4(homedir10())) {
     throw new CcSwitchProviderError(
       "workspace-invalid",
       "Broker workspace \u4E0D\u80FD\u662F\u6587\u4EF6\u7CFB\u7EDF\u6839\u76EE\u5F55\u6216\u7528\u6237 home\uFF1B\u8BF7\u5728\u5177\u4F53\u9879\u76EE\u76EE\u5F55\u4E2D\u542F\u52A8\u5B50\u4EE3\u7406"
     );
   }
-  const configPath = join26(
+  const configPath = join27(
     input.stateDir,
     "cc-switch",
     `broker-${policyFingerprint2.slice(0, 16)}-${runtimePolicy.role}.json`
   );
-  await mkdir16(resolve4(input.stateDir, "cc-switch"), { recursive: true, mode: 448 });
-  await chmod6(resolve4(input.stateDir, "cc-switch"), 448).catch(() => {
+  await mkdir17(resolve4(input.stateDir, "cc-switch"), { recursive: true, mode: 448 });
+  await chmod7(resolve4(input.stateDir, "cc-switch"), 448).catch(() => {
   });
-  const dataDir = join26(
+  const dataDir = join27(
     input.stateDir,
     "cc-switch",
     "mixagents-data",
     policyFingerprint2.slice(0, 16)
   );
-  await mkdir16(dataDir, { recursive: true, mode: 448 });
-  await chmod6(dataDir, 448).catch(() => {
+  await mkdir17(dataDir, { recursive: true, mode: 448 });
+  await chmod7(dataDir, 448).catch(() => {
   });
   const codexBin = await materializeManagedCodexLauncher({
     stateDir: input.stateDir,
@@ -13917,9 +14132,9 @@ async function materializeCcSwitchBrokerRuntime(input) {
   };
 }
 async function materializeManagedCodexLauncher(input) {
-  const wrapperDir = join26(input.stateDir, "cc-switch", "codex-wrapper");
-  await mkdir16(wrapperDir, { recursive: true, mode: 448 });
-  await chmod6(wrapperDir, 448).catch(() => {
+  const wrapperDir = join27(input.stateDir, "cc-switch", "codex-wrapper");
+  await mkdir17(wrapperDir, { recursive: true, mode: 448 });
+  await chmod7(wrapperDir, 448).catch(() => {
   });
   const overrides = [
     ...input.webSearch === "disabled" ? ["-c", 'web_search="disabled"'] : [],
@@ -13935,7 +14150,7 @@ async function materializeManagedCodexLauncher(input) {
   ];
   if (overrides.length === 0) return input.codexBin;
   const name = `managed-${input.role}-${input.fingerprint.slice(0, 16)}`;
-  const launcherPath = join26(wrapperDir, `${name}.mjs`);
+  const launcherPath = join27(wrapperDir, `${name}.mjs`);
   const launcher = [
     "#!/usr/bin/env node",
     // Native spawn cannot launch npm .cmd shims on Windows. Resolve from the
@@ -13969,10 +14184,10 @@ async function materializeManagedCodexLauncher(input) {
     ""
   ].join("\n");
   await writeFileAtomic(launcherPath, launcher, { mode: 448 });
-  await chmod6(launcherPath, 448).catch(() => {
+  await chmod7(launcherPath, 448).catch(() => {
   });
   if (process.platform !== "win32") return launcherPath;
-  const commandPath = join26(wrapperDir, `${name}.cmd`);
+  const commandPath = join27(wrapperDir, `${name}.cmd`);
   await writeFileAtomic(
     commandPath,
     `@echo off\r
@@ -14203,7 +14418,7 @@ function parseSelectedConfig(record, codexHome) {
     );
   }
   const config = parseCodexConfigSummary(configText);
-  const activeConfig = codexHome ? parseCodexConfigSummary(readConfigTextSync(join26(codexHome, "config.toml"))) : void 0;
+  const activeConfig = codexHome ? parseCodexConfigSummary(readConfigTextSync(join27(codexHome, "config.toml"))) : void 0;
   return { config, ...activeConfig ? { activeConfig } : {} };
 }
 function resolveCredential(providerId, provider, settingsConfig, configText) {
@@ -14372,7 +14587,7 @@ function safeHostname(value) {
 }
 async function readSettingsJson(path) {
   try {
-    return parseJsonRecord(await readFile15(path, "utf8"), path);
+    return parseJsonRecord(await readFile16(path, "utf8"), path);
   } catch {
     return void 0;
   }
@@ -14410,18 +14625,18 @@ function isRecord3(value) {
 }
 
 // src/integrations/broker-routes.ts
-import { chmod as chmod7, mkdir as mkdir17, readFile as readFile16 } from "fs/promises";
-import { homedir as homedir10 } from "os";
-import { dirname as dirname17, join as join27 } from "path";
+import { chmod as chmod8, mkdir as mkdir18, readFile as readFile17 } from "fs/promises";
+import { homedir as homedir11 } from "os";
+import { dirname as dirname17, join as join28 } from "path";
 function brokerRoutesPath(env = process.env) {
-  const configHome = env.XDG_CONFIG_HOME?.trim() || join27(homedir10(), ".config");
-  return join27(configHome, "arg-bridge", "broker-routes.json");
+  const configHome = env.XDG_CONFIG_HOME?.trim() || join28(homedir11(), ".config");
+  return join28(configHome, "arg-bridge", "broker-routes.json");
 }
 async function loadBrokerRouteMap(env = process.env) {
   const path = brokerRoutesPath(env);
   let raw;
   try {
-    raw = await readFile16(path, "utf8");
+    raw = await readFile17(path, "utf8");
   } catch (error) {
     if (error.code === "ENOENT") return { path };
     return { path, error: `\u65E0\u6CD5\u8BFB\u53D6 ${path}: ${errorMessage4(error)}` };
@@ -14477,10 +14692,10 @@ function parseBrokerRouteMap(input) {
 async function saveBrokerRouteMap(config, env = process.env) {
   const path = brokerRoutesPath(env);
   const checked = parseBrokerRouteMap(config);
-  await mkdir17(dirname17(path), { recursive: true, mode: 448 });
+  await mkdir18(dirname17(path), { recursive: true, mode: 448 });
   await writeFileAtomic(path, `${JSON.stringify(checked, null, 2)}
 `, { mode: 384 });
-  await chmod7(path, 384).catch(() => {
+  await chmod8(path, 384).catch(() => {
   });
   return path;
 }
@@ -14508,7 +14723,7 @@ function errorMessage4(error) {
 // src/agent/subagents/mixagents.ts
 import { existsSync as existsSync6 } from "fs";
 import { createRequire as createRequire2 } from "module";
-import { basename as basename5, isAbsolute as isAbsolute5 } from "path";
+import { basename as basename5, isAbsolute as isAbsolute6 } from "path";
 import { fileURLToPath as fileURLToPath2 } from "url";
 
 // src/agent/subagents/mcp-client.ts
@@ -14699,40 +14914,6 @@ function abortError() {
 }
 function redactSecrets(value) {
   return value.replace(/sk-[A-Za-z0-9_-]{8,}/gu, "sk-[REDACTED]").replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/giu, "Bearer [REDACTED]").replace(/("(?:api[_-]?key|token|authorization|secret)"\s*:\s*")[^"]+"/giu, '$1[REDACTED]"').replace(/\b(api[_-]?key|token|authorization|secret)\s*([=:])\s*[^\s,;}]+/giu, "$1$2[REDACTED]").replace(/\b([A-Z][A-Z0-9_]*KEY|TOKEN|SECRET)\s*[=:]\s*[^\s,}]+/gu, "$1=[REDACTED]");
-}
-
-// src/agent/subagents/types.ts
-import { createHash as createHash5 } from "crypto";
-var SubagentUnavailableError = class extends Error {
-  constructor(code, message, details) {
-    super(message);
-    this.code = code;
-    this.details = details;
-    this.name = "SubagentUnavailableError";
-  }
-  code;
-  details;
-};
-var SubagentAgentNotFoundError = class extends Error {
-  constructor(agentId) {
-    super(`\u5B50\u4EE3\u7406\u5DF2\u4E0D\u5B58\u5728\uFF08agentId=${agentId}\uFF09\uFF1B\u5C06\u521B\u5EFA\u65B0\u7684 side agent\u3002`);
-    this.agentId = agentId;
-    this.name = "SubagentAgentNotFoundError";
-  }
-  agentId;
-};
-function subagentRouteFingerprint(route) {
-  return createHash5("sha256").update(JSON.stringify({
-    id: route.id,
-    provider: route.provider,
-    model: route.model,
-    backend: route.backend ?? null,
-    revision: route.revision ?? null,
-    targetFingerprint: route.targetFingerprint ?? null,
-    description: route.description ?? null,
-    tags: [...route.tags].sort(),
-    maxAccess: route.maxAccess
-  })).digest("hex");
 }
 
 // src/agent/subagents/mixagents.ts
@@ -15121,7 +15302,7 @@ var MixAgentsBrokerBackend = class {
   }
 };
 function validateRuntimeOverrides(runtime) {
-  if (!isAbsolute5(runtime.brokerConfigPath) || !runtime.fingerprint.trim()) {
+  if (!isAbsolute6(runtime.brokerConfigPath) || !runtime.fingerprint.trim()) {
     throw new SubagentUnavailableError(
       "mixagents-not-configured",
       "\u81EA\u52A8 cc-switch Broker runtime \u914D\u7F6E\u65E0\u6548"
@@ -15271,7 +15452,7 @@ function isGeneratedRuntimeBrokerLaunch(launch) {
 }
 function isMissingKnownLegacyBrokerLaunch(launch) {
   return [launch.command, ...launch.args].some(
-    (value) => isAbsolute5(value) && /[\\/]node_modules[\\/]mixagents-broker[\\/]dist[\\/]server\.js$/u.test(value) && !existsSync6(value)
+    (value) => isAbsolute6(value) && /[\\/]node_modules[\\/]mixagents-broker[\\/]dist[\\/]server\.js$/u.test(value) && !existsSync6(value)
   );
 }
 function agentFromSnapshot(value, fallback) {
@@ -15282,6 +15463,7 @@ function agentFromSnapshot(value, fallback) {
       "MixAgents spawn_agent \u672A\u8FD4\u56DE agentId"
     );
   }
+  const threadId = subagentThreadId({ agentId, threadId: stringValue2(value.threadId) ?? stringValue2(value.thread_id) });
   return {
     agentId,
     route: stringValue2(value.route) ?? fallback.route,
@@ -15293,7 +15475,7 @@ function agentFromSnapshot(value, fallback) {
     backendId: "mixagents",
     status: sideStatus(value.status),
     createdAt: Date.now(),
-    ...stringValue2(value.threadId) ?? stringValue2(value.thread_id) ? { threadId: stringValue2(value.threadId) ?? stringValue2(value.thread_id) } : {}
+    ...threadId ? { threadId } : {}
   };
 }
 function firstAgent(value) {
@@ -15381,8 +15563,8 @@ function numericVersion(value) {
 }
 
 // src/agent/subagents/registry.ts
-import { homedir as homedir11 } from "os";
-import { join as join28 } from "path";
+import { homedir as homedir12 } from "os";
+import { join as join29 } from "path";
 async function resolveSubagents(input) {
   const env = input.env ?? process.env;
   const config = input.subagents ?? DEFAULT_SUBAGENT_CONFIG;
@@ -15528,8 +15710,8 @@ function forkFallback(base, routes, reason) {
   };
 }
 function defaultGeneratedRuntimeDir(env) {
-  const stateHome = env.XDG_STATE_HOME?.trim() || join28(homedir11(), ".local", "state");
-  return join28(stateHome, "arg-bridge", "cc-switch-runtime");
+  const stateHome = env.XDG_STATE_HOME?.trim() || join29(homedir12(), ".local", "state");
+  return join29(stateHome, "arg-bridge", "cc-switch-runtime");
 }
 function selectSubagentRoute(input) {
   const access3 = input.access ?? "read-only";
@@ -15570,10 +15752,10 @@ function errorMessage6(error) {
 }
 
 // src/agent/subagents/broker-tools.ts
-import { createHash as createHash6 } from "crypto";
+import { createHash as createHash7 } from "crypto";
 import { readFileSync as readFileSync7 } from "fs";
-import { lstat as lstat2, realpath as realpath5 } from "fs/promises";
-import { isAbsolute as isAbsolute6, parse as parse2, relative } from "path";
+import { lstat as lstat3, realpath as realpath6 } from "fs/promises";
+import { isAbsolute as isAbsolute7, parse as parse2, relative as relative2 } from "path";
 var BROKER_TOOL_VERSION = 1;
 var DEFAULT_BROKER_TOOL_NAMESPACE = "arg_bridge";
 var MAX_TASK_BYTES = 128 * 1024;
@@ -15585,7 +15767,7 @@ var MAX_WAIT_MS = 60 * 6e4;
 var BrokerToolController = class {
   constructor(options) {
     this.options = options;
-    this.env = options.env ?? process.env;
+    this.env = { ...options.env ?? process.env };
     this.namespace = options.namespace ?? DEFAULT_BROKER_TOOL_NAMESPACE;
     this.specs = brokerToolSpecs(this.namespace);
     this.loadState();
@@ -15623,6 +15805,11 @@ var BrokerToolController = class {
     if (this.closed) return failure("Broker tool controller is closed");
     if (signal?.aborted) return failure("Broker tool call aborted");
     try {
+      const artifact = await readThreadArtifactDelivery(
+        { ...this.env, CODEX_THREAD_ID: this.options.threadId },
+        this.options.cwd
+      );
+      if (artifact) await this.refreshArtifactDelivery(artifact);
       const record = isRecord5(args) ? args : {};
       const idempotencyKey = optionalString(record.idempotency_key, "idempotency_key", 200);
       if (idempotencyKey) {
@@ -15662,6 +15849,7 @@ var BrokerToolController = class {
   }
   async refreshArtifactDelivery(artifact) {
     const next = {
+      ARG_BRIDGE_ARTIFACT_SCOPE: artifact?.scope,
       ARG_BRIDGE_ARTIFACT_SOCKET: artifact?.socketPath,
       ARG_BRIDGE_ARTIFACT_TOKEN: artifact?.token
     };
@@ -15674,6 +15862,7 @@ var BrokerToolController = class {
       }
     }
     this.artifactToken = artifact?.token;
+    await this.bindWorkerArtifacts();
     if (!changed || !this.backend) return;
     const backend = this.backend;
     this.backend = void 0;
@@ -15738,8 +15927,8 @@ var BrokerToolController = class {
     const workspace = await canonicalWorkspace(optionalString(args.workspace, "workspace", 4096), this.options.cwd);
     if (access3 === "read-only") {
       const parentWorkspace = await canonicalWorkspace(void 0, this.options.cwd);
-      const rel = relative(parentWorkspace, workspace);
-      if (rel.startsWith("..") || isAbsolute6(rel)) {
+      const rel = relative2(parentWorkspace, workspace);
+      if (rel.startsWith("..") || isAbsolute7(rel)) {
         throw new SubagentUnavailableError(
           "workspace-denied",
           "read-only workers may only access the parent workspace or a subdirectory of it."
@@ -16242,6 +16431,7 @@ var BrokerToolController = class {
     this.rebuildAliases();
   }
   async persist() {
+    await this.bindWorkerArtifacts();
     const body = {
       version: 1,
       workers: [...this.workers.values()].map(({ backend: _backend, ...worker }) => worker),
@@ -16254,6 +16444,14 @@ var BrokerToolController = class {
       await writeFileAtomic(this.options.stateFile, snapshot, { mode: 384 });
     });
     await this.writeChain;
+  }
+  async bindWorkerArtifacts() {
+    const { ARG_BRIDGE_ARTIFACT_SCOPE: scope, ARG_BRIDGE_ARTIFACT_SOCKET: socketPath, ARG_BRIDGE_ARTIFACT_TOKEN: token } = this.env;
+    if (!scope || !socketPath || !token) return;
+    await Promise.all([...this.workers.values()].map((worker) => {
+      const threadId = subagentThreadId(worker.agent);
+      return threadId ? bindThreadArtifactDelivery(threadId, { scope, socketPath, token }, [worker.workspace], this.env) : void 0;
+    }));
   }
 };
 function brokerToolSpecs(namespace = DEFAULT_BROKER_TOOL_NAMESPACE) {
@@ -16425,10 +16623,10 @@ function parseAccess(value) {
 }
 async function canonicalWorkspace(requested, fallback) {
   const value = requested ?? fallback;
-  if (!isAbsolute6(value)) throw new Error("workspace must be an absolute path");
-  const canonical = await realpath5(value).catch(() => void 0);
+  if (!isAbsolute7(value)) throw new Error("workspace must be an absolute path");
+  const canonical = await realpath6(value).catch(() => void 0);
   if (!canonical) throw new Error(`workspace does not exist: ${value}`);
-  const info = await lstat2(canonical);
+  const info = await lstat3(canonical);
   if (!info.isDirectory()) throw new Error("workspace must be a directory");
   if (canonical === parse2(canonical).root) throw new Error("workspace cannot be a filesystem root");
   return canonical;
@@ -16450,7 +16648,7 @@ async function assertWriteAuthorization(authorization, task, workspace) {
     "write_authorization.task",
     MAX_TASK_BYTES
   );
-  const canonical = await realpath5(authorizedWorkspace).catch(() => void 0);
+  const canonical = await realpath6(authorizedWorkspace).catch(() => void 0);
   if (canonical !== workspace || authorizedTask !== task) {
     throw new SubagentUnavailableError(
       "write-not-authorized",
@@ -16482,7 +16680,7 @@ function numberValue3(value, minimum, maximum) {
   return value;
 }
 function backendConfigKey(config) {
-  return createHash6("sha256").update(JSON.stringify(config.mixagents ?? {})).digest("hex");
+  return createHash7("sha256").update(JSON.stringify(config.mixagents ?? {})).digest("hex");
 }
 function safeError(error) {
   return truncate2(redactSecrets(error instanceof Error ? error.message : String(error)), 8e3);
@@ -16511,19 +16709,19 @@ function readStateFile(path) {
 }
 
 // src/integrations/project-rsi.ts
-import { createHash as createHash7 } from "crypto";
-import { lstat as lstat3, mkdtemp, readFile as readFile17, readdir as readdir5, realpath as realpath6, rm as rm13, stat as stat6, writeFile as writeFile9, mkdir as mkdir18 } from "fs/promises";
-import { homedir as homedir12, tmpdir as tmpdir3 } from "os";
-import { dirname as dirname18, isAbsolute as isAbsolute7, join as join29, parse as parse3, relative as relative2, resolve as resolve5 } from "path";
-var CONFIG_RELATIVE_PATH = join29(".project-rsi", "config.json");
-var EVIDENCE_RELATIVE_PATH = join29(".agent", "rsi");
+import { createHash as createHash8 } from "crypto";
+import { lstat as lstat4, mkdtemp, readFile as readFile18, readdir as readdir6, realpath as realpath7, rm as rm13, stat as stat6, writeFile as writeFile9, mkdir as mkdir19 } from "fs/promises";
+import { homedir as homedir13, tmpdir as tmpdir3 } from "os";
+import { dirname as dirname18, isAbsolute as isAbsolute8, join as join30, parse as parse3, relative as relative3, resolve as resolve5 } from "path";
+var CONFIG_RELATIVE_PATH = join30(".project-rsi", "config.json");
+var EVIDENCE_RELATIVE_PATH = join30(".agent", "rsi");
 var MAX_CONFIG_BYTES = 256 * 1024;
 var MAX_MANIFEST_BYTES = 2 * 1024 * 1024;
 async function discoverProjectRsi(cwd, configuredRoot) {
   if (configuredRoot) {
     const root = await canonicalSafeProjectRoot(configuredRoot);
     if (!root) return void 0;
-    const configPath = join29(root, CONFIG_RELATIVE_PATH);
+    const configPath = join30(root, CONFIG_RELATIVE_PATH);
     try {
       return await readProject(root, configPath);
     } catch (error) {
@@ -16533,7 +16731,7 @@ async function discoverProjectRsi(cwd, configuredRoot) {
   }
   let current = resolve5(cwd);
   for (; ; ) {
-    const configPath = join29(current, CONFIG_RELATIVE_PATH);
+    const configPath = join30(current, CONFIG_RELATIVE_PATH);
     const exists2 = await stat6(configPath).then((info) => info.isFile()).catch(() => false);
     if (!exists2) {
       const parent2 = dirname18(current);
@@ -16657,13 +16855,13 @@ async function writeRsiReviewEvidence(runDir, review) {
     access: review.access,
     agentId: review.agentId,
     verdict: redactSecrets(review.verdict).slice(0, 80),
-    responseHash: createHash7("sha256").update(safeResponse).digest("hex"),
+    responseHash: createHash8("sha256").update(safeResponse).digest("hex"),
     response: safeResponse.slice(0, 16e3),
     startedAt: review.startedAt,
     completedAt: review.completedAt
   };
-  const path = join29(runDir, "review.json");
-  await mkdir18(runDir, { recursive: true, mode: 448 });
+  const path = join30(runDir, "review.json");
+  await mkdir19(runDir, { recursive: true, mode: 448 });
   await writeFile9(path, `${JSON.stringify(body, null, 2)}
 `, { mode: 384 });
   return path;
@@ -16714,8 +16912,8 @@ async function runUpstreamRsi(project, task, config, context, signal) {
     };
   }
   if (signal?.aborted) throw abortError3();
-  const tempDir = await mkdtemp(join29(tmpdir3(), "arg-bridge-rsi-run-"));
-  const requestPath = join29(tempDir, "request.json");
+  const tempDir = await mkdtemp(join30(tmpdir3(), "arg-bridge-rsi-run-"));
+  const requestPath = join30(tempDir, "request.json");
   await writeFile9(requestPath, `${JSON.stringify({
     version: 1,
     task: redactSecrets(task).slice(0, 16e3),
@@ -16769,7 +16967,7 @@ async function readProject(root, configPath) {
   if (!safeRoot) throw new Error(`\u4E0D\u5B89\u5168\u7684 Project RSI \u6839\u76EE\u5F55\uFF1A${root}`);
   let parsed;
   try {
-    parsed = JSON.parse(await readFile17(configPath, "utf8"));
+    parsed = JSON.parse(await readFile18(configPath, "utf8"));
   } catch (error) {
     throw new Error(`\u65E0\u6CD5\u89E3\u6790 Project RSI \u914D\u7F6E ${configPath}: ${safeError2(error)}`);
   }
@@ -16779,12 +16977,12 @@ async function readProject(root, configPath) {
   const config = parsed;
   if (config.projectRoot) {
     const declared = resolve5(safeRoot, config.projectRoot);
-    const canonicalDeclared = await realpath6(declared).catch(() => void 0);
+    const canonicalDeclared = await realpath7(declared).catch(() => void 0);
     if (canonicalDeclared !== safeRoot) {
       throw new Error("Project RSI \u914D\u7F6E\u4E2D\u7684 projectRoot \u4E0E\u53D1\u73B0\u76EE\u5F55\u4E0D\u4E00\u81F4");
     }
   }
-  const evidence = typeof config.runsDir === "string" && config.runsDir.trim() ? resolve5(safeRoot, config.runsDir) : join29(safeRoot, EVIDENCE_RELATIVE_PATH, "runs");
+  const evidence = typeof config.runsDir === "string" && config.runsDir.trim() ? resolve5(safeRoot, config.runsDir) : join30(safeRoot, EVIDENCE_RELATIVE_PATH, "runs");
   if (!isWithin(safeRoot, evidence)) throw new Error("Project RSI runsDir \u8D85\u51FA\u9879\u76EE\u6839\u76EE\u5F55");
   return {
     root: safeRoot,
@@ -16796,19 +16994,19 @@ async function readProject(root, configPath) {
 async function canonicalSafeProjectRoot(input) {
   if (!input.trim()) return void 0;
   const candidate = resolve5(input);
-  if (!isAbsolute7(candidate) || candidate === parse3(candidate).root) return void 0;
-  const canonical = await realpath6(candidate).catch(() => void 0);
+  if (!isAbsolute8(candidate) || candidate === parse3(candidate).root) return void 0;
+  const canonical = await realpath7(candidate).catch(() => void 0);
   if (!canonical) return void 0;
-  const home = resolve5(homedir12());
+  const home = resolve5(homedir13());
   if (canonical === home || canonical === parse3(canonical).root) return void 0;
   if (dirname18(canonical) === parse3(canonical).root) return void 0;
-  const info = await lstat3(canonical);
+  const info = await lstat4(canonical);
   return info.isDirectory() && !info.isSymbolicLink() ? canonical : void 0;
 }
 async function listRuns(project) {
   let entries;
   try {
-    entries = await readdir5(project.evidenceDir, { withFileTypes: true });
+    entries = await readdir6(project.evidenceDir, { withFileTypes: true });
   } catch (error) {
     if (error.code === "ENOENT") return [];
     throw error;
@@ -16816,13 +17014,13 @@ async function listRuns(project) {
   const runs = [];
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
-    const dir = join29(project.evidenceDir, entry.name);
-    const manifestPath = join29(dir, "manifest.json");
+    const dir = join30(project.evidenceDir, entry.name);
+    const manifestPath = join30(dir, "manifest.json");
     const info = await stat6(manifestPath).catch(() => void 0);
     if (!info?.isFile() || info.size > MAX_MANIFEST_BYTES) continue;
     let manifest;
     try {
-      manifest = JSON.parse(await readFile17(manifestPath, "utf8"));
+      manifest = JSON.parse(await readFile18(manifestPath, "utf8"));
     } catch {
       continue;
     }
@@ -16831,12 +17029,12 @@ async function listRuns(project) {
     const manifestRunId = typeof raw.runId === "string" ? raw.runId.trim() : "";
     if (manifestRunId !== entry.name) continue;
     const declaredRoot = typeof raw.projectRoot === "string" ? raw.projectRoot.trim() : typeof raw.project === "object" && raw.project && !Array.isArray(raw.project) ? raw.project.root : void 0;
-    const canonicalDeclared = typeof declaredRoot === "string" && declaredRoot.trim() ? await realpath6(resolve5(project.root, declaredRoot.trim())).catch(() => void 0) : void 0;
+    const canonicalDeclared = typeof declaredRoot === "string" && declaredRoot.trim() ? await realpath7(resolve5(project.root, declaredRoot.trim())).catch(() => void 0) : void 0;
     if (canonicalDeclared !== project.root) {
       continue;
     }
-    const rawManifest = await readFile17(manifestPath, "utf8");
-    const manifestHash = createHash7("sha256").update(rawManifest).digest("hex");
+    const rawManifest = await readFile18(manifestPath, "utf8");
+    const manifestHash = createHash8("sha256").update(rawManifest).digest("hex");
     const receipt = await readValidatorReceipt(dir, entry.name, manifestHash);
     const task = isRecordValue(raw.task);
     const turnContext = isRecordValue(raw.turn);
@@ -16862,11 +17060,11 @@ async function listRuns(project) {
 }
 async function readValidatorReceipt(runDir, runId, manifestHash) {
   for (const name of ["validator.json", "receipt.json"]) {
-    const path = join29(runDir, name);
+    const path = join30(runDir, name);
     const info = await stat6(path).catch(() => void 0);
     if (!info?.isFile()) continue;
     try {
-      const parsed = JSON.parse(await readFile17(path, "utf8"));
+      const parsed = JSON.parse(await readFile18(path, "utf8"));
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
         return { path, passed: false, mtimeMs: info.mtimeMs, reason: "validator receipt \u4E0D\u662F\u5BF9\u8C61" };
       }
@@ -16891,14 +17089,14 @@ async function readValidatorReceipt(runDir, runId, manifestHash) {
       return { path, passed: false, reason: safeError2(error) };
     }
   }
-  return { path: join29(runDir, "validator.json"), passed: false, reason: "\u7F3A\u5C11 validator receipt" };
+  return { path: join30(runDir, "validator.json"), passed: false, reason: "\u7F3A\u5C11 validator receipt" };
 }
 function resolveValidatorPath(project, config) {
   const configured = config.validatorCommand ?? project.config.validator?.path ?? project.config.validator?.command;
   if (configured) {
     return configured.includes("/") ? resolve5(project.root, configured) : configured;
   }
-  const conventional = join29(project.root, ".project-rsi", "project_rsi.py");
+  const conventional = join30(project.root, ".project-rsi", "project_rsi.py");
   return conventional;
 }
 function runMatchesTurn(run, turn) {
@@ -16931,8 +17129,8 @@ async function isRegularFile(path) {
   return (await stat6(path).catch(() => void 0))?.isFile() ?? false;
 }
 function isWithin(root, candidate) {
-  const rel = relative2(root, candidate);
-  return rel === "" || !rel.startsWith("..") && !isAbsolute7(rel);
+  const rel = relative3(root, candidate);
+  return rel === "" || !rel.startsWith("..") && !isAbsolute8(rel);
 }
 function safeError2(error) {
   return redactSecrets(error instanceof Error ? error.message : String(error));
@@ -17753,7 +17951,7 @@ ${options.prompt}` : options.prompt }];
 
 // src/agent/structured/claude.ts
 import { randomUUID as randomUUID2 } from "crypto";
-import { readFile as readFile18 } from "fs/promises";
+import { readFile as readFile19 } from "fs/promises";
 import { extname as extname2 } from "path";
 var ClaudeStructuredSession = class _ClaudeStructuredSession {
   constructor(id, options, query) {
@@ -17919,7 +18117,7 @@ ${JSON.stringify(input, null, 2)}`,
       for (const path of options.images ?? []) {
         const mime = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif" }[extname2(path).toLowerCase()];
         if (!mime) throw new Error("Unsupported image format");
-        content.push({ type: "image", source: { type: "base64", media_type: mime, data: await readFile18(path, "base64") } });
+        content.push({ type: "image", source: { type: "base64", media_type: mime, data: await readFile19(path, "base64") } });
       }
       if (signal.aborted) return;
       this.phase = "busy";
@@ -18066,13 +18264,13 @@ ${JSON.stringify(input, null, 2)}`,
 };
 
 // src/agent/structured/native-bridge.ts
-import { createHash as createHash8 } from "crypto";
-import { mkdir as mkdir19, readFile as readFile19 } from "fs/promises";
-import { dirname as dirname19, join as join32 } from "path";
+import { createHash as createHash9 } from "crypto";
+import { mkdir as mkdir20, readFile as readFile20 } from "fs/promises";
+import { dirname as dirname19, join as join33 } from "path";
 
 // src/agent/structured/socket-security.ts
-import { lstat as lstat4, realpath as realpath7, stat as stat7 } from "fs/promises";
-import { join as join30, resolve as resolve6 } from "path";
+import { lstat as lstat5, realpath as realpath8, stat as stat7 } from "fs/promises";
+import { join as join31, resolve as resolve6 } from "path";
 var trustedSocketParents = /* @__PURE__ */ new Set();
 var MAX_SOCKET_PARENT_LEVELS = 20;
 async function resolveAppServerSocketPath(candidate) {
@@ -18080,10 +18278,10 @@ async function resolveAppServerSocketPath(candidate) {
     throw new Error("App Server endpoint \u4E0D\u5B89\u5168");
   }
   const requested = resolve6(candidate);
-  const resolvedPath = await realpath7(requested);
+  const resolvedPath = await realpath8(requested);
   await assertOwnedParents(resolvedPath);
   if (requested !== resolvedPath) {
-    const requestedParent = await realpath7(join30(requested, ".."));
+    const requestedParent = await realpath8(join31(requested, ".."));
     await assertOwnedParents(requestedParent);
   }
   const info = await stat7(resolvedPath);
@@ -18110,15 +18308,15 @@ async function canonicalAppServerEndpoints(candidates) {
   return endpoints;
 }
 async function assertOwnedParents(target) {
-  let current = join30(target, "..");
+  let current = join31(target, "..");
   for (let level = 0; level < MAX_SOCKET_PARENT_LEVELS; level += 1) {
     const directory = resolve6(current);
     if (directory === "/") return;
     if (trustedSocketParents.has(directory)) return;
-    const info = await lstat4(directory);
+    const info = await lstat5(directory);
     if (!isSafeSocketParent(info)) throw new Error("App Server socket \u4E0D\u5B89\u5168");
     trustedSocketParents.add(directory);
-    current = join30(directory, "..");
+    current = join31(directory, "..");
   }
   throw new Error("App Server socket \u4E0D\u5B89\u5168");
 }
@@ -18138,12 +18336,12 @@ import {
   realpathSync as realpathSync2,
   statSync as statSync2
 } from "fs";
-import { join as join31 } from "path";
+import { join as join32 } from "path";
 var MAX_PROCESS_FAMILY_DEPTH = 8;
 var MAX_ANCESTOR_DEPTH = 4;
 function discoverCodexThreadWriterOwners(codexHome, threadId) {
   if (process.platform !== "linux") return { pids: [], endpoints: [] };
-  const lockPath = join31(codexHome, "thread-writer-locks", `${threadId}.lock`);
+  const lockPath = join32(codexHome, "thread-writer-locks", `${threadId}.lock`);
   if (!existsSync7(lockPath)) return { lockPath, pids: [], endpoints: [] };
   const pids = findLockOwnerPids(lockPath);
   if (pids.length === 0) return { lockPath, pids, endpoints: [] };
@@ -18342,8 +18540,8 @@ async function prepareNativeCodexEnvironment(input) {
     fingerprint: {
       credentials: fingerprintCredentialEnv(credential.env),
       networkMode: thirdParty ? "inherit:third-party-direct" : input.config.network?.mode ?? "inherit",
-      configStamp: env.CODEX_HOME ? fileStamp(join32(env.CODEX_HOME, "config.toml")) : void 0,
-      authStamp: env.CODEX_HOME ? fileStamp(join32(env.CODEX_HOME, "auth.json")) : void 0
+      configStamp: env.CODEX_HOME ? fileStamp(join33(env.CODEX_HOME, "config.toml")) : void 0,
+      authStamp: env.CODEX_HOME ? fileStamp(join33(env.CODEX_HOME, "auth.json")) : void 0
     }
   };
 }
@@ -18363,7 +18561,7 @@ function resolveFollowCurrentProviderSelection(prepared) {
       `\u5F53\u524D provider ${identity.ccSwitchProviderId} \u7F3A\u5C11\u51ED\u636E\u5B57\u6BB5 ${prepared.credential.envKey ?? "(unknown)"}\uFF1B\u5DF2\u62D2\u7EDD\u521B\u5EFA\u53EF\u80FD\u4F7F\u7528\u65E7 key \u7684 Bridge thread`
     );
   }
-  const runtimeFingerprint = createHash8("sha256").update(JSON.stringify({
+  const runtimeFingerprint = createHash9("sha256").update(JSON.stringify({
     ccSwitchProviderId: identity.ccSwitchProviderId,
     modelProvider: identity.codexProviderId,
     model: identity.model,
@@ -18399,7 +18597,7 @@ async function createNativeBridgeSession(input) {
     );
   }
   const namespace = config.toolNamespace || DEFAULT_BROKER_TOOL_NAMESPACE;
-  const markerPath = join32(input.profileDir, "structured", "broker-threads.json");
+  const markerPath = join33(input.profileDir, "structured", "broker-threads.json");
   const requestedThread = input.threadId?.trim();
   const adoptThread = input.adoptThreadId?.trim();
   if (input.followCurrentProvider && !adoptThread) {
@@ -18580,7 +18778,7 @@ async function createNativeBridgeSession(input) {
         ...current.ccSwitchProviderId ? { providerId: current.ccSwitchProviderId } : {},
         cwd: input.cwd,
         codexBin: input.binary,
-        stateDir: join32(input.profileDir, "structured")
+        stateDir: join33(input.profileDir, "structured")
       });
       return {
         brokerConfigPath: generated.brokerConfigPath,
@@ -18593,10 +18791,10 @@ async function createNativeBridgeSession(input) {
       threadId: markerThreadId,
       cwd: input.cwd,
       scope: `native-bridge:${input.profileName}:${markerThreadId}`,
-      stateFile: join32(
+      stateFile: join33(
         input.profileDir,
         "structured",
-        `broker-workers-${createHash8("sha256").update(markerThreadId).digest("hex").slice(0, 24)}.json`
+        `broker-workers-${createHash9("sha256").update(markerThreadId).digest("hex").slice(0, 24)}.json`
       ),
       env,
       namespace,
@@ -18639,17 +18837,17 @@ async function createNativeBridgeSession(input) {
   }
 }
 function historySnapshotPath(profileDir, threadId) {
-  return join32(
+  return join33(
     profileDir,
     "structured",
     "broker-thread-history",
-    `${createHash8("sha256").update(threadId).digest("hex")}.json`
+    `${createHash9("sha256").update(threadId).digest("hex")}.json`
   );
 }
 async function readThreadHistorySnapshot(profileDir, threadId) {
   try {
     const parsed = JSON.parse(
-      await readFile19(historySnapshotPath(profileDir, threadId), "utf8")
+      await readFile20(historySnapshotPath(profileDir, threadId), "utf8")
     );
     return parsed.version === 1 && parsed.threadId === threadId && Array.isArray(parsed.items) && Array.isArray(parsed.turnIds) ? parsed : void 0;
   } catch {
@@ -18658,7 +18856,7 @@ async function readThreadHistorySnapshot(profileDir, threadId) {
 }
 async function writeThreadHistorySnapshot(profileDir, threadId, history, turnIds) {
   const path = historySnapshotPath(profileDir, threadId);
-  await mkdir19(dirname19(path), { recursive: true, mode: 448 });
+  await mkdir20(dirname19(path), { recursive: true, mode: 448 });
   const snapshot = {
     version: 1,
     threadId,
@@ -18861,7 +19059,7 @@ async function findLoadedThreadHost(profileDir, threadId, env) {
       `thread ${threadId} \u7684 writer \u7531 PID ${owner.pids.join(", ")} \u6301\u6709\uFF0C\u4F46\u5176\u5DF2\u77E5 App Server endpoint \u672A\u62A5\u544A\u8BE5 thread \u5DF2\u52A0\u8F7D\uFF1B\u5DF2\u62D2\u7EDD\u51B7\u542F\u52A8\u65B0\u7684 writer\u3002`
     );
   }
-  const registered = registry.map((host) => join32(host.directory, "server.sock"));
+  const registered = registry.map((host) => join33(host.directory, "server.sock"));
   const loaded = await probeLoadedEndpoints(
     registered,
     threadId,
@@ -18909,7 +19107,7 @@ async function probeLoadedEndpoints(socketPaths, threadId, env) {
 }
 async function readAdoptionMarkers(path, adoptedFrom, namespace) {
   try {
-    const parsed = JSON.parse(await readFile19(path, "utf8"));
+    const parsed = JSON.parse(await readFile20(path, "utf8"));
     if (parsed.version !== 1 || !parsed.threads || typeof parsed.threads !== "object") {
       return [];
     }
@@ -18940,7 +19138,7 @@ async function findLatestAdoptedThreadMarker(path, adoptedFrom, namespace) {
 }
 async function readThreadMarker(path, threadId) {
   try {
-    const parsed = JSON.parse(await readFile19(path, "utf8"));
+    const parsed = JSON.parse(await readFile20(path, "utf8"));
     const marker = parsed.version === 1 ? parsed.threads?.[threadId] : void 0;
     return marker && marker.version === BROKER_TOOL_VERSION && typeof marker.namespace === "string" ? marker : void 0;
   } catch {
@@ -18950,7 +19148,7 @@ async function readThreadMarker(path, threadId) {
 async function writeThreadMarker(path, threadId, namespace, adoptedFrom, providerSelection, previousThreadId) {
   let parsed = { version: 1, threads: {} };
   try {
-    const current = JSON.parse(await readFile19(path, "utf8"));
+    const current = JSON.parse(await readFile20(path, "utf8"));
     if (current.version !== 1 || !current.threads || typeof current.threads !== "object" || Array.isArray(current.threads)) {
       throw new Error(`Broker thread marker \u683C\u5F0F\u65E0\u6548\uFF1A${path}`);
     }
@@ -18973,7 +19171,7 @@ async function writeThreadMarker(path, threadId, namespace, adoptedFrom, provide
       runtimeFingerprint: providerSelection.runtimeFingerprint
     } : {}
   };
-  await mkdir19(dirname19(path), { recursive: true, mode: 448 });
+  await mkdir20(dirname19(path), { recursive: true, mode: 448 });
   await writeFileAtomic(path, `${JSON.stringify({ version: 1, threads }, null, 2)}
 `, {
     mode: 384
@@ -18990,9 +19188,9 @@ function textFromUserContent(content) {
 }
 
 // src/agent/structured/view.ts
-import { createHash as createHash9 } from "crypto";
-import { mkdir as mkdir20, appendFile, lstat as lstat5, chmod as chmod8 } from "fs/promises";
-import { join as join33 } from "path";
+import { createHash as createHash10 } from "crypto";
+import { mkdir as mkdir21, appendFile, lstat as lstat6, chmod as chmod9 } from "fs/promises";
+import { join as join34 } from "path";
 var quote = (value) => `'${value.replace(/'/g, `'\\''`)}'`;
 var StructuredView = class {
   constructor(directory, key) {
@@ -19009,12 +19207,12 @@ var StructuredView = class {
   async start(native, cwd) {
     if (native) this.nativeSpec = native;
     if (cwd) this.nativeCwd = cwd;
-    await mkdir20(this.directory, { recursive: true, mode: 448 });
-    const info = await lstat5(this.directory);
+    await mkdir21(this.directory, { recursive: true, mode: 448 });
+    const info = await lstat6(this.directory);
     if (info.isSymbolicLink() || !info.isDirectory() || process.getuid && info.uid !== process.getuid()) throw new Error("Unsafe terminal view directory");
-    await chmod8(this.directory, 448);
-    const name = `argbridge-api-${createHash9("sha256").update(this.key).digest("hex").slice(0, 16)}`;
-    this.logPath = join33(this.directory, `${name}.log`);
+    await chmod9(this.directory, 448);
+    const name = `argbridge-api-${createHash10("sha256").update(this.key).digest("hex").slice(0, 16)}`;
+    this.logPath = join34(this.directory, `${name}.log`);
     await appendFile(this.logPath, "", { mode: 384 });
     if (!native) {
       await appendFile(
@@ -19024,7 +19222,7 @@ var StructuredView = class {
       );
     }
     if (process.platform === "win32" || spawnProcessSync("tmux", ["-V"], { stdio: "ignore" }).status !== 0) return;
-    const socket = join33(this.directory, "view.sock");
+    const socket = join34(this.directory, "view.sock");
     if (Buffer.byteLength(socket) > 100) return;
     const exists2 = spawnProcessSync("tmux", ["-S", socket, "has-session", "-t", name], { stdio: "ignore" });
     if (exists2.status === 0 && native) {
@@ -19054,7 +19252,7 @@ var StructuredView = class {
     if (options.native) this.nativeSpec = options.native;
     if (artifactEnv && Object.keys(artifactEnv).length > 0) {
       const socket = this.statusValue.terminal?.socketPath;
-      const name = `argbridge-api-${createHash9("sha256").update(this.key).digest("hex").slice(0, 16)}`;
+      const name = `argbridge-api-${createHash10("sha256").update(this.key).digest("hex").slice(0, 16)}`;
       if (socket) {
         for (const [key, value] of Object.entries(artifactEnv)) {
           if (value === void 0) continue;
@@ -19382,16 +19580,16 @@ function routeChangeReason(state, route, cwd, access3) {
   return void 0;
 }
 async function authorizedSideWorkspace(cwd, requested) {
-  if (!requested) return realpath8(cwd);
-  if (!isAbsolute8(requested)) {
+  if (!requested) return realpath9(cwd);
+  if (!isAbsolute9(requested)) {
     throw new Error(
       `workspace-write side \u9700\u8981\u7EDD\u5BF9 canonical workspace \u8DEF\u5F84\uFF1A${requested}`
     );
   }
-  const root = await realpath8(cwd);
-  const workspace = await realpath8(requested);
-  const rel = relative3(root, workspace);
-  if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute8(rel)) {
+  const root = await realpath9(cwd);
+  const workspace = await realpath9(requested);
+  const rel = relative4(root, workspace);
+  if (rel === ".." || rel.startsWith(`..${sep2}`) || isAbsolute9(rel)) {
     throw new Error(
       `workspace-write side \u53EA\u80FD\u8BBF\u95EE\u5F53\u524D workspace \u6216\u5176\u5B50\u76EE\u5F55\uFF1A${workspace}`
     );
@@ -19459,10 +19657,10 @@ async function resolveAppServerSocketPath2(candidate) {
     throw new Error("App Server endpoint \u4E0D\u5B89\u5168");
   }
   const requested = resolve7(candidate);
-  const resolvedPath = await realpath8(requested);
+  const resolvedPath = await realpath9(requested);
   await assertOwnedParents2(resolvedPath);
   if (requested !== resolvedPath) {
-    const requestedParent = await realpath8(join34(requested, ".."));
+    const requestedParent = await realpath9(join35(requested, ".."));
     await assertOwnedParents2(requestedParent);
   }
   const info = await stat8(resolvedPath);
@@ -19473,15 +19671,15 @@ async function resolveAppServerSocketPath2(candidate) {
   return resolvedPath;
 }
 async function assertOwnedParents2(target) {
-  let current = join34(target, "..");
+  let current = join35(target, "..");
   for (let level = 0; level < MAX_SOCKET_PARENT_LEVELS2; level += 1) {
     const directory = resolve7(current);
     if (directory === "/") return;
     if (trustedSocketParents2.has(directory)) return;
-    const info = await lstat6(directory);
+    const info = await lstat7(directory);
     if (!isSafeSocketParent2(info)) throw new Error("App Server socket \u4E0D\u5B89\u5168");
     trustedSocketParents2.add(directory);
-    current = join34(directory, "..");
+    current = join35(directory, "..");
   }
   throw new Error("App Server socket \u4E0D\u5B89\u5168");
 }
@@ -19497,15 +19695,16 @@ var StructuredAdapter = class {
     this.options = options;
     this.id = options.kind;
     this.displayName = options.kind === "codex" ? "Codex App Server" : "Claude Agent SDK";
-    this.bindingsFile = join34(options.profileDir, "structured", "tmux-bindings.json");
-    this.candidatesFile = join34(options.profileDir, "structured", "tmux-candidates.json");
-    this.sidesFile = join34(options.profileDir, "structured", "subagent-sides.json");
-    this.brokerThreadsFile = join34(options.profileDir, "structured", "broker-threads.json");
+    this.bindingsFile = join35(options.profileDir, "structured", "tmux-bindings.json");
+    this.candidatesFile = join35(options.profileDir, "structured", "tmux-candidates.json");
+    this.sidesFile = join35(options.profileDir, "structured", "subagent-sides.json");
+    this.brokerThreadsFile = join35(options.profileDir, "structured", "broker-threads.json");
     this.loadBindings();
     this.loadCandidates();
     this.loadMixagentsSides();
     this.loadBrokerThreads();
     this.tmux = {
+      restoreArtifactDelivery: (scope, artifact) => this.restoreArtifactDelivery(scope, artifact),
       list: async (socket) => this.listStructuredPanes(socket),
       bind: async (scope, selector) => this.bindTmuxPane(scope, selector),
       unbind: async (scope) => {
@@ -19700,6 +19899,57 @@ var StructuredAdapter = class {
     } catch {
     }
   }
+  /** Restore exact thread bindings without resuming, interrupting or spawning a turn. */
+  async restoreArtifactDelivery(scope, artifact) {
+    if (this.id !== "codex") return false;
+    const threads = /* @__PURE__ */ new Map();
+    const binding = this.bindings.get(scope);
+    if (binding) {
+      threads.set(binding.threadId, binding.cwd);
+      const pane = listStructuredTmuxPanes(binding.target.socketPath).find(
+        (candidate) => candidate.paneId === binding.target.paneId && candidate.sessionName === binding.target.sessionName
+      );
+      if (pane?.structured?.threadId && pane.structured.endpoint) threads.set(pane.structured.threadId, pane.paneCurrentPath);
+    }
+    const current = this.sessions.get(scope);
+    if (current?.main instanceof CodexStructuredSession) threads.set(current.main.id, current.cwd);
+    const directory = join35(this.options.profileDir, "structured");
+    for (const name of await readdir7(directory).catch(() => [])) {
+      if (!/^[a-f0-9]{64}\.json$/u.test(name)) continue;
+      try {
+        const saved = JSON.parse(await readFile21(join35(directory, name), "utf8"));
+        if (saved.scope === scope && saved.kind === "codex" && saved.id && saved.cwd) threads.set(saved.id, saved.cwd);
+      } catch {
+      }
+    }
+    const env = this.options.env ?? process.env;
+    for (const [threadId, cwd] of threads) {
+      await bindThreadArtifactDelivery(threadId, artifact, [cwd], env);
+      const workerStateFile = join35(directory, `broker-workers-${createHash11("sha256").update(threadId).digest("hex").slice(0, 24)}.json`);
+      await bindArtifactWorkerState(workerStateFile, artifact, env);
+      try {
+        const state = JSON.parse(await readFile21(workerStateFile, "utf8"));
+        if (state.version === 1 && Array.isArray(state.workers)) {
+          for (const worker of state.workers) {
+            const workerThreadId = worker.agent && subagentThreadId(worker.agent);
+            if (workerThreadId && typeof worker.workspace === "string") {
+              await bindThreadArtifactDelivery(workerThreadId, artifact, [worker.workspace], env);
+            }
+          }
+        }
+      } catch {
+      }
+    }
+    for (const side of this.mixagentsSides.values()) {
+      const threadId = subagentThreadId(side.agent);
+      if (side.scope !== scope || !threadId) continue;
+      await bindThreadArtifactDelivery(threadId, artifact, [side.cwd], env);
+      side.artifactSocketPath = artifact.socketPath;
+      side.artifactToken = artifact.token;
+    }
+    if (current?.main instanceof CodexStructuredSession) await current.main.refreshBrokerArtifactDelivery(artifact);
+    return threads.size > 0 || [...this.mixagentsSides.values()].some((side) => side.scope === scope && subagentThreadId(side.agent));
+  }
   loadCandidates() {
     try {
       const parsed = JSON.parse(readFileSync10(this.candidatesFile, "utf8"));
@@ -19711,7 +19961,7 @@ var StructuredAdapter = class {
     }
   }
   async saveCandidates() {
-    await mkdir21(join34(this.options.profileDir, "structured"), { recursive: true, mode: 448 });
+    await mkdir22(join35(this.options.profileDir, "structured"), { recursive: true, mode: 448 });
     await writeFileAtomic(this.candidatesFile, JSON.stringify({ version: 1, candidates: Object.fromEntries(this.candidates) }, null, 2) + "\n", { mode: 384 });
   }
   loadMixagentsSides() {
@@ -19737,7 +19987,7 @@ var StructuredAdapter = class {
     }
   }
   async saveMixagentsSides() {
-    await mkdir21(join34(this.options.profileDir, "structured"), { recursive: true, mode: 448 });
+    await mkdir22(join35(this.options.profileDir, "structured"), { recursive: true, mode: 448 });
     const sides = Object.fromEntries(
       [...this.mixagentsSides.entries()].map(([key, side]) => [
         key,
@@ -19755,6 +20005,16 @@ var StructuredAdapter = class {
         }
       ])
     );
+    for (const side of this.mixagentsSides.values()) {
+      const threadId = subagentThreadId(side.agent);
+      if (threadId && side.artifactSocketPath && side.artifactToken) {
+        await bindThreadArtifactDelivery(threadId, {
+          scope: side.scope,
+          socketPath: side.artifactSocketPath,
+          token: side.artifactToken
+        }, [side.cwd], this.options.env ?? process.env);
+      }
+    }
     await writeFileAtomic(this.sidesFile, `${JSON.stringify({ version: 1, sides }, null, 2)}
 `, { mode: 384 });
   }
@@ -19796,7 +20056,7 @@ var StructuredAdapter = class {
     }
   }
   async saveBrokerThreads() {
-    await mkdir21(join34(this.options.profileDir, "structured"), { recursive: true, mode: 448 });
+    await mkdir22(join35(this.options.profileDir, "structured"), { recursive: true, mode: 448 });
     await writeFileAtomic(
       this.brokerThreadsFile,
       `${JSON.stringify({ version: 1, threads: Object.fromEntries(this.brokerThreads) }, null, 2)}
@@ -19825,10 +20085,10 @@ var StructuredAdapter = class {
       threadId,
       cwd,
       scope,
-      stateFile: join34(
+      stateFile: join35(
         this.options.profileDir,
         "structured",
-        `broker-workers-${createHash10("sha256").update(threadId).digest("hex").slice(0, 24)}.json`
+        `broker-workers-${createHash11("sha256").update(threadId).digest("hex").slice(0, 24)}.json`
       ),
       env: {
         ...this.options.env ?? process.env,
@@ -19851,7 +20111,7 @@ var StructuredAdapter = class {
       ...config.ccSwitchProviderId ? { providerId: config.ccSwitchProviderId } : {},
       cwd,
       codexBin: this.options.binary,
-      stateDir: join34(this.options.profileDir, "structured"),
+      stateDir: join35(this.options.profileDir, "structured"),
       runtimePolicy: {
         role,
         webSearch: config.webSearch,
@@ -20473,7 +20733,7 @@ ${finalText}`));
     }
     const config = await this.currentRsiConfig();
     if (config.mode === "off") return { ok: true };
-    const taskHash = createHash10("sha256").update(input.prompt).digest("hex");
+    const taskHash = createHash11("sha256").update(input.prompt).digest("hex");
     const turnContext = {
       turnStartedAt: input.turnStartedAt,
       threadId: input.threadId,
@@ -20566,7 +20826,7 @@ ${finalText}`));
         subagents: reviewerConfig,
         env: this.options.env ?? process.env,
         cwd: projectRoot,
-        stateDir: join34(this.options.profileDir, "structured"),
+        stateDir: join35(this.options.profileDir, "structured"),
         codexBin: this.options.binary,
         ...this.options.codexHome ? { codexHome: this.options.codexHome } : {},
         ...this.runtimeIdentity?.ccSwitchProviderId ? { parentProviderId: this.runtimeIdentity.ccSwitchProviderId } : {},
@@ -20581,7 +20841,7 @@ ${finalText}`));
     if (resolved.kind !== "mixagents" || !resolved.backend || !resolved.route) {
       return { ok: false, reason: "\u6CA1\u6709\u53EF\u7528\u7684 MixAgents read route" };
     }
-    const manifest = await readFile20(join34(runDir, "manifest.json"), "utf8").catch(() => "{}");
+    const manifest = await readFile21(join35(runDir, "manifest.json"), "utf8").catch(() => "{}");
     const startedAt = Date.now();
     const task = [
       "Perform one bounded read-only Project RSI review.",
@@ -20690,7 +20950,7 @@ ${truncateSnapshot(redactDiagnosticText(redactSecrets(manifest)), 8e3)}
       rounds.push({
         round,
         findings: truncateSnapshot(redactSecrets(reason), 8e3),
-        promptHash: createHash10("sha256").update(repairPrompt).digest("hex"),
+        promptHash: createHash11("sha256").update(repairPrompt).digest("hex"),
         startedAt: new Date(startedAt).toISOString(),
         completedAt: new Date(completedAt).toISOString()
       });
@@ -20722,7 +20982,7 @@ ${truncateSnapshot(redactDiagnosticText(redactSecrets(manifest)), 8e3)}
   }
   async writeRsiRepairEvidence(runDir, rounds, finalFailure) {
     await writeFileAtomic(
-      join34(runDir, "repair-loop.json"),
+      join35(runDir, "repair-loop.json"),
       `${JSON.stringify({
         version: 1,
         rounds,
@@ -20735,7 +20995,7 @@ ${truncateSnapshot(redactDiagnosticText(redactSecrets(manifest)), 8e3)}
     );
   }
   async saveBindings() {
-    await mkdir21(join34(this.options.profileDir, "structured"), { recursive: true, mode: 448 });
+    await mkdir22(join35(this.options.profileDir, "structured"), { recursive: true, mode: 448 });
     await writeFileAtomic(this.bindingsFile, JSON.stringify({ version: 1, bindings: Object.fromEntries(this.bindings), disabled: [...this.autoDiscoveryDisabled] }, null, 2) + "\n", { mode: 384 });
   }
   async bindTmuxPane(scope, selector) {
@@ -21010,6 +21270,12 @@ ${truncateSnapshot(redactDiagnosticText(redactSecrets(manifest)), 8e3)}
         const current = await this.session(options);
         if (abort.signal.aborted) return;
         if (current.main instanceof CodexStructuredSession) {
+          await bindThreadArtifactDelivery(current.main.id, options.artifactDelivery, [current.cwd], this.options.env ?? process.env);
+          if (options.artifactDelivery) await bindArtifactWorkerState(
+            join35(this.options.profileDir, "structured", `broker-workers-${createHash11("sha256").update(current.main.id).digest("hex").slice(0, 24)}.json`),
+            options.artifactDelivery,
+            this.options.env ?? process.env
+          );
           await current.main.refreshBrokerArtifactDelivery(options.artifactDelivery);
         }
         if (side && /^\/btw\s+result\s*$/iu.test(options.prompt.trim())) {
@@ -21095,7 +21361,7 @@ ${truncateSnapshot(redactDiagnosticText(redactSecrets(manifest)), 8e3)}
             env: workerEnv,
             cwd: sideWorkspace,
             access: btw.access,
-            stateDir: join34(this.options.profileDir, "structured"),
+            stateDir: join35(this.options.profileDir, "structured"),
             codexBin: this.options.binary,
             ...this.options.codexHome ? { codexHome: this.options.codexHome } : {},
             ...this.runtimeIdentity?.ccSwitchProviderId ? { parentProviderId: this.runtimeIdentity.ccSwitchProviderId } : {},
@@ -21314,15 +21580,15 @@ ${prompt}
   }
   makeView(scope) {
     const key = `${this.options.profileDir}\0${scope}`;
-    const directory = join34(tmpdir4(), `ab-view-${process.getuid?.() ?? "user"}-${createHash10("sha256").update(key).digest("hex").slice(0, 12)}`);
+    const directory = join35(tmpdir4(), `ab-view-${process.getuid?.() ?? "user"}-${createHash11("sha256").update(key).digest("hex").slice(0, 12)}`);
     return new StructuredView(directory, key);
   }
   stateFile(scope, cwd) {
-    return join34(this.options.profileDir, "structured", `${createHash10("sha256").update(scope).update("\0").update(cwd).digest("hex")}.json`);
+    return join35(this.options.profileDir, "structured", `${createHash11("sha256").update(scope).update("\0").update(cwd).digest("hex")}.json`);
   }
   async saved(scope, cwd) {
     try {
-      const value = JSON.parse(await readFile20(this.stateFile(scope, cwd), "utf8"));
+      const value = JSON.parse(await readFile21(this.stateFile(scope, cwd), "utf8"));
       return value.scope === scope && value.cwd === cwd && value.kind === this.id && typeof value.id === "string" ? value : void 0;
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
@@ -21406,11 +21672,11 @@ ${prompt}
   }
   async createSession(scope, options, bound2) {
     const cwd = options.cwd;
-    const directory = join34(this.options.profileDir, "structured");
+    const directory = join35(this.options.profileDir, "structured");
     const stateFile = this.stateFile(scope, cwd);
     let saved;
     try {
-      saved = JSON.parse(await readFile20(stateFile, "utf8"));
+      saved = JSON.parse(await readFile21(stateFile, "utf8"));
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
     }
@@ -21736,16 +22002,16 @@ ${prompt}
     return {
       credentials: fingerprintCredentialEnv(this.credentialResolution.env),
       networkMode: this.providerIsThirdParty ? "inherit:third-party-direct" : this.options.network?.mode ?? "inherit",
-      configStamp: home ? fileStamp(join34(home, "config.toml")) : void 0,
-      authStamp: home ? fileStamp(join34(home, "auth.json")) : void 0
+      configStamp: home ? fileStamp(join35(home, "config.toml")) : void 0,
+      authStamp: home ? fileStamp(join35(home, "auth.json")) : void 0
     };
   }
 };
 
 // src/agent/structured/preferred.ts
 import { readFileSync as readFileSync11 } from "fs";
-import { join as join35 } from "path";
-import { mkdir as mkdir22 } from "fs/promises";
+import { join as join36 } from "path";
+import { mkdir as mkdir23 } from "fs/promises";
 var PreferredStructuredAdapter = class {
   constructor(structured, live, directory) {
     this.structured = structured;
@@ -21753,13 +22019,13 @@ var PreferredStructuredAdapter = class {
     this.directory = directory;
     this.id = structured.id;
     this.displayName = `${structured.displayName} (live fallback)`;
-    this.file = join35(directory, "preferred-panes.json");
+    this.file = join36(directory, "preferred-panes.json");
     try {
       const data = JSON.parse(readFileSync11(this.file, "utf8"));
       if (data.version === 1) for (const [scope, target] of Object.entries(data.targets ?? {})) this.targets.set(scope, target);
     } catch {
       try {
-        const old = JSON.parse(readFileSync11(join35(directory, "structured", "tmux-bindings.json"), "utf8"));
+        const old = JSON.parse(readFileSync11(join36(directory, "structured", "tmux-bindings.json"), "utf8"));
         if (old.version === 1) for (const [scope, binding] of Object.entries(old.bindings ?? {})) {
           const target = binding.target;
           if (target?.paneId) this.targets.set(scope, target);
@@ -21799,6 +22065,13 @@ var PreferredStructuredAdapter = class {
         return removed;
       },
       releaseManaged: async (scope, cwd) => this.live.tmux.releaseManaged?.(scope, cwd) ?? false,
+      restoreArtifactDelivery: async (scope, artifact) => {
+        const restored = await Promise.all([
+          this.structured.tmux?.restoreArtifactDelivery?.(scope, artifact) ?? false,
+          this.live.tmux?.restoreArtifactDelivery?.(scope, artifact) ?? false
+        ]);
+        return restored.some(Boolean);
+      },
       status: async (scope, cwd) => {
         const saved = this.targets.get(scope);
         if (!saved) return this.structured.tmux.status(scope, cwd);
@@ -21821,7 +22094,7 @@ var PreferredStructuredAdapter = class {
   targets = /* @__PURE__ */ new Map();
   file;
   async save() {
-    await mkdir22(this.directory, { recursive: true, mode: 448 });
+    await mkdir23(this.directory, { recursive: true, mode: 448 });
     await writeFileAtomic(this.file, JSON.stringify({ version: 1, targets: Object.fromEntries(this.targets) }), { mode: 384 });
   }
   current(scope) {
@@ -21950,9 +22223,145 @@ var PreferredStructuredAdapter = class {
 
 // src/bot/channel.ts
 import { createLarkChannel } from "@larksuite/channel";
-import { createHash as createHash16 } from "crypto";
-import { homedir as homedir15 } from "os";
-import { dirname as dirname23, join as join39 } from "path";
+import { createHash as createHash17 } from "crypto";
+import { homedir as homedir17 } from "os";
+
+// src/agent/artifact-relay.ts
+import { createHmac, randomBytes as randomBytes4, timingSafeEqual } from "crypto";
+import { lstat as lstat8, mkdir as mkdir24, open as open4, readFile as readFile22, readdir as readdir8 } from "fs/promises";
+import { homedir as homedir14 } from "os";
+import { join as join37 } from "path";
+var PREFIX = "ARG_BRIDGE_FILE_REQUEST_V1:";
+var MAX_AGE_MS = 5 * 6e4;
+function artifactRelayRequest(artifact, path, caption) {
+  if (!artifact.scope || !process.env.CODEX_THREAD_ID) throw new Error("\u5F53\u524D\u6C99\u7BB1\u65E0\u6CD5\u8FDE\u63A5 Bridge\uFF0C\u4E14\u7F3A\u5C11\u7CBE\u786E thread/scope\uFF0C\u4E0D\u80FD\u63D0\u4EA4\u6587\u4EF6\u8BF7\u6C42");
+  const request = {
+    scope: artifact.scope,
+    threadId: process.env.CODEX_THREAD_ID,
+    cwd: process.cwd(),
+    path,
+    ...caption ? { caption } : {},
+    nonce: randomBytes4(24).toString("hex"),
+    createdAt: Date.now()
+  };
+  const payload = Buffer.from(JSON.stringify(request)).toString("base64url");
+  return `${PREFIX}${payload}.${signature(payload, artifact.token)}`;
+}
+function verifiedArtifactRelayRequests(text2, threadId, tokens) {
+  const requests = [];
+  for (const match of text2.matchAll(/ARG_BRIDGE_FILE_REQUEST_V1:([A-Za-z0-9_-]{1,22000})\.([a-f0-9]{64})/gu)) {
+    try {
+      const payload = match[1];
+      const request = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+      if (request.threadId !== threadId || typeof request.scope !== "string" || typeof request.path !== "string" || typeof request.cwd !== "string" || request.caption !== void 0 && typeof request.caption !== "string" || !/^[a-f0-9]{48}$/u.test(request.nonce) || !Number.isFinite(request.createdAt) || Date.now() - request.createdAt > MAX_AGE_MS || request.createdAt - Date.now() > 1e4) continue;
+      const grant = tokens.get(request.scope);
+      if (!grant || !timingSafeEqual(Buffer.from(match[2], "hex"), Buffer.from(signature(payload, grant.token), "hex"))) continue;
+      requests.push(request);
+    } catch {
+    }
+  }
+  return requests;
+}
+function signature(payload, token) {
+  return createHmac("sha256", token).update(`arg-bridge-file-v1\0${payload}`).digest("hex");
+}
+var ArtifactRelayReader = class {
+  offsets = /* @__PURE__ */ new Map();
+  async read(source) {
+    const info = await lstat8(source.path);
+    if (!info.isFile() || info.isSymbolicLink() || process.getuid && info.uid !== process.getuid()) return "";
+    const previous = this.offsets.get(source.path);
+    const offset = previous && previous.offset <= info.size ? previous.offset : Math.max(0, info.size - 256 * 1024);
+    if (offset === info.size) return "";
+    const file = await open4(source.path, "r");
+    try {
+      const buffer = Buffer.alloc(Math.min(512 * 1024, info.size - offset));
+      const { bytesRead } = await file.read(buffer, 0, buffer.length, offset);
+      const text2 = (previous?.tail ?? "") + buffer.subarray(0, bytesRead).toString("utf8");
+      const end = text2.lastIndexOf("\n");
+      this.offsets.set(source.path, { offset: offset + bytesRead, tail: end >= 0 ? text2.slice(end + 1) : text2.slice(-65536) });
+      if (end < 0) return "";
+      return text2.slice(0, end).split("\n").flatMap((line) => {
+        try {
+          const entry = JSON.parse(line);
+          return entry.type === "response_item" && ["function_call_output", "custom_tool_call_output"].includes(entry.payload?.type) && typeof entry.payload.output === "string" ? [entry.payload.output] : [];
+        } catch {
+          return [];
+        }
+      }).join("\n");
+    } finally {
+      await file.close();
+    }
+  }
+};
+async function claimArtifactRelayRequest(nonce, env = process.env) {
+  const directory = join37(artifactContextDirectory(env), "relay-receipts");
+  await mkdir24(directory, { recursive: true, mode: 448 });
+  const info = await lstat8(directory);
+  if (!info.isDirectory() || info.isSymbolicLink() || process.getuid && info.uid !== process.getuid()) return false;
+  try {
+    const file = await open4(join37(directory, `${nonce}.json`), "wx", 384);
+    await file.close();
+    return true;
+  } catch (err) {
+    if (err.code === "EEXIST") return false;
+    throw err;
+  }
+}
+async function findArtifactRelaySources(homes, threadIds) {
+  const sources = [];
+  for (const threadId of new Set(threadIds)) {
+    if (!/^[a-f0-9]{8}-[a-f0-9]{4}-7[a-f0-9]{3}-[a-f0-9]{4}-[a-f0-9]{12}$/iu.test(threadId)) continue;
+    const timestamp = Number.parseInt(threadId.replaceAll("-", "").slice(0, 12), 16);
+    for (const home of homes) for (const offset of [-864e5, 0, 864e5]) {
+      const day = new Date(timestamp + offset).toISOString().slice(0, 10).split("-");
+      const directory = join37(home, "sessions", ...day);
+      for (const name of await readdir8(directory).catch(() => [])) {
+        if (name.endsWith(`-${threadId}.jsonl`)) sources.push({ threadId, path: join37(directory, name) });
+      }
+    }
+  }
+  return sources;
+}
+function createArtifactRelaySourceResolver(profileDir, codexHome, env = process.env) {
+  let cached = [];
+  let refreshedAt = 0;
+  return async (socketPath, scopes) => {
+    if (Date.now() - refreshedAt < 3e3) return cached;
+    const homes = /* @__PURE__ */ new Set([codexHome ?? env.CODEX_HOME ?? join37(homedir14(), ".codex")]);
+    try {
+      const bindings = JSON.parse(await readFile22(join37(profileDir, "structured", "tmux-bindings.json"), "utf8"));
+      for (const binding of Object.values(bindings.bindings ?? {})) {
+        const home = binding.target?.structured?.codexHome;
+        if (home) homes.add(home);
+      }
+    } catch {
+    }
+    const dataDirs = /* @__PURE__ */ new Set();
+    const generated = join37(profileDir, "structured", "cc-switch", "mixagents-data");
+    for (const name of await readdir8(generated).catch(() => [])) {
+      if (/^[a-f0-9]{16}$/u.test(name)) dataDirs.add(join37(generated, name));
+    }
+    try {
+      const path = env.MIXAGENTS_BROKER_CONFIG || join37(env.XDG_CONFIG_HOME || join37(homedir14(), ".config"), "mixagents", "broker.json");
+      const config = JSON.parse(await readFile22(path, "utf8"));
+      if (typeof config.dataDir === "string") dataDirs.add(config.dataDir);
+    } catch {
+    }
+    for (const dataDir of dataDirs) {
+      const runtimes = join37(dataDir, "runtimes");
+      for (const name of await readdir8(runtimes).catch(() => [])) {
+        if (/^[A-Za-z0-9._-]+$/u.test(name)) homes.add(join37(runtimes, name));
+      }
+    }
+    cached = await findArtifactRelaySources([...homes], await artifactRelayThreadIds(socketPath, scopes, env));
+    refreshedAt = Date.now();
+    return cached;
+  };
+}
+
+// src/bot/channel.ts
+import { dirname as dirname23, join as join41 } from "path";
 
 // src/agent/bridge-system-prompt.ts
 var BRIDGE_SYSTEM_PROMPT = `# arg-bridge \u8FD0\u884C\u7EA6\u5B9A
@@ -22148,7 +22557,7 @@ function codexCapability(profile2) {
 }
 
 // src/bridge-agent/router.ts
-import { createHash as createHash11 } from "crypto";
+import { createHash as createHash12 } from "crypto";
 var OpenAiCompatibleBridgeClassifier = class {
   endpoint;
   model;
@@ -22241,7 +22650,7 @@ function looksLikeTerminalPicker(text2) {
   return isStructuredLiveInteraction(text2);
 }
 function sha256(value) {
-  return createHash11("sha256").update(value).digest("hex");
+  return createHash12("sha256").update(value).digest("hex");
 }
 
 // src/agent/models.ts
@@ -22348,9 +22757,9 @@ function safeJsonStringify(value) {
 
 // src/commands/index.ts
 import { randomUUID as randomUUID4 } from "crypto";
-import { lstat as lstat7, readFile as readFile21, realpath as realpath9 } from "fs/promises";
-import { homedir as homedir14 } from "os";
-import { basename as basename8, dirname as dirname20, isAbsolute as isAbsolute9, relative as relative4, sep as sep2 } from "path";
+import { lstat as lstat9, readFile as readFile23, realpath as realpath10 } from "fs/promises";
+import { homedir as homedir16 } from "os";
+import { basename as basename8, dirname as dirname20, isAbsolute as isAbsolute10, relative as relative5, sep as sep3 } from "path";
 
 // src/card/account-cards.ts
 function maskAppId(id) {
@@ -23279,7 +23688,7 @@ function escapeCode(s) {
 }
 
 // src/policy/fingerprint.ts
-import { createHash as createHash12 } from "crypto";
+import { createHash as createHash13 } from "crypto";
 
 // src/session/jcs.ts
 function canonicalizeJcs(value) {
@@ -23342,7 +23751,7 @@ function attachmentPolicyConfigDigest(input) {
   });
 }
 function digestCanonical(value) {
-  return createHash12("sha256").update(canonicalizeJcs(value)).digest().subarray(0, 16).toString("base64url");
+  return createHash13("sha256").update(canonicalizeJcs(value)).digest().subarray(0, 16).toString("base64url");
 }
 
 // src/policy/access.ts
@@ -24381,9 +24790,9 @@ function finalizeIfRunning(state) {
 
 // src/session/history.ts
 import { createReadStream } from "fs";
-import { readdir as readdir6, stat as stat9 } from "fs/promises";
-import { homedir as homedir13 } from "os";
-import { join as join36 } from "path";
+import { readdir as readdir9, stat as stat9 } from "fs/promises";
+import { homedir as homedir15 } from "os";
+import { join as join38 } from "path";
 import { createInterface as createInterface6 } from "readline";
 
 // src/session/preview.ts
@@ -24422,13 +24831,13 @@ function encodeCwd(cwd) {
   return cwd.replace(/[^A-Za-z0-9]/g, "-");
 }
 function claudeProjectDir(cwd) {
-  return join36(homedir13(), ".claude", "projects", encodeCwd(cwd));
+  return join38(homedir15(), ".claude", "projects", encodeCwd(cwd));
 }
 async function listRecentSessions(cwd, limit = 5) {
   const dir = claudeProjectDir(cwd);
   let files;
   try {
-    files = await readdir6(dir);
+    files = await readdir9(dir);
   } catch (err) {
     if (err.code === "ENOENT") return [];
     throw err;
@@ -24436,7 +24845,7 @@ async function listRecentSessions(cwd, limit = 5) {
   const jsonls = files.filter((f) => f.endsWith(".jsonl"));
   const withStats = await Promise.all(
     jsonls.map(async (f) => {
-      const path = join36(dir, f);
+      const path = join38(dir, f);
       try {
         const st = await stat9(path);
         return { file: f, path, mtime: st.mtimeMs };
@@ -24507,7 +24916,7 @@ function formatRelTime(mtime) {
 
 // src/session/codex-history.ts
 import { createInterface as createInterface7 } from "readline";
-import { join as join37 } from "path";
+import { join as join39 } from "path";
 var CodexHistoryError = class extends Error {
   code;
   constructor(code, message, options) {
@@ -24622,7 +25031,7 @@ function spawnCodexAppServer(options) {
   if (options.codexHome) {
     envOverrides.CODEX_HOME = options.codexHome;
   } else if (options.inheritCodexHome === false) {
-    envOverrides.CODEX_HOME = join37(options.profileStateDir, "codex-home");
+    envOverrides.CODEX_HOME = join39(options.profileStateDir, "codex-home");
   }
   return spawnProcess(options.binary, ["app-server", "--listen", "stdio://"], {
     env: mergeProcessEnv(process.env, envOverrides),
@@ -24972,12 +25381,12 @@ function isMessageAuditReject(err) {
   return /not pass the audit/i.test(message);
 }
 function expandTilde(p4) {
-  if (p4 === "~") return homedir14();
-  if (p4.startsWith("~/")) return `${homedir14()}${p4.slice(1)}`;
+  if (p4 === "~") return homedir16();
+  if (p4.startsWith("~/")) return `${homedir16()}${p4.slice(1)}`;
   return p4;
 }
 function isAbsoluteOrTilde(p4) {
-  return isAbsolute9(p4) || p4 === "~" || p4.startsWith("~/");
+  return isAbsolute10(p4) || p4 === "~" || p4.startsWith("~/");
 }
 async function handleSendFile(args, ctx) {
   const input = args.trim();
@@ -24988,7 +25397,7 @@ async function handleSendFile(args, ctx) {
   const requestedPath = expandTilde(input);
   let entry;
   try {
-    entry = await lstat7(requestedPath);
+    entry = await lstat9(requestedPath);
   } catch {
     await reply(ctx, "\u6587\u4EF6\u4E0D\u5B58\u5728\u6216\u4E0D\u53EF\u8BBF\u95EE\u3002");
     return;
@@ -25001,7 +25410,7 @@ async function handleSendFile(args, ctx) {
     await reply(ctx, "\u53EA\u80FD\u53D1\u9001\u666E\u901A\u6587\u4EF6\u3002");
     return;
   }
-  const resolvedPath = await realpath9(requestedPath).catch(() => void 0);
+  const resolvedPath = await realpath10(requestedPath).catch(() => void 0);
   if (!resolvedPath) {
     await reply(ctx, "\u6587\u4EF6\u4E0D\u5B58\u5728\u6216\u4E0D\u53EF\u8BBF\u95EE\u3002");
     return;
@@ -25044,7 +25453,7 @@ async function resolveSendFileRoots(ctx) {
     commandProfilePaths(ctx).mediaDir,
     ...ctx.controls.profileConfig.outbound.allowedFileDirs.map(expandTilde)
   ].filter((path) => Boolean(path));
-  const roots = await Promise.all(candidates.map((path) => realpath9(path).catch(() => void 0)));
+  const roots = await Promise.all(candidates.map((path) => realpath10(path).catch(() => void 0)));
   return [...new Set(roots.filter((path) => Boolean(path)))];
 }
 function sendFileFailureMessage(err) {
@@ -25055,8 +25464,8 @@ function sendFileFailureMessage(err) {
   return "\u6587\u4EF6\u4E0A\u4F20\u5230\u98DE\u4E66\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u5E94\u7528\u6743\u9650\u3001token \u548C\u7F51\u7EDC\u540E\u91CD\u8BD5\u3002";
 }
 function isPathWithinRoot(path, root) {
-  const pathRelative = relative4(root, path);
-  return pathRelative === "" || pathRelative !== ".." && !pathRelative.startsWith(`..${sep2}`) && !isAbsolute9(pathRelative);
+  const pathRelative = relative5(root, path);
+  return pathRelative === "" || pathRelative !== ".." && !pathRelative.startsWith(`..${sep3}`) && !isAbsolute10(pathRelative);
 }
 function formatByteLimit(bytes) {
   if (bytes >= 1024 * 1024) return `${Math.floor(bytes / (1024 * 1024))} MiB`;
@@ -25456,7 +25865,7 @@ function runtimeAccessStatus(profileConfig) {
 async function larkCliStatus(ctx) {
   const appPaths2 = commandProfilePaths(ctx);
   try {
-    const raw = JSON.parse(await readFile21(appPaths2.larkCliTargetConfigFile, "utf8"));
+    const raw = JSON.parse(await readFile23(appPaths2.larkCliTargetConfigFile, "utf8"));
     const app = raw.apps?.find(
       (candidate) => candidate.appId === ctx.controls.profileConfig.accounts.app.id && candidate.brand === ctx.controls.profileConfig.accounts.app.tenant
     );
@@ -25869,9 +26278,9 @@ ${fence}`;
 }
 function parseTmuxSocketArgument(parts) {
   if (parts.length === 0) return "";
-  if (parts.length === 1) return isAbsolute9(parts[0]) ? parts[0] : null;
+  if (parts.length === 1) return isAbsolute10(parts[0]) ? parts[0] : null;
   if (parts.length === 2 && parts[0] === "-L") return parts[1];
-  if (parts.length === 2 && parts[0] === "-S") return isAbsolute9(parts[1]) ? parts[1] : null;
+  if (parts.length === 2 && parts[0] === "-S") return isAbsolute10(parts[1]) ? parts[1] : null;
   return null;
 }
 function formatTmuxList(panes, profile2 = "codex") {
@@ -27877,8 +28286,8 @@ function makeFakeMsg(evt, threadId) {
 }
 
 // src/card/callback-auth.ts
-import { createHmac, randomBytes as randomBytes4, timingSafeEqual } from "crypto";
-var PREFIX = "bridge_cb.v1";
+import { createHmac as createHmac2, randomBytes as randomBytes5, timingSafeEqual as timingSafeEqual2 } from "crypto";
+var PREFIX2 = "bridge_cb.v1";
 var CallbackAuth = class {
   keys;
   nonceStore;
@@ -27889,7 +28298,7 @@ var CallbackAuth = class {
     if (this.keys.length === 0) throw new Error("at least one callback key is required");
     this.nonceStore = options.nonceStore;
     this.now = options.now ?? Date.now;
-    this.createNonce = options.createNonce ?? (() => randomBytes4(16).toString("base64url"));
+    this.createNonce = options.createNonce ?? (() => randomBytes5(16).toString("base64url"));
   }
   sign(input) {
     const key = this.signingKey();
@@ -27905,21 +28314,21 @@ var CallbackAuth = class {
       kv: key.version
     };
     const encoded = encodeJson(payload);
-    return `${PREFIX}.${encoded}.${sign(encoded, key.secret)}`;
+    return `${PREFIX2}.${encoded}.${sign(encoded, key.secret)}`;
   }
   verify(token, expected) {
     const parts = token.split(".");
-    if (parts.length !== 4 || `${parts[0]}.${parts[1]}` !== PREFIX) {
+    if (parts.length !== 4 || `${parts[0]}.${parts[1]}` !== PREFIX2) {
       return { ok: false, reason: "malformed" };
     }
     const encodedPayload = parts[2];
-    const signature = parts[3];
-    if (!encodedPayload || !signature) return { ok: false, reason: "malformed" };
+    const signature2 = parts[3];
+    if (!encodedPayload || !signature2) return { ok: false, reason: "malformed" };
     const payload = decodePayload(encodedPayload);
     if (!payload) return { ok: false, reason: "malformed" };
     const key = this.keys.find((candidate) => candidate.version === payload.kv);
     if (!key) return { ok: false, reason: "unknown-key" };
-    if (!signatureMatches(signature, sign(encodedPayload, key.secret))) {
+    if (!signatureMatches(signature2, sign(encodedPayload, key.secret))) {
       return { ok: false, reason: "bad-signature" };
     }
     if (payload.exp <= this.now()) return { ok: false, reason: "expired" };
@@ -27969,16 +28378,16 @@ function decodePayload(encoded) {
   }
 }
 function sign(payload, secret) {
-  return createHmac("sha256", secret).update(payload).digest("base64url");
+  return createHmac2("sha256", secret).update(payload).digest("base64url");
 }
 function signatureMatches(actual, expected) {
   const actualBytes = Buffer.from(actual);
   const expectedBytes = Buffer.from(expected);
-  return actualBytes.length === expectedBytes.length && timingSafeEqual(actualBytes, expectedBytes);
+  return actualBytes.length === expectedBytes.length && timingSafeEqual2(actualBytes, expectedBytes);
 }
 
 // src/card/callback-store.ts
-import { readFile as readFile22 } from "fs/promises";
+import { readFile as readFile24 } from "fs/promises";
 var CallbackNonceStore = class {
   path;
   nonces = /* @__PURE__ */ new Map();
@@ -27988,7 +28397,7 @@ var CallbackNonceStore = class {
   }
   async load() {
     try {
-      const raw = JSON.parse(await readFile22(this.path, "utf8"));
+      const raw = JSON.parse(await readFile24(this.path, "utf8"));
       if (!raw || typeof raw !== "object") return;
       this.nonces.clear();
       for (const [nonce, state] of Object.entries(raw)) {
@@ -28536,10 +28945,10 @@ function footerLine(status) {
 }
 
 // src/media/cache.ts
-import { createHash as createHash13 } from "crypto";
+import { createHash as createHash14 } from "crypto";
 import { createReadStream as createReadStream2 } from "fs";
-import { mkdir as mkdir23, readdir as readdir7, rename as rename4, rm as rm14, stat as stat10 } from "fs/promises";
-import { join as join38 } from "path";
+import { mkdir as mkdir25, readdir as readdir10, rename as rename4, rm as rm14, stat as stat10 } from "fs/promises";
+import { join as join40 } from "path";
 
 // src/media/attachment.ts
 var DEFAULT_POLICY = {
@@ -28645,7 +29054,7 @@ var MediaCache = class {
   }
   async resolve(items, options = {}) {
     if (items.length === 0) return [];
-    await mkdir23(this.rootDir, { recursive: true });
+    await mkdir25(this.rootDir, { recursive: true });
     const candidates = [];
     for (const item of items) {
       try {
@@ -28675,7 +29084,7 @@ var MediaCache = class {
       return null;
     }
     const kind = r.type;
-    const tmpPath = join38(
+    const tmpPath = join40(
       this.rootDir,
       `.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`
     );
@@ -28689,7 +29098,7 @@ var MediaCache = class {
     const hash = await hashFile(tmpPath);
     const mime = contentType ?? defaultMime(kind);
     const ext = safeExtensionForMime(mime);
-    const absPath = join38(this.rootDir, `${hash}.${ext}`);
+    const absPath = join40(this.rootDir, `${hash}.${ext}`);
     try {
       await stat10(absPath);
       await rm14(tmpPath, { force: true });
@@ -28750,9 +29159,9 @@ function defaultMime(kind) {
 }
 async function listFiles(root) {
   const out = [];
-  const entries = await readdir7(root, { withFileTypes: true }).catch(() => []);
+  const entries = await readdir10(root, { withFileTypes: true }).catch(() => []);
   for (const entry of entries) {
-    const full = join38(root, entry.name);
+    const full = join40(root, entry.name);
     if (entry.isDirectory()) {
       out.push(...await listFiles(full));
     } else if (entry.isFile()) {
@@ -28762,7 +29171,7 @@ async function listFiles(root) {
   return out;
 }
 async function hashFile(path) {
-  const hash = createHash13("sha256");
+  const hash = createHash14("sha256");
   for await (const chunk of createReadStream2(path)) {
     hash.update(chunk);
   }
@@ -29649,7 +30058,7 @@ var ChatModeCache = class {
 
 // src/bot/comments.ts
 import { randomUUID as randomUUID6 } from "crypto";
-import { mkdir as mkdir24 } from "fs/promises";
+import { mkdir as mkdir26 } from "fs/promises";
 import { dirname as dirname21 } from "path";
 
 // src/bot/run-flow.ts
@@ -29786,9 +30195,9 @@ function recordRunSessionEvent(input) {
 }
 
 // src/bot/comment-resource.ts
-import { createHash as createHash14 } from "crypto";
+import { createHash as createHash15 } from "crypto";
 function commentTokenDigest(token) {
-  return createHash14("sha256").update(token).digest("hex").slice(0, 16);
+  return createHash15("sha256").update(token).digest("hex").slice(0, 16);
 }
 function commentDocumentScopeId(fileToken) {
   return `comment-doc:${commentTokenDigest(fileToken)}`;
@@ -30230,7 +30639,7 @@ async function resolveCommentWorkingDirectory(configuredCwd, defaultCwd, managed
 }
 async function resolveManagedCommentWorkingDirectory(managedFallbackCwd, fallbackFrom, fallbackReason, failures) {
   try {
-    await mkdir24(managedFallbackCwd, { recursive: true, mode: 448 });
+    await mkdir26(managedFallbackCwd, { recursive: true, mode: 448 });
   } catch (err) {
     return {
       ok: false,
@@ -30818,29 +31227,34 @@ async function removeReaction(channel, messageId, reactionId) {
 }
 
 // src/bot/artifact-broker.ts
-import { createHash as createHash15, randomBytes as randomBytes5 } from "crypto";
-import { lstat as lstat8, mkdir as mkdir25, readFile as readFile23, realpath as realpath10, rm as rm15 } from "fs/promises";
+import { createHash as createHash16, randomBytes as randomBytes6 } from "crypto";
+import { lstat as lstat10, mkdir as mkdir27, readFile as readFile25, realpath as realpath11, rm as rm15 } from "fs/promises";
 import { createServer } from "net";
-import { basename as basename9, dirname as dirname22, isAbsolute as isAbsolute10, relative as relative5, resolve as resolve8, sep as sep3 } from "path";
+import { basename as basename9, dirname as dirname22, isAbsolute as isAbsolute11, relative as relative6, resolve as resolve8, sep as sep4 } from "path";
 var ArtifactBroker = class {
-  constructor(socketPath, channel, allowLocalFileRoot, persistentStatePath) {
+  constructor(socketPath, channel, allowLocalFileRoot, persistentStatePath, relaySources) {
     this.channel = channel;
     this.allowLocalFileRoot = allowLocalFileRoot;
     this.persistentStatePath = persistentStatePath;
+    this.relaySources = relaySources;
     this.socketPath = artifactBrokerSocketPath(socketPath);
   }
   channel;
   allowLocalFileRoot;
   persistentStatePath;
+  relaySources;
   grants = /* @__PURE__ */ new Map();
   persistentTokensByScope = /* @__PURE__ */ new Map();
   server;
   saving = Promise.resolve();
+  relayTimer;
+  relaying;
+  relayReader = new ArtifactRelayReader();
   socketPath;
   async start() {
     await this.loadPersistentGrants();
     if (process.platform !== "win32") {
-      await mkdir25(dirname22(this.socketPath), { recursive: true });
+      await mkdir27(dirname22(this.socketPath), { recursive: true });
       await rm15(this.socketPath, { force: true }).catch(() => {
       });
     }
@@ -30855,6 +31269,12 @@ var ArtifactBroker = class {
         resolve11();
       });
     });
+    if (this.relaySources) {
+      this.relayTimer = setInterval(() => {
+        void this.pollRelay();
+      }, 1e3);
+      this.relayTimer.unref();
+    }
   }
   issue(input) {
     if (input.persistent) {
@@ -30874,7 +31294,7 @@ var ArtifactBroker = class {
       }
       this.persistentTokensByScope.delete(input.scope);
     }
-    const token = randomBytes5(32).toString("base64url");
+    const token = randomBytes6(32).toString("base64url");
     this.grants.set(token, { ...input, token, updatedAt: Date.now() });
     if (input.persistent) {
       this.persistentTokensByScope.set(input.scope, token);
@@ -30911,6 +31331,8 @@ var ArtifactBroker = class {
     });
   }
   async close() {
+    if (this.relayTimer) clearInterval(this.relayTimer);
+    await this.relaying;
     await this.flush();
     const server = this.server;
     this.server = void 0;
@@ -30922,6 +31344,38 @@ var ArtifactBroker = class {
   }
   async flush() {
     await this.saving;
+  }
+  /** Signed tool-output relay keeps read-only/offline sandboxes intact. */
+  async pollRelay() {
+    if (!this.relaySources || this.relaying) return;
+    this.relaying = (async () => {
+      const tokens = new Map([...this.grants.values()].map((grant) => [grant.scope, grant]));
+      if (!tokens.size) return;
+      for (const source of await this.relaySources(this.socketPath, new Set(tokens.keys()))) {
+        const output = await this.relayReader.read(source).catch(() => "");
+        for (const request of verifiedArtifactRelayRequests(output, source.threadId, tokens)) {
+          if (!await claimArtifactRelayRequest(request.nonce)) continue;
+          const grant = tokens.get(request.scope);
+          try {
+            await this.deliver({ token: grant.token, cwd: request.cwd, path: request.path, caption: request.caption });
+          } catch (err) {
+            const message = err instanceof Error ? err.message : "\u6587\u4EF6\u53D1\u9001\u5931\u8D25";
+            await this.channel.send(
+              grant.chatId,
+              { markdown: `\u98DE\u4E66\u9644\u4EF6\u672A\u53D1\u9001\u6210\u529F\uFF1A${message}` },
+              { replyTo: grant.replyTo, ...grant.replyInThread ? { replyInThread: true } : {} }
+            );
+          }
+        }
+      }
+    })().catch((err) => {
+      log.warn("artifact", "sandbox-relay-failed", { message: err instanceof Error ? err.message : String(err) });
+    });
+    try {
+      await this.relaying;
+    } finally {
+      this.relaying = void 0;
+    }
   }
   async handle(socket) {
     let input = "";
@@ -30957,18 +31411,25 @@ var ArtifactBroker = class {
     if (typeof request.path !== "string" || !request.path.trim()) {
       throw new Error("\u8BF7\u63D0\u4F9B\u8981\u53D1\u9001\u7684\u6587\u4EF6\u8DEF\u5F84");
     }
-    if (isAbsolute10(request.path)) throw new Error("\u6587\u4EF6\u8DEF\u5F84\u5FC5\u987B\u76F8\u5BF9\u5F53\u524D\u5DE5\u4F5C\u76EE\u5F55");
+    if (isAbsolute11(request.path)) throw new Error("\u6587\u4EF6\u8DEF\u5F84\u5FC5\u987B\u76F8\u5BF9\u5F53\u524D\u5DE5\u4F5C\u76EE\u5F55");
     if (request.path.split(/[\\/]+/u).some((part) => part === "..")) {
       throw new Error("\u6587\u4EF6\u8DEF\u5F84\u4E0D\u80FD\u5305\u542B ..");
     }
     if (grant.allowedRoots.length === 0) {
       throw new Error("\u5F53\u524D\u4EFB\u52A1\u5C1A\u672A\u6388\u6743\u6587\u4EF6\u76EE\u5F55\uFF1B\u8BF7\u5728\u5F53\u524D\u4EFB\u52A1\u4E2D\u91CD\u65B0\u8BF7\u6C42\u53D1\u9001");
     }
+    let roots = grant.allowedRoots;
+    if (request.cwd !== void 0) {
+      if (typeof request.cwd !== "string" || !isAbsolute11(request.cwd)) throw new Error("\u65E0\u6548\u7684\u6587\u4EF6\u53D1\u9001\u5DE5\u4F5C\u76EE\u5F55");
+      const cwd = await realpath11(request.cwd);
+      if (!await findCanonicalAllowedRoot(cwd, grant.allowedRoots)) throw new Error("\u6587\u4EF6\u53D1\u9001\u5DE5\u4F5C\u76EE\u5F55\u4E0D\u5728\u5F53\u524D\u4EFB\u52A1\u5141\u8BB8\u7684\u76EE\u5F55\u5185");
+      roots = [cwd];
+    }
     let requested;
     let entry;
-    for (const root2 of grant.allowedRoots) {
+    for (const root2 of roots) {
       const candidate = resolve8(root2, request.path);
-      const candidateEntry = await lstat8(candidate).catch(() => void 0);
+      const candidateEntry = await lstat10(candidate).catch(() => void 0);
       if (!candidateEntry) continue;
       requested = candidate;
       entry = candidateEntry;
@@ -30978,7 +31439,7 @@ var ArtifactBroker = class {
     if (entry.isSymbolicLink()) throw new Error("\u4E0D\u5141\u8BB8\u53D1\u9001\u7B26\u53F7\u94FE\u63A5");
     if (!entry.isFile()) throw new Error("\u53EA\u80FD\u53D1\u9001\u666E\u901A\u6587\u4EF6");
     if (entry.size > grant.maxFileBytes) throw new Error(`\u6587\u4EF6\u8D85\u8FC7\u53D1\u9001\u4E0A\u9650\uFF08${grant.maxFileBytes} B\uFF09`);
-    const resolved = await realpath10(requested);
+    const resolved = await realpath11(requested);
     const root = await findCanonicalAllowedRoot(resolved, grant.allowedRoots);
     if (!root) throw new Error("\u6587\u4EF6\u4E0D\u5728\u5F53\u524D\u4EFB\u52A1\u5141\u8BB8\u7684\u76EE\u5F55\u5185");
     if (!await this.allowLocalFileRoot(root)) throw new Error("bridge \u672A\u5141\u8BB8\u8BE5\u6587\u4EF6\u76EE\u5F55");
@@ -31005,7 +31466,7 @@ var ArtifactBroker = class {
   async loadPersistentGrants() {
     if (!this.persistentStatePath) return;
     try {
-      const raw = JSON.parse(await readFile23(this.persistentStatePath, "utf8"));
+      const raw = JSON.parse(await readFile25(this.persistentStatePath, "utf8"));
       if (raw.version !== 1 || !Array.isArray(raw.grants)) return;
       for (const item of raw.grants) {
         if (!isPersistentGrant(item)) continue;
@@ -31040,17 +31501,17 @@ var ArtifactBroker = class {
   }
 };
 function isPathWithinRoot2(path, root) {
-  const pathRelative = relative5(root, path);
-  return pathRelative === "" || pathRelative !== ".." && !pathRelative.startsWith(`..${sep3}`) && !isAbsolute10(pathRelative);
+  const pathRelative = relative6(root, path);
+  return pathRelative === "" || pathRelative !== ".." && !pathRelative.startsWith(`..${sep4}`) && !isAbsolute11(pathRelative);
 }
 function artifactBrokerSocketPath(socketPath) {
   if (process.platform !== "win32") return socketPath;
-  const digest = createHash15("sha256").update(resolve8(socketPath)).digest("hex").slice(0, 32);
-  return `\\\\.\\pipe\\arg-bridge-artifact-${digest}`;
+  const digest2 = createHash16("sha256").update(resolve8(socketPath)).digest("hex").slice(0, 32);
+  return `\\\\.\\pipe\\arg-bridge-artifact-${digest2}`;
 }
 async function findCanonicalAllowedRoot(path, roots) {
   for (const root of roots) {
-    const canonicalRoot = await realpath10(root).catch(() => void 0);
+    const canonicalRoot = await realpath11(root).catch(() => void 0);
     if (canonicalRoot && isPathWithinRoot2(path, canonicalRoot)) return root;
   }
   return void 0;
@@ -31058,7 +31519,7 @@ async function findCanonicalAllowedRoot(path, roots) {
 function isPersistentGrant(value) {
   if (!value || typeof value !== "object") return false;
   const grant = value;
-  return grant.persistent === true && typeof grant.token === "string" && /^[A-Za-z0-9_-]{16,200}$/u.test(grant.token) && typeof grant.scope === "string" && grant.scope.length > 0 && typeof grant.chatId === "string" && grant.chatId.length > 0 && typeof grant.replyTo === "string" && grant.replyTo.length > 0 && Array.isArray(grant.allowedRoots) && grant.allowedRoots.every((root) => typeof root === "string" && isAbsolute10(root)) && typeof grant.maxFileBytes === "number" && Number.isSafeInteger(grant.maxFileBytes) && grant.maxFileBytes > 0;
+  return grant.persistent === true && typeof grant.token === "string" && /^[A-Za-z0-9_-]{16,200}$/u.test(grant.token) && typeof grant.scope === "string" && grant.scope.length > 0 && typeof grant.chatId === "string" && grant.chatId.length > 0 && typeof grant.replyTo === "string" && grant.replyTo.length > 0 && Array.isArray(grant.allowedRoots) && grant.allowedRoots.every((root) => typeof root === "string" && isAbsolute11(root)) && typeof grant.maxFileBytes === "number" && Number.isSafeInteger(grant.maxFileBytes) && grant.maxFileBytes > 0;
 }
 function normalizeCaption(value) {
   if (value === void 0) return void 0;
@@ -31070,7 +31531,7 @@ function normalizeCaption(value) {
 }
 
 // src/bot/inbound-message-ledger.ts
-import { readFile as readFile24 } from "fs/promises";
+import { readFile as readFile26 } from "fs/promises";
 var FILE_VERSION2 = 1;
 var DEFAULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1e3;
 var DEFAULT_MAX_ENTRIES = 5e4;
@@ -31086,7 +31547,7 @@ var InboundMessageLedger = class {
   async load() {
     if (!this.path) return;
     try {
-      const raw = JSON.parse(await readFile24(this.path, "utf8"));
+      const raw = JSON.parse(await readFile26(this.path, "utf8"));
       if (raw.version !== FILE_VERSION2 || !raw.entries || typeof raw.entries !== "object") return;
       for (const [messageId, acceptedAt] of Object.entries(raw.entries)) {
         if (typeof acceptedAt === "number" && Number.isFinite(acceptedAt) && messageId) {
@@ -31630,8 +32091,8 @@ function stringifyArgs(args) {
   }).join(" ");
 }
 function expandHomeDirectory(path) {
-  if (path === "~") return homedir15();
-  return path.startsWith("~/") ? join39(homedir15(), path.slice(2)) : path;
+  if (path === "~") return homedir17();
+  return path.startsWith("~/") ? join41(homedir17(), path.slice(2)) : path;
 }
 async function startChannel(deps) {
   const { cfg, agent, sessions, sessionCatalog, workspaces, controls } = deps;
@@ -31641,10 +32102,10 @@ async function startChannel(deps) {
   const pool = new ProcessPool(() => getMaxConcurrentRuns(controls.cfg));
   const executor = new RunExecutor({ agent, pool, activeRuns });
   const appSecret = await resolveAppSecret(cfg, deps.appPaths);
-  const callbackNonceStore = deps.appPaths?.mediaDir ? new CallbackNonceStore(join39(dirname23(deps.appPaths.mediaDir), "callback-nonces.json")) : void 0;
+  const callbackNonceStore = deps.appPaths?.mediaDir ? new CallbackNonceStore(join41(dirname23(deps.appPaths.mediaDir), "callback-nonces.json")) : void 0;
   await callbackNonceStore?.load();
   const inboundMessages = new InboundMessageLedger(
-    deps.appPaths?.mediaDir ? join39(dirname23(deps.appPaths.mediaDir), "inbound-message-ledger.json") : void 0
+    deps.appPaths?.mediaDir ? join41(dirname23(deps.appPaths.mediaDir), "inbound-message-ledger.json") : void 0
   );
   await inboundMessages.load();
   const callbackAuth = callbackNonceStore ? new CallbackAuth({
@@ -31735,10 +32196,14 @@ async function startChannel(deps) {
   const media = new MediaCache(channel, deps.appPaths?.mediaDir);
   const artifactStateDir = deps.appPaths?.mediaDir ? dirname23(deps.appPaths.mediaDir) : void 0;
   const artifactBroker = new ArtifactBroker(
-    join39(artifactStateDir ?? join39(process.cwd(), ".arg-bridge-media"), "artifact-broker.sock"),
+    join41(artifactStateDir ?? join41(process.cwd(), ".arg-bridge-media"), "artifact-broker.sock"),
     channel,
     allowLocalFileRoot,
-    artifactStateDir ? join39(artifactStateDir, "artifact-grants.json") : void 0
+    artifactStateDir ? join41(artifactStateDir, "artifact-grants.json") : void 0,
+    artifactStateDir && controls.profileConfig.agentKind === "codex" ? createArtifactRelaySourceResolver(
+      artifactStateDir,
+      controls.profileConfig.codex?.codexHome ?? (controls.profileConfig.codex?.inheritCodexHome === false ? join41(artifactStateDir, "codex-home") : void 0)
+    ) : void 0
   );
   await artifactBroker.start();
   if (agent.tmux?.restoreArtifactDelivery) {
@@ -34271,6 +34736,9 @@ async function processAgentStream(handle, events, scope, idleTimeoutMs, progress
       if (handle.interrupted) break;
       const evt = eventGate.accept(rawEvent);
       if (!evt) continue;
+      if (evt.type === "tool_result") {
+        evt.output = evt.output.replace(/ARG_BRIDGE_FILE_REQUEST_V1:[A-Za-z0-9_-]+\.[a-f0-9]{64}/gu, "[\u6587\u4EF6\u53D1\u9001\u8BF7\u6C42\u5DF2\u4EA4\u7ED9 Bridge]");
+      }
       if (evt.type === "tool_use") {
         inFlightTools.add(evt.id);
         log.info("agent", "tool-in-flight", {
@@ -34358,7 +34826,7 @@ async function processAgentStream(handle, events, scope, idleTimeoutMs, progress
     interrupted: handle.interrupted,
     sourceChars: finalSourceText.length,
     sourceBytes: Buffer.byteLength(finalSourceText, "utf8"),
-    sourceSha256: createHash16("sha256").update(finalSourceText).digest("hex"),
+    sourceSha256: createHash17("sha256").update(finalSourceText).digest("hex"),
     renderedMarkdownBytes: Buffer.byteLength(finalMarkdown, "utf8"),
     renderedCardBytes: Buffer.byteLength(finalCard, "utf8")
   });
@@ -34636,7 +35104,7 @@ function detectLiveInteraction(text2, allowBareConfirmation = false, autoConfirm
     // A prefix signature made two long menus look identical whenever they
     // shared their title and early choices. Hash the complete current surface
     // so repeated redraws dedupe, while every genuinely nested menu is sent.
-    signature: createHash16("sha256").update(prompt).update("\0").update(buttons.map((button2) => button2.input).join("|")).digest("hex"),
+    signature: createHash17("sha256").update(prompt).update("\0").update(buttons.map((button2) => button2.input).join("|")).digest("hex"),
     prompt: displayPrompt.slice(0, isCodexModelPickerPrompt(prompt) ? 4e3 : 1200),
     buttons
   };
@@ -35005,8 +35473,8 @@ async function ensureDeliveredTail(input) {
   });
   log.info("outbound", "delivery-integrity", {
     scope: input.scope,
-    sourceSha256: createHash16("sha256").update(input.source).digest("hex"),
-    deliveredSha256: createHash16("sha256").update(input.delivered).digest("hex"),
+    sourceSha256: createHash17("sha256").update(input.source).digest("hex"),
+    deliveredSha256: createHash17("sha256").update(input.delivered).digest("hex"),
     sourceBytes: Buffer.byteLength(input.source, "utf8"),
     deliveredBytes: Buffer.byteLength(input.delivered, "utf8"),
     tailCovered: covered
@@ -35142,7 +35610,7 @@ function isDefined(value) {
 }
 
 // src/session/store.ts
-import { readFile as readFile25 } from "fs/promises";
+import { readFile as readFile27 } from "fs/promises";
 var SessionStore = class {
   data = {};
   saving = Promise.resolve();
@@ -35152,7 +35620,7 @@ var SessionStore = class {
   }
   async load() {
     try {
-      const text2 = await readFile25(this.path, "utf8");
+      const text2 = await readFile27(this.path, "utf8");
       const raw = JSON.parse(text2);
       this.data = {};
       for (const [chatId, entry] of Object.entries(raw)) {
@@ -35317,7 +35785,7 @@ function isPersistedLiveInteraction(value) {
 
 // src/session/catalog.ts
 import { randomUUID as randomUUID7 } from "crypto";
-import { open as open4, readFile as readFile26, rename as rename5, mkdir as mkdir26 } from "fs/promises";
+import { open as open5, readFile as readFile28, rename as rename5, mkdir as mkdir28 } from "fs/promises";
 import { dirname as dirname24 } from "path";
 var DEFAULT_MAX_ARCHIVED_AGE_MS = 90 * 24 * 60 * 60 * 1e3;
 var DEFAULT_MAX_ENTRIES_PER_SCOPE = 20;
@@ -35340,7 +35808,7 @@ var SessionCatalog = class {
   }
   async load() {
     try {
-      const raw = JSON.parse(await readFile26(this.path, "utf8"));
+      const raw = JSON.parse(await readFile28(this.path, "utf8"));
       if (!Array.isArray(raw)) {
         this.data.clear();
         return;
@@ -35440,11 +35908,11 @@ var SessionCatalog = class {
     });
   }
   async persist() {
-    await mkdir26(dirname24(this.path), { recursive: true });
+    await mkdir28(dirname24(this.path), { recursive: true });
     const tmp = `${this.path}.${process.pid}.${Date.now()}.${randomUUID7()}.tmp`;
     const payload = `${JSON.stringify(this.entries(), null, 2)}
 `;
-    const fh = await open4(tmp, "w", 384);
+    const fh = await open5(tmp, "w", 384);
     try {
       await fh.writeFile(payload, "utf8");
       await fh.sync();
@@ -35453,7 +35921,7 @@ var SessionCatalog = class {
     }
     await rename5(tmp, this.path);
     try {
-      const dir = await open4(dirname24(this.path), "r");
+      const dir = await open5(dirname24(this.path), "r");
       try {
         await dir.sync();
       } finally {
@@ -35502,7 +35970,7 @@ function assertAgentIdentity(input) {
 }
 
 // src/workspace/store.ts
-import { readFile as readFile27 } from "fs/promises";
+import { readFile as readFile29 } from "fs/promises";
 var WorkspaceStore = class {
   data = { chats: {}, named: {} };
   saving = Promise.resolve();
@@ -35512,7 +35980,7 @@ var WorkspaceStore = class {
   }
   async load() {
     try {
-      const text2 = await readFile27(this.path, "utf8");
+      const text2 = await readFile29(this.path, "utf8");
       const parsed = JSON.parse(text2);
       this.data = {
         chats: parsed.chats ?? {},
@@ -36050,9 +36518,9 @@ function formatAgo3(ms) {
 
 // src/cli/commands/agent-sendfile.ts
 import { spawnSync as spawnSync4 } from "child_process";
-import { readFile as readFile28 } from "fs/promises";
+import { readFile as readFile30 } from "fs/promises";
 import { connect as connect2 } from "net";
-import { dirname as dirname25, isAbsolute as isAbsolute11, join as join40, relative as relative6, resolve as resolve9, sep as sep4 } from "path";
+import { dirname as dirname25, isAbsolute as isAbsolute12, join as join42, relative as relative7, resolve as resolve9, sep as sep5 } from "path";
 function resolveAgentArtifactDelivery(env = process.env, readTmuxEnvironment = readTmuxSessionEnvironment) {
   const scope = env.ARG_BRIDGE_ARTIFACT_SCOPE;
   const socketPath = env.ARG_BRIDGE_ARTIFACT_SOCKET;
@@ -36072,11 +36540,28 @@ function resolveAgentArtifactDelivery(env = process.env, readTmuxEnvironment = r
   return socketPath && token ? { ...scope ? { scope } : {}, socketPath, token } : void 0;
 }
 async function runAgentSendFile(path, caption) {
-  const artifact = resolveAgentArtifactDelivery();
+  let artifact = await readThreadArtifactDelivery() ?? resolveAgentArtifactDelivery();
+  if (!artifact && process.env.ARG_BRIDGE_ARTIFACT_SCOPE && process.env.ARG_BRIDGE_ARTIFACT_SOCKET) {
+    artifact = await recoverArtifactDelivery({
+      scope: process.env.ARG_BRIDGE_ARTIFACT_SCOPE,
+      socketPath: process.env.ARG_BRIDGE_ARTIFACT_SOCKET,
+      token: ""
+    });
+  }
   if (!artifact) {
     throw new Error("\u5F53\u524D\u8FDB\u7A0B\u6CA1\u6709 bridge \u6587\u4EF6\u53D1\u9001\u80FD\u529B\uFF1B\u8BF7\u4ECE bridge agent \u4EFB\u52A1\u5185\u8C03\u7528\uFF0C\u6216\u5728\u6258\u7BA1 tmux session \u4E2D\u91CD\u542F bridge \u540E\u91CD\u8BD5");
   }
-  let response = await requestArtifactDelivery(artifact, path, caption);
+  let response;
+  try {
+    response = await requestArtifactDelivery(artifact, path, caption);
+  } catch (err) {
+    if (!["EPERM", "EACCES"].includes(err.code ?? "")) throw err;
+    const renewed = await recoverArtifactDelivery(artifact) ?? artifact;
+    process.stdout.write(`${artifactRelayRequest(renewed, path, caption)}
+\u6587\u4EF6\u53D1\u9001\u8BF7\u6C42\u5DF2\u63D0\u4EA4\u5230 Bridge\uFF1B\u4EE5\u98DE\u4E66\u9644\u4EF6\u6216\u5931\u8D25\u56DE\u6267\u4E3A\u51C6\u3002
+`);
+    return;
+  }
   const message = typeof response.message === "string" ? response.message : "";
   if (response.ok !== true && /令牌已失效|capability.*expired/iu.test(message)) {
     const renewed = await recoverArtifactDelivery(artifact);
@@ -36106,17 +36591,17 @@ function requestArtifactDelivery(artifact, path, caption) {
       socket.end();
     });
     socket.on("connect", () => {
-      socket.write(`${JSON.stringify({ token: artifact.token, path, ...caption ? { caption } : {} })}
+      socket.write(`${JSON.stringify({ token: artifact.token, cwd: process.cwd(), path, ...caption ? { caption } : {} })}
 `);
     });
   });
 }
 async function recoverArtifactDelivery(stale, cwd = process.cwd()) {
   if (!stale.scope) return void 0;
-  const statePath = join40(dirname25(stale.socketPath), "artifact-grants.json");
+  const statePath = join42(dirname25(stale.socketPath), "artifact-grants.json");
   let parsed;
   try {
-    parsed = JSON.parse(await readFile28(statePath, "utf8"));
+    parsed = JSON.parse(await readFile30(statePath, "utf8"));
   } catch {
     return void 0;
   }
@@ -36129,7 +36614,7 @@ async function recoverArtifactDelivery(stale, cwd = process.cwd()) {
     const grant = entry;
     if (grant.persistent !== true || grant.scope !== stale.scope || typeof grant.token !== "string" || !/^[A-Za-z0-9_-]{16,200}$/u.test(grant.token) || !Array.isArray(grant.allowedRoots)) return [];
     const allowed = grant.allowedRoots.some(
-      (value) => typeof value === "string" && isAbsolute11(value) && isWithin2(currentCwd, resolve9(value))
+      (value) => typeof value === "string" && isAbsolute12(value) && isWithin2(currentCwd, resolve9(value))
     );
     return allowed ? [{
       token: grant.token,
@@ -36153,16 +36638,16 @@ function readTmuxSessionEnvironment(name, env) {
   return line.startsWith(prefix) ? line.slice(prefix.length) || void 0 : void 0;
 }
 function isWithin2(path, root) {
-  const rel = relative6(root, path);
-  return rel === "" || rel !== ".." && !rel.startsWith(`..${sep4}`) && !isAbsolute11(rel);
+  const rel = relative7(root, path);
+  return rel === "" || rel !== ".." && !rel.startsWith(`..${sep5}`) && !isAbsolute12(rel);
 }
 
 // src/cli/commands/native.ts
-import { readFile as readFile29 } from "fs/promises";
-import { join as join41 } from "path";
+import { readFile as readFile31 } from "fs/promises";
+import { join as join43 } from "path";
 async function runNative(thread, opts) {
   const rootPaths = resolveAppPaths();
-  const root = JSON.parse(await readFile29(rootPaths.configFile, "utf8"));
+  const root = JSON.parse(await readFile31(rootPaths.configFile, "utf8"));
   const profileName = opts.profile ?? root.activeProfile;
   const paths2 = resolveAppPaths({ profile: profileName });
   if (!root.profiles?.[profileName]) throw new Error(`Unknown profile: ${profileName}`);
@@ -36283,9 +36768,9 @@ async function runNative(thread, opts) {
       }
     }
   }
-  for (const file of [join41(paths2.profileDir, "structured", "tmux-bindings.json"), join41(paths2.profileDir, "preferred-panes.json")]) {
+  for (const file of [join43(paths2.profileDir, "structured", "tmux-bindings.json"), join43(paths2.profileDir, "preferred-panes.json")]) {
     try {
-      const stored = JSON.parse(await readFile29(file, "utf8"));
+      const stored = JSON.parse(await readFile31(file, "utf8"));
       for (const entry of Object.values(stored.bindings ?? stored.targets ?? {})) {
         const identity = entry.structured ?? entry;
         if (identity.threadId === thread && identity.endpoint) candidates.add(identity.endpoint);
@@ -36336,8 +36821,8 @@ async function runNative(thread, opts) {
     fingerprint: {
       credentials: fingerprintCredentialEnv(credential.env),
       networkMode: thirdParty ? "inherit:third-party-direct" : config.network?.mode ?? "inherit",
-      configStamp: env.CODEX_HOME ? fileStamp(join41(env.CODEX_HOME, "config.toml")) : void 0,
-      authStamp: env.CODEX_HOME ? fileStamp(join41(env.CODEX_HOME, "auth.json")) : void 0
+      configStamp: env.CODEX_HOME ? fileStamp(join43(env.CODEX_HOME, "config.toml")) : void 0,
+      authStamp: env.CODEX_HOME ? fileStamp(join43(env.CODEX_HOME, "auth.json")) : void 0
     },
     ...runtimeIdentity ? { runtimeIdentity } : {}
   }));
@@ -36381,15 +36866,15 @@ async function waitChild(child) {
 }
 
 // src/cli/commands/settings.ts
-import { realpath as realpath11 } from "fs/promises";
-import { homedir as homedir17 } from "os";
-import { dirname as dirname27, join as join43, parse as parse4, resolve as resolve10 } from "path";
+import { realpath as realpath12 } from "fs/promises";
+import { homedir as homedir19 } from "os";
+import { dirname as dirname27, join as join45, parse as parse4, resolve as resolve10 } from "path";
 import * as p3 from "@clack/prompts";
 
 // src/agent/subagents/diagnostics.ts
-import { homedir as homedir16 } from "os";
-import { basename as basename10, dirname as dirname26, join as join42 } from "path";
-import { readFile as readFile30 } from "fs/promises";
+import { homedir as homedir18 } from "os";
+import { basename as basename10, dirname as dirname26, join as join44 } from "path";
+import { readFile as readFile32 } from "fs/promises";
 async function collectSubagentDiagnostics(input) {
   const env = input.env ?? process.env;
   const signal = input.signal ?? new AbortController().signal;
@@ -36479,7 +36964,7 @@ async function collectSubagentDiagnostics(input) {
       loaded: Boolean(routeMapState.config),
       ...routeMapState.error ? { error: redactSecrets(routeMapState.error) } : {}
     },
-    brokerConfigPath: env.MIXAGENTS_BROKER_CONFIG?.trim() || join42(env.XDG_CONFIG_HOME?.trim() || join42(homedir16(), ".config"), "mixagents", "broker.json"),
+    brokerConfigPath: env.MIXAGENTS_BROKER_CONFIG?.trim() || join44(env.XDG_CONFIG_HOME?.trim() || join44(homedir18(), ".config"), "mixagents", "broker.json"),
     selectedRoute: { id: null },
     selectedWriteRoute: { id: null },
     readRoutes: [],
@@ -36712,7 +37197,7 @@ async function inspectStructuredRuntime(stateDir, _namespace) {
   }
   let markers = [];
   try {
-    const parsed = JSON.parse(await readFile30(join42(stateDir, "broker-threads.json"), "utf8"));
+    const parsed = JSON.parse(await readFile32(join44(stateDir, "broker-threads.json"), "utf8"));
     if (isRecord6(parsed) && parsed.version === 1 && isRecord6(parsed.threads)) {
       markers = Object.entries(parsed.threads).flatMap(([threadId, value]) => {
         if (!isRecord6(value)) return [];
@@ -37334,7 +37819,7 @@ async function loadSettingsSnapshot(options = {}) {
       config: subagentConfig,
       cwd,
       env,
-      stateDir: join43(paths2.profileDir, "structured"),
+      stateDir: join45(paths2.profileDir, "structured"),
       codexHome,
       codexBin: profile2.codex?.binaryPath ?? "codex"
     }),
@@ -37484,9 +37969,9 @@ function boundedNumberInput(value, minimum, maximum, label) {
 }
 async function validatedRsiRoot(input) {
   if (!input || input.includes("\0")) throw new Error("Project RSI root \u65E0\u6548");
-  const candidate = await realpath11(resolve10(input)).catch(() => void 0);
+  const candidate = await realpath12(resolve10(input)).catch(() => void 0);
   if (!candidate) throw new Error(`Project RSI root \u4E0D\u5B58\u5728\uFF1A${input}`);
-  if (candidate === parse4(candidate).root || candidate === resolve10(homedir17()) || dirname27(candidate) === parse4(candidate).root) {
+  if (candidate === parse4(candidate).root || candidate === resolve10(homedir19()) || dirname27(candidate) === parse4(candidate).root) {
     throw new Error("Project RSI root \u4E0D\u80FD\u662F /\u3001home \u6216\u5BBD\u6CDB\u7236\u76EE\u5F55");
   }
   const project = await discoverProjectRsi(candidate, candidate);
@@ -37527,8 +38012,8 @@ function providerSwitchState(running, configuredCcSwitchProviderId, configured, 
 }
 
 // src/cli/commands/doctor.ts
-import { createHash as createHash17 } from "crypto";
-import { join as join44 } from "path";
+import { createHash as createHash18 } from "crypto";
+import { join as join46 } from "path";
 async function runDoctor(options = {}) {
   const report = await loadDoctorReport(options);
   if (options.json || !process.stdout.isTTY) {
@@ -37798,9 +38283,9 @@ async function probeSubagentRoute(options, requestedRoute) {
       },
       env,
       cwd: options.cwd ?? profile2.workspaces.default ?? process.cwd(),
-      stateDir: join44(paths2.profileDir, "structured"),
+      stateDir: join46(paths2.profileDir, "structured"),
       codexBin: profile2.codex?.binaryPath ?? "codex",
-      ...profile2.codex?.codexHome ? { codexHome: profile2.codex.codexHome } : profile2.codex?.inheritCodexHome === false ? { codexHome: join44(paths2.profileDir, "codex-home") } : {},
+      ...profile2.codex?.codexHome ? { codexHome: profile2.codex.codexHome } : profile2.codex?.inheritCodexHome === false ? { codexHome: join46(paths2.profileDir, "codex-home") } : {},
       requestedRoute,
       signal: controller.signal
     });
@@ -37828,7 +38313,7 @@ async function probeSubagentRoute(options, requestedRoute) {
         provider: resolved.route.provider,
         model: resolved.route.model,
         access: "read-only",
-        ...result.text ? { outputHash: createHash17("sha256").update(result.text).digest("hex") } : {},
+        ...result.text ? { outputHash: createHash18("sha256").update(result.text).digest("hex") } : {},
         note: "explicit-paid-request; no fallback or replay"
       };
     } finally {
@@ -37860,16 +38345,16 @@ function classifyProbeError(message, aborted) {
 }
 
 // src/cli/commands/migrate-local-poc.ts
-import { createHash as createHash18 } from "crypto";
+import { createHash as createHash19 } from "crypto";
 import {
   copyFile as copyFile3,
-  lstat as lstat9,
-  mkdir as mkdir27,
-  readFile as readFile31,
-  readdir as readdir8,
+  lstat as lstat11,
+  mkdir as mkdir29,
+  readFile as readFile33,
+  readdir as readdir11,
   writeFile as writeFile10
 } from "fs/promises";
-import { basename as basename11, dirname as dirname28, join as join45 } from "path";
+import { basename as basename11, dirname as dirname28, join as join47 } from "path";
 import { fileURLToPath as fileURLToPath3 } from "url";
 var POC_MARKERS = [
   "ARG_BRIDGE_LOCAL_POC_MANAGED",
@@ -37917,13 +38402,13 @@ async function migrateLocalPoc(options = {}) {
     conflicts: [],
     rollback: []
   };
-  for (const relative7 of ["dist/cli.js", "dist/broker-side.js"]) {
-    const path = join45(packageDir, relative7);
-    const body = await readFile31(path, "utf8").catch(() => void 0);
+  for (const relative8 of ["dist/cli.js", "dist/broker-side.js"]) {
+    const path = join47(packageDir, relative8);
+    const body = await readFile33(path, "utf8").catch(() => void 0);
     if (body === void 0) continue;
     const marker = POC_MARKERS.some((item) => body.includes(item));
-    const sha2562 = createHash18("sha256").update(body).digest("hex");
-    const expectedHash = packageVersion ? KNOWN_CLEAN_HASHES[packageVersion]?.[relative7] : void 0;
+    const sha2562 = createHash19("sha256").update(body).digest("hex");
+    const expectedHash = packageVersion ? KNOWN_CLEAN_HASHES[packageVersion]?.[relative8] : void 0;
     const unknownOneVersionSevenFile = packageVersion === "1.6.7" && !expectedHash;
     const unknownModifiedKnownVersion = Boolean(expectedHash && expectedHash !== sha2562);
     if (!marker) {
@@ -37962,7 +38447,7 @@ async function migrateLocalPoc(options = {}) {
       action: "restore-backup"
     });
   }
-  const sideMapPath = join45(paths2.profileDir, "structured", "subagent-sides.json");
+  const sideMapPath = join47(paths2.profileDir, "structured", "subagent-sides.json");
   let sideMap = await migrateSideMap(sideMapPath, false, timestamp);
   if (sideMap) {
     report.sideMap = sideMap;
@@ -37972,7 +38457,7 @@ async function migrateLocalPoc(options = {}) {
   }
   const changes = report.package.patchedFiles.some((file) => file.action === "restore-backup") || report.sideMap?.action === "upgrade";
   if (apply && report.conflicts.length === 0 && changes) {
-    const hasConfig = await lstat9(rootPaths.configFile).then((info) => info.isFile()).catch(() => false);
+    const hasConfig = await lstat11(rootPaths.configFile).then((info) => info.isFile()).catch(() => false);
     if (hasConfig) {
       const backup = `${rootPaths.configFile}.local-poc-${timestamp}`;
       await copyFile3(rootPaths.configFile, backup);
@@ -37993,8 +38478,8 @@ async function migrateLocalPoc(options = {}) {
     }
   }
   if (apply && report.conflicts.length === 0 && changes) {
-    const markerFile = join45(paths2.profileDir, ".arg-bridge", "migrations", "local-poc-v1.json");
-    await mkdir27(dirname28(markerFile), { recursive: true, mode: 448 });
+    const markerFile = join47(paths2.profileDir, ".arg-bridge", "migrations", "local-poc-v1.json");
+    await mkdir29(dirname28(markerFile), { recursive: true, mode: 448 });
     await writeFile10(markerFile, `${JSON.stringify({
       version: 1,
       appliedAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -38008,7 +38493,7 @@ async function migrateLocalPoc(options = {}) {
   return report;
 }
 async function migrateSideMap(path, apply, timestamp) {
-  const raw = await readFile31(path, "utf8").catch(() => void 0);
+  const raw = await readFile33(path, "utf8").catch(() => void 0);
   if (raw === void 0) return void 0;
   let parsed;
   try {
@@ -38074,7 +38559,7 @@ function normalizeSideMap(input) {
   };
 }
 async function findOriginalBackup(path) {
-  const names = await readdir8(dirname28(path)).catch(() => []);
+  const names = await readdir11(dirname28(path)).catch(() => []);
   const stem = basename11(path);
   const candidates = names.filter(
     (name) => [
@@ -38083,13 +38568,13 @@ async function findOriginalBackup(path) {
       `${stem}.arg-bridge-original`,
       `${stem}.bak`
     ].includes(name)
-  ).map((name) => join45(dirname28(path), name));
+  ).map((name) => join47(dirname28(path), name));
   return candidates.length === 1 ? candidates[0] : void 0;
 }
 async function locatePackageDir() {
   let current = dirname28(fileURLToPath3(import.meta.url));
   for (; ; ) {
-    const packageFile = await readFile31(join45(current, "package.json"), "utf8").catch(() => void 0);
+    const packageFile = await readFile33(join47(current, "package.json"), "utf8").catch(() => void 0);
     if (packageFile) {
       try {
         const parsed = JSON.parse(packageFile);
@@ -38104,7 +38589,7 @@ async function locatePackageDir() {
 }
 async function readPackageVersion(packageDir) {
   try {
-    const parsed = JSON.parse(await readFile31(join45(packageDir, "package.json"), "utf8"));
+    const parsed = JSON.parse(await readFile33(join47(packageDir, "package.json"), "utf8"));
     return parsed && typeof parsed === "object" && !Array.isArray(parsed) && typeof parsed.version === "string" ? parsed.version : void 0;
   } catch {
     return void 0;

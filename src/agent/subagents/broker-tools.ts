@@ -6,6 +6,8 @@ import type { SubagentAccess, SubagentConfig } from '../../config/profile-schema
 import { loadBrokerRouteMap } from '../../integrations/broker-routes';
 import { readCcSwitchState } from '../../integrations/cc-switch';
 import { writeFileAtomic } from '../../platform/atomic-write';
+import { bindThreadArtifactDelivery, readThreadArtifactDelivery } from '../artifact-context';
+import type { ArtifactDeliveryEnv } from '../lark-channel-env';
 import {
   mergeRuntimeRoutes,
   MixAgentsBrokerBackend,
@@ -17,6 +19,7 @@ import {
   SubagentAgentNotFoundError,
   SubagentUnavailableError,
   subagentRouteFingerprint,
+  subagentThreadId,
   type SideAgent,
   type SideAgentResult,
   type SubagentBackend,
@@ -58,7 +61,7 @@ export interface BrokerToolHost {
   call(tool: string, args: unknown, signal?: AbortSignal): Promise<DynamicToolCallResult>;
   setWriteAuthorization?(authorization: WriteAuthorization | undefined): void;
   refreshArtifactDelivery?(
-    artifact: { socketPath: string; token: string } | undefined,
+    artifact: ArtifactDeliveryEnv | undefined,
   ): Promise<void>;
   close(): Promise<void>;
 }
@@ -161,7 +164,7 @@ export class BrokerToolController implements BrokerToolHost {
   private writeAuthorization?: WriteAuthorization;
 
   constructor(private readonly options: BrokerToolControllerOptions) {
-    this.env = options.env ?? process.env;
+    this.env = { ...(options.env ?? process.env) };
     this.namespace = options.namespace ?? DEFAULT_BROKER_TOOL_NAMESPACE;
     this.specs = brokerToolSpecs(this.namespace);
     this.loadState();
@@ -184,6 +187,10 @@ export class BrokerToolController implements BrokerToolHost {
     if (this.closed) return failure('Broker tool controller is closed');
     if (signal?.aborted) return failure('Broker tool call aborted');
     try {
+      const artifact = await readThreadArtifactDelivery(
+        { ...this.env, CODEX_THREAD_ID: this.options.threadId }, this.options.cwd,
+      );
+      if (artifact) await this.refreshArtifactDelivery(artifact);
       const record = isRecord(args) ? args : {};
       const idempotencyKey = optionalString(record.idempotency_key, 'idempotency_key', 200);
       if (idempotencyKey) {
@@ -230,9 +237,10 @@ export class BrokerToolController implements BrokerToolHost {
   }
 
   async refreshArtifactDelivery(
-    artifact: { socketPath: string; token: string } | undefined,
+    artifact: ArtifactDeliveryEnv | undefined,
   ): Promise<void> {
     const next: Record<string, string | undefined> = {
+      ARG_BRIDGE_ARTIFACT_SCOPE: artifact?.scope,
       ARG_BRIDGE_ARTIFACT_SOCKET: artifact?.socketPath,
       ARG_BRIDGE_ARTIFACT_TOKEN: artifact?.token,
     };
@@ -245,6 +253,7 @@ export class BrokerToolController implements BrokerToolHost {
       }
     }
     this.artifactToken = artifact?.token;
+    await this.bindWorkerArtifacts();
     if (!changed || !this.backend) return;
     const backend = this.backend;
     this.backend = undefined;
@@ -896,6 +905,7 @@ export class BrokerToolController implements BrokerToolHost {
   }
 
   private async persist(): Promise<void> {
+    await this.bindWorkerArtifacts();
     const body: PersistedState = {
       version: 1,
       workers: [...this.workers.values()].map(({ backend: _backend, ...worker }) => worker),
@@ -908,6 +918,15 @@ export class BrokerToolController implements BrokerToolHost {
         await writeFileAtomic(this.options.stateFile, snapshot, { mode: 0o600 });
       });
     await this.writeChain;
+  }
+
+  private async bindWorkerArtifacts(): Promise<void> {
+    const { ARG_BRIDGE_ARTIFACT_SCOPE: scope, ARG_BRIDGE_ARTIFACT_SOCKET: socketPath, ARG_BRIDGE_ARTIFACT_TOKEN: token } = this.env;
+    if (!scope || !socketPath || !token) return;
+    await Promise.all([...this.workers.values()].map(worker => {
+      const threadId = subagentThreadId(worker.agent);
+      return threadId ? bindThreadArtifactDelivery(threadId, { scope, socketPath, token }, [worker.workspace], this.env) : undefined;
+    }));
   }
 }
 

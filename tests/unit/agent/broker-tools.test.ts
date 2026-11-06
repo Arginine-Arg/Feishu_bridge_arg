@@ -150,6 +150,7 @@ async function controller(options: {
     cwd: root,
     scope: 'scope',
     stateFile,
+    env: { ...process.env, ARG_BRIDGE_ARTIFACT_CONTEXT_DIR: join(root, 'artifact-contexts') },
     ...(options.namespace ? { namespace: options.namespace } : {}),
     getConfig: async () => config,
     routeResolver: async input => {
@@ -276,6 +277,24 @@ describe('Bridge Broker dynamic tools', () => {
     });
     expect(backend.spawns).toHaveLength(2);
     expect(backend.closes).toContain('agent-1');
+    await tool.close();
+  });
+
+  it('refreshes all artifact fields and binds reusable worker threads without mutating the parent env', async () => {
+    const { root, tool } = await controller();
+    const originalScope = process.env.ARG_BRIDGE_ARTIFACT_SCOPE;
+    const artifact = { scope: 'chat-exact', socketPath: join(root, 'artifact.sock'), token: 'persistent-token' };
+    await tool.refreshArtifactDelivery(artifact);
+    await tool.call('spawn_agent', { name: 'reporter', task: 'Review the report' });
+    const env = Reflect.get(tool, 'env') as NodeJS.ProcessEnv;
+    expect(env).toMatchObject({
+      ARG_BRIDGE_ARTIFACT_SCOPE: artifact.scope,
+      ARG_BRIDGE_ARTIFACT_SOCKET: artifact.socketPath,
+      ARG_BRIDGE_ARTIFACT_TOKEN: artifact.token,
+    });
+    expect(process.env.ARG_BRIDGE_ARTIFACT_SCOPE).toBe(originalScope);
+    const { readThreadArtifactDelivery } = await import('../../../src/agent/artifact-context');
+    await expect(readThreadArtifactDelivery({ ...env, CODEX_THREAD_ID: 'worker-thread-1' }, root)).resolves.toEqual(artifact);
     await tool.close();
   });
 

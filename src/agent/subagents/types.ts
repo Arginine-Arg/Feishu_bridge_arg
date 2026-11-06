@@ -49,6 +49,13 @@ export interface SideAgent {
   threadId?: string;
 }
 
+/** Older Broker snapshots encode the native thread only in their agent ID. */
+export function subagentThreadId(agent: Pick<SideAgent, 'agentId' | 'threadId'>): string | undefined {
+  if (agent.threadId) return agent.threadId;
+  const match = /^broker:[^:]+:([^:\s]{1,200})$/u.exec(agent.agentId);
+  return match?.[1];
+}
+
 export interface SideAgentResult {
   status: SideAgentStatus;
   text?: string;

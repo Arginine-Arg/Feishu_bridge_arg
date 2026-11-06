@@ -6,6 +6,7 @@ import type {
 import { createLarkChannel } from '@larksuite/channel';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
+import { createArtifactRelaySourceResolver } from '../agent/artifact-relay';
 import { dirname, join } from 'node:path';
 import { claudeCapability, codexCapability } from '../agent/capability';
 import { BridgeAgent, createBridgeAgentFromEnvironment } from '../bridge-agent';
@@ -385,6 +386,11 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     channel,
     allowLocalFileRoot,
     artifactStateDir ? join(artifactStateDir, 'artifact-grants.json') : undefined,
+    artifactStateDir && controls.profileConfig.agentKind === 'codex'
+      ? createArtifactRelaySourceResolver(artifactStateDir,
+          controls.profileConfig.codex?.codexHome ??
+          (controls.profileConfig.codex?.inheritCodexHome === false ? join(artifactStateDir, 'codex-home') : undefined))
+      : undefined,
   );
   await artifactBroker.start();
   if (agent.tmux?.restoreArtifactDelivery) {
@@ -3772,6 +3778,9 @@ async function processAgentStream(
       if (handle.interrupted) break;
       const evt = eventGate.accept(rawEvent);
       if (!evt) continue;
+      if (evt.type === 'tool_result') {
+        evt.output = evt.output.replace(/ARG_BRIDGE_FILE_REQUEST_V1:[A-Za-z0-9_-]+\.[a-f0-9]{64}/gu, '[文件发送请求已交给 Bridge]');
+      }
 
       // Track tool flight before re-arming the idle timer so the arm step
       // sees the correct set size. tool_use opens a window; tool_result

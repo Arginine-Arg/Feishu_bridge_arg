@@ -658,6 +658,7 @@ function artifactDeliveryEnv(
   if (!artifact) return {};
   return {
     artifactEnv: {
+      ...(artifact.scope ? { ARG_BRIDGE_ARTIFACT_SCOPE: artifact.scope } : {}),
       ARG_BRIDGE_ARTIFACT_SOCKET: artifact.socketPath,
       ARG_BRIDGE_ARTIFACT_TOKEN: artifact.token,
     },

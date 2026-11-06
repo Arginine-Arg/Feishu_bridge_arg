@@ -12,6 +12,7 @@ import { RpcClient, type Wire } from './rpc';
 import { SIDE_BOUNDARY_PROMPT, SIDE_DEVELOPER_INSTRUCTIONS } from './side-boundary';
 import { codexTurnPermissionOverrides } from './permissions';
 import type { BrokerToolHost, WriteAuthorization } from '../subagents/broker-tools';
+import type { ArtifactDeliveryEnv } from '../lark-channel-env';
 
 const toolItems = new Set(['commandExecution', 'fileChange', 'mcpToolCall', 'collabAgentToolCall', 'webSearch', 'imageGeneration', 'dynamicToolCall']);
 
@@ -241,7 +242,7 @@ export class CodexStructuredSession implements StructuredSession {
     this.brokerTools?.setWriteAuthorization?.(authorization);
   }
   async refreshBrokerArtifactDelivery(
-    artifact: { socketPath: string; token: string } | undefined,
+    artifact: ArtifactDeliveryEnv | undefined,
   ): Promise<void> {
     await this.brokerTools?.refreshArtifactDelivery?.(artifact);
   }
