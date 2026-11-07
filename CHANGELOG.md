@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.16.2
+
+- Routes numeric choices to the main/side session that owns the pending
+  structured request, including a main model picker while side is open.
+  Ambiguous pending sessions require a card or explicit request ID.
+- Supports guarded native Codex TUI menu input from structured sessions,
+  including the informational “Giving this request a little extra thought”
+  wait popup that has no App Server request. Numbers, Enter/Escape and bounded
+  navigation keys operate only on a revalidated current menu and exact thread.
+- Restores menu controls from saved external bindings and managed view state
+  after bot restart, without resuming/creating a model turn. Closed/changed
+  menus, stale panes and numbered output are rejected instead of sent as text.
+
 ## 1.16.1
 
 - Restores file delivery after a bot restart for already-bound native/adopted

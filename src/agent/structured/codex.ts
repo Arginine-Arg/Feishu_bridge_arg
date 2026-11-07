@@ -296,7 +296,8 @@ export class CodexStructuredSession implements StructuredSession {
     if (name === '/stop') { await this.interrupt(); return []; }
     const reply = /^\/?answer\s+(\S+)\s+([\s\S]+)$/.exec(input.trim());
     if (reply) { await this.answer(reply[1]!, reply[2]!); return []; }
-    if (/^\d+$/.test(input.trim()) && this.pending.size === 1) { await this.answer([...this.pending.keys()][0]!, input.trim()); return []; }
+    const number = /^(\d+)(?:\s+(?:enter|return|回车|确认))?$/iu.exec(input.trim());
+    if (number && this.pending.size === 1) { await this.answer([...this.pending.keys()][0]!, number[1]!); return []; }
     throw new Error(`结构化后端不支持此控制命令：${input}。不会将它当普通提示词发送。`);
   }
   private menu(prompt: string, entries: Array<{ label: string; apply(): Promise<AgentEvent[]> }>): AgentEvent {
@@ -317,6 +318,7 @@ export class CodexStructuredSession implements StructuredSession {
   private commandEvents: AgentEvent[] = [];
   drainCommands(): AgentEvent[] { return this.commandEvents.splice(0); }
   hasRequest(id: string): boolean { return this.pending.has(id); }
+  pendingRequestCount(): number { return this.pending.size; }
   freeTextRequest(): string | undefined { const entry = [...this.pending][0]; return this.pending.size === 1 && entry?.[1].freeText ? entry[0] : undefined; }
   async answer(id: string, value: string): Promise<void> {
     const request = this.pending.get(id);

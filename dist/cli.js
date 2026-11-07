@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.16.1",
+  version: "1.16.2",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -6853,9 +6853,9 @@ function parseLiveInteractionOptions(input, parseOptions = {}) {
     if (bullet && (!parseOptions.includeAmbiguousBullets || !isAmbiguousOptionRun(ambiguousRows, index))) continue;
     const key = groups.number ?? groups.letter;
     const label = groups.label.trim();
-    const identity = `${key ?? ""}\0${label}`.toLowerCase();
-    if (seen.has(identity)) continue;
-    seen.add(identity);
+    const identity2 = `${key ?? ""}\0${label}`.toLowerCase();
+    if (seen.has(identity2)) continue;
+    seen.add(identity2);
     parsed.push({
       ...key ? { key: key.toLowerCase() } : {},
       label,
@@ -9689,10 +9689,10 @@ function liveTmuxIdentity(cwd, sessionKey, signature2, preferredSessionName) {
   };
 }
 function managedTmuxIdentity(cwd, sessionKey, signature2, preferredSessionName) {
-  const identity = liveTmuxIdentity(cwd, sessionKey, signature2, preferredSessionName);
+  const identity2 = liveTmuxIdentity(cwd, sessionKey, signature2, preferredSessionName);
   return {
     socketPath: defaultTmuxSocketPath({ ...process.env, TMUX: void 0 }),
-    sessionName: identity.sessionName
+    sessionName: identity2.sessionName
   };
 }
 function isTmuxAvailable() {
@@ -17738,8 +17738,9 @@ ${options.prompt}` : options.prompt }];
       await this.answer(reply2[1], reply2[2]);
       return [];
     }
-    if (/^\d+$/.test(input.trim()) && this.pending.size === 1) {
-      await this.answer([...this.pending.keys()][0], input.trim());
+    const number = /^(\d+)(?:\s+(?:enter|return|回车|确认))?$/iu.exec(input.trim());
+    if (number && this.pending.size === 1) {
+      await this.answer([...this.pending.keys()][0], number[1]);
       return [];
     }
     throw new Error(`\u7ED3\u6784\u5316\u540E\u7AEF\u4E0D\u652F\u6301\u6B64\u63A7\u5236\u547D\u4EE4\uFF1A${input}\u3002\u4E0D\u4F1A\u5C06\u5B83\u5F53\u666E\u901A\u63D0\u793A\u8BCD\u53D1\u9001\u3002`);
@@ -17765,6 +17766,9 @@ ${options.prompt}` : options.prompt }];
   }
   hasRequest(id) {
     return this.pending.has(id);
+  }
+  pendingRequestCount() {
+    return this.pending.size;
   }
   freeTextRequest() {
     const entry = [...this.pending][0];
@@ -18170,9 +18174,10 @@ ${JSON.stringify(input, null, 2)}`,
       await this.answer(reply2[1], reply2[2]);
       return this.drainCommands();
     }
-    if (/^\d+$/.test(input.trim()) && this.pending.size === 1) {
+    const number = /^(\d+)(?:\s+(?:enter|return|回车|确认))?$/iu.exec(input.trim());
+    if (number && this.pending.size === 1) {
       const [id, request] = [...this.pending][0];
-      const value = [...request.values][Number(input.trim()) - 1];
+      const value = [...request.values][Number(number[1]) - 1];
       if (!value) throw new Error("\u9009\u9879\u65E0\u6548");
       await this.answer(id, value);
       return this.drainCommands();
@@ -18195,6 +18200,9 @@ ${JSON.stringify(input, null, 2)}`,
   }
   hasRequest(id) {
     return this.pending.has(id);
+  }
+  pendingRequestCount() {
+    return this.pending.size;
   }
   freeTextRequest() {
     const entry = [...this.pending][0];
@@ -18557,31 +18565,31 @@ async function prepareNativeCodexEnvironment(input) {
   };
 }
 function resolveFollowCurrentProviderSelection(prepared) {
-  const identity = prepared.runtimeIdentity;
-  if (!identity?.ccSwitchProviderId) {
+  const identity2 = prepared.runtimeIdentity;
+  if (!identity2?.ccSwitchProviderId) {
     throw new Error("\u65E0\u6CD5\u89E3\u6790\u5F53\u524D cc-switch Codex provider ID\uFF1B\u5DF2\u62D2\u7EDD follow-current-provider \u8FC1\u79FB");
   }
-  if (!identity.codexProviderId) {
+  if (!identity2.codexProviderId) {
     throw new Error("\u65E0\u6CD5\u89E3\u6790\u5F53\u524D Codex model_provider\uFF1B\u5DF2\u62D2\u7EDD follow-current-provider \u8FC1\u79FB");
   }
-  if (!identity.model) {
+  if (!identity2.model) {
     throw new Error("\u65E0\u6CD5\u89E3\u6790\u5F53\u524D Codex model\uFF1B\u5DF2\u62D2\u7EDD follow-current-provider \u8FC1\u79FB");
   }
   if (prepared.credential.missingToken) {
     throw new Error(
-      `\u5F53\u524D provider ${identity.ccSwitchProviderId} \u7F3A\u5C11\u51ED\u636E\u5B57\u6BB5 ${prepared.credential.envKey ?? "(unknown)"}\uFF1B\u5DF2\u62D2\u7EDD\u521B\u5EFA\u53EF\u80FD\u4F7F\u7528\u65E7 key \u7684 Bridge thread`
+      `\u5F53\u524D provider ${identity2.ccSwitchProviderId} \u7F3A\u5C11\u51ED\u636E\u5B57\u6BB5 ${prepared.credential.envKey ?? "(unknown)"}\uFF1B\u5DF2\u62D2\u7EDD\u521B\u5EFA\u53EF\u80FD\u4F7F\u7528\u65E7 key \u7684 Bridge thread`
     );
   }
   const runtimeFingerprint = createHash9("sha256").update(JSON.stringify({
-    ccSwitchProviderId: identity.ccSwitchProviderId,
-    modelProvider: identity.codexProviderId,
-    model: identity.model,
+    ccSwitchProviderId: identity2.ccSwitchProviderId,
+    modelProvider: identity2.codexProviderId,
+    model: identity2.model,
     fingerprint: prepared.fingerprint
   })).digest("hex");
   return {
-    ccSwitchProviderId: identity.ccSwitchProviderId,
-    modelProvider: identity.codexProviderId,
-    model: identity.model,
+    ccSwitchProviderId: identity2.ccSwitchProviderId,
+    modelProvider: identity2.codexProviderId,
+    model: identity2.model,
     runtimeFingerprint
   };
 }
@@ -19334,6 +19342,96 @@ ${event.output}
   }
 };
 
+// src/agent/structured/native-picker.ts
+function isNativePickerControl(input) {
+  const text2 = input.trim();
+  if (/^\d{1,3}(?:\s+(?:enter|return|回车|确认))?$/iu.test(text2)) return true;
+  const sequence = parseLiveControlSequence(text2);
+  return Boolean(sequence && sequence.length <= 16 && sequence.every(
+    (key) => ["\x1B[A", "\x1B[B", "\x1B[C", "\x1B[D", "\r", "\x1B", "	", " "].includes(key)
+  ));
+}
+function nativePickerSurface(screen) {
+  const lines = [];
+  let fenced = false;
+  for (const line of screen.split("\n")) {
+    if (/^\s*(?:```|~~~)/u.test(line)) {
+      fenced = !fenced;
+      continue;
+    }
+    if (!fenced) lines.push(line.trimEnd());
+  }
+  let start = -1;
+  for (const [index, line] of lines.entries()) {
+    if (/^\s*Giving this request a little extra thought\s*$/iu.test(line)) start = index;
+  }
+  if (start >= 0) {
+    const text3 = lines.slice(start).join("\n").trim();
+    const options2 = parseLiveInteractionOptions(text3);
+    if (options2.length === 2 && options2[0]?.key === "1" && options2[1]?.key === "2" && /^Dismiss and keep waiting$/iu.test(options2[0].label) && /^Learn more$/iu.test(options2[1].label) && options2.some((option) => option.selected) && /No action is required\. Codex will keep waiting, and this menu will close when the response is ready\.\s*$/iu.test(text3.replace(/\s+/gu, " "))) {
+      return { text: text3, options: options2 };
+    }
+  }
+  const tail = lines.filter((line) => line.trim()).at(-1) ?? "";
+  if (!/(?:enter.*(?:confirm|continue|select)|esc.*(?:cancel|back|exit))/iu.test(tail)) return void 0;
+  const text2 = liveInteractionSurface(lines.join("\n"));
+  if (!text2 || !/(?:enter.*(?:confirm|continue|select)|esc.*(?:cancel|back|exit))/iu.test(text2)) return void 0;
+  const options = parseLiveInteractionOptions(text2);
+  return options.length >= 2 && options.some((option) => option.selected) ? { text: text2, options } : void 0;
+}
+var transport = {
+  capture(target) {
+    if (!isSafeTmuxSocket(target.socketPath)) throw new Error("tmux socket \u4E0D\u5B58\u5728\u6216\u4E0D\u5B89\u5168");
+    const result = spawnProcessSync("tmux", ["-S", target.socketPath, "capture-pane", "-p", "-t", target.paneId], { encoding: "utf8", maxBuffer: 256 * 1024 });
+    if (result.status !== 0) throw new Error("\u65E0\u6CD5\u8BFB\u53D6\u5F53\u524D Codex \u7EC8\u7AEF\u83DC\u5355");
+    return typeof result.stdout === "string" ? result.stdout : result.stdout?.toString("utf8") ?? "";
+  },
+  send(target, keys) {
+    const result = spawnProcessSync("tmux", ["-S", target.socketPath, "send-keys", "-t", target.paneId, ...keys], { encoding: "utf8" });
+    if (result.status !== 0) throw new Error("\u7EC8\u7AEF\u83DC\u5355\u6309\u952E\u53D1\u9001\u5931\u8D25\uFF1B\u672A\u81EA\u52A8\u91CD\u8BD5");
+  }
+};
+function sendNativePickerControl(resolveTarget2, input, io = transport) {
+  if (!isNativePickerControl(input)) throw new Error("\u8BE5\u8F93\u5165\u4E0D\u662F\u7EC8\u7AEF\u83DC\u5355\u63A7\u5236");
+  const target = resolveTarget2();
+  if (!target?.structured?.endpoint) throw new Error("\u6CA1\u6709\u7ED1\u5B9A\u5230\u5F53\u524D thread \u7684 Codex \u7EC8\u7AEF\u83DC\u5355\uFF1B\u672A\u53D1\u9001\u6309\u952E");
+  const expectedIdentity = identity(target);
+  const surface = nativePickerSurface(io.capture(target));
+  if (!surface) throw new Error("\u5F53\u524D\u6CA1\u6709\u53EF\u64CD\u4F5C\u7684 Codex \u7EC8\u7AEF\u83DC\u5355\uFF0C\u83DC\u5355\u53EF\u80FD\u5DF2\u81EA\u52A8\u5173\u95ED\uFF1B\u672A\u53D1\u9001\u6309\u952E");
+  const numeric = /^(\d{1,3})(?:\s+(?:enter|return|回车|确认))?$/iu.exec(input.trim());
+  let keys;
+  if (numeric) {
+    const requested = surface.options.findIndex((option) => option.key === numeric[1]);
+    const selected = surface.options.findIndex((option) => option.selected);
+    if (requested < 0 || selected < 0) throw new Error("\u65E0\u6548\u9009\u9879\uFF1B\u8BF7\u4F7F\u7528\u5F53\u524D\u7EC8\u7AEF\u83DC\u5355\u4E2D\u7684\u7F16\u53F7");
+    const steps = requested - selected;
+    if (Math.abs(steps) > 50) throw new Error("\u7EC8\u7AEF\u83DC\u5355\u5BFC\u822A\u8D85\u51FA\u8303\u56F4");
+    keys = [...Array.from({ length: Math.abs(steps) }, () => steps > 0 ? "Down" : "Up"), "Enter"];
+  } else {
+    const map = {
+      "\x1B[A": "Up",
+      "\x1B[B": "Down",
+      "\x1B[C": "Right",
+      "\x1B[D": "Left",
+      "\r": "Enter",
+      "\x1B": "Escape",
+      "	": "Tab",
+      " ": "Space"
+    };
+    keys = parseLiveControlSequence(input).map((key) => map[key]);
+    if (keys.slice(0, -1).some((key) => key === "Enter" || key === "Escape")) {
+      throw new Error("\u786E\u8BA4\u6216\u9000\u51FA\u5FC5\u987B\u662F\u672C\u6B21\u83DC\u5355\u64CD\u4F5C\u7684\u6700\u540E\u4E00\u4E2A\u6309\u952E");
+    }
+  }
+  const latest = resolveTarget2();
+  if (!latest || identity(latest) !== expectedIdentity) throw new Error("pane \u4E2D\u7684\u4F1A\u8BDD\u5DF2\u7ECF\u6539\u53D8\uFF0C\u65E7\u9009\u62E9\u672A\u53D1\u9001");
+  if (nativePickerSurface(io.capture(latest))?.text !== surface.text) throw new Error("\u7EC8\u7AEF\u83DC\u5355\u5DF2\u53D8\u5316\u6216\u5173\u95ED\uFF0C\u65E7\u9009\u62E9\u672A\u53D1\u9001\uFF1B\u8BF7\u91CD\u65B0\u67E5\u770B /tmux tail");
+  io.send(latest, keys);
+}
+function identity(target) {
+  return [target.socketPath, target.sessionName, target.paneId, target.panePid, target.structured?.endpoint, target.structured?.threadId].join("\0");
+}
+
 // src/agent/structured/tmux-discovery.ts
 import { basename as basename7, resolve as resolvePath } from "path";
 import { readFileSync as readFileSync9, readlinkSync as readlinkSync3 } from "fs";
@@ -19346,15 +19444,15 @@ function listStructuredTmuxPanes(socket) {
     const identities = [
       ...processArgs,
       ...pane.paneStartCommand ? [shellWords(pane.paneStartCommand)] : []
-    ].map((argv) => parseStructuredAgentArgv(argv, pane.agentKind)).filter((identity2) => Boolean(identity2));
-    const unique = new Map(identities.map((identity2) => [JSON.stringify(identity2), identity2]));
+    ].map((argv) => parseStructuredAgentArgv(argv, pane.agentKind)).filter((identity3) => Boolean(identity3));
+    const unique = new Map(identities.map((identity3) => [JSON.stringify(identity3), identity3]));
     const remote = new Map(
-      identities.filter((identity2) => identity2.endpoint).map((identity2) => [JSON.stringify(identity2), identity2])
+      identities.filter((identity3) => identity3.endpoint).map((identity3) => [JSON.stringify(identity3), identity3])
     );
-    const identity = unique.size === 1 ? [...unique.values()][0] : remote.size === 1 ? [...remote.values()][0] : void 0;
-    if (!identity) return [];
+    const identity2 = unique.size === 1 ? [...unique.values()][0] : remote.size === 1 ? [...remote.values()][0] : void 0;
+    if (!identity2) return [];
     const codexHome = pane.agentKind === "codex" ? processEnvironmentForPidTree(pane.panePid).CODEX_HOME : void 0;
-    return [{ ...pane, structured: { ...identity, ...codexHome ? { codexHome } : {} } }];
+    return [{ ...pane, structured: { ...identity2, ...codexHome ? { codexHome } : {} } }];
   });
 }
 function activeStructuredTmuxPane(socket, sessionName) {
@@ -19882,16 +19980,16 @@ var StructuredAdapter = class {
     if (this.id === "codex") await ensureBundledCodexSkill(this.options.codexHome ?? process.env.CODEX_HOME);
     if (this.id === "codex") {
       const home = this.options.codexHome ?? defaultCodexHome();
-      const [provider, identity, ccSwitch] = await Promise.all([
+      const [provider, identity2, ccSwitch] = await Promise.all([
         resolveCodexProvider(home),
         resolveCodexActiveConfigIdentity(home),
         readCcSwitchCurrentProvider(this.options.env ?? process.env)
       ]);
       this.providerIsThirdParty = !provider.official;
-      this.runtimeIdentity = identity ? {
+      this.runtimeIdentity = identity2 ? {
         ...ccSwitch.providerId ? { ccSwitchProviderId: ccSwitch.providerId } : {},
-        codexProviderId: identity.codexProviderId,
-        ...identity.model ? { model: identity.model } : {},
+        codexProviderId: identity2.codexProviderId,
+        ...identity2.model ? { model: identity2.model } : {},
         recordedAt: Date.now()
       } : void 0;
       this.credentialResolution = await resolveCodexCredentialEnv(
@@ -21196,6 +21294,23 @@ ${truncateSnapshot(redactDiagnosticText(redactSecrets(manifest)), 8e3)}
   }
   structuredControl = async (scope, input) => {
     const current = this.sessions.get(scope) ?? await this.starting.get(scope);
+    if (isNativePickerControl(input)) {
+      const pending = [current?.main, current?.side].filter(
+        (session) => Boolean(session && (session.pendingRequestCount?.() ?? (session.diagnostics().phase === "picker" ? 1 : 0)) > 0)
+      );
+      if (pending.length > 1) throw new Error("\u4E3B\u4F1A\u8BDD\u548C side \u90FD\u6709\u5F85\u56DE\u7B54\u7684\u9009\u62E9\uFF0C\u8BF7\u4F7F\u7528\u5BF9\u5E94\u5361\u7247\u6216 /answer <request-id> <\u9009\u9879>");
+      if (pending.length === 1) {
+        const target2 = pending[0];
+        const events2 = await target2.command(input);
+        const extra2 = target2 instanceof CodexStructuredSession || target2 instanceof ClaudeStructuredSession ? target2.drainCommands() : [];
+        for (const event of [...events2, ...extra2]) (target2 === current?.side ? current.sideView : current?.view)?.event(event);
+        return [...events2, ...extra2];
+      }
+      if (this.id === "codex") {
+        sendNativePickerControl(await this.nativePickerResolver(scope, current), input);
+        return [textEvent(`\u21AA \u5DF2\u53D1\u9001\u5230\u5F53\u524D Codex \u7EC8\u7AEF\u83DC\u5355\uFF1A${input.trim()}`)];
+      }
+    }
     if (!current) throw new Error("\u5F53\u524D\u7ED3\u6784\u5316\u4F1A\u8BDD\u5C1A\u672A\u5EFA\u7ACB");
     const mixagents = this.mixagentsSideForScope(scope);
     if (mixagents && !isMainScopedNativeCommand(input) && /^\/status(?:\s|$)/iu.test(input.trim())) {
@@ -21204,13 +21319,44 @@ ${truncateSnapshot(redactDiagnosticText(redactSecrets(manifest)), 8e3)}
       )];
     }
     const requestId = /^\/answer\s+(\S+)/.exec(input)?.[1];
-    const target = requestId ? [current.main, current.side].find((session) => session?.hasRequest(requestId)) : current.side ?? current.main;
+    const target = requestId ? [current.main, current.side].find((session) => session?.hasRequest(requestId)) : isMainScopedNativeCommand(input) ? current.main : current.side ?? current.main;
     if (!target) throw new Error("\u8BF7\u6C42\u5DF2\u5931\u6548\u6216\u4E0D\u5C5E\u4E8E\u6B64\u4F1A\u8BDD");
     const events = await target.command(input);
     const extra = target instanceof CodexStructuredSession || target instanceof ClaudeStructuredSession ? target.drainCommands() : [];
     for (const event of [...events, ...extra]) (current.sideView ?? current.view).event(event);
     return [...events, ...extra];
   };
+  /** Locate an existing same-thread native TUI without starting/resuming work. */
+  async nativePickerResolver(scope, current) {
+    const bound2 = this.bindings.get(scope) ?? current?.bound;
+    if (bound2) return () => this.refreshBindingTarget(bound2);
+    const view = current?.side ? current.sideView : current?.view;
+    const target = current?.side ?? current?.main;
+    const terminal = view?.status().terminal;
+    const candidates = [];
+    if (terminal && target instanceof CodexStructuredSession) candidates.push({ terminal, id: target.id, endpoint: target.endpoint });
+    if (!current) {
+      const directory = join35(this.options.profileDir, "structured");
+      for (const name of await readdir7(directory).catch(() => [])) {
+        if (!/^[a-f0-9]{64}\.json$/u.test(name)) continue;
+        try {
+          const saved = JSON.parse(await readFile21(join35(directory, name), "utf8"));
+          if (saved.scope === scope && saved.kind === "codex" && saved.view?.terminal && saved.endpoint) {
+            candidates.push({ terminal: saved.view.terminal, id: saved.id, endpoint: saved.endpoint });
+          }
+        } catch {
+        }
+      }
+    }
+    return () => {
+      const panes = candidates.flatMap((candidate) => listStructuredTmuxPanes(candidate.terminal.socketPath).filter(
+        (pane) => (pane.paneId === candidate.terminal.target || pane.sessionName === candidate.terminal.target) && pane.structured?.threadId === candidate.id && pane.structured.endpoint === candidate.endpoint
+      ));
+      const unique = new Map(panes.map((pane) => [`${pane.socketPath}\0${pane.paneId}`, pane]));
+      if (unique.size > 1) throw new Error("\u5F53\u524D\u4F1A\u8BDD\u6709\u591A\u4E2A\u7EC8\u7AEF\u83DC\u5355\u76EE\u6807\uFF0C\u8BF7\u5148\u901A\u8FC7 /tmux bind \u9009\u62E9\u5F53\u524D pane");
+      return [...unique.values()][0];
+    };
+  }
   structuredReady = (scope) => this.sessions.has(scope);
   structuredQuestion = (scope) => {
     const current = this.sessions.get(scope);
@@ -21267,6 +21413,10 @@ ${truncateSnapshot(redactDiagnosticText(redactSecrets(manifest)), 8e3)}
         if (parsedWriteAuthorization.error) throw new Error(parsedWriteAuthorization.error);
         const scope = options.scopeId ?? options.cwd ?? "";
         const known = this.sessions.get(scope);
+        if (!side && options.liveInputMode === "control" && isNativePickerControl(options.prompt)) {
+          for (const event of await this.structuredControl(scope, options.prompt)) emit2(event);
+          return;
+        }
         if (side && options.liveInputMode === "side-exit" && options.cwd) {
           const mixagents = this.sideStateFor(scope, options.cwd);
           if (mixagents) {
@@ -22125,7 +22275,7 @@ var PreferredStructuredAdapter = class {
   }
   forScope(scope) {
     const selected = this.selected(scope);
-    const identity = this.current(scope)?.structured;
+    const identity2 = this.current(scope)?.structured;
     return {
       id: this.id,
       displayName: this.displayName,
@@ -22137,7 +22287,7 @@ var PreferredStructuredAdapter = class {
       ...selected.structuredControl ? {
         structuredControl: async (scopeId, input) => {
           const now = this.current(scopeId)?.structured;
-          if (this.targets.has(scopeId) && (!now?.endpoint || now.endpoint !== identity?.endpoint || now.threadId !== identity?.threadId)) {
+          if (this.targets.has(scopeId) && (!now?.endpoint || now.endpoint !== identity2?.endpoint || now.threadId !== identity2?.threadId)) {
             throw new Error("pane \u4E2D\u7684\u4F1A\u8BDD\u5DF2\u7ECF\u6539\u53D8\uFF0C\u65E7\u9009\u62E9\u672A\u53D1\u9001\u3002\u8BF7\u4F7F\u7528\u5F53\u524D\u4F1A\u8BDD\u7684\u65B0\u5361\u7247\u3002");
           }
           return selected.structuredControl(scopeId, input);
@@ -25698,12 +25848,12 @@ async function handleResume(args, ctx) {
     return;
   }
   if (ctx.controls.profileConfig.agentKind === "codex") {
-    const identity2 = ctx.sessionCatalogIdentity;
-    const entry = ctx.sessionCatalog && identity2 ? ctx.sessionCatalog.activeFor(identity2) : void 0;
-    const history = identity2 ? await listCodexResumeHistory(ctx, cwd, limit) : [];
-    if (history.length > 0 && identity2) {
+    const identity3 = ctx.sessionCatalogIdentity;
+    const entry = ctx.sessionCatalog && identity3 ? ctx.sessionCatalog.activeFor(identity3) : void 0;
+    const history = identity3 ? await listCodexResumeHistory(ctx, cwd, limit) : [];
+    if (history.length > 0 && identity3) {
       const entries2 = history.map((thread) => {
-        const nonce = issueResumeCandidate(identity2, { threadId: thread.threadId });
+        const nonce = issueResumeCandidate(identity3, { threadId: thread.threadId });
         return {
           sessionId: nonce,
           preview: thread.name || thread.preview,
@@ -25716,8 +25866,8 @@ async function handleResume(args, ctx) {
       await ctx.channel.send(ctx.msg.chatId, { card: card3 }, commandReplyOptions(ctx));
       return;
     }
-    if (entry?.threadId && identity2) {
-      const nonce = issueResumeCandidate(identity2, { threadId: entry.threadId });
+    if (entry?.threadId && identity3) {
+      const nonce = issueResumeCandidate(identity3, { threadId: entry.threadId });
       await reply(
         ctx,
         `\u5F53\u524D Codex thread \u53EF\u6062\u590D\u3002
@@ -25731,9 +25881,9 @@ async function handleResume(args, ctx) {
   }
   const sessions = await listClaudeResumeHistory(ctx, cwd, limit);
   const currentSession = ctx.sessions.getRaw(ctx.scope);
-  const identity = ctx.sessionCatalogIdentity;
+  const identity2 = ctx.sessionCatalogIdentity;
   const entries = sessions.map((s) => ({
-    sessionId: identity ? issueResumeCandidate(identity, { sessionId: s.sessionId }) : s.sessionId,
+    sessionId: identity2 ? issueResumeCandidate(identity2, { sessionId: s.sessionId }) : s.sessionId,
     displayId: s.sessionId,
     preview: s.preview,
     relTime: formatRelTime(s.mtime),
@@ -25802,26 +25952,26 @@ async function applyResume(sessionId, ctx) {
   ctx.sessions.set(ctx.scope, sessionId, cwd);
   await reply(ctx, RESUME_APPLIED_REPLY);
 }
-function issueResumeCandidate(identity, target) {
+function issueResumeCandidate(identity2, target) {
   pruneResumeCandidates();
   let nonce = randomUUID4().slice(0, 12);
   while (resumeCandidates.has(nonce)) nonce = randomUUID4().slice(0, 12);
   resumeCandidates.set(nonce, {
-    scopeId: identity.scopeId,
-    agentId: identity.agentId,
-    cwdRealpath: identity.cwdRealpath,
-    policyFingerprint: identity.policyFingerprint,
+    scopeId: identity2.scopeId,
+    agentId: identity2.agentId,
+    cwdRealpath: identity2.cwdRealpath,
+    policyFingerprint: identity2.policyFingerprint,
     ...target,
     expiresAt: Date.now() + RESUME_CANDIDATE_TTL_MS
   });
   return nonce;
 }
-function consumeResumeCandidate(nonce, identity) {
+function consumeResumeCandidate(nonce, identity2) {
   pruneResumeCandidates();
   const candidate = resumeCandidates.get(nonce);
   if (!candidate) return void 0;
   resumeCandidates.delete(nonce);
-  if (candidate.scopeId !== identity.scopeId || candidate.agentId !== identity.agentId || candidate.cwdRealpath !== identity.cwdRealpath || candidate.policyFingerprint !== identity.policyFingerprint || identity.agentId === "claude" && !candidate.sessionId || identity.agentId === "codex" && !candidate.threadId) {
+  if (candidate.scopeId !== identity2.scopeId || candidate.agentId !== identity2.agentId || candidate.cwdRealpath !== identity2.cwdRealpath || candidate.policyFingerprint !== identity2.policyFingerprint || identity2.agentId === "claude" && !candidate.sessionId || identity2.agentId === "codex" && !candidate.threadId) {
     return void 0;
   }
   return candidate;
@@ -32443,16 +32593,16 @@ async function startChannel(deps) {
   });
   await ownerRefresh.start();
   const knownChatsRefresh = startKnownChatsRefreshTimer(channel, controls);
-  const identity = channel.botIdentity;
-  if (identity?.openId) {
+  const identity2 = channel.botIdentity;
+  if (identity2?.openId) {
     agent.setBotIdentity?.({
-      openId: identity.openId,
-      ...identity.name ? { name: identity.name } : {}
+      openId: identity2.openId,
+      ...identity2.name ? { name: identity2.name } : {}
     });
   }
   log.info("ws", "connected", {
-    bot: identity?.name ?? "unknown",
-    openId: identity?.openId ?? "-",
+    bot: identity2?.name ?? "unknown",
+    openId: identity2?.openId ?? "-",
     agent: `${agent.displayName} (${agent.id})`,
     appId: cfg.accounts.app.id,
     procId: controls.processId
@@ -36799,8 +36949,8 @@ async function runNative(thread, opts) {
     try {
       const stored = JSON.parse(await readFile31(file, "utf8"));
       for (const entry of Object.values(stored.bindings ?? stored.targets ?? {})) {
-        const identity = entry.structured ?? entry;
-        if (identity.threadId === thread && identity.endpoint) candidates.add(identity.endpoint);
+        const identity2 = entry.structured ?? entry;
+        if (identity2.threadId === thread && identity2.endpoint) candidates.add(identity2.endpoint);
       }
     } catch {
     }
@@ -38017,11 +38167,11 @@ function assertPrompt(value) {
 }
 function uniqueRuntimeIdentities(identities) {
   const seen = /* @__PURE__ */ new Set();
-  return identities.filter((identity) => {
+  return identities.filter((identity2) => {
     const key = [
-      identity.ccSwitchProviderId ?? "",
-      identity.codexProviderId,
-      identity.model ?? ""
+      identity2.ccSwitchProviderId ?? "",
+      identity2.codexProviderId,
+      identity2.model ?? ""
     ].join("\0");
     if (seen.has(key)) return false;
     seen.add(key);
@@ -38033,7 +38183,7 @@ function providerSwitchState(running, configuredCcSwitchProviderId, configured, 
   if (runningUnknown > 0) return "unknown";
   if (running.length === 0) return "not-running";
   const inSync = running.every(
-    (identity) => (identity.ccSwitchProviderId ?? null) === configuredCcSwitchProviderId && identity.codexProviderId === configured.codexProviderId && (identity.model ?? null) === (configured.model ?? null)
+    (identity2) => (identity2.ccSwitchProviderId ?? null) === configuredCcSwitchProviderId && identity2.codexProviderId === configured.codexProviderId && (identity2.model ?? null) === (configured.model ?? null)
   );
   return inSync ? "in-sync" : "pending-next-turn";
 }

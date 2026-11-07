@@ -169,9 +169,10 @@ export class ClaudeStructuredSession implements StructuredSession {
     }
     const reply = /^\/?answer\s+(\S+)\s+([\s\S]+)$/.exec(input.trim());
     if (reply) { await this.answer(reply[1]!, reply[2]!); return this.drainCommands(); }
-    if (/^\d+$/.test(input.trim()) && this.pending.size === 1) {
+    const number = /^(\d+)(?:\s+(?:enter|return|回车|确认))?$/iu.exec(input.trim());
+    if (number && this.pending.size === 1) {
       const [id, request] = [...this.pending][0]!;
-      const value = [...request.values][Number(input.trim()) - 1];
+      const value = [...request.values][Number(number[1]) - 1];
       if (!value) throw new Error('选项无效');
       await this.answer(id, value); return this.drainCommands();
     }
@@ -190,6 +191,7 @@ export class ClaudeStructuredSession implements StructuredSession {
   private commandEvents: AgentEvent[] = [];
   drainCommands(): AgentEvent[] { return this.commandEvents.splice(0); }
   hasRequest(id: string): boolean { return this.pending.has(id); }
+  pendingRequestCount(): number { return this.pending.size; }
   freeTextRequest(): string | undefined { const entry = [...this.pending][0]; return this.pending.size === 1 && entry?.[1].freeText ? entry[0] : undefined; }
   async answer(id: string, value: string): Promise<void> {
     const request = this.pending.get(id);

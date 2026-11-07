@@ -78,6 +78,7 @@ import { findLoadedThreadHost } from './native-bridge';
 import type { StructuredSession } from './contracts';
 import { textEvent } from './contracts';
 import { StructuredView } from './view';
+import { isNativePickerControl, sendNativePickerControl } from './native-picker';
 import { RpcClient, type Wire } from './rpc';
 import type { TmuxBindingStatus } from '../tmux-control';
 import { activeStructuredTmuxPane, listStructuredTmuxPanes, processEnvironmentForPidTree } from './tmux-discovery';
@@ -2083,6 +2084,23 @@ export class StructuredAdapter implements AgentAdapter {
   }
   structuredControl = async (scope: string, input: string): Promise<AgentEvent[]> => {
     const current = this.sessions.get(scope) ?? await this.starting.get(scope);
+    if (isNativePickerControl(input)) {
+      const pending = [current?.main, current?.side].filter((session): session is StructuredSession =>
+        Boolean(session && (session.pendingRequestCount?.() ?? (session.diagnostics().phase === 'picker' ? 1 : 0)) > 0),
+      );
+      if (pending.length > 1) throw new Error('主会话和 side 都有待回答的选择，请使用对应卡片或 /answer <request-id> <选项>');
+      if (pending.length === 1) {
+        const target = pending[0]!;
+        const events = await target.command(input);
+        const extra = target instanceof CodexStructuredSession || target instanceof ClaudeStructuredSession ? target.drainCommands() : [];
+        for (const event of [...events, ...extra]) (target === current?.side ? current.sideView : current?.view)?.event(event);
+        return [...events, ...extra];
+      }
+      if (this.id === 'codex') {
+        sendNativePickerControl(await this.nativePickerResolver(scope, current), input);
+        return [textEvent(`↪ 已发送到当前 Codex 终端菜单：${input.trim()}`)];
+      }
+    }
     if (!current) throw new Error('当前结构化会话尚未建立');
     const mixagents = this.mixagentsSideForScope(scope);
     if (
@@ -2100,13 +2118,44 @@ export class StructuredAdapter implements AgentAdapter {
     const requestId = /^\/answer\s+(\S+)/.exec(input)?.[1];
     const target = requestId
       ? [current.main, current.side].find(session => session?.hasRequest(requestId))
-      : current.side ?? current.main;
+      : isMainScopedNativeCommand(input) ? current.main : current.side ?? current.main;
     if (!target) throw new Error('请求已失效或不属于此会话');
     const events = await target.command(input);
     const extra = target instanceof CodexStructuredSession || target instanceof ClaudeStructuredSession ? target.drainCommands() : [];
     for (const event of [...events, ...extra]) (current.sideView ?? current.view).event(event);
     return [...events, ...extra];
   };
+  /** Locate an existing same-thread native TUI without starting/resuming work. */
+  private async nativePickerResolver(scope: string, current?: ScopeSession): Promise<() => TmuxPaneTarget | undefined> {
+    const bound = this.bindings.get(scope) ?? current?.bound;
+    if (bound) return () => this.refreshBindingTarget(bound);
+    const view = current?.side ? current.sideView : current?.view;
+    const target = current?.side ?? current?.main;
+    const terminal = view?.status().terminal;
+    const candidates: Array<{ terminal: NonNullable<TmuxBindingStatus['terminal']>; id: string; endpoint: string }> = [];
+    if (terminal && target instanceof CodexStructuredSession) candidates.push({ terminal, id: target.id, endpoint: target.endpoint });
+    if (!current) {
+      const directory = join(this.options.profileDir, 'structured');
+      for (const name of await readdir(directory).catch(() => [] as string[])) {
+        if (!/^[a-f0-9]{64}\.json$/u.test(name)) continue;
+        try {
+          const saved = JSON.parse(await readFile(join(directory, name), 'utf8')) as SavedStructuredState;
+          if (saved.scope === scope && saved.kind === 'codex' && saved.view?.terminal && saved.endpoint) {
+            candidates.push({ terminal: saved.view.terminal, id: saved.id, endpoint: saved.endpoint });
+          }
+        } catch { /* No live terminal in this saved state. */ }
+      }
+    }
+    return () => {
+      const panes = candidates.flatMap(candidate => listStructuredTmuxPanes(candidate.terminal.socketPath).filter(pane =>
+        (pane.paneId === candidate.terminal.target || pane.sessionName === candidate.terminal.target) &&
+        pane.structured?.threadId === candidate.id && pane.structured.endpoint === candidate.endpoint,
+      ));
+      const unique = new Map(panes.map(pane => [`${pane.socketPath}\0${pane.paneId}`, pane]));
+      if (unique.size > 1) throw new Error('当前会话有多个终端菜单目标，请先通过 /tmux bind 选择当前 pane');
+      return [...unique.values()][0];
+    };
+  }
   structuredReady = (scope: string): boolean => this.sessions.has(scope);
   structuredQuestion = (scope: string): string | undefined => {
     const current = this.sessions.get(scope);
@@ -2163,6 +2212,10 @@ export class StructuredAdapter implements AgentAdapter {
         if (parsedWriteAuthorization.error) throw new Error(parsedWriteAuthorization.error);
         const scope = options.scopeId ?? options.cwd ?? '';
         const known = this.sessions.get(scope);
+        if (!side && options.liveInputMode === 'control' && isNativePickerControl(options.prompt)) {
+          for (const event of await this.structuredControl(scope, options.prompt)) emit(event);
+          return;
+        }
         if (side && options.liveInputMode === 'side-exit' && options.cwd) {
           const mixagents = this.sideStateFor(scope, options.cwd);
           if (mixagents) {

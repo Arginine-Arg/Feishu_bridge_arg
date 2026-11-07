@@ -101,6 +101,33 @@ it('answers a /model picker on the thread that owns it', async () => {
   await main.close(); await side.close();
 });
 
+it('routes a bare numbered choice to the main protocol picker while side is open', async () => {
+  const rpc = fakeRpc(method => method === 'model/list'
+    ? { data: [{ id: 'selected-model', supportedReasoningEfforts: [] }] } : {});
+  const main = new CodexStructuredSession('main', '', rpc as unknown as RpcClient);
+  const side = new CodexStructuredSession('side', '', rpc as unknown as RpcClient);
+  const adapter = scopeWithSide(rpc, main, side);
+  await main.command('/model');
+  await expect(adapter.structuredControl('scope', '1')).resolves.toEqual(expect.arrayContaining([
+    expect.objectContaining({ type: 'text', delta: '模型已设置为 selected-model' }),
+  ]));
+  expect(rpc.request).toHaveBeenCalledWith('thread/settings/update', { threadId: 'main', model: 'selected-model' });
+  expect(rpc.request.mock.calls.some(([name]) => name === 'turn/start')).toBe(false);
+  await main.close(); await side.close();
+});
+
+it('rejects ambiguous main/side numeric choices and never falls through to terminal input', async () => {
+  const rpc = fakeRpc(method => method === 'model/list'
+    ? { data: [{ id: 'selected-model', supportedReasoningEfforts: [] }] } : {});
+  const main = new CodexStructuredSession('main', '', rpc as unknown as RpcClient);
+  const side = new CodexStructuredSession('side', '', rpc as unknown as RpcClient);
+  const adapter = scopeWithSide(rpc, main, side);
+  await main.command('/model'); await side.command('/model');
+  await expect(adapter.structuredControl('scope', '1')).rejects.toThrow('都有待回答');
+  expect(rpc.request.mock.calls.some(([name]) => name === 'thread/settings/update' || name === 'turn/start')).toBe(false);
+  await main.close(); await side.close();
+});
+
 it('stops the main goal with /stop even while a side handle is open', async () => {
   const rpc = fakeRpc((method) => {
     if (method === 'thread/goal/get') return { goal: { status: 'active' } };

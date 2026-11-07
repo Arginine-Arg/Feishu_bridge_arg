@@ -9,6 +9,7 @@ export interface StructuredSession {
   command(input: string): Promise<AgentEvent[]>;
   answer(id: string, value: string): Promise<void>;
   hasRequest(id: string): boolean;
+  pendingRequestCount?(): number;
   freeTextRequest(): string | undefined;
   /**
    * Stop the running work. Returns `false` when the session proved there was
