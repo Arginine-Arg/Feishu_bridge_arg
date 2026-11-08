@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.17.0
+
+- Supports `arg-bridge native --bridge <thread-id> --follow-current-provider`.
+  It reopens the exact same Codex thread ID under the current cc-switch
+  provider/model instead of requiring text-only `--adopt` migration.
+- Starts the provider-generation App Server with a scoped compatibility alias:
+  the historical provider ID is retained for Codex thread validation, while
+  endpoint, credentials, wire API and headers come from the current provider.
+- Updates the current model and records `compatibilityProvider` plus the new
+  provider generation marker. Repeated commands reconstruct the compatibility
+  host idempotently without changing thread history or creation time.
+- Rejects active turns and old-provider App Servers that still own the thread,
+  preventing competing writers. Other `--bridge` resumes keep their historical
+  provider unless provider following is explicitly requested.
+
 ## 1.16.2
 
 - Routes numeric choices to the main/side session that owns the pending

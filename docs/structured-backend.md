@@ -134,6 +134,7 @@ For a Bridge-managed terminal session, use:
 arg-bridge native --bridge --profile codex
 arg-bridge native --adopt <old-thread-id> --profile codex
 arg-bridge native --adopt <old-thread-id> --follow-current-provider --profile codex
+arg-bridge native --bridge <thread-id> --follow-current-provider --profile codex
 ```
 
 `--bridge` registers `arg_bridge.*` dynamic tools and keeps the Bridge tool host
@@ -141,6 +142,12 @@ alive while the TUI is open. `--adopt` migrates bounded user/assistant text to a
 new Bridge thread because Codex 0.164 `thread/resume` has no `dynamicTools`
 parameter. See [Bridge-managed native TUI](./native-bridge.md) for the protocol
 and marker details.
+
+`--bridge <thread-id> --follow-current-provider` keeps the thread ID and full
+native resume state. Bridge validates an idle boundary, starts a provider-
+generation App Server, and uses a scoped compatibility alias so the historical
+provider ID passes Codex's thread check while the actual endpoint, credentials,
+wire API and model come from the current cc-switch provider.
 
 An empty shell is not automatically overwritten: run the native command there
 when ready. Proxy environment changes cannot modify an already-running server.

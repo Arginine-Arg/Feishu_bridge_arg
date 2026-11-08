@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.16.2",
+  version: "1.17.0",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -13162,7 +13162,7 @@ function artifactDeliveryEnv(artifact) {
 
 // src/agent/structured/adapter.ts
 import { createHash as createHash11, randomUUID as randomUUID3 } from "crypto";
-import { readFile as readFile21, readdir as readdir7, mkdir as mkdir22, lstat as lstat7, realpath as realpath9, stat as stat8 } from "fs/promises";
+import { readFile as readFile21, readdir as readdir8, mkdir as mkdir22, lstat as lstat7, realpath as realpath9, stat as stat8 } from "fs/promises";
 import { readFileSync as readFileSync10 } from "fs";
 import { tmpdir as tmpdir4 } from "os";
 import { isAbsolute as isAbsolute9, join as join35, relative as relative4, resolve as resolve7, sep as sep2 } from "path";
@@ -13586,7 +13586,12 @@ async function connectCodexHostInternal(options, attempt) {
       await mkdir16(directory, { recursive: true, mode: 448 });
     }
     const logFile = await open3(join25(directory, "server.log"), "a", 384);
-    const child = spawnProcess(options.binary, ["app-server", "--listen", endpoint], {
+    const child = spawnProcess(options.binary, [
+      "app-server",
+      "--listen",
+      endpoint,
+      ...options.configOverrides ?? []
+    ], {
       cwd: options.cwd,
       env: options.env,
       detached: true,
@@ -18284,7 +18289,7 @@ ${JSON.stringify(input, null, 2)}`,
 
 // src/agent/structured/native-bridge.ts
 import { createHash as createHash9 } from "crypto";
-import { mkdir as mkdir20, readFile as readFile20 } from "fs/promises";
+import { mkdir as mkdir20, open as open4, readFile as readFile20, readdir as readdir7 } from "fs/promises";
 import { dirname as dirname19, join as join33 } from "path";
 
 // src/agent/structured/socket-security.ts
@@ -18619,37 +18624,62 @@ async function createNativeBridgeSession(input) {
   const markerPath = join33(input.profileDir, "structured", "broker-threads.json");
   const requestedThread = input.threadId?.trim();
   const adoptThread = input.adoptThreadId?.trim();
-  if (input.followCurrentProvider && !adoptThread) {
-    throw new Error("--follow-current-provider \u53EA\u80FD\u4E0E --adopt <thread-id> \u4E00\u8D77\u4F7F\u7528");
-  }
-  if (input.followCurrentProvider && requestedThread) {
-    throw new Error("--follow-current-provider migration \u4E0D\u80FD\u540C\u65F6\u6307\u5B9A positional thread");
+  if (input.followCurrentProvider && !adoptThread && !requestedThread) {
+    throw new Error(
+      "--follow-current-provider \u9700\u8981 --adopt <thread-id> \u6216 --bridge <thread-id>"
+    );
   }
   const providerSelection = input.followCurrentProvider ? resolveFollowCurrentProviderSelection(prepared) : void 0;
   const lineageHead = adoptThread ? await findLatestAdoptedThreadMarker(markerPath, adoptThread, namespace) : void 0;
   const adoptedMarker = lineageHead && (!providerSelection || adoptedThreadMarkerMatchesProvider(lineageHead, providerSelection)) ? lineageHead : void 0;
   const adoptionSourceThread = providerSelection && lineageHead && !adoptedMarker ? lineageHead.threadId : adoptThread;
   const existingThread = requestedThread ?? adoptedMarker?.threadId;
+  let existingMarker;
   if (requestedThread) {
-    const marker = await readThreadMarker(markerPath, requestedThread);
-    if (!marker || marker.namespace !== namespace) {
+    existingMarker = await readThreadMarker(markerPath, requestedThread);
+    if (!existingMarker || existingMarker.namespace !== namespace) {
       throw new Error(
         `thread ${requestedThread} \u6CA1\u6709\u5339\u914D\u7684 Bridge Broker marker\u3002\u8BF7\u4F7F\u7528 --adopt \u505A\u5B89\u5168\u8FC1\u79FB\uFF1B\u4E0D\u80FD\u4F2A\u9020 marker\u3002`
       );
     }
   }
-  let sourceHost = providerSelection && adoptionSourceThread && !adoptedMarker ? await findLoadedThreadHost(input.profileDir, adoptionSourceThread, env) : void 0;
-  let host = existingThread ? await findLoadedThreadHost(input.profileDir, existingThread, env) : void 0;
-  if (!host && adoptThread && !providerSelection) {
-    host = await findLoadedThreadHost(input.profileDir, adoptThread, env);
-  }
-  const nativeScope = providerSelection ? `native-bridge-follow-current:${input.profileName}:${input.cwd}:${providerSelection.runtimeFingerprint}` : `native-bridge:${input.profileName}:${input.cwd}`;
+  const providerGenerationChanged = Boolean(
+    providerSelection && requestedThread && (!existingMarker || !adoptedThreadMarkerMatchesProvider(existingMarker, providerSelection))
+  );
+  const providerCompatibility = providerSelection && (providerGenerationChanged || existingMarker?.compatibilityProvider) ? await buildProviderCompatibilityConfig(
+    env.CODEX_HOME ?? defaultCodexHome(env),
+    existingThread,
+    existingMarker?.compatibilityProvider ?? existingMarker?.modelProvider,
+    providerSelection
+  ) : void 0;
+  const compatibilityScope = providerCompatibility ? `:compat-${createHash9("sha256").update(providerCompatibility.resumeProvider).digest("hex").slice(0, 16)}` : "";
+  const nativeScope = providerSelection ? `native-bridge-follow-current:${input.profileName}:${input.cwd}:${providerSelection.runtimeFingerprint}${compatibilityScope}` : `native-bridge:${input.profileName}:${input.cwd}`;
   const nativeHostDirectory = codexHostRuntimeDirectory(
     input.profileDir,
     nativeScope,
     input.cwd,
     { env }
   );
+  let sourceHost = providerSelection && adoptionSourceThread && !adoptedMarker ? await findLoadedThreadHost(input.profileDir, adoptionSourceThread, env) : void 0;
+  const loadedThreadHost = existingThread ? await findLoadedThreadHost(input.profileDir, existingThread, env) : void 0;
+  if (providerGenerationChanged && loadedThreadHost && loadedThreadHost.directory !== nativeHostDirectory) {
+    try {
+      await assertIdleThread(
+        loadedThreadHost.rpc,
+        existingThread,
+        "--bridge <thread-id> --follow-current-provider"
+      );
+    } finally {
+      loadedThreadHost.rpc.close();
+    }
+    throw new Error(
+      `thread ${existingThread} \u4ECD\u7531\u65E7 provider \u7684 App Server \u6301\u6709\uFF1B\u8BF7\u5148\u9000\u51FA\u8BE5 native TUI\uFF0C\u5E76\u8FD0\u884C arg-bridge restart --profile <profile> \u56DE\u6536\u7A7A\u95F2 App Server \u540E\u91CD\u8BD5\u3002`
+    );
+  }
+  let host = loadedThreadHost?.directory === nativeHostDirectory ? loadedThreadHost : !providerGenerationChanged ? loadedThreadHost : void 0;
+  if (!host && adoptThread && !providerSelection) {
+    host = await findLoadedThreadHost(input.profileDir, adoptThread, env);
+  }
   let ownsHost = false;
   if (!host) {
     try {
@@ -18660,7 +18690,10 @@ async function createNativeBridgeSession(input) {
         cwd: input.cwd,
         env,
         fingerprint: prepared.fingerprint,
-        ...prepared.runtimeIdentity ? { runtimeIdentity: prepared.runtimeIdentity } : {}
+        ...prepared.runtimeIdentity ? { runtimeIdentity: prepared.runtimeIdentity } : {},
+        ...providerCompatibility ? {
+          configOverrides: codexConfigOverrideArgs(providerCompatibility.config)
+        } : {}
       });
       host = {
         rpc: connected.rpc,
@@ -18680,6 +18713,7 @@ async function createNativeBridgeSession(input) {
   let oldThreadId;
   let mode = "new";
   let reusedAdoption = false;
+  let providerRebound = false;
   let controller;
   let session;
   const owned = ownsHost;
@@ -18696,24 +18730,50 @@ async function createNativeBridgeSession(input) {
   };
   try {
     if (existingThread) {
+      if (providerSelection && !providerGenerationChanged) {
+        await assertIdleThread(
+          rpc,
+          existingThread,
+          "--bridge <thread-id> --follow-current-provider"
+        );
+      }
       const resumed = await resumeCodexThread(
         rpc,
-        { threadId: existingThread, excludeTurns: true, cwd: input.cwd },
+        {
+          threadId: existingThread,
+          excludeTurns: true,
+          cwd: input.cwd,
+          ...providerSelection ? {
+            modelProvider: providerCompatibility?.resumeProvider ?? providerSelection.modelProvider,
+            model: providerSelection.model
+          } : {},
+          ...providerCompatibility ? {
+            config: providerCompatibility.config
+          } : {}
+        },
         codexThreadPermissionOverrides(input.sandbox, input.approvalPolicy),
         18e4,
         { preserveProviderModel: true }
       );
+      const resumedThreadId = typeof resumed.thread?.id === "string" ? resumed.thread.id : typeof resumed.id === "string" ? resumed.id : "";
+      if (resumedThreadId !== existingThread) {
+        throw new Error(
+          `provider rebind \u8FD4\u56DE\u4E86\u4E0D\u540C thread\uFF1A\u671F\u671B ${existingThread}\uFF0C\u5B9E\u9645 ${resumedThreadId || "(missing)"}`
+        );
+      }
       if (providerSelection) {
+        const expectedProvider = providerCompatibility?.resumeProvider ?? providerSelection.modelProvider;
         const resumedProvider = typeof resumed.thread?.modelProvider === "string" ? resumed.thread.modelProvider : typeof resumed.modelProvider === "string" ? resumed.modelProvider : "";
         const resumedModel = typeof resumed.thread?.model === "string" ? resumed.thread.model : typeof resumed.model === "string" ? resumed.model : "";
-        if (resumedProvider !== providerSelection.modelProvider || resumedModel !== providerSelection.model) {
+        if (resumedProvider !== expectedProvider || resumedModel !== providerSelection.model) {
           throw new Error(
-            `\u5DF2\u6709 follow-current-provider thread \u7684 provider/model \u4E0D\u5339\u914D\uFF1A\u671F\u671B ${providerSelection.modelProvider}/${providerSelection.model}\uFF0C\u5B9E\u9645 ${resumedProvider || "(missing)"}/${resumedModel || "(missing)"}`
+            `provider rebind \u540E\u7684 thread provider/model \u4E0D\u5339\u914D\uFF1A\u671F\u671B ${expectedProvider}/${providerSelection.model}\uFF0C\u5B9E\u9645 ${resumedProvider || "(missing)"}/${resumedModel || "(missing)"}`
           );
         }
       }
       markerThreadId = existingThread;
       mode = adoptedMarker ? "adopted" : "attached";
+      providerRebound = providerGenerationChanged;
       if (adoptedMarker) {
         oldThreadId = adoptedMarker.previousThreadId ?? adoptThread;
         reusedAdoption = true;
@@ -18829,9 +18889,10 @@ async function createNativeBridgeSession(input) {
         markerPath,
         markerThreadId,
         namespace,
-        adoptThread ?? oldThreadId,
+        adoptThread ?? oldThreadId ?? existingMarker?.adoptedFrom,
         providerSelection,
-        oldThreadId
+        oldThreadId ?? existingMarker?.previousThreadId,
+        providerCompatibility?.resumeProvider
       );
     }
     session = new CodexStructuredSession(markerThreadId, endpoint, rpc, controller);
@@ -18840,6 +18901,7 @@ async function createNativeBridgeSession(input) {
       threadId: markerThreadId,
       ...oldThreadId ? { oldThreadId } : {},
       ...reusedAdoption ? { reusedAdoption: true } : {},
+      ...providerRebound ? { providerRebound: true } : {},
       ...providerSelection ? { providerSelection } : {},
       endpoint,
       env,
@@ -19019,7 +19081,7 @@ async function readIdleThread(rpc, threadId) {
   const turns = Array.isArray(thread.turns) ? thread.turns : [];
   const active2 = thread.status?.type === "active" || turns.some((turn) => turn.status === "inProgress");
   if (active2) {
-    throw new Error(`\u65E7 thread ${threadId} \u4ECD\u5728\u8FD0\u884C\uFF1B\u8BF7\u7B49\u5F53\u524D turn \u5B8C\u6210\u540E\u518D\u6267\u884C --adopt`);
+    throw new Error(`thread ${threadId} \u4ECD\u5728\u8FD0\u884C\uFF1B\u8BF7\u7B49\u5F53\u524D turn \u5B8C\u6210\u540E\u518D\u6267\u884C --adopt`);
   }
   if (turns.length > 0) return statusResult;
   try {
@@ -19050,6 +19112,112 @@ async function readIdleThread(rpc, threadId) {
       turns: [...newest].reverse()
     }
   };
+}
+async function assertIdleThread(rpc, threadId, operation) {
+  const result = await rpc.request("thread/read", {
+    threadId,
+    includeTurns: false
+  }, 18e4);
+  const thread = result.thread ?? result;
+  const turns = Array.isArray(thread?.turns) ? thread.turns : [];
+  const active2 = thread?.status?.type === "active" || turns.some((turn) => turn.status === "inProgress");
+  if (active2) {
+    throw new Error(
+      `thread ${threadId} \u4ECD\u6709\u6D3B\u52A8 turn\uFF1B\u4E0D\u80FD\u5728\u8FD0\u884C\u4E2D\u6267\u884C ${operation}\uFF0C\u8BF7\u7B49\u5F53\u524D turn \u5B8C\u6210`
+    );
+  }
+}
+async function buildProviderCompatibilityConfig(codexHome, threadId, markerProvider, selection) {
+  if (!codexHome) return void 0;
+  const historical = await readHistoricalThreadIdentity(codexHome, threadId);
+  const historicalProvider = markerProvider ?? historical.modelProvider;
+  if (!historicalProvider || historicalProvider === selection.modelProvider) return void 0;
+  const config = await readCodexConfigSummary(join33(codexHome, "config.toml"));
+  const current = config.providers.get(selection.modelProvider);
+  const officialCurrent = selection.modelProvider === "openai" || selection.modelProvider === "codex";
+  if (!current?.baseUrl && !officialCurrent) return void 0;
+  const alias = current?.baseUrl ? {
+    name: current.name ?? selection.modelProvider,
+    base_url: current.baseUrl,
+    ...current.envKey ? { env_key: current.envKey } : {},
+    ...current.wireApi ? { wire_api: current.wireApi } : {},
+    ...current.requiresOpenAiAuth !== void 0 ? { requires_openai_auth: current.requiresOpenAiAuth } : {},
+    ...current.supportsStandaloneWebSearch !== void 0 ? { supports_standalone_web_search: current.supportsStandaloneWebSearch } : {},
+    ...current.envHttpHeaders ? { env_http_headers: current.envHttpHeaders } : {},
+    ...current.httpHeaders ? { http_headers: current.httpHeaders } : {}
+  } : {
+    name: "OpenAI",
+    wire_api: "responses",
+    requires_openai_auth: true
+  };
+  return {
+    resumeProvider: historicalProvider,
+    config: {
+      model_provider: historicalProvider,
+      model: selection.model,
+      model_providers: {
+        [historicalProvider]: alias
+      }
+    }
+  };
+}
+function codexConfigOverrideArgs(config) {
+  const args = [];
+  const visit = (prefix, value) => {
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      for (const [key, child] of Object.entries(value)) {
+        visit(
+          prefix ? `${prefix}.${configPathSegment(key)}` : configPathSegment(key),
+          child
+        );
+      }
+      return;
+    }
+    const serialized = typeof value === "string" ? JSON.stringify(value) : typeof value === "boolean" || typeof value === "number" ? String(value) : JSON.stringify(value);
+    if (serialized !== void 0) args.push("-c", `${prefix}=${serialized}`);
+  };
+  for (const [key, value] of Object.entries(config)) {
+    visit(configPathSegment(key), value);
+  }
+  return args;
+}
+function configPathSegment(key) {
+  return /^[A-Za-z0-9_-]+$/u.test(key) ? key : JSON.stringify(key);
+}
+async function readHistoricalThreadIdentity(codexHome, threadId) {
+  if (!/^[a-f0-9]{8}-[a-f0-9]{4}-7[a-f0-9]{3}-[a-f0-9]{4}-[a-f0-9]{12}$/iu.test(threadId)) {
+    return {};
+  }
+  const timestamp = Number.parseInt(threadId.replaceAll("-", "").slice(0, 12), 16);
+  for (const rootName of ["sessions", "archived_sessions"]) {
+    for (const offset of [-864e5, 0, 864e5]) {
+      const date = new Date(timestamp + offset).toISOString().slice(0, 10).split("-");
+      const directory = join33(codexHome, rootName, ...date);
+      for (const name of await readdir7(directory).catch(() => [])) {
+        if (!name.endsWith(`-${threadId}.jsonl`)) continue;
+        const file = await open4(join33(directory, name), "r");
+        try {
+          const buffer = Buffer.alloc(64 * 1024);
+          const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
+          for (const line of buffer.subarray(0, bytesRead).toString("utf8").split("\n")) {
+            try {
+              const entry = JSON.parse(line);
+              if (entry.type !== "session_meta") continue;
+              const payload = entry.payload ?? entry;
+              return {
+                ...typeof payload.model_provider === "string" && payload.model_provider.trim() ? { modelProvider: payload.model_provider.trim() } : {},
+                ...typeof payload.model === "string" && payload.model.trim() ? { model: payload.model.trim() } : {}
+              };
+            } catch {
+            }
+          }
+        } finally {
+          await file.close();
+        }
+      }
+    }
+  }
+  return {};
 }
 async function findLoadedThreadHost(profileDir, threadId, env) {
   if (!threadId) return void 0;
@@ -19140,7 +19308,8 @@ async function readAdoptionMarkers(path, adoptedFrom, namespace) {
         ...marker.ccSwitchProviderId ? { ccSwitchProviderId: marker.ccSwitchProviderId } : {},
         ...marker.modelProvider ? { modelProvider: marker.modelProvider } : {},
         ...marker.model ? { model: marker.model } : {},
-        ...marker.runtimeFingerprint ? { runtimeFingerprint: marker.runtimeFingerprint } : {}
+        ...marker.runtimeFingerprint ? { runtimeFingerprint: marker.runtimeFingerprint } : {},
+        ...marker.compatibilityProvider ? { compatibilityProvider: marker.compatibilityProvider } : {}
       }];
     }).sort(
       (left, right) => right.createdAt - left.createdAt || right.threadId.localeCompare(left.threadId)
@@ -19164,7 +19333,7 @@ async function readThreadMarker(path, threadId) {
     return void 0;
   }
 }
-async function writeThreadMarker(path, threadId, namespace, adoptedFrom, providerSelection, previousThreadId) {
+async function writeThreadMarker(path, threadId, namespace, adoptedFrom, providerSelection, previousThreadId, compatibilityProvider) {
   let parsed = { version: 1, threads: {} };
   try {
     const current = JSON.parse(await readFile20(path, "utf8"));
@@ -19176,18 +19345,21 @@ async function writeThreadMarker(path, threadId, namespace, adoptedFrom, provide
     if (error.code !== "ENOENT") throw error;
   }
   const threads = { ...parsed.threads ?? {} };
+  const previous = threads[threadId];
   threads[threadId] = {
+    ...previous ?? {},
     version: BROKER_TOOL_VERSION,
     namespace,
-    createdAt: Date.now(),
-    ...adoptedFrom ? { adoptedFrom } : {},
-    ...previousThreadId && previousThreadId !== adoptedFrom ? { previousThreadId } : {},
+    createdAt: previous?.createdAt ?? Date.now(),
+    ...adoptedFrom ?? previous?.adoptedFrom ? { adoptedFrom: adoptedFrom ?? previous?.adoptedFrom } : {},
+    ...previousThreadId ?? previous?.previousThreadId ? { previousThreadId: previousThreadId ?? previous?.previousThreadId } : {},
     ...providerSelection ? {
       followCurrentProvider: true,
       ...providerSelection.ccSwitchProviderId ? { ccSwitchProviderId: providerSelection.ccSwitchProviderId } : {},
       modelProvider: providerSelection.modelProvider,
       model: providerSelection.model,
-      runtimeFingerprint: providerSelection.runtimeFingerprint
+      runtimeFingerprint: providerSelection.runtimeFingerprint,
+      ...compatibilityProvider ? { compatibilityProvider } : {}
     } : {}
   };
   await mkdir20(dirname19(path), { recursive: true, mode: 448 });
@@ -20024,7 +20196,7 @@ var StructuredAdapter = class {
     const current = this.sessions.get(scope);
     if (current?.main instanceof CodexStructuredSession) threads.set(current.main.id, current.cwd);
     const directory = join35(this.options.profileDir, "structured");
-    for (const name of await readdir7(directory).catch(() => [])) {
+    for (const name of await readdir8(directory).catch(() => [])) {
       if (!/^[a-f0-9]{64}\.json$/u.test(name)) continue;
       try {
         const saved = JSON.parse(await readFile21(join35(directory, name), "utf8"));
@@ -21337,7 +21509,7 @@ ${truncateSnapshot(redactDiagnosticText(redactSecrets(manifest)), 8e3)}
     if (terminal && target instanceof CodexStructuredSession) candidates.push({ terminal, id: target.id, endpoint: target.endpoint });
     if (!current) {
       const directory = join35(this.options.profileDir, "structured");
-      for (const name of await readdir7(directory).catch(() => [])) {
+      for (const name of await readdir8(directory).catch(() => [])) {
         if (!/^[a-f0-9]{64}\.json$/u.test(name)) continue;
         try {
           const saved = JSON.parse(await readFile21(join35(directory, name), "utf8"));
@@ -22393,7 +22565,7 @@ import { homedir as homedir17 } from "os";
 
 // src/agent/artifact-relay.ts
 import { createHmac, randomBytes as randomBytes4, timingSafeEqual } from "crypto";
-import { lstat as lstat8, mkdir as mkdir24, open as open4, readFile as readFile22, readdir as readdir8 } from "fs/promises";
+import { lstat as lstat8, mkdir as mkdir24, open as open5, readFile as readFile22, readdir as readdir9 } from "fs/promises";
 import { homedir as homedir14 } from "os";
 import { join as join37 } from "path";
 var PREFIX = "ARG_BRIDGE_FILE_REQUEST_V1:";
@@ -22438,7 +22610,7 @@ var ArtifactRelayReader = class {
     const previous = this.offsets.get(source.path);
     const offset = previous && previous.offset <= info.size ? previous.offset : Math.max(0, info.size - 256 * 1024);
     if (offset === info.size) return "";
-    const file = await open4(source.path, "r");
+    const file = await open5(source.path, "r");
     try {
       const buffer = Buffer.alloc(Math.min(512 * 1024, info.size - offset));
       const { bytesRead } = await file.read(buffer, 0, buffer.length, offset);
@@ -22465,7 +22637,7 @@ async function claimArtifactRelayRequest(nonce, env = process.env) {
   const info = await lstat8(directory);
   if (!info.isDirectory() || info.isSymbolicLink() || process.getuid && info.uid !== process.getuid()) return false;
   try {
-    const file = await open4(join37(directory, `${nonce}.json`), "wx", 384);
+    const file = await open5(join37(directory, `${nonce}.json`), "wx", 384);
     await file.close();
     return true;
   } catch (err) {
@@ -22481,7 +22653,7 @@ async function findArtifactRelaySources(homes, threadIds) {
     for (const home of homes) for (const offset of [-864e5, 0, 864e5]) {
       const day = new Date(timestamp + offset).toISOString().slice(0, 10).split("-");
       const directory = join37(home, "sessions", ...day);
-      for (const name of await readdir8(directory).catch(() => [])) {
+      for (const name of await readdir9(directory).catch(() => [])) {
         if (name.endsWith(`-${threadId}.jsonl`)) sources.push({ threadId, path: join37(directory, name) });
       }
     }
@@ -22504,7 +22676,7 @@ function createArtifactRelaySourceResolver(profileDir, codexHome, env = process.
     }
     const dataDirs = /* @__PURE__ */ new Set();
     const generated = join37(profileDir, "structured", "cc-switch", "mixagents-data");
-    for (const name of await readdir8(generated).catch(() => [])) {
+    for (const name of await readdir9(generated).catch(() => [])) {
       if (/^[a-f0-9]{16}$/u.test(name)) dataDirs.add(join37(generated, name));
     }
     try {
@@ -22515,7 +22687,7 @@ function createArtifactRelaySourceResolver(profileDir, codexHome, env = process.
     }
     for (const dataDir of dataDirs) {
       const runtimes = join37(dataDir, "runtimes");
-      for (const name of await readdir8(runtimes).catch(() => [])) {
+      for (const name of await readdir9(runtimes).catch(() => [])) {
         if (/^[A-Za-z0-9._-]+$/u.test(name)) homes.add(join37(runtimes, name));
       }
     }
@@ -24955,7 +25127,7 @@ function finalizeIfRunning(state) {
 
 // src/session/history.ts
 import { createReadStream } from "fs";
-import { readdir as readdir9, stat as stat9 } from "fs/promises";
+import { readdir as readdir10, stat as stat9 } from "fs/promises";
 import { homedir as homedir15 } from "os";
 import { join as join38 } from "path";
 import { createInterface as createInterface6 } from "readline";
@@ -25002,7 +25174,7 @@ async function listRecentSessions(cwd, limit = 5) {
   const dir = claudeProjectDir(cwd);
   let files;
   try {
-    files = await readdir9(dir);
+    files = await readdir10(dir);
   } catch (err) {
     if (err.code === "ENOENT") return [];
     throw err;
@@ -29112,7 +29284,7 @@ function footerLine(status) {
 // src/media/cache.ts
 import { createHash as createHash14 } from "crypto";
 import { createReadStream as createReadStream2 } from "fs";
-import { mkdir as mkdir25, readdir as readdir10, rename as rename4, rm as rm14, stat as stat10 } from "fs/promises";
+import { mkdir as mkdir25, readdir as readdir11, rename as rename4, rm as rm14, stat as stat10 } from "fs/promises";
 import { join as join40 } from "path";
 
 // src/media/attachment.ts
@@ -29324,7 +29496,7 @@ function defaultMime(kind) {
 }
 async function listFiles(root) {
   const out = [];
-  const entries = await readdir10(root, { withFileTypes: true }).catch(() => []);
+  const entries = await readdir11(root, { withFileTypes: true }).catch(() => []);
   for (const entry of entries) {
     const full = join40(root, entry.name);
     if (entry.isDirectory()) {
@@ -35959,7 +36131,7 @@ function isPersistedLiveInteraction(value) {
 
 // src/session/catalog.ts
 import { randomUUID as randomUUID7 } from "crypto";
-import { open as open5, readFile as readFile28, rename as rename5, mkdir as mkdir28 } from "fs/promises";
+import { open as open6, readFile as readFile28, rename as rename5, mkdir as mkdir28 } from "fs/promises";
 import { dirname as dirname24 } from "path";
 var DEFAULT_MAX_ARCHIVED_AGE_MS = 90 * 24 * 60 * 60 * 1e3;
 var DEFAULT_MAX_ENTRIES_PER_SCOPE = 20;
@@ -36086,7 +36258,7 @@ var SessionCatalog = class {
     const tmp = `${this.path}.${process.pid}.${Date.now()}.${randomUUID7()}.tmp`;
     const payload = `${JSON.stringify(this.entries(), null, 2)}
 `;
-    const fh = await open5(tmp, "w", 384);
+    const fh = await open6(tmp, "w", 384);
     try {
       await fh.writeFile(payload, "utf8");
       await fh.sync();
@@ -36095,7 +36267,7 @@ var SessionCatalog = class {
     }
     await rename5(tmp, this.path);
     try {
-      const dir = await open5(dirname24(this.path), "r");
+      const dir = await open6(dirname24(this.path), "r");
       try {
         await dir.sync();
       } finally {
@@ -36823,6 +36995,7 @@ function isWithin2(path, root) {
 import { readFile as readFile31 } from "fs/promises";
 import { join as join43 } from "path";
 async function runNative(thread, opts) {
+  validateNativeControlOptions(thread, opts);
   const rootPaths = resolveAppPaths();
   const root = JSON.parse(await readFile31(rootPaths.configFile, "utf8"));
   const profileName = opts.profile ?? root.activeProfile;
@@ -36839,9 +37012,6 @@ async function runNative(thread, opts) {
   }
   const binary = config.codex?.binaryPath ?? "codex";
   const codexHome = config.codex?.codexHome ?? (config.codex?.inheritCodexHome === false ? `${paths2.profileDir}/codex-home` : void 0);
-  if (opts.followCurrentProvider && !opts.adopt) {
-    throw new Error("--follow-current-provider \u53EA\u80FD\u4E0E --adopt <thread-id> \u4E00\u8D77\u4F7F\u7528");
-  }
   if (opts.bridge || opts.adopt) {
     if (config.agentKind !== "codex") {
       throw new Error("arg-bridge native --bridge/--adopt \u53EA\u652F\u6301 Codex profile");
@@ -36876,7 +37046,7 @@ async function runNative(thread, opts) {
         }
         if (bridge.providerSelection) {
           console.log(
-            `Migrated provider: cc-switch=${bridge.providerSelection.ccSwitchProviderId ?? "(unknown)"} model_provider=${bridge.providerSelection.modelProvider} model=${bridge.providerSelection.model}`
+            `${bridge.providerRebound ? "Rebound provider in place" : "Verified provider"}: cc-switch=${bridge.providerSelection.ccSwitchProviderId ?? "(unknown)"} model_provider=${bridge.providerSelection.modelProvider} model=${bridge.providerSelection.model}`
           );
         }
       } else {
@@ -37024,6 +37194,14 @@ async function runNative(thread, opts) {
     host.rpc.close();
     if (startedHost) await dropOwner(paths2.profileDir);
   }
+}
+function validateNativeControlOptions(thread, opts) {
+  if (!opts.followCurrentProvider) return;
+  if (opts.adopt) return;
+  if (opts.bridge && thread?.trim()) return;
+  throw new Error(
+    "--follow-current-provider \u9700\u8981 --adopt <thread-id> \u6216 --bridge <thread-id>\uFF1B\u666E\u901A positional resume \u4E0D\u4F1A\u5207\u6362 provider"
+  );
 }
 async function waitChild(child) {
   const handle = () => {
@@ -38528,7 +38706,7 @@ import {
   lstat as lstat11,
   mkdir as mkdir29,
   readFile as readFile33,
-  readdir as readdir11,
+  readdir as readdir12,
   writeFile as writeFile10
 } from "fs/promises";
 import { basename as basename11, dirname as dirname28, join as join47 } from "path";
@@ -38736,7 +38914,7 @@ function normalizeSideMap(input) {
   };
 }
 async function findOriginalBackup(path) {
-  const names = await readdir11(dirname28(path)).catch(() => []);
+  const names = await readdir12(dirname28(path)).catch(() => []);
   const stem = basename11(path);
   const candidates = names.filter(
     (name) => [
@@ -38804,8 +38982,8 @@ function formatReport(report) {
 // src/cli/index.ts
 var program = new Command();
 program.name("arg-bridge").description("Bridge Feishu/Lark messenger with local CLI coding agents").version(package_default.version, "-v, --version");
-program.command("native [thread]").description("Open or resume an agent in this shell; Codex shares an App Server with Bridge").option("--profile <name>", "profile whose agent and permissions to use").option("--yolo", "alias for --dangerously-bypass-approvals-and-sandbox on a new Codex thread").option("--dangerously-bypass-approvals-and-sandbox", "skip approvals and sandboxing on a new Codex thread").option("-s, --sandbox <mode>", "read-only, workspace-write, or danger-full-access").option("-a, --ask-for-approval <policy>", "never or on-request (resume inherits frozen permissions)").option("--bridge", "Open a Bridge-managed native TUI with Broker dynamic tools").option("--adopt <thread-id>", "Migrate an existing Codex thread into a new Bridge-managed thread").option("--follow-current-provider", "With --adopt, create the migrated thread under the current cc-switch provider/model").action(async (thread, opts) => runNative(thread, opts));
-program.command("codex [thread]").description("Alias for `native`/`native <thread>`; launches the official Codex binary without replacing it").option("--profile <name>", "profile whose Codex agent and permissions to use").option("--yolo", "alias for --dangerously-bypass-approvals-and-sandbox on a new Codex thread").option("--dangerously-bypass-approvals-and-sandbox", "skip approvals and sandboxing on a new Codex thread").option("-s, --sandbox <mode>", "read-only, workspace-write, or danger-full-access").option("-a, --ask-for-approval <policy>", "never or on-request (resume inherits frozen permissions)").option("--bridge", "Open a Bridge-managed native TUI with Broker dynamic tools").option("--adopt <thread-id>", "Migrate an existing Codex thread into a new Bridge-managed thread").option("--follow-current-provider", "With --adopt, create the migrated thread under the current cc-switch provider/model").action(async (thread, opts) => runNative(thread, opts));
+program.command("native [thread]").description("Open or resume an agent in this shell; Codex shares an App Server with Bridge").option("--profile <name>", "profile whose agent and permissions to use").option("--yolo", "alias for --dangerously-bypass-approvals-and-sandbox on a new Codex thread").option("--dangerously-bypass-approvals-and-sandbox", "skip approvals and sandboxing on a new Codex thread").option("-s, --sandbox <mode>", "read-only, workspace-write, or danger-full-access").option("-a, --ask-for-approval <policy>", "never or on-request (resume inherits frozen permissions)").option("--bridge", "Open a Bridge-managed native TUI with Broker dynamic tools").option("--adopt <thread-id>", "Migrate an existing Codex thread into a new Bridge-managed thread").option("--follow-current-provider", "With --adopt create a new provider generation; with --bridge <thread-id> rebind that idle thread in place").action(async (thread, opts) => runNative(thread, opts));
+program.command("codex [thread]").description("Alias for `native`/`native <thread>`; launches the official Codex binary without replacing it").option("--profile <name>", "profile whose Codex agent and permissions to use").option("--yolo", "alias for --dangerously-bypass-approvals-and-sandbox on a new Codex thread").option("--dangerously-bypass-approvals-and-sandbox", "skip approvals and sandboxing on a new Codex thread").option("-s, --sandbox <mode>", "read-only, workspace-write, or danger-full-access").option("-a, --ask-for-approval <policy>", "never or on-request (resume inherits frozen permissions)").option("--bridge", "Open a Bridge-managed native TUI with Broker dynamic tools").option("--adopt <thread-id>", "Migrate an existing Codex thread into a new Bridge-managed thread").option("--follow-current-provider", "With --adopt create a new provider generation; with --bridge <thread-id> rebind that idle thread in place").action(async (thread, opts) => runNative(thread, opts));
 program.command("settings").description("Open the guided cc-switch/MixAgents/Project RSI settings flow").option("--profile <name>", "profile to inspect or edit (defaults to active profile)").option("--json", "print a machine-readable, secret-free snapshot without prompting").action(async (opts) => {
   await runSettings(opts);
 });

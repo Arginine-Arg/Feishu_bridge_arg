@@ -4,7 +4,7 @@ A lightweight bot that bridges Feishu / Lark messenger with your local Claude Co
 
 [中文 README](./README.zh.md)
 
-Version 1.16.2 lets structured sessions answer visible native Codex menus with `/codex 1`, `/codex enter`, `/codex esc` and navigation keys; protocol choices stay with their owning main/side session. Version 1.16.1 restores file sending for existing native/adopted sessions, `/btw` and subagents after updating and restarting each bot profile. No new native/adopt operation is needed for already bound sessions. Version 1.16.0 adds model version and reasoning effort selection after the cc-switch provider in settings. Models come from the selected provider's local configuration, with manual model IDs and provider defaults also available. Preferences apply to `/btw`, workers and reviewers, and are saved separately for each provider. Version 1.15.0 fixed stale file delivery tokens; 1.14.0 made `/btw` workspace-write by default and provider adoption linear across A -> B -> A switches.
+Version 1.17.0 lets `arg-bridge native --bridge <thread-id> --follow-current-provider` reopen the exact same Codex thread under the current cc-switch provider/model without text-only adoption. A scoped compatibility provider keeps Codex's historical thread ID valid while routing requests, credentials and the selected model through the current provider. Version 1.16.2 lets structured sessions answer visible native Codex menus with `/codex 1`, `/codex enter`, `/codex esc` and navigation keys; protocol choices stay with their owning main/side session. Version 1.16.1 restores file sending for existing native/adopted sessions, `/btw` and subagents after updating and restarting each bot profile. Version 1.16.0 adds model version and reasoning effort selection after the cc-switch provider in settings.
 
 Version 1.6.7 introduced provider-aware Codex resume, and 1.7.0 added idle-boundary rebinding. Version 1.9.1 narrows reattachment semantics: reconnecting to an existing native or structured thread preserves the provider/model recorded by that thread instead of silently following a newly selected cc-switch route.
 
@@ -60,7 +60,7 @@ Install a pinned release or use a writable custom npm prefix when required:
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.16.2
+sh /tmp/install-arg-bridge.sh --version 1.17.0
 # Example for a machine without permission to write npm's configured global prefix:
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ Release tarballs are preferred. If a Git install is required, keep both compatib
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.16.2"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.17.0"
 ```
 
-`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.16.2`.
+`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.17.0`.
 
 ### 4. Node or npm global-prefix errors
 
@@ -229,6 +229,7 @@ arg-bridge native [thread] [--profile <name>]
 arg-bridge native --bridge [--profile <name>]
 arg-bridge native --adopt <thread-id> [--profile <name>]
 arg-bridge native --adopt <thread-id> --follow-current-provider [--profile <name>]
+arg-bridge native --bridge <thread-id> --follow-current-provider [--profile <name>]
 arg-bridge codex [thread] [--profile <name>]
 arg-bridge settings --profile codex [--json]
 arg-bridge doctor --profile codex --json
@@ -279,12 +280,13 @@ codex plugin add mixagents-broker@mixagents
 
 `arg-bridge settings` now guides the user through main-account context, fallback policy, **follow current provider or a fixed cc-switch provider**, model version and reasoning effort, automatic cc-switch credential resolution, Project RSI, and a plain-language confirmation. Model choices are read from the selected provider's local configuration; manual model IDs and provider defaults are available. Preferences are saved per provider and apply on the next subagent dispatch. No route ID or Key entry is required. Technical concurrency/native-tool/write-worker controls are behind an explicit advanced prompt. The default flow does not create `broker-routes.json` and never changes the main provider. `arg-bridge doctor --json` is read-only and must not spend money. Only an explicit `--probe-route <id>` sends one read-only generation probe and never retries or falls back.
 
-Version 1.9.1 adds two explicit terminal entry points:
+The explicit terminal entry points now include in-place provider following:
 
 ```bash
 arg-bridge native --bridge
 arg-bridge native --adopt <old-thread-id>
 arg-bridge native --adopt <old-thread-id> --follow-current-provider
+arg-bridge native --bridge <thread-id> --follow-current-provider
 ```
 
 `--bridge` starts a Bridge-managed native TUI with `arg_bridge.*` dynamic tools
@@ -313,6 +315,16 @@ persists a bounded text-history sidecar for each thread and raises the handoff
 budget to 48k characters; a recent-tail fallback handles exceptionally long
 source histories. Repeating the command is idempotent only when the newest
 lineage head already matches the selected provider generation.
+
+With `--bridge <thread-id> --follow-current-provider`, Bridge keeps the same
+thread ID and full Codex resume state. It first verifies that no turn is active;
+if the thread is still loaded by the previous provider's App Server, exit that
+TUI and restart the profile to reclaim the idle host. Bridge then starts a
+provider-generation App Server whose scoped compatibility alias retains the
+thread's historical provider ID while endpoint, credentials, wire API and
+headers come from the current cc-switch provider. The model is updated to the
+current selection. The marker records `compatibilityProvider`, so repeating the
+command reconstructs the same host idempotently.
 
 ### Mid-turn messages
 

@@ -52,6 +52,7 @@ export async function runNative(
     followCurrentProvider?: boolean;
   } & CodexPermissionCliOptions,
 ): Promise<void> {
+  validateNativeControlOptions(thread, opts);
   const rootPaths = resolveAppPaths();
   const root = JSON.parse(await readFile(rootPaths.configFile, 'utf8'));
   const profileName = opts.profile ?? root.activeProfile;
@@ -69,9 +70,6 @@ export async function runNative(
   const binary = config.codex?.binaryPath ?? 'codex';
   const codexHome = config.codex?.codexHome
     ?? (config.codex?.inheritCodexHome === false ? `${paths.profileDir}/codex-home` : undefined);
-  if (opts.followCurrentProvider && !opts.adopt) {
-    throw new Error('--follow-current-provider 只能与 --adopt <thread-id> 一起使用');
-  }
   if (opts.bridge || opts.adopt) {
     if (config.agentKind !== 'codex') {
       throw new Error('arg-bridge native --bridge/--adopt 只支持 Codex profile');
@@ -107,7 +105,8 @@ export async function runNative(
         }
         if (bridge.providerSelection) {
           console.log(
-            `Migrated provider: cc-switch=${bridge.providerSelection.ccSwitchProviderId ?? '(unknown)'} ` +
+            `${bridge.providerRebound ? 'Rebound provider in place' : 'Verified provider'}: ` +
+              `cc-switch=${bridge.providerSelection.ccSwitchProviderId ?? '(unknown)'} ` +
               `model_provider=${bridge.providerSelection.modelProvider} ` +
               `model=${bridge.providerSelection.model}`,
           );
@@ -269,6 +268,23 @@ export async function runNative(
     host.rpc.close();
     if (startedHost) await dropOwner(paths.profileDir);
   }
+}
+
+export function validateNativeControlOptions(
+  thread: string | undefined,
+  opts: {
+    bridge?: boolean;
+    adopt?: string;
+    followCurrentProvider?: boolean;
+  },
+): void {
+  if (!opts.followCurrentProvider) return;
+  if (opts.adopt) return;
+  if (opts.bridge && thread?.trim()) return;
+  throw new Error(
+    '--follow-current-provider 需要 --adopt <thread-id> 或 --bridge <thread-id>；' +
+      '普通 positional resume 不会切换 provider',
+  );
 }
 
 async function waitChild(child: ReturnType<typeof spawnProcess>): Promise<void> {

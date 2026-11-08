@@ -504,6 +504,223 @@ nativeBridge('registers dynamic tools and safely migrates a legacy thread into a
   }
 }, 180_000);
 
+nativeBridge('rebinds an existing Bridge thread to the current provider without changing its ID', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'arg-bridge-native-rebind-'));
+  const codexHome = join(root, 'codex-home');
+  const workspace = join(root, 'workspace');
+  const profileDir = join(root, 'profile');
+  const ccSwitchHome = join(root, 'cc-switch');
+  const brokerState = join(root, 'broker-state.json');
+  await Promise.all([
+    mkdir(codexHome, { recursive: true }),
+    mkdir(workspace, { recursive: true }),
+    mkdir(profileDir, { recursive: true }),
+    mkdir(ccSwitchHome, { recursive: true }),
+  ]);
+  await writeFile(join(ccSwitchHome, 'settings.json'), JSON.stringify({
+    currentProviderCodex: 'native-test-provider',
+  }), { mode: 0o600 });
+
+  const requests: Array<Record<string, any>> = [];
+  const provider = createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on('data', chunk => chunks.push(Buffer.from(chunk)));
+    request.on('end', () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as Record<string, any>;
+      requests.push(body);
+      response.writeHead(200, {
+        'content-type': 'text/event-stream',
+        'cache-control': 'no-cache',
+        connection: 'keep-alive',
+      });
+      response.end(sse([
+        created('provider-rebind'),
+        assistantMessage('provider-rebind', 'PROVIDER_REBIND_OK'),
+        completed('provider-rebind'),
+      ]));
+    });
+  });
+  await new Promise<void>(resolve => provider.listen(0, '127.0.0.1', resolve));
+  const address = provider.address() as { port: number };
+  const writeProvider = async (providerId: string, model: string): Promise<void> => {
+    await writeFile(join(codexHome, 'config.toml'), [
+      `model = "${model}"`,
+      `model_provider = "${providerId}"`,
+      'approval_policy = "never"',
+      'sandbox_mode = "read-only"',
+      '',
+      `[model_providers.${providerId}]`,
+      `name = "${providerId}"`,
+      `base_url = "http://127.0.0.1:${address.port}/v1"`,
+      'wire_api = "responses"',
+      'requires_openai_auth = false',
+      'env_key = "OPENAI_API_KEY"',
+    ].join('\n'), { mode: 0o600 });
+  };
+  await writeProvider('native-local', 'native-bridge-model');
+
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    CODEX_HOME: codexHome,
+    CC_SWITCH_HOME: ccSwitchHome,
+    OPENAI_API_KEY: 'trace-only-native',
+    XDG_RUNTIME_DIR: join(root, 'runtime'),
+    FAKE_MIXAGENTS_STATE: brokerState,
+    NO_PROXY: '127.0.0.1,localhost',
+    no_proxy: '127.0.0.1,localhost',
+  };
+  const profile = createDefaultProfileConfig({
+    agentKind: 'codex',
+    accounts: { app: { id: 'native-test', secret: 'not-used', tenant: 'feishu' } },
+    codex: {
+      binaryPath: 'codex',
+      codexHome,
+      inheritCodexHome: false,
+    },
+  });
+  profile.subagents = {
+    ...DEFAULT_SUBAGENT_CONFIG,
+    mode: 'broker',
+    routeMode: 'manual',
+    readRoute: 'read-a',
+    allowForkFallback: false,
+    mixagents: {
+      mcpCommand: process.execPath,
+      mcpArgs: [fixture],
+      credentialEnvKeys: ['FAKE_MIXAGENTS_STATE'],
+    },
+  };
+
+  let bridge: Awaited<ReturnType<typeof createNativeBridgeSession>> | undefined;
+  try {
+    bridge = await createNativeBridgeSession({
+      profileName: 'codex',
+      profileDir,
+      cwd: workspace,
+      config: profile,
+      env,
+      binary: 'codex',
+      codexHome,
+      sandbox: 'read-only',
+    });
+    const threadId = bridge.threadId;
+    const initialEvents: Array<{ type: string; delta?: string }> = [];
+    await bridge.session!.submit({
+      runId: 'native-before-rebind',
+      scopeId: 'native-rebind-scope',
+      cwd: workspace,
+      prompt: 'Establish the original provider thread.',
+    }, event => initialEvents.push(event), AbortSignal.timeout(60_000));
+    expect(initialEvents.filter(event => event.type === 'error')).toEqual([]);
+    const originalMarker = JSON.parse(await readFile(
+      join(profileDir, 'structured', 'broker-threads.json'),
+      'utf8',
+    ));
+    await bridge.close();
+    bridge = undefined;
+    await shutdownProfileHosts(profileDir);
+
+    // The original provider is gone. The current provider must still reopen
+    // the exact same thread ID and use its configured endpoint/model.
+    await writeProvider('native-local-follow', 'native-follow-model');
+    requests.length = 0;
+    bridge = await createNativeBridgeSession({
+      profileName: 'codex',
+      profileDir,
+      cwd: workspace,
+      config: profile,
+      env,
+      binary: 'codex',
+      codexHome,
+      sandbox: 'read-only',
+      threadId,
+      followCurrentProvider: true,
+    });
+    expect(bridge).toMatchObject({
+      mode: 'attached',
+      threadId,
+      providerRebound: true,
+      providerSelection: {
+        ccSwitchProviderId: 'native-test-provider',
+        modelProvider: 'native-local-follow',
+        model: 'native-follow-model',
+      },
+    });
+    const reboundEvents: Array<{ type: string; delta?: string }> = [];
+    await bridge.session!.submit({
+      runId: 'native-after-rebind',
+      scopeId: 'native-rebind-scope',
+      cwd: workspace,
+      prompt: 'Continue in the same thread through the new provider.',
+    }, event => reboundEvents.push(event), AbortSignal.timeout(60_000));
+    expect(reboundEvents.filter(event => event.type === 'error')).toEqual([]);
+    expect(reboundEvents.filter(event => event.type === 'text').map(event => event.delta).join(''))
+      .toContain('PROVIDER_REBIND_OK');
+    expect(requests.some(request => request.model === 'native-follow-model')).toBe(true);
+
+    const marker = JSON.parse(await readFile(
+      join(profileDir, 'structured', 'broker-threads.json'),
+      'utf8',
+    ));
+    expect(marker.threads[threadId]).toMatchObject({
+      createdAt: originalMarker.threads[threadId].createdAt,
+      followCurrentProvider: true,
+      modelProvider: 'native-local-follow',
+      model: 'native-follow-model',
+      runtimeFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+      compatibilityProvider: 'native-local',
+    });
+    const reboundCreatedAt = marker.threads[threadId].createdAt;
+    await bridge.close();
+    bridge = undefined;
+    await shutdownProfileHosts(profileDir);
+
+    // Repeating the command is idempotent and reconstructs the same
+    // compatibility host after the previous one has been reclaimed.
+    requests.length = 0;
+    bridge = await createNativeBridgeSession({
+      profileName: 'codex',
+      profileDir,
+      cwd: workspace,
+      config: profile,
+      env,
+      binary: 'codex',
+      codexHome,
+      sandbox: 'read-only',
+      threadId,
+      followCurrentProvider: true,
+    });
+    expect(bridge).toMatchObject({
+      mode: 'attached',
+      threadId,
+      providerSelection: {
+        modelProvider: 'native-local-follow',
+        model: 'native-follow-model',
+      },
+    });
+    expect(bridge.providerRebound).toBeUndefined();
+    const repeatedMarker = JSON.parse(await readFile(
+      join(profileDir, 'structured', 'broker-threads.json'),
+      'utf8',
+    ));
+    expect(repeatedMarker.threads[threadId]).toMatchObject({
+      createdAt: reboundCreatedAt,
+      compatibilityProvider: 'native-local',
+      modelProvider: 'native-local-follow',
+    });
+  } finally {
+    await bridge?.close();
+    await shutdownProfileHosts(profileDir);
+    await new Promise<void>(resolve => provider.close(() => resolve()));
+    await rm(root, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 100,
+    });
+  }
+}, 120_000);
+
 function sse(events: Array<Record<string, unknown>>): string {
   return events.map(event => `data: ${JSON.stringify(event)}\n\n`).join('');
 }

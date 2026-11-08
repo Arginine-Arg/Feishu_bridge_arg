@@ -1,7 +1,7 @@
 # Bridge-managed native TUI
 
-Version 1.9.3 hardens the Bridge-managed native path added in 1.9.1 without
-changing the meaning of ordinary `arg-bridge native`.
+Version 1.17.0 adds in-place provider following for existing Bridge threads
+without changing the meaning of ordinary `arg-bridge native`.
 
 ## Commands
 
@@ -18,6 +18,9 @@ arg-bridge native --bridge \
 
 # Attach to an existing thread that already has a Bridge marker
 arg-bridge native --bridge <thread-id> --profile codex
+
+# Reopen the exact same thread under the current cc-switch provider/model
+arg-bridge native --bridge <thread-id> --follow-current-provider
 
 # Safely migrate an old thread into a new Bridge-managed thread
 arg-bridge native --adopt <old-thread-id>
@@ -65,6 +68,27 @@ without restarting the daemon.
   provider generation merges that snapshot with newer turns, preserving context
   produced by the previous provider.
 
+For an existing Bridge-managed thread, use the same command with `--bridge`:
+
+```bash
+arg-bridge native --bridge <thread-id> --follow-current-provider --profile codex
+```
+
+This is an in-place provider rebind, not an adoption:
+
+- the thread ID and full Codex resume state stay unchanged;
+- an active turn is rejected;
+- if the previous provider's App Server still owns the thread, exit that native
+  TUI and restart the profile so the idle host can be reclaimed;
+- the new provider-generation host gets a thread-scoped compatibility alias:
+  Codex still sees the historical provider ID during thread validation, while
+  the endpoint, credential, wire API and headers come from the current
+  cc-switch provider;
+- the selected model is updated to the current provider's configured model;
+- the marker records the current generation and `compatibilityProvider`, making
+  repeated commands idempotent and allowing the compatibility host to be
+  reconstructed after cleanup.
+
 Very long histories no longer require one unbounded `thread/read` response.
 Status is read separately, then a 180-second full-history attempt is used when
 possible; if it times out, Bridge falls back to the recent turn tail before
@@ -92,8 +116,8 @@ It does not copy:
 - tool arguments or tool output blobs;
 - images or local file paths.
 
-The source and destination are capped at 12,000 text characters and secret
-patterns are redacted.
+Adoption handoffs are capped at 48,000 text characters and secret patterns are
+redacted.
 
 ## Dynamic tools
 

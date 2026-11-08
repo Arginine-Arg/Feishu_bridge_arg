@@ -87,6 +87,8 @@ export async function connectCodexHost(options: {
    */
   fingerprint?: CodexHostEnvironmentFingerprint;
   runtimeIdentity?: CodexHostRuntimeIdentity;
+  /** Internal App Server config overrides for provider-compatible resumes. */
+  configOverrides?: string[];
 }): Promise<{ rpc: RpcClient; endpoint: string }> {
   return connectCodexHostInternal(options, 0);
 }
@@ -99,6 +101,7 @@ interface CodexHostOptions {
   env: NodeJS.ProcessEnv;
   fingerprint?: CodexHostEnvironmentFingerprint;
   runtimeIdentity?: CodexHostRuntimeIdentity;
+  configOverrides?: string[];
 }
 
 async function connectCodexHostInternal(
@@ -160,7 +163,12 @@ async function connectCodexHostInternal(
       await mkdir(directory, { recursive: true, mode: 0o700 });
     }
     const logFile = await open(join(directory, 'server.log'), 'a', 0o600);
-    const child = spawnProcess(options.binary, ['app-server', '--listen', endpoint], {
+    const child = spawnProcess(options.binary, [
+      'app-server',
+      '--listen',
+      endpoint,
+      ...(options.configOverrides ?? []),
+    ], {
       cwd: options.cwd, env: options.env, detached: true,
       stdio: ['ignore', logFile.fd, logFile.fd],
     });

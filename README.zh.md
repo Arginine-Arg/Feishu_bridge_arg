@@ -4,7 +4,7 @@
 
 [English README](./README.md)
 
-`1.16.2` 补齐结构化会话中原生 Codex 终端菜单的 `/codex 1`、`enter`、`esc` 和方向键控制；协议选择按实际持有请求的主会话或 side 路由。`1.16.1` 修复已有 native/adopt 主会话、`/btw` 和 subagent 缺少文件发送能力的问题；更新并重启各 bot profile 后，已绑定会话无需重新 native/adopt。`1.16.0` 在 settings 选择 cc-switch provider 后增加模型版本和推理强度选择。模型来自所选 provider 的本地配置，也可手填模型 ID 或跟随默认值；选择按 provider 保存，对 `/btw`、普通 subagent 和 reviewer 生效。`1.15.0` 修复文件发送令牌失效；`1.14.0` 将 `/btw` 改为默认 workspace-write，并让 provider adoption 形成 A -> B -> A 的线性上下文。
+`1.17.0` 支持 `arg-bridge native --bridge <thread-id> --follow-current-provider`，在保持原 Codex thread ID 和完整 resume 状态的同时切换到当前 cc-switch provider/model，不再要求文本式 adopt。Bridge 使用线程级兼容别名让历史 provider ID 继续通过 Codex 校验，实际 endpoint、凭据、wire API 和模型来自当前 provider。`1.16.2` 补齐结构化会话中原生 Codex 终端菜单控制；`1.16.1` 修复已有主会话、`/btw` 和 subagent 的文件发送恢复；`1.16.0` 在 settings 中增加按 provider 保存的模型版本和推理强度。
 
 `1.6.7` 引入 provider-aware Codex resume，`1.7.0` 增加 idle 边界重绑。`1.9.1` 收紧重连语义：附着已有 native 或 structured thread 时，保留该 thread 记录的 provider/model，不会因为 cc-switch 后来切换了 route 而静默改路。
 
@@ -60,7 +60,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.16.2
+sh /tmp/install-arg-bridge.sh --version 1.17.0
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.16.2"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.17.0"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.16.2`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.17.0`。
 
 ### 4. Node 或 npm 全局目录错误
 
@@ -229,6 +229,7 @@ arg-bridge native [thread] [--profile <name>]
 arg-bridge native --bridge [--profile <name>]
 arg-bridge native --adopt <thread-id> [--profile <name>]
 arg-bridge native --adopt <thread-id> --follow-current-provider [--profile <name>]
+arg-bridge native --bridge <thread-id> --follow-current-provider [--profile <name>]
 arg-bridge codex [thread] [--profile <name>]
 arg-bridge settings --profile codex [--json]
 arg-bridge doctor --profile codex --json
@@ -276,12 +277,13 @@ codex plugin add mixagents-broker@mixagents
 
 `arg-bridge settings` 现在会用五步向导说明：当前主对话、是否允许降级、子代理跟随当前 provider 还是固定某个 cc-switch provider、模型版本和推理强度、Key 自动由 cc-switch 解析、是否启用项目证据校验。模型选项来自所选 provider 的本地配置，也可手填或跟随默认值；选择按 provider 保存，下一次子代理派发时生效。用户不需要填写 route ID 或 Key；并发、native 工具遮蔽、写权限和自定义 MCP 等参数收在“高级设置”里。默认不创建 `broker-routes.json`，也不会切换主 provider。
 
-`1.9.1` 新增两个显式终端入口：
+显式终端入口现在包括同 thread 的 provider 切换：
 
 ```bash
 arg-bridge native --bridge
 arg-bridge native --adopt <old-thread-id>
 arg-bridge native --adopt <old-thread-id> --follow-current-provider
+arg-bridge native --bridge <thread-id> --follow-current-provider
 ```
 
 `--bridge` 会启动一个由 Bridge 托管的 native TUI：Codex 父 thread 获得
@@ -308,6 +310,14 @@ head 创建新的 A generation，不会回到旧的 A 分支丢失 B 阶段工�
 每个 thread 保存有界文本历史 sidecar，handoff 预算提高到 48k 字符；超长
 历史使用 recent-tail 回退。只有最新 lineage head 已经匹配当前
 provider/model/credential generation 时才幂等复用。
+
+使用 `--bridge <thread-id> --follow-current-provider` 时，Bridge 保留原
+thread ID 和完整 Codex resume 状态。它先确认没有活动 turn；如果旧 provider
+的 App Server 仍持有该 thread，需要先退出该 native TUI 并重启 profile 回收
+空闲 host。随后 Bridge 启动 provider-generation App Server：线程级兼容别名
+保留历史 provider ID 供 Codex 校验，实际 base URL、凭据、wire API 和 headers
+来自当前 cc-switch provider，模型更新为当前选择。marker 会记录
+`compatibilityProvider`，重复执行会幂等重建同一兼容 host。
 
 ### 长任务中途消息
 
