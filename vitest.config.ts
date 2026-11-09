@@ -5,9 +5,10 @@ export default defineConfig({
     // The vendored Broker has upstream `node:test` suites that are executed
     // separately by `test:broker`; Vitest must not try to collect them.
     exclude: [...configDefaults.exclude, 'vendor/**'],
-    // Live terminal tests create real PTYs and tmux servers. The default worker
-    // count follows host CPU count and can starve those processes in CI.
+    // Live terminal tests create real PTYs and tmux servers. Two hosted-runner
+    // workers keep their process and terminal transitions below contention
+    // limits while preserving local parallelism.
     minWorkers: 1,
-    maxWorkers: 4,
+    maxWorkers: process.env.CI ? 2 : 4,
   },
 });

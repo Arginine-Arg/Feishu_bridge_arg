@@ -74,7 +74,15 @@ describe.skipIf(!live)('tmux control', () => {
     expect(spawnSync('tmux', ['-S', socket, 'new-session', '-d', '-s', 'claude', '-c', root, claude, '30']).status).toBe(0);
     expect(spawnSync('tmux', ['-S', socket, 'new-session', '-d', '-s', 'shell', '-c', root, 'sleep', '30']).status).toBe(0);
 
-    const panes = listTmuxAgentPanes(socket);
+    let panes = listTmuxAgentPanes(socket);
+    const deadline = Date.now() + 3_000;
+    while (
+      panes.map((pane) => pane.agentKind).sort().join(',') !== 'claude,codex' &&
+      Date.now() < deadline
+    ) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 50));
+      panes = listTmuxAgentPanes(socket);
+    }
     expect(panes.map((pane) => pane.agentKind).sort()).toEqual(['claude', 'codex']);
     expect(panes.every((pane) => pane.ownership === 'external')).toBe(true);
     expect(panes.every((pane) => pane.attachCommand.includes(`tmux -S ${socket}`))).toBe(true);
