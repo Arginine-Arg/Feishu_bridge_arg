@@ -322,16 +322,25 @@ and the same continuing wait policy.
 
 The side runtime also limits Codex request/stream retries so a temporarily
 unavailable provider fails quickly instead of appearing to think indefinitely.
-With the vendored `events-v1` Broker, Bridge forwards model text deltas and safe
-tool lifecycle updates as they arrive. `wait_agent` remains authoritative for
-the final text/error. With an older external Broker, Bridge falls back to a
-liveness heartbeat every 15 seconds. When one `workerTimeoutMs` window ends
-without a terminal result, Bridge emits a continuation notice and waits again
-from the persisted event cursor. `/btw out` explicitly requests interruption
-and discards the side. `/btw result` recovers retained timeout state left by an
-older version, Bridge interruption or another abnormal recovery path. A normal
-new `/btw` does not silently replace such a retained side; it asks the user to
-collect or discard it first.
+With the vendored `events-v1` Broker, Bridge forwards model text deltas,
+bounded/redacted reasoning summaries and safe tool lifecycle updates as they
+arrive. Reasoning summaries are throttled and never become part of the final
+answer text. `wait_agent` and the mailbox snapshot remain authoritative for the
+final text/error.
+
+Bridge reconciles the read-only `list_agents` mailbox every 15 seconds, so a
+completed/failed worker is recovered even when the progress stream is quiet or
+stale. A completely stalled backend call still receives the 15-second fallback
+heartbeat. Every 60 seconds Bridge also emits a status update containing the
+real Broker status and event cursor. Consumers therefore no longer have to
+guess whether the worker is still alive or the Bridge stopped forwarding.
+
+When one `workerTimeoutMs` window ends without a terminal result, Bridge emits a
+continuation notice and waits again from the persisted event cursor. `/btw out`
+explicitly requests interruption and discards the side. `/btw result` recovers
+retained timeout state left by an older version, Bridge interruption or another
+abnormal recovery path. A normal new `/btw` does not silently replace such a
+retained side; it asks the user to collect or discard it first.
 
 ## Credential ownership
 

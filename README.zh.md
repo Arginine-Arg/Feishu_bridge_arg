@@ -4,7 +4,7 @@
 
 [English README](./README.md)
 
-`1.17.0` 支持 `arg-bridge native --bridge <thread-id> --follow-current-provider`，在保持原 Codex thread ID 和完整 resume 状态的同时切换到当前 cc-switch provider/model，不再要求文本式 adopt。Bridge 使用线程级兼容别名让历史 provider ID 继续通过 Codex 校验，实际 endpoint、凭据、wire API 和模型来自当前 provider。`1.16.2` 补齐结构化会话中原生 Codex 终端菜单控制；`1.16.1` 修复已有主会话、`/btw` 和 subagent 的文件发送恢复；`1.16.0` 在 settings 中增加按 provider 保存的模型版本和推理强度。
+`1.18.0` 修复长时间运行的 `/btw` 和 MixAgents subagent 在事件流静默或陈旧时看起来“无限等待”的问题。Bridge 每 15 秒用只读 `list_agents` 对账终态 mailbox，至少每 60 秒发送一次带真实 Broker 状态和 cursor 的心跳，并把有界、脱敏的 Codex reasoning summary 作为节流进度转发，不写入最终答案正文。`1.17.0` 支持在保持原 thread ID 的情况下使用 `--follow-current-provider`；`1.16.x` 系列补齐终端菜单、文件发送恢复和子代理模型设置。
 
 `1.6.7` 引入 provider-aware Codex resume，`1.7.0` 增加 idle 边界重绑。`1.9.1` 收紧重连语义：附着已有 native 或 structured thread 时，保留该 thread 记录的 provider/model，不会因为 cc-switch 后来切换了 route 而静默改路。
 
@@ -60,7 +60,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.17.0
+sh /tmp/install-arg-bridge.sh --version 1.18.0
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.17.0"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.18.0"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.17.0`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.18.0`。
 
 ### 4. Node 或 npm 全局目录错误
 

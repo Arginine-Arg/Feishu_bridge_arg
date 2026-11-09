@@ -170,6 +170,13 @@ function appendEvent(agent, event) {
 
 function queueTextEvents(agent, text) {
   appendEvent(agent, { type: 'turn_started' });
+  if (process.env.FAKE_MIXAGENTS_REASONING_PROGRESS === '1') {
+    appendEvent(agent, {
+      type: 'reasoning_summary_delta',
+      text: 'checking the current workspace',
+      itemId: `reasoning-${agent.agentId}`,
+    });
+  }
   for (const chunk of text.match(/.{1,6}/gsu) ?? [text]) {
     appendEvent(agent, { type: 'text_delta', text: chunk });
   }
@@ -214,6 +221,14 @@ async function handleTool(name, args, id) {
     return tool(id, agentPayload(agent));
   }
   if (name === 'list_agents') {
+    if (process.env.FAKE_MIXAGENTS_SILENT_EVENT_STREAM === '1') {
+      state.silentListCalls = Number(state.silentListCalls ?? 0) + 1;
+      for (const item of Object.values(state.agents)) {
+        if (state.silentListCalls >= 2 && item.status === 'running') {
+          item.status = 'completed';
+        }
+      }
+    }
     await persist();
     return tool(id, {
       agents: Object.values(state.agents).map(agent => agentPayload(agent)),
@@ -238,6 +253,21 @@ async function handleTool(name, args, id) {
     const events = maxEvents === 0
       ? []
       : agent.events.filter(event => event.seq > cursor).slice(0, maxEvents);
+    if (process.env.FAKE_MIXAGENTS_SILENT_EVENT_STREAM === '1' && agent.status === 'running') {
+      await new Promise(resolve => setTimeout(resolve, 5));
+      const eventCursor = agent.events.at(-1)?.seq ?? 0;
+      await persist();
+      return tool(id, {
+        agentId,
+        events: [],
+        nextCursor: cursor,
+        eventCursor,
+        status: 'running',
+        done: false,
+        cursorExpired: false,
+        droppedThrough: agent.droppedThrough,
+      });
+    }
     if (maxEvents > 0 && agent.status === 'running') {
       agent.status = 'completed';
       appendEvent(agent, { type: 'turn_completed', status: 'completed' });

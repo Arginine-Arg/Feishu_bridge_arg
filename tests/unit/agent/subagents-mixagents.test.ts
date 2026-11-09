@@ -278,7 +278,8 @@ describe('MixAgentsBrokerBackend', () => {
         cwd: root,
         access: 'read-only',
       });
-      expect(state.calls.filter((call: { tool: string }) => call.tool === 'wait_agent')).toHaveLength(2);
+      expect(state.calls.filter((call: { tool: string }) => call.tool === 'wait_agent')).toHaveLength(0);
+      expect(state.calls.filter((call: { tool: string }) => call.tool === 'list_agents')).toHaveLength(2);
     } finally {
       await backend.closeBackend();
     }
@@ -309,6 +310,74 @@ describe('MixAgentsBrokerBackend', () => {
         text: 'result:Legacy mailbox',
       });
       expect(progress).toEqual([]);
+    } finally {
+      await backend.closeBackend();
+    }
+  });
+
+  it('reconciles the terminal mailbox when the progress stream stays silent', async () => {
+    const { root, env, config } = await setup();
+    const backend = new MixAgentsBrokerBackend(config, {
+      ...env,
+      FAKE_MIXAGENTS_SILENT_EVENT_STREAM: '1',
+    }, undefined, {
+      mailboxReconcileMs: 20,
+      statusNoticeMs: 20,
+    });
+    try {
+      const [route] = await backend.listRoutes(new AbortController().signal);
+      const signal = new AbortController().signal;
+      const agent = await backend.createOrReuse({
+        route: route!,
+        task: 'Silent stream',
+        cwd: root,
+        scope: 'silent-progress',
+        access: 'read-only',
+        signal,
+      });
+      const progress: SideAgentProgress[] = [];
+      await expect(backend.wait(agent, signal, 1_000, event => {
+        progress.push(event);
+      })).resolves.toMatchObject({
+        status: 'completed',
+        text: 'result:Silent stream',
+      });
+      expect(progress).toContainEqual(expect.objectContaining({
+        type: 'status',
+        status: 'running',
+      }));
+    } finally {
+      await backend.closeBackend();
+    }
+  });
+
+  it('maps reasoning summaries to progress without adding raw reasoning text', async () => {
+    const { root, env, config } = await setup();
+    const backend = new MixAgentsBrokerBackend(config, {
+      ...env,
+      FAKE_MIXAGENTS_REASONING_PROGRESS: '1',
+    });
+    try {
+      const [route] = await backend.listRoutes(new AbortController().signal);
+      const signal = new AbortController().signal;
+      const agent = await backend.createOrReuse({
+        route: route!,
+        task: 'Reasoning progress',
+        cwd: root,
+        scope: 'reasoning-progress',
+        access: 'read-only',
+        signal,
+      });
+      const progress: SideAgentProgress[] = [];
+      await expect(backend.wait(agent, signal, undefined, event => {
+        progress.push(event);
+      })).resolves.toMatchObject({
+        status: 'completed',
+      });
+      expect(progress).toContainEqual(expect.objectContaining({
+        type: 'reasoning_summary',
+        text: 'checking the current workspace',
+      }));
     } finally {
       await backend.closeBackend();
     }

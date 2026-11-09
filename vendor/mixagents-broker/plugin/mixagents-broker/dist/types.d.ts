@@ -7,7 +7,7 @@ export type JsonObject = {
 };
 export type Access = "read-only" | "workspace-write";
 export type AgentStatus = "starting" | "running" | "interrupted" | "completed" | "failed" | "not_found";
-export type AgentEventType = "turn_started" | "text_delta" | "tool_started" | "tool_completed" | "turn_completed";
+export type AgentEventType = "turn_started" | "text_delta" | "reasoning_summary_delta" | "tool_started" | "tool_completed" | "turn_completed";
 export interface AgentEvent {
     seq: number;
     type: AgentEventType;

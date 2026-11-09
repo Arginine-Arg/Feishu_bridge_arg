@@ -4,7 +4,7 @@ A lightweight bot that bridges Feishu / Lark messenger with your local Claude Co
 
 [中文 README](./README.zh.md)
 
-Version 1.17.0 lets `arg-bridge native --bridge <thread-id> --follow-current-provider` reopen the exact same Codex thread under the current cc-switch provider/model without text-only adoption. A scoped compatibility provider keeps Codex's historical thread ID valid while routing requests, credentials and the selected model through the current provider. Version 1.16.2 lets structured sessions answer visible native Codex menus with `/codex 1`, `/codex enter`, `/codex esc` and navigation keys; protocol choices stay with their owning main/side session. Version 1.16.1 restores file sending for existing native/adopted sessions, `/btw` and subagents after updating and restarting each bot profile. Version 1.16.0 adds model version and reasoning effort selection after the cc-switch provider in settings.
+Version 1.18.0 makes long-running `/btw` and MixAgents subagent progress resilient to a quiet or stale event stream. Bridge reconciles the read-only agent mailbox every 15 seconds, emits a real status/cursor heartbeat at least every minute, and forwards bounded Codex reasoning summaries without putting them into the final answer. Version 1.17.0 lets `arg-bridge native --bridge <thread-id> --follow-current-provider` reopen the exact same Codex thread under the current cc-switch provider/model without text-only adoption. Version 1.16.2 lets structured sessions answer visible native Codex menus; 1.16.1 restores file sending for existing sessions; 1.16.0 adds per-provider subagent model and reasoning settings.
 
 Version 1.6.7 introduced provider-aware Codex resume, and 1.7.0 added idle-boundary rebinding. Version 1.9.1 narrows reattachment semantics: reconnecting to an existing native or structured thread preserves the provider/model recorded by that thread instead of silently following a newly selected cc-switch route.
 
@@ -60,7 +60,7 @@ Install a pinned release or use a writable custom npm prefix when required:
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.17.0
+sh /tmp/install-arg-bridge.sh --version 1.18.0
 # Example for a machine without permission to write npm's configured global prefix:
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ Release tarballs are preferred. If a Git install is required, keep both compatib
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.17.0"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.18.0"
 ```
 
-`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.17.0`.
+`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.18.0`.
 
 ### 4. Node or npm global-prefix errors
 

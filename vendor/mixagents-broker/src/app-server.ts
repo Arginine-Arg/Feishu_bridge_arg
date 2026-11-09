@@ -911,6 +911,18 @@ export class AppServerRuntime extends EventEmitter {
       });
       return;
     }
+    if (
+      method === "item/reasoning/summaryTextDelta" &&
+      typeof params.delta === "string" &&
+      params.delta.length > 0
+    ) {
+      this.#appendEvent(agent, {
+        type: "reasoning_summary_delta",
+        text: params.delta,
+        ...(typeof params.itemId === "string" ? { itemId: params.itemId } : {}),
+      });
+      return;
+    }
     if (method === "item/started" && isRecord(params.item)) {
       const tool = toolNameFromItem(params.item);
       if (tool) {

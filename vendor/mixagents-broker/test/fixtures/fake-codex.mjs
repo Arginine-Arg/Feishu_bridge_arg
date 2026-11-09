@@ -304,6 +304,44 @@ async function startTurn(thread, text) {
           ),
         30,
       );
+    } else if (text.includes("reasoning progress")) {
+      setTimeout(() => {
+        send({
+          jsonrpc: "2.0",
+          method: "item/reasoning/summaryTextDelta",
+          params: {
+            threadId: thread.id,
+            turnId: turn.id,
+            itemId: `reasoning_${turn.id}`,
+            summaryIndex: 0,
+            delta: "checking evidence ",
+          },
+        });
+      }, 10);
+      setTimeout(() => {
+        send({
+          jsonrpc: "2.0",
+          method: "item/reasoning/summaryTextDelta",
+          params: {
+            threadId: thread.id,
+            turnId: turn.id,
+            itemId: `reasoning_${turn.id}`,
+            summaryIndex: 0,
+            delta: "and tests",
+          },
+        });
+      }, 20);
+      setTimeout(
+        () =>
+          void complete(
+            thread,
+            turn,
+            "reasoning progress done",
+            "completed",
+            true,
+          ),
+        30,
+      );
     } else if (text.includes("fail")) {
       setTimeout(() => void complete(thread, turn, "fake provider failure", "failed"), 15);
     } else {

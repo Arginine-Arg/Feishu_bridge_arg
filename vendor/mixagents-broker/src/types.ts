@@ -14,6 +14,7 @@ export type AgentStatus =
 export type AgentEventType =
   | "turn_started"
   | "text_delta"
+  | "reasoning_summary_delta"
   | "tool_started"
   | "tool_completed"
   | "turn_completed";

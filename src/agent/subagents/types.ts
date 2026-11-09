@@ -66,6 +66,8 @@ export type SideAgentProgress =
   | { type: 'text'; text: string; itemId?: string; cursor?: number }
   | { type: 'tool_started'; tool: string; itemId?: string; cursor?: number }
   | { type: 'tool_completed'; tool: string; itemId?: string; cursor?: number }
+  | { type: 'reasoning_summary'; text: string; itemId?: string; cursor?: number }
+  | { type: 'status'; status: SideAgentStatus; cursor?: number; elapsedMs?: number }
   | { type: 'notice'; text: string };
 
 export type SideAgentProgressHandler = (event: SideAgentProgress) => void;

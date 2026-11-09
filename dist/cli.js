@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.17.0",
+  version: "1.18.0",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -14937,6 +14937,8 @@ var REQUIRED_TOOLS = [
 ];
 var WAIT_REQUEST_MS = 12e4;
 var DEFAULT_TOTAL_WAIT_MS = 15 * 6e4;
+var DEFAULT_MAILBOX_RECONCILE_MS = 15e3;
+var DEFAULT_STATUS_NOTICE_MS = 6e4;
 var require3 = createRequire2(import.meta.url);
 var MixAgentsBrokerBackend = class {
   constructor(config, env = process.env, runtime, options = {}) {
@@ -15086,12 +15088,24 @@ var MixAgentsBrokerBackend = class {
   }
   async waitInternal(agent, signal, timeoutMs, onProgress, initialCursor) {
     const client = await this.ensureClient();
+    const startedAt = Date.now();
     const deadline = Date.now() + timeoutMs;
+    const mailboxReconcileMs = Math.max(
+      1,
+      this.options.mailboxReconcileMs ?? DEFAULT_MAILBOX_RECONCILE_MS
+    );
+    const statusNoticeMs = Math.max(
+      1,
+      this.options.statusNoticeMs ?? DEFAULT_STATUS_NOTICE_MS
+    );
     let cursor = initialCursor;
     let cursorGapReported = false;
+    let lastMailboxReconcileAt = startedAt;
+    let lastStatusNoticeAt = startedAt;
     while (Date.now() < deadline) {
       if (signal.aborted) throw abortError2();
       const remaining = Math.max(1, deadline - Date.now());
+      let snapshot;
       if (this.supportsProgressEvents) {
         try {
           const waitMs = Math.min(5e3, remaining);
@@ -15111,9 +15125,26 @@ var MixAgentsBrokerBackend = class {
             });
           }
           this.emitProgressEvents(progress, onProgress);
-          const status2 = stringValue2(progress.status);
-          if (status2 === "not_found") throw new SubagentAgentNotFoundError(agent.agentId);
-          if (status2 !== "completed" && status2 !== "failed" && status2 !== "interrupted") {
+          const status = stringValue2(progress.status);
+          if (status === "not_found") throw new SubagentAgentNotFoundError(agent.agentId);
+          const eventCursor = numberValue2(progress.eventCursor) ?? numberValue2(progress.nextCursor) ?? cursor;
+          const now = Date.now();
+          if (status === "completed" || status === "failed" || status === "interrupted" || now - lastMailboxReconcileAt >= mailboxReconcileMs) {
+            snapshot = await this.readAgentSnapshot(client, agent.agentId, signal);
+            lastMailboxReconcileAt = now;
+          }
+          const snapshotStatus = snapshot ? sideStatus(snapshot.status) : void 0;
+          const snapshotStillRunning = snapshotStatus === void 0 || snapshotStatus === "starting" || snapshotStatus === "running";
+          if (snapshotStillRunning && now - lastStatusNoticeAt >= statusNoticeMs) {
+            lastStatusNoticeAt = now;
+            onProgress?.({
+              type: "status",
+              status: snapshotStatus ?? sideStatus(status),
+              ...(numberValue2(snapshot?.eventCursor) ?? eventCursor) !== void 0 ? { cursor: numberValue2(snapshot?.eventCursor) ?? eventCursor } : {},
+              elapsedMs: now - startedAt
+            });
+          }
+          if (!snapshot) {
             continue;
           }
         } catch (error) {
@@ -15126,24 +15157,32 @@ var MixAgentsBrokerBackend = class {
           });
         }
       }
-      const waitBudget = Math.max(1, Math.min(WAIT_REQUEST_MS, deadline - Date.now()));
-      const result = await client.callTool("wait_agent", {
-        agentIds: [agent.agentId],
-        timeoutMs: waitBudget
-      }, { signal, timeoutMs: waitBudget + 1e4 }).catch((error) => {
-        throw translateToolError(error, agent.cwd);
-      });
-      const snapshot = firstAgent(result);
-      if (!snapshot) continue;
-      const status = snapshot.status;
-      if (status === "completed") return { status, text: stringValue2(snapshot.output) };
-      if (status === "failed") {
-        return { status, error: redactSecrets(stringValue2(snapshot.error) ?? "\u5B50\u4EE3\u7406\u6267\u884C\u5931\u8D25") };
+      if (!snapshot) {
+        const waitBudget = Math.max(1, Math.min(WAIT_REQUEST_MS, deadline - Date.now()));
+        const result2 = await client.callTool("wait_agent", {
+          agentIds: [agent.agentId],
+          timeoutMs: waitBudget
+        }, { signal, timeoutMs: waitBudget + 1e4 }).catch((error) => {
+          throw translateToolError(error, agent.cwd);
+        });
+        snapshot = firstAgent(result2);
       }
-      if (status === "interrupted") return { status };
-      if (status === "not_found") throw new SubagentAgentNotFoundError(agent.agentId);
+      if (!snapshot) continue;
+      const result = resultFromAgentSnapshot(snapshot);
+      if (result) return result;
     }
     return { status: "timeout", error: "\u5B50\u4EE3\u7406\u7B49\u5F85\u8D85\u65F6" };
+  }
+  async readAgentSnapshot(client, agentId, signal) {
+    const result = await client.callTool("list_agents", {}, {
+      signal,
+      timeoutMs: 1e4
+    });
+    const snapshot = Array.isArray(result.agents) ? result.agents.find(
+      (entry) => isRecord4(entry) && stringValue2(entry.agentId) === agentId
+    ) : void 0;
+    if (!isRecord4(snapshot)) throw new SubagentAgentNotFoundError(agentId);
+    return snapshot;
   }
   async send(agent, message, signal, timeoutMs = DEFAULT_TOTAL_WAIT_MS, onProgress) {
     const client = await this.ensureClient();
@@ -15283,7 +15322,8 @@ var MixAgentsBrokerBackend = class {
     this.supportsProgressEvents = false;
   }
   emitProgressEvents(value, onProgress) {
-    if (!onProgress || !Array.isArray(value.events)) return;
+    if (!onProgress || !Array.isArray(value.events)) return 0;
+    let emitted = 0;
     for (const raw of value.events) {
       if (!isRecord4(raw)) continue;
       const type = stringValue2(raw.type);
@@ -15296,6 +15336,16 @@ var MixAgentsBrokerBackend = class {
           ...itemId ? { itemId } : {},
           ...cursor !== void 0 ? { cursor } : {}
         });
+        emitted += 1;
+      } else if (type === "reasoning_summary_delta" && typeof raw.text === "string" && raw.text) {
+        const cursor = numberValue2(raw.seq);
+        onProgress({
+          type: "reasoning_summary",
+          text: raw.text,
+          ...itemId ? { itemId } : {},
+          ...cursor !== void 0 ? { cursor } : {}
+        });
+        emitted += 1;
       } else if (type === "tool_started" || type === "tool_completed") {
         const tool = stringValue2(raw.tool);
         if (tool) {
@@ -15306,9 +15356,11 @@ var MixAgentsBrokerBackend = class {
             ...itemId ? { itemId } : {},
             ...cursor !== void 0 ? { cursor } : {}
           });
+          emitted += 1;
         }
       }
     }
+    return emitted;
   }
 };
 function validateRuntimeOverrides(runtime) {
@@ -15491,6 +15543,23 @@ function agentFromSnapshot(value, fallback) {
 function firstAgent(value) {
   if (!Array.isArray(value.agents)) return void 0;
   return value.agents.find(isRecord4);
+}
+function resultFromAgentSnapshot(snapshot) {
+  const status = sideStatus(snapshot.status);
+  if (status === "completed") {
+    return { status, text: stringValue2(snapshot.output) };
+  }
+  if (status === "failed") {
+    return {
+      status,
+      error: redactSecrets(stringValue2(snapshot.error) ?? "\u5B50\u4EE3\u7406\u6267\u884C\u5931\u8D25")
+    };
+  }
+  if (status === "interrupted") return { status };
+  if (status === "not_found") {
+    throw new SubagentAgentNotFoundError(stringValue2(snapshot.agentId) ?? "unknown");
+  }
+  return void 0;
 }
 function sideStatus(value) {
   return value === "starting" || value === "running" || value === "completed" || value === "failed" || value === "interrupted" || value === "not_found" || value === "timeout" || value === "closed" ? value : "running";
@@ -20882,8 +20951,48 @@ var StructuredAdapter = class {
     const startedAt = Date.now();
     let lastActivityAt = startedAt;
     let softBudgetNoticeSent = softBudgetMs === void 0;
+    let reasoningBuffer = "";
+    let lastReasoningEmitAt = 0;
+    const flushReasoning = () => {
+      const text2 = reasoningBuffer.trim();
+      reasoningBuffer = "";
+      if (!text2) return;
+      log.info("agent", "mixagents-reasoning-summary", {
+        route: route.id,
+        chars: text2.length
+      });
+      emit2(textEvent(`\u{1F4AD} ${redactSecrets(text2)}
+`));
+    };
     const onProgress = (progress) => {
       lastActivityAt = Date.now();
+      if (progress.type === "reasoning_summary") {
+        if (progress.cursor !== void 0) streamedProgress.cursor = progress.cursor;
+        reasoningBuffer = `${reasoningBuffer}${redactSecrets(progress.text)}`.slice(-2e3);
+        const now = Date.now();
+        if (reasoningBuffer.length >= 1600 || now - lastReasoningEmitAt >= 5e3) {
+          lastReasoningEmitAt = now;
+          flushReasoning();
+        }
+        return;
+      }
+      if (progress.type === "status") {
+        if (progress.cursor !== void 0) streamedProgress.cursor = progress.cursor;
+        const elapsed = Math.max(
+          1,
+          Math.round((progress.elapsedMs ?? Date.now() - startedAt) / 1e3)
+        );
+        log.info("agent", "mixagents-status-heartbeat", {
+          route: route.id,
+          status: progress.status,
+          cursor: progress.cursor ?? null,
+          elapsedSeconds: elapsed
+        });
+        emit2(textEvent(
+          `\u23F3 MixAgents side \u4ECD\u5728\u8FD0\u884C\uFF1Astatus=${progress.status}\uFF0C\u5DF2\u7B49\u5F85 ${elapsed} \u79D2` + (progress.cursor !== void 0 ? `\uFF0Ccursor=${progress.cursor}` : "") + "\uFF1Bworker \u7EE7\u7EED\u5728\u540E\u53F0\u6267\u884C\u3002\n"
+        ));
+        return;
+      }
       if (progress.type === "text") {
         if (progress.cursor !== void 0) streamedProgress.cursor = progress.cursor;
         const text2 = redactSecrets(progress.text);
@@ -20935,6 +21044,7 @@ var StructuredAdapter = class {
     try {
       return await operation(onProgress);
     } finally {
+      flushReasoning();
       if (timer) clearInterval(timer);
     }
   }

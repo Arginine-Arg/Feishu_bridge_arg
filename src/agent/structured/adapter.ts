@@ -1437,8 +1437,50 @@ export class StructuredAdapter implements AgentAdapter {
     const startedAt = Date.now();
     let lastActivityAt = startedAt;
     let softBudgetNoticeSent = softBudgetMs === undefined;
+    let reasoningBuffer = '';
+    let lastReasoningEmitAt = 0;
+    const flushReasoning = (): void => {
+      const text = reasoningBuffer.trim();
+      reasoningBuffer = '';
+      if (!text) return;
+      log.info('agent', 'mixagents-reasoning-summary', {
+        route: route.id,
+        chars: text.length,
+      });
+      emit(textEvent(`💭 ${redactSecrets(text)}\n`));
+    };
     const onProgress = (progress: SideAgentProgress): void => {
       lastActivityAt = Date.now();
+      if (progress.type === 'reasoning_summary') {
+        if (progress.cursor !== undefined) streamedProgress.cursor = progress.cursor;
+        reasoningBuffer = `${reasoningBuffer}${redactSecrets(progress.text)}`.slice(-2_000);
+        const now = Date.now();
+        if (reasoningBuffer.length >= 1_600 || now - lastReasoningEmitAt >= 5_000) {
+          lastReasoningEmitAt = now;
+          flushReasoning();
+        }
+        return;
+      }
+      if (progress.type === 'status') {
+        if (progress.cursor !== undefined) streamedProgress.cursor = progress.cursor;
+        const elapsed = Math.max(
+          1,
+          Math.round((progress.elapsedMs ?? (Date.now() - startedAt)) / 1_000),
+        );
+        log.info('agent', 'mixagents-status-heartbeat', {
+          route: route.id,
+          status: progress.status,
+          cursor: progress.cursor ?? null,
+          elapsedSeconds: elapsed,
+        });
+        emit(textEvent(
+          `⏳ MixAgents side 仍在运行：status=${progress.status}` +
+          `，已等待 ${elapsed} 秒` +
+          (progress.cursor !== undefined ? `，cursor=${progress.cursor}` : '') +
+          '；worker 继续在后台执行。\n',
+        ));
+        return;
+      }
       if (progress.type === 'text') {
         if (progress.cursor !== undefined) streamedProgress.cursor = progress.cursor;
         const text = redactSecrets(progress.text);
@@ -1496,6 +1538,7 @@ export class StructuredAdapter implements AgentAdapter {
     try {
       return await operation(onProgress);
     } finally {
+      flushReasoning();
       if (timer) clearInterval(timer);
     }
   }

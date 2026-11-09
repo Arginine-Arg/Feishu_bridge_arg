@@ -236,6 +236,32 @@ test("tool progress exposes lifecycle metadata without command or output data", 
   }
 });
 
+test("reasoning summaries are exposed as bounded progress", async () => {
+  const app = await harness();
+  try {
+    const spawned = await app.broker.spawnAgent({
+      route: "test-route",
+      task: "reasoning progress",
+      cwd: app.workspace,
+    });
+    await app.broker.waitAgents([spawned.agentId], 2_000);
+    const page = await app.broker.readAgentEvents(spawned.agentId, {
+      cursor: 0,
+      maxEvents: 100,
+      waitMs: 0,
+    });
+    assert.equal(
+      page.events
+        .filter((event) => event.type === "reasoning_summary_delta")
+        .map((event) => event.text)
+        .join(""),
+      "checking evidence and tests",
+    );
+  } finally {
+    await app.close();
+  }
+});
+
 test("long-poll progress reads are cancellable", async () => {
   const app = await harness();
   try {

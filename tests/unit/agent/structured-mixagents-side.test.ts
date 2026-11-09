@@ -1266,6 +1266,8 @@ describe('structured MixAgents /btw', () => {
     const backend = new FakeBackend(() => routeA);
     backend.waitProgress = [
       { type: 'text', text: 'sk-super-secret ' },
+      { type: 'reasoning_summary', text: 'checking the evidence', cursor: 3 },
+      { type: 'status', status: 'running', cursor: 4, elapsedMs: 60_000 },
       { type: 'tool_started', tool: 'commandExecution', itemId: 'tool-1' },
       { type: 'tool_completed', tool: 'commandExecution', itemId: 'tool-1' },
       { type: 'text', text: 'answer' },
@@ -1299,6 +1301,18 @@ describe('structured MixAgents /btw', () => {
     expect(events).toContainEqual(expect.objectContaining({
       type: 'text',
       delta: 'answer',
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'text',
+      delta: expect.stringContaining('💭 checking the evidence'),
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'text',
+      delta: expect.stringContaining('status=running'),
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'text',
+      delta: expect.stringContaining('cursor=4'),
     }));
     expect(events).toContainEqual(expect.objectContaining({
       type: 'tool_use',

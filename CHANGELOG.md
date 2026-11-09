@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.18.0
+
+- Reconciles `/btw` and subagent progress with the read-only `list_agents`
+  mailbox every 15 seconds, so a silent or stale `read_agent_events` stream
+  cannot hide an already completed/failed worker until the hard wait ends.
+- Emits a status-only liveness update at least every 60 seconds with the real
+  Broker status and event cursor, while retaining the existing 15-second
+  heartbeat for a completely stalled backend call.
+- Forwards bounded, redacted Codex reasoning summaries as throttled progress.
+  Raw reasoning text, tool arguments, command strings and command output remain
+  excluded, and summaries never enter the authoritative final answer text.
+- Keeps terminal `wait_agent`/mailbox results authoritative and automatically
+  continues across wait windows without duplicating final output.
+
 ## 1.17.0
 
 - Supports `arg-bridge native --bridge <thread-id> --follow-current-provider`.

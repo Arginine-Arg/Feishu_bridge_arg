@@ -47,21 +47,27 @@ the capability as optional: older Broker servers continue to use
     { "seq": 130, "type": "text_delta", "text": "Inspecting " },
     {
       "seq": 131,
+      "type": "reasoning_summary_delta",
+      "text": "Checking the evidence. ",
+      "itemId": "reasoning-1"
+    },
+    {
+      "seq": 132,
       "type": "tool_started",
       "tool": "commandExecution",
       "itemId": "item-1"
     },
     {
-      "seq": 132,
+      "seq": 133,
       "type": "tool_completed",
       "tool": "commandExecution",
       "itemId": "item-1"
     },
-    { "seq": 133, "type": "text_delta", "text": "the receipts." },
-    { "seq": 134, "type": "turn_completed", "status": "completed" }
+    { "seq": 134, "type": "text_delta", "text": "the receipts." },
+    { "seq": 135, "type": "turn_completed", "status": "completed" }
   ],
-  "nextCursor": 134,
-  "eventCursor": 134,
+  "nextCursor": 135,
+  "eventCursor": 135,
   "status": "completed",
   "done": true,
   "cursorExpired": false,
@@ -71,6 +77,9 @@ the capability as optional: older Broker servers continue to use
 
 The terminal `wait_agent` mailbox remains authoritative for final text and
 errors. Progress events are advisory and cannot replace the final result.
+ArgBridge also performs a read-only `list_agents` reconciliation every 15
+seconds while a side or worker is running. This detects a terminal mailbox even
+if the event stream stays quiet or misses its final event.
 
 ## Buffering and recovery
 
@@ -90,7 +99,9 @@ progress events are not replayed.
 
 ## Security boundary
 
-- Only model text deltas and item lifecycle metadata cross the progress API.
+- Only model text deltas, user-visible reasoning summaries and item lifecycle
+  metadata cross the progress API.
+- Raw reasoning text (`item/reasoning/textDelta`) is not forwarded.
 - Tool args, command strings, command output, file contents, credentials and
   provider headers are not included in tool progress events.
 - ArgBridge redacts streamed and final text before emitting it to Feishu or a

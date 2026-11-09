@@ -12,6 +12,7 @@ import {
   type SideAgentInput,
   type SideAgentProgressHandler,
   type SideAgentResult,
+  type SideAgentStatus,
   type SubagentBackend,
   type SubagentRoute,
 } from './types';
@@ -27,6 +28,8 @@ const REQUIRED_TOOLS = [
 
 const WAIT_REQUEST_MS = 120_000;
 const DEFAULT_TOTAL_WAIT_MS = 15 * 60_000;
+const DEFAULT_MAILBOX_RECONCILE_MS = 15_000;
+const DEFAULT_STATUS_NOTICE_MS = 60_000;
 const require = createRequire(import.meta.url);
 
 export interface MixAgentsLaunchConfig {
@@ -49,6 +52,10 @@ export interface MixAgentsRuntimeOverrides {
 export interface MixAgentsBrokerBackendOptions {
   /** Test seam; production resolves the bundled compatible MCP entrypoint. */
   recoveryLaunch?: MixAgentsLaunchConfig;
+  /** Read-only terminal mailbox reconciliation interval while events are quiet. */
+  mailboxReconcileMs?: number;
+  /** Maximum interval between status-only progress updates. */
+  statusNoticeMs?: number;
 }
 
 /**
@@ -275,12 +282,24 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
     initialCursor: number,
   ): Promise<SideAgentResult> {
     const client = await this.ensureClient();
+    const startedAt = Date.now();
     const deadline = Date.now() + timeoutMs;
+    const mailboxReconcileMs = Math.max(
+      1,
+      this.options.mailboxReconcileMs ?? DEFAULT_MAILBOX_RECONCILE_MS,
+    );
+    const statusNoticeMs = Math.max(
+      1,
+      this.options.statusNoticeMs ?? DEFAULT_STATUS_NOTICE_MS,
+    );
     let cursor = initialCursor;
     let cursorGapReported = false;
+    let lastMailboxReconcileAt = startedAt;
+    let lastStatusNoticeAt = startedAt;
     while (Date.now() < deadline) {
       if (signal.aborted) throw abortError();
       const remaining = Math.max(1, deadline - Date.now());
+      let snapshot: Record<string, unknown> | undefined;
       if (this.supportsProgressEvents) {
         try {
           const waitMs = Math.min(5_000, remaining);
@@ -302,7 +321,38 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
           this.emitProgressEvents(progress, onProgress);
           const status = stringValue(progress.status);
           if (status === 'not_found') throw new SubagentAgentNotFoundError(agent.agentId);
-          if (status !== 'completed' && status !== 'failed' && status !== 'interrupted') {
+          const eventCursor = numberValue(progress.eventCursor)
+            ?? numberValue(progress.nextCursor)
+            ?? cursor;
+          const now = Date.now();
+          if (
+            status === 'completed' ||
+            status === 'failed' ||
+            status === 'interrupted' ||
+            now - lastMailboxReconcileAt >= mailboxReconcileMs
+          ) {
+            snapshot = await this.readAgentSnapshot(client, agent.agentId, signal);
+            lastMailboxReconcileAt = now;
+          }
+          const snapshotStatus = snapshot ? sideStatus(snapshot.status) : undefined;
+          const snapshotStillRunning = snapshotStatus === undefined ||
+            snapshotStatus === 'starting' ||
+            snapshotStatus === 'running';
+          if (
+            snapshotStillRunning &&
+            now - lastStatusNoticeAt >= statusNoticeMs
+          ) {
+            lastStatusNoticeAt = now;
+            onProgress?.({
+              type: 'status',
+              status: snapshotStatus ?? sideStatus(status),
+              ...(numberValue(snapshot?.eventCursor) ?? eventCursor) !== undefined
+                ? { cursor: numberValue(snapshot?.eventCursor) ?? eventCursor }
+                : {},
+              elapsedMs: now - startedAt,
+            });
+          }
+          if (!snapshot) {
             continue;
           }
         } catch (error) {
@@ -315,25 +365,40 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
           });
         }
       }
-      const waitBudget = Math.max(1, Math.min(WAIT_REQUEST_MS, deadline - Date.now()));
-      const result = await client.callTool('wait_agent', {
-        agentIds: [agent.agentId],
-        timeoutMs: waitBudget,
-      }, { signal, timeoutMs: waitBudget + 10_000 }).catch(error => {
-        throw translateToolError(error, agent.cwd);
-      });
-      const snapshot = firstAgent(result);
-      if (!snapshot) continue;
-      const status = snapshot.status;
-      if (status === 'completed') return { status, text: stringValue(snapshot.output) };
-      if (status === 'failed') {
-        return { status, error: redactSecrets(stringValue(snapshot.error) ?? '子代理执行失败') };
+      if (!snapshot) {
+        const waitBudget = Math.max(1, Math.min(WAIT_REQUEST_MS, deadline - Date.now()));
+        const result = await client.callTool('wait_agent', {
+          agentIds: [agent.agentId],
+          timeoutMs: waitBudget,
+        }, { signal, timeoutMs: waitBudget + 10_000 }).catch(error => {
+          throw translateToolError(error, agent.cwd);
+        });
+        snapshot = firstAgent(result);
       }
-      if (status === 'interrupted') return { status };
-      if (status === 'not_found') throw new SubagentAgentNotFoundError(agent.agentId);
+      if (!snapshot) continue;
+      const result = resultFromAgentSnapshot(snapshot);
+      if (result) return result;
       // starting/running: wait_agent timed out; loop until the total deadline.
     }
     return { status: 'timeout', error: '子代理等待超时' };
+  }
+
+  private async readAgentSnapshot(
+    client: McpStdioClient,
+    agentId: string,
+    signal: AbortSignal,
+  ): Promise<Record<string, unknown>> {
+    const result = await client.callTool('list_agents', {}, {
+      signal,
+      timeoutMs: 10_000,
+    });
+    const snapshot = Array.isArray(result.agents)
+      ? result.agents.find(entry =>
+          isRecord(entry) && stringValue(entry.agentId) === agentId
+        )
+      : undefined;
+    if (!isRecord(snapshot)) throw new SubagentAgentNotFoundError(agentId);
+    return snapshot;
   }
 
   async send(
@@ -494,8 +559,9 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
   private emitProgressEvents(
     value: Record<string, unknown>,
     onProgress: SideAgentProgressHandler | undefined,
-  ): void {
-    if (!onProgress || !Array.isArray(value.events)) return;
+  ): number {
+    if (!onProgress || !Array.isArray(value.events)) return 0;
+    let emitted = 0;
     for (const raw of value.events) {
       if (!isRecord(raw)) continue;
       const type = stringValue(raw.type);
@@ -508,6 +574,16 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
           ...(itemId ? { itemId } : {}),
           ...(cursor !== undefined ? { cursor } : {}),
         });
+        emitted += 1;
+      } else if (type === 'reasoning_summary_delta' && typeof raw.text === 'string' && raw.text) {
+        const cursor = numberValue(raw.seq);
+        onProgress({
+          type: 'reasoning_summary',
+          text: raw.text,
+          ...(itemId ? { itemId } : {}),
+          ...(cursor !== undefined ? { cursor } : {}),
+        });
+        emitted += 1;
       } else if (type === 'tool_started' || type === 'tool_completed') {
         const tool = stringValue(raw.tool);
         if (tool) {
@@ -518,9 +594,11 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
             ...(itemId ? { itemId } : {}),
             ...(cursor !== undefined ? { cursor } : {}),
           });
+          emitted += 1;
         }
       }
     }
+    return emitted;
   }
 }
 
@@ -792,6 +870,26 @@ function agentFromSnapshot(
 function firstAgent(value: Record<string, unknown>): Record<string, unknown> | undefined {
   if (!Array.isArray(value.agents)) return undefined;
   return value.agents.find(isRecord);
+}
+
+function resultFromAgentSnapshot(
+  snapshot: Record<string, unknown>,
+): SideAgentResult | undefined {
+  const status = sideStatus(snapshot.status);
+  if (status === 'completed') {
+    return { status, text: stringValue(snapshot.output) };
+  }
+  if (status === 'failed') {
+    return {
+      status,
+      error: redactSecrets(stringValue(snapshot.error) ?? '子代理执行失败'),
+    };
+  }
+  if (status === 'interrupted') return { status };
+  if (status === 'not_found') {
+    throw new SubagentAgentNotFoundError(stringValue(snapshot.agentId) ?? 'unknown');
+  }
+  return undefined;
 }
 
 function sideStatus(value: unknown): SideAgent['status'] {
