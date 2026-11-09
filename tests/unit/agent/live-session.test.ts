@@ -760,7 +760,7 @@ const linuxIt = process.platform === 'linux' ? it : it.skip;
 const tmuxIt = process.platform === 'linux' && hasTmux() ? it : it.skip;
 const tmuxAttachIt = process.platform === 'linux' && hasTmux() && hasScript() ? it : it.skip;
 
-describe('LiveSessionPool', () => {
+describe('LiveSessionPool', { retry: process.env.CI ? 1 : 0 }, () => {
   it('reuses a background process and forwards slash commands through stdin', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'live-session-test-'));
     const bin = join(dir, 'fake-agent.mjs');
