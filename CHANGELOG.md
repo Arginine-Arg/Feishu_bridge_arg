@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.18.1
+
+- Replaces the read-only `list_agents` mailbox probe with non-blocking
+  `wait_agent(timeoutMs=0)` reconciliation every five seconds. Only
+  `wait_agent` drains pending App Server approval and interaction requests.
+- Fixes permission prompts such as “retrying with elevated permissions”
+  remaining pending forever while the worker stayed `running` with a frozen
+  event cursor. Disallowed escalation is now declined promptly and returned to
+  the worker as a tool result instead of hanging the side.
+- Preserves the 1.18.0 terminal mailbox recovery, status heartbeat, reasoning
+  summary streaming and final-answer de-duplication.
+
 ## 1.18.0
 
 - Reconciles `/btw` and subagent progress with the read-only `list_agents`

@@ -278,8 +278,18 @@ describe('MixAgentsBrokerBackend', () => {
         cwd: root,
         access: 'read-only',
       });
-      expect(state.calls.filter((call: { tool: string }) => call.tool === 'wait_agent')).toHaveLength(0);
-      expect(state.calls.filter((call: { tool: string }) => call.tool === 'list_agents')).toHaveLength(2);
+      const waitCalls = state.calls.filter(
+        (call: { tool: string }) => call.tool === 'wait_agent',
+      );
+      expect(waitCalls).toHaveLength(2);
+      expect(waitCalls).toEqual([
+        expect.objectContaining({
+          arguments: expect.objectContaining({ timeoutMs: 0 }),
+        }),
+        expect.objectContaining({
+          arguments: expect.objectContaining({ timeoutMs: 0 }),
+        }),
+      ]);
     } finally {
       await backend.closeBackend();
     }

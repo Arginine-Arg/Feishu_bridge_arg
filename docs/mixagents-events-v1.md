@@ -77,9 +77,11 @@ the capability as optional: older Broker servers continue to use
 
 The terminal `wait_agent` mailbox remains authoritative for final text and
 errors. Progress events are advisory and cannot replace the final result.
-ArgBridge also performs a read-only `list_agents` reconciliation every 15
-seconds while a side or worker is running. This detects a terminal mailbox even
-if the event stream stays quiet or misses its final event.
+ArgBridge performs a non-blocking `wait_agent(timeoutMs=0)` reconciliation
+every five seconds while a side or worker is running. This detects a terminal
+mailbox even if the event stream stays quiet or misses its final event, and it
+drains pending App Server approval/interaction requests. A read-only
+`list_agents` probe alone cannot perform that interaction handoff.
 
 ## Buffering and recovery
 

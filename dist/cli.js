@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.18.0",
+  version: "1.18.1",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -14937,7 +14937,7 @@ var REQUIRED_TOOLS = [
 ];
 var WAIT_REQUEST_MS = 12e4;
 var DEFAULT_TOTAL_WAIT_MS = 15 * 6e4;
-var DEFAULT_MAILBOX_RECONCILE_MS = 15e3;
+var DEFAULT_MAILBOX_RECONCILE_MS = 5e3;
 var DEFAULT_STATUS_NOTICE_MS = 6e4;
 var require3 = createRequire2(import.meta.url);
 var MixAgentsBrokerBackend = class {
@@ -15130,7 +15130,7 @@ var MixAgentsBrokerBackend = class {
           const eventCursor = numberValue2(progress.eventCursor) ?? numberValue2(progress.nextCursor) ?? cursor;
           const now = Date.now();
           if (status === "completed" || status === "failed" || status === "interrupted" || now - lastMailboxReconcileAt >= mailboxReconcileMs) {
-            snapshot = await this.readAgentSnapshot(client, agent.agentId, signal);
+            snapshot = await this.readAgentMailboxSnapshot(client, agent.agentId, signal);
             lastMailboxReconcileAt = now;
           }
           const snapshotStatus = snapshot ? sideStatus(snapshot.status) : void 0;
@@ -15173,8 +15173,11 @@ var MixAgentsBrokerBackend = class {
     }
     return { status: "timeout", error: "\u5B50\u4EE3\u7406\u7B49\u5F85\u8D85\u65F6" };
   }
-  async readAgentSnapshot(client, agentId, signal) {
-    const result = await client.callTool("list_agents", {}, {
+  async readAgentMailboxSnapshot(client, agentId, signal) {
+    const result = await client.callTool("wait_agent", {
+      agentIds: [agentId],
+      timeoutMs: 0
+    }, {
       signal,
       timeoutMs: 1e4
     });

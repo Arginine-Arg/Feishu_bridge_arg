@@ -328,12 +328,14 @@ arrive. Reasoning summaries are throttled and never become part of the final
 answer text. `wait_agent` and the mailbox snapshot remain authoritative for the
 final text/error.
 
-Bridge reconciles the read-only `list_agents` mailbox every 15 seconds, so a
-completed/failed worker is recovered even when the progress stream is quiet or
-stale. A completely stalled backend call still receives the 15-second fallback
-heartbeat. Every 60 seconds Bridge also emits a status update containing the
-real Broker status and event cursor. Consumers therefore no longer have to
-guess whether the worker is still alive or the Bridge stopped forwarding.
+Bridge reconciles the mailbox with non-blocking `wait_agent(timeoutMs=0)` every
+five seconds. Besides recovering a completed/failed worker from a quiet event
+stream, this is the only path that drains App Server command/file approval and
+other pending interaction requests. A denied extra-permission request is
+returned to the worker as a tool result instead of leaving the turn indefinitely
+`running`. A completely stalled backend call still receives the 15-second
+fallback heartbeat. Every 60 seconds Bridge also emits a status update
+containing the real Broker status and event cursor.
 
 When one `workerTimeoutMs` window ends without a terminal result, Bridge emits a
 continuation notice and waits again from the persisted event cursor. `/btw out`

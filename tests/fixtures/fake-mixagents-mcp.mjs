@@ -291,6 +291,16 @@ async function handleTool(name, args, id) {
     return tool(id, agentPayload(agent));
   }
   if (name === 'wait_agent') {
+    if (process.env.FAKE_MIXAGENTS_SILENT_EVENT_STREAM === '1') {
+      state.silentWaitCalls = Number(state.silentWaitCalls ?? 0) + 1;
+      if (state.silentWaitCalls === 1) {
+        await persist();
+        return tool(id, {
+          timedOut: true,
+          agents: [agentPayload(agent, 'running')],
+        });
+      }
+    }
     agent.status = 'completed';
     await persist();
     return tool(id, {

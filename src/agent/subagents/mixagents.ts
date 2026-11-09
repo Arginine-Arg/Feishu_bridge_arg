@@ -28,7 +28,7 @@ const REQUIRED_TOOLS = [
 
 const WAIT_REQUEST_MS = 120_000;
 const DEFAULT_TOTAL_WAIT_MS = 15 * 60_000;
-const DEFAULT_MAILBOX_RECONCILE_MS = 15_000;
+const DEFAULT_MAILBOX_RECONCILE_MS = 5_000;
 const DEFAULT_STATUS_NOTICE_MS = 60_000;
 const require = createRequire(import.meta.url);
 
@@ -331,7 +331,7 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
             status === 'interrupted' ||
             now - lastMailboxReconcileAt >= mailboxReconcileMs
           ) {
-            snapshot = await this.readAgentSnapshot(client, agent.agentId, signal);
+            snapshot = await this.readAgentMailboxSnapshot(client, agent.agentId, signal);
             lastMailboxReconcileAt = now;
           }
           const snapshotStatus = snapshot ? sideStatus(snapshot.status) : undefined;
@@ -383,12 +383,19 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
     return { status: 'timeout', error: '子代理等待超时' };
   }
 
-  private async readAgentSnapshot(
+  private async readAgentMailboxSnapshot(
     client: McpStdioClient,
     agentId: string,
     signal: AbortSignal,
   ): Promise<Record<string, unknown>> {
-    const result = await client.callTool('list_agents', {}, {
+    // `wait_agent(timeout=0)` is a non-blocking mailbox reconciliation. It
+    // also drains App Server approval/interaction requests; `list_agents` alone
+    // leaves those requests pending forever, which made privileged commands
+    // appear to hang at running/cursor-stable.
+    const result = await client.callTool('wait_agent', {
+      agentIds: [agentId],
+      timeoutMs: 0,
+    }, {
       signal,
       timeoutMs: 10_000,
     });
