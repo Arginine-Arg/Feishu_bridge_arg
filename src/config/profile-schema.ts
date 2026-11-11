@@ -4,6 +4,7 @@ import type {
   MessageReplyMode,
   SecretsConfig,
 } from './schema';
+import { normalizeProviderRecovery, type ProviderRecoveryConfig } from './provider-recovery';
 import {
   normalizePermissions,
   permissionsToLegacySandbox,
@@ -32,6 +33,7 @@ export interface SandboxConfig {
 }
 
 export interface CodexConfig {
+  providerRecovery?: Partial<ProviderRecoveryConfig>;
   binaryPath: string;
   realpath?: string;
   version?: string;
@@ -414,6 +416,7 @@ function normalizeCodex(input: CodexConfig & { flags?: unknown }): CodexConfig {
     inheritCodexHome: input.inheritCodexHome !== false,
     ignoreUserConfig: input.ignoreUserConfig === true,
     ignoreRules: input.ignoreRules !== false,
+    ...(input.providerRecovery ? { providerRecovery: normalizeProviderRecovery(input.providerRecovery) } : {}),
   };
   return codex;
 }

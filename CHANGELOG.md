@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.19.0
+
+- Adds bounded provider-error continuation for Codex structured main sessions.
+  Transient terminal failures back off 30/60/120 seconds; explicit API retries
+  with 60 seconds of no text/tool progress are interrupted first, then continued
+  after a confirmed terminal event. Stops, goals paused by users, authorization,
+  quota, context and sandbox failures do not trigger recovery.
+- Adds settings controls for all providers, selected provider IDs, or disabled
+  recovery. Reattaches recovery observers to an unambiguous already-loaded
+  saved main thread after bot restart, without creating dormant tasks.
+- Sends structured text/card output as coalesced, acknowledged full snapshots.
+  Detects Feishu business-code rejections, rebuilds one expired/withdrawn card,
+  and falls back to the complete final reply on terminal delivery failure.
+- Reconciles completed Codex message items and turn snapshots by message ID,
+  preserving corrected final prose and missing suffixes without replaying
+  normal streamed prefixes. Command output preferences remain effective.
+
 ## 1.18.1
 
 - Replaces the read-only `list_agents` mailbox probe with non-blocking

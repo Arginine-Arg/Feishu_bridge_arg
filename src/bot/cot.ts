@@ -315,6 +315,9 @@ export async function consumeCotEvents(
         continue;
       }
       if (evt.type === 'text') {
+        // CoT's append protocol cannot revise a published message. Close its
+        // draft and publish the corrected item as a separate complete entry.
+        if (evt.replace) closeTextIfNeeded();
         closeReasoningIfNeeded();
         if (!textStepOpen) {
           textStepOpen = true;

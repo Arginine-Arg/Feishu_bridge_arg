@@ -4,7 +4,7 @@ A lightweight bot that bridges Feishu / Lark messenger with your local Claude Co
 
 [中文 README](./README.zh.md)
 
-Version 1.18.1 fixes `/btw` and MixAgents workers hanging at a pending permission/approval prompt. A non-blocking `wait_agent(timeoutMs=0)` reconciliation now drains App Server interactions every five seconds, so a denied escalation reaches the worker as a tool result instead of leaving it `running` with a frozen cursor. Version 1.18.0 adds terminal-mailbox recovery, real status heartbeats and bounded reasoning-summary progress. Version 1.17.0 lets native Bridge threads follow the current provider in place; 1.16.x adds structured menu controls, file-delivery recovery and per-provider subagent model settings.
+Version 1.19.0 adds bounded automatic continuation for temporary provider failures and stalled API reconnections. After 60 seconds of explicit retry silence, Bridge interrupts that turn and confirms it has ended before continuing. Settings can limit recovery to selected providers. Structured replies use acknowledged, coalesced full-card updates and reconcile complete message text, fixing frozen prefixes and missing final text. See [recovery settings and limits](./docs/structured-backend.md#provider-recovery-1190).
 
 Version 1.6.7 introduced provider-aware Codex resume, and 1.7.0 added idle-boundary rebinding. Version 1.9.1 narrows reattachment semantics: reconnecting to an existing native or structured thread preserves the provider/model recorded by that thread instead of silently following a newly selected cc-switch route.
 
@@ -60,7 +60,7 @@ Install a pinned release or use a writable custom npm prefix when required:
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.18.1
+sh /tmp/install-arg-bridge.sh --version 1.19.0
 # Example for a machine without permission to write npm's configured global prefix:
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ Release tarballs are preferred. If a Git install is required, keep both compatib
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.18.1"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.19.0"
 ```
 
-`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.18.1`.
+`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.19.0`.
 
 ### 4. Node or npm global-prefix errors
 

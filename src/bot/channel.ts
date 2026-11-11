@@ -102,6 +102,7 @@ import { fetchKnownChats } from './lark-info';
 import { ArtifactBroker } from './artifact-broker';
 import { InboundMessageLedger } from './inbound-message-ledger';
 import { RunEventGate, SerializedDelivery } from './run-delivery';
+import { acknowledgedStream } from './acknowledged-stream';
 import {
   contentWithoutLeadingMention,
   effectiveLiveInputMode,
@@ -2757,6 +2758,9 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   };
   const prepareStateForReply = (state: RunState): RunState =>
     filterForPrefs(withNativeEmptyFallback(state));
+  const streamReply: LarkChannel['stream'] = agent.structuredControl
+    ? async (to, input, options) => { await acknowledgedStream(channel, to, input, options); return { messageId: '' }; }
+    : channel.stream.bind(channel);
   const cardRenderOptions = callbackAuth
     ? {
         structuredOnly: Boolean(agent.structuredControl),
@@ -3015,8 +3019,6 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       const deliverLongReply = async (): Promise<void> => {
         if (!longReplyText || longReplyDelivered || handle.detached) return;
         if (currentOutputMode() === 'off') return;
-        longReplyDelivered = true;
-        freshFinalPosted = true;
         await sendCompleteReplyChunks({
           channel,
           chatId,
@@ -3025,12 +3027,13 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           scope,
           replyMode: 'card',
         });
+        longReplyDelivered = true;
+        freshFinalPosted = true;
       };
       const postFreshFinal = async (state: RunState): Promise<void> => {
         if (handle.detached) return;
         if (freshFinalPosted) return;
         if (currentOutputMode() === 'off') return;
-        freshFinalPosted = true;
         const replyState =
           currentOutputMode() === 'final'
             ? finalAnswerOnlyState(prepareStateForReply(state))
@@ -3057,6 +3060,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           ),
           { scope, chunk: 0, total: 0, warning: true },
         );
+        freshFinalPosted = true;
       };
       let lastSentCardSerialized: string | undefined;
       const renderDone = processAgentStream(
@@ -3135,6 +3139,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       );
       await runRollingReplyStream({
         mode: replyMode,
+        rolloverMs: agent.structuredControl ? 0 : undefined,
+        terminalGraceMs: agent.structuredControl ? 35_000 : undefined,
         renderDone,
         startSegment: (segmentDone, markProducerStarted, segment) => {
           segmentBaseText = segment === 1 ? '' : runStateTextCursor(prepareStateForReply(latestState));
@@ -3153,7 +3159,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
             if (segment > 1 && !hasNewText) return;
             if (segment > 1 && !segmentTextReadyFlag) return;
             const currentSegmentState = stateForDelivery(latestState);
-            return channel.stream(
+            return streamReply(
             chatId,
             {
               card: {
@@ -3245,8 +3251,6 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       const deliverLongReply = async (): Promise<void> => {
         if (!longReplyText || longReplyDelivered || handle.detached) return;
         if (currentOutputMode() === 'off') return;
-        longReplyDelivered = true;
-        freshFinalPosted = true;
         await sendCompleteReplyChunks({
           channel,
           chatId,
@@ -3255,12 +3259,13 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           scope,
           replyMode: 'markdown',
         });
+        longReplyDelivered = true;
+        freshFinalPosted = true;
       };
       const postFreshFinal = async (state: RunState): Promise<void> => {
         if (handle.detached) return;
         if (freshFinalPosted) return;
         if (currentOutputMode() === 'off') return;
-        freshFinalPosted = true;
         const replyState =
           currentOutputMode() === 'final'
             ? finalAnswerOnlyState(prepareStateForReply(state))
@@ -3280,6 +3285,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
             () => channel.send(chatId, { markdown: body }, sendOpts),
             { scope, chunk: 0, total: 0, warning: true },
           );
+          freshFinalPosted = true;
         }
       };
       let lastSentMarkdownText: string | undefined;
@@ -3351,6 +3357,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       );
       await runRollingReplyStream({
         mode: replyMode,
+        rolloverMs: agent.structuredControl ? 0 : undefined,
+        terminalGraceMs: agent.structuredControl ? 35_000 : undefined,
         renderDone,
         startSegment: (segmentDone, markProducerStarted, segment) => {
           segmentBaseText = segment === 1 ? '' : runStateTextCursor(prepareStateForReply(latestState));
@@ -3369,7 +3377,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
             if (segment > 1 && !hasNewText) return;
             if (segment > 1 && !segmentTextReadyFlag) return;
             const currentSegmentState = stateForDelivery(latestState);
-            return channel.stream(
+            return streamReply(
             chatId,
             {
               markdown: async (ctrl) => {
@@ -3966,6 +3974,7 @@ export async function runRollingReplyStream(input: {
   ) => Promise<unknown>;
   fallback: (state: RunState) => Promise<void>;
   rolloverMs?: number;
+  terminalGraceMs?: number;
 }): Promise<void> {
   let renderSettled = false;
   const renderResult = input.renderDone.then(
@@ -3986,7 +3995,8 @@ export async function runRollingReplyStream(input: {
     let producerStarted = false;
     let rolloverTimer: NodeJS.Timeout | undefined;
     const rollover = new Promise<void>((resolve) => {
-      rolloverTimer = setTimeout(resolve, rolloverMs);
+      // Acknowledged full-card snapshots have no typewriter stream expiry.
+      if (rolloverMs > 0) rolloverTimer = setTimeout(resolve, rolloverMs);
     });
     const segmentDone = Promise.race([
       renderResult.then(() => undefined),
@@ -4026,7 +4036,7 @@ export async function runRollingReplyStream(input: {
 
       const terminal = await Promise.race([
         streamResult,
-        delay(STREAM_TERMINAL_GRACE_MS).then(() => undefined),
+        delay(input.terminalGraceMs ?? STREAM_TERMINAL_GRACE_MS).then(() => undefined),
       ]);
       if (!terminal) {
         log.warn('stream', 'terminal-grace-expired', {
@@ -4050,7 +4060,10 @@ export async function runRollingReplyStream(input: {
         await runFallbackReply(input.mode, first.state, input.fallback);
         return;
       }
-      if (!terminal.ok) throw terminal.err;
+      if (!terminal.ok) {
+        log.fail('stream', terminal.err, { mode: input.mode, segment, step: 'terminal' });
+        await runFallbackReply(input.mode, first.state, input.fallback);
+      }
       return;
     }
 
@@ -4084,6 +4097,7 @@ async function runFallbackReply(
     await fallback(state);
   } catch (err) {
     log.fail('stream', err, { mode, step: 'fallback' });
+    throw err;
   }
 }
 

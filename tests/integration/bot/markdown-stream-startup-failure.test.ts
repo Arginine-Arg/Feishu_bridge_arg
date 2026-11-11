@@ -62,6 +62,7 @@ interface FakeLarkChannel {
       v1: {
         message: {
           get: ReturnType<typeof vi.fn>;
+          patch: ReturnType<typeof vi.fn>;
         };
         messageReaction: {
           create: ReturnType<typeof vi.fn>;
@@ -75,7 +76,7 @@ interface FakeLarkChannel {
   disconnect(): Promise<void>;
   getChatMode(chatId: string): Promise<'group' | 'topic'>;
   getConnectionStatus(): { state: 'connected'; reconnectAttempts: number };
-  send(chatId: string, content: unknown, options?: unknown): Promise<void>;
+  send(chatId: string, content: unknown, options?: unknown): Promise<{ messageId: string }>;
   stream(chatId: string, input: unknown, options?: unknown): Promise<void>;
   addReaction(messageId: string, emojiType: string): Promise<string>;
   removeReaction(messageId: string, reactionId: string): Promise<void>;
@@ -810,6 +811,31 @@ describe('markdown stream startup failures', () => {
     expect(h.agent.runOptions).toHaveLength(1);
   });
 
+  it.each(['markdown', 'card'] as const)('forwards complete structured prose and hides commands in %s mode', async mode => {
+    const h = await createHarness();
+    h.agent.structuredControl = vi.fn(async () => []);
+    h.profileConfig.preferences = { ...h.profileConfig.preferences, messageReply: mode, messageReplyMigrated: true, showToolCalls: false };
+    h.controls.cfg.preferences = h.profileConfig.preferences;
+    h.controls.profileConfig.preferences = h.profileConfig.preferences;
+    const text = '完整的结构化正文，不能只显示前几个字。尾部校验 🧬';
+    h.agent.setEvents([[
+      ...Array.from(text).map(delta => ({ type: 'text' as const, source: 'agent' as const, itemId: 't:a', delta })),
+      { type: 'tool_use', id: 'cmd', name: 'commandExecution', input: { command: 'DO_NOT_FORWARD_COMMAND' } },
+      { type: 'tool_result', id: 'cmd', output: 'DO_NOT_FORWARD_OUTPUT', isError: false },
+      { type: 'text', itemId: 't:b', source: 'agent', delta: '最终' },
+      { type: 'text', itemId: 't:b', source: 'agent', replace: true, delta: '最终完整答复 END' },
+      { type: 'done', terminationReason: 'normal' },
+    ]]);
+    await startTestBridge(h);
+    await h.channel.handlers.message?.(message('om_complete_structured_' + mode, 'report progress'));
+    await waitFor(() => JSON.stringify(h.channel.rawClient.im.v1.message.patch.mock.calls).includes('最终完整答复 END'));
+    const last = h.channel.rawClient.im.v1.message.patch.mock.calls.at(-1)![0].data.content;
+    expect(last).toContain(text);
+    expect(last).toContain('最终完整答复 END');
+    expect(last).not.toContain('DO_NOT_FORWARD');
+    expect(JSON.parse(last).config.streaming_mode).toBe(false);
+  });
+
   it('streams structured goal output through the regular reply path', async () => {
     const updates: string[] = [];
     const h = await createHarness({ stream: async (_chatId, input) => {
@@ -821,7 +847,8 @@ describe('markdown stream startup failures', () => {
     h.agent.setEvents([[{ type: 'text', delta: 'Structured goal progress' }, { type: 'done', terminationReason: 'normal' }]]);
     await startTestBridge(h);
     await h.channel.handlers.message?.(message('om_goal_stream', '/codex /goal finish the task'));
-    await waitFor(() => updates.some(text => text.includes('Structured goal progress')));
+    await waitFor(() => JSON.stringify(h.channel.rawClient.im.v1.message.patch.mock.calls).includes('Structured goal progress'));
+    expect(updates).toEqual([]);
     expect(h.agent.runOptions).toHaveLength(1);
   });
 
@@ -2386,6 +2413,7 @@ function createFakeLarkChannel(options: {
         v1: {
           message: {
             get: vi.fn(async () => ({ data: { items: [] } })),
+            patch: vi.fn(async () => ({ code: 0 })),
           },
           messageReaction: {
             create: vi.fn(options.reactionCreate ?? (async () => ({ data: { reaction_id: 'reaction_1' } }))),
@@ -2411,6 +2439,7 @@ function createFakeLarkChannel(options: {
         throw new Error('card send failed');
       }
       sent.push({ chatId, content, options: sendOptions });
+      return { messageId: `sent-${sent.length}` };
     },
     stream: options.stream ?? (async () => {
       await new Promise<void>(() => {});

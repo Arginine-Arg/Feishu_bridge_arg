@@ -24,6 +24,7 @@ import { writeFileAtomic } from '../../platform/atomic-write';
 import { connectCodexHost, shutdownProfileHosts } from './host';
 import {
   fileStamp,
+  readHostRegistry,
   fingerprintCredentialEnv,
   type CodexHostEnvironmentFingerprint,
   type CodexHostRuntimeIdentity,
@@ -77,6 +78,7 @@ import { ClaudeStructuredSession } from './claude';
 import { findLoadedThreadHost } from './native-bridge';
 import type { StructuredSession } from './contracts';
 import { textEvent } from './contracts';
+import { normalizeProviderRecovery, type ProviderRecoveryConfig } from '../../config/provider-recovery';
 import { StructuredView } from './view';
 import { isNativePickerControl, sendNativePickerControl } from './native-picker';
 import { RpcClient, type Wire } from './rpc';
@@ -444,6 +446,7 @@ interface MixAgentsSideState {
   updatedAt: number;
 }
 export interface StructuredAdapterOptions {
+  providerRecovery?: Partial<ProviderRecoveryConfig>;
   kind: 'codex' | 'claude'; binary: string; profileDir: string; codexHome?: string;
   larkChannel?: LarkChannelEnvContext; nativeView?: boolean; sandbox?: CodexSandboxMode;
   network?: NetworkConfig;
@@ -463,6 +466,7 @@ export class StructuredAdapter implements AgentAdapter {
   readonly displayName: string;
   readonly tmux: AgentTmuxControl;
   private sessions = new Map<string, ScopeSession>();
+  private recoveryObservers = new Map<string, CodexStructuredSession>();
   private starting = new Map<string, Promise<ScopeSession>>();
   private bindings = new Map<string, StructuredBinding>();
   private autoDiscoveryDisabled = new Set<string>();
@@ -496,6 +500,10 @@ export class StructuredAdapter implements AgentAdapter {
       list: async (socket?: string) => this.listStructuredPanes(socket),
       bind: async (scope, selector) => this.bindTmuxPane(scope, selector),
       unbind: async scope => {
+        const observer = this.recoveryObservers.get(scope);
+        if (observer) { await observer.close(); observer.disconnect(); this.recoveryObservers.delete(scope); }
+        const main = this.sessions.get(scope)?.main;
+        if (main instanceof CodexStructuredSession) main.cancelAutoRecovery();
         const removed = this.bindings.delete(scope);
         if (removed) this.autoDiscoveryDisabled.add(scope);
         if (removed) await this.saveBindings();
@@ -555,6 +563,9 @@ export class StructuredAdapter implements AgentAdapter {
           return acted !== false;
         }
         if (options?.sideOnly) return false;
+        const observer = this.recoveryObservers.get(scope);
+        if (observer?.isAlive()) return observer.interrupt();
+        if (observer) { await observer.close(); observer.disconnect(); this.recoveryObservers.delete(scope); }
         const binding = this.bindings.get(scope);
         if (binding) return this.interruptBinding(binding);
         if (this.id !== 'codex' || !cwd) return false;
@@ -661,9 +672,11 @@ export class StructuredAdapter implements AgentAdapter {
   private async restoreArtifactDelivery(scope: string, artifact: ArtifactDeliveryEnv): Promise<boolean> {
     if (this.id !== 'codex') return false;
     const threads = new Map<string, string>();
+    const recoverable = new Map<string, { cwd: string; endpoint: string }>();
     const binding = this.bindings.get(scope);
     if (binding) {
       threads.set(binding.threadId, binding.cwd);
+      recoverable.set(binding.threadId, { cwd: binding.cwd, endpoint: binding.endpoint });
       const pane = listStructuredTmuxPanes(binding.target.socketPath).find(candidate =>
         candidate.paneId === binding.target.paneId && candidate.sessionName === binding.target.sessionName,
       );
@@ -676,7 +689,10 @@ export class StructuredAdapter implements AgentAdapter {
       if (!/^[a-f0-9]{64}\.json$/u.test(name)) continue;
       try {
         const saved = JSON.parse(await readFile(join(directory, name), 'utf8')) as SavedStructuredState;
-        if (saved.scope === scope && saved.kind === 'codex' && saved.id && saved.cwd) threads.set(saved.id, saved.cwd);
+        if (saved.scope === scope && saved.kind === 'codex' && saved.id && saved.cwd) {
+          threads.set(saved.id, saved.cwd);
+          if (saved.endpoint) recoverable.set(saved.id, { cwd: saved.cwd, endpoint: saved.endpoint });
+        }
       } catch { /* Ignore unrelated/stale state. */ }
     }
     const env = this.options.env ?? process.env;
@@ -704,6 +720,15 @@ export class StructuredAdapter implements AgentAdapter {
       side.artifactToken = artifact.token;
     }
     if (current?.main instanceof CodexStructuredSession) await current.main.refreshBrokerArtifactDelivery(artifact);
+    // Reattach only to an already-loaded, unambiguous saved main thread.
+    // Restarting the bot must not create hosts or revive dormant work.
+    const recoveryTargets = binding ? [...recoverable].filter(([id]) => id === binding.threadId) : [...recoverable];
+    if (!current && !this.recoveryObservers.has(scope) && recoveryTargets.length === 1) {
+      const [id, target] = recoveryTargets[0]!;
+      await this.restoreRecoveryObserver(scope, id, target.cwd, target.endpoint, artifact).catch(error => {
+        log.warn('agent', 'provider-recovery-attach-unavailable', { scope, thread: id, reason: redactDiagnosticText(String(error)) });
+      });
+    }
     return threads.size > 0 || [...this.mixagentsSides.values()].some(side => side.scope === scope && subagentThreadId(side.agent));
   }
   private loadCandidates(): void {
@@ -2586,7 +2611,7 @@ export class StructuredAdapter implements AgentAdapter {
         }
         return activeTarget.steer(request);
       },
-      detach: async () => { detached = true; events.close(); },
+      detach: async () => { detached = true; if (activeTarget instanceof CodexStructuredSession) activeTarget.cancelAutoRecovery(); events.close(); },
       waitForExit: async () => true };
   }
   private makeView(scope: string): StructuredView {
@@ -2686,6 +2711,13 @@ export class StructuredAdapter implements AgentAdapter {
     finally { this.starting.delete(scope); }
   }
   private async createSession(scope: string, options: AgentRunOptions, bound?: StructuredBinding): Promise<ScopeSession> {
+    const observer = this.recoveryObservers.get(scope);
+    if (observer) {
+      // Stop its timers before another subscriber can own recovery decisions.
+      observer.cancelAutoRecovery();
+      await observer.close(); observer.disconnect();
+      this.recoveryObservers.delete(scope);
+    }
     const cwd = options.cwd!;
     const directory = join(this.options.profileDir, 'structured');
     const stateFile = this.stateFile(scope, cwd);
@@ -2795,7 +2827,7 @@ export class StructuredAdapter implements AgentAdapter {
                 brokerState.config.toolNamespace,
               )
             : undefined;
-          const attached = new CodexStructuredSession(bound.threadId, endpoint, rpc, brokerTools);
+          const attached = await this.createMainSession(bound.threadId, endpoint, rpc, brokerTools);
           await attached.syncState();
           await writeFileAtomic(stateFile, JSON.stringify({
             id: bound.threadId,
@@ -2974,9 +3006,9 @@ export class StructuredAdapter implements AgentAdapter {
             )
           : undefined;
         restored = saved && brokerState.enabled
-          ? new CodexStructuredSession(saved.id, endpoint, rpc, brokerTools)
+          ? await this.createMainSession(saved.id, endpoint, rpc, brokerTools)
           : undefined;
-        main = restored ?? new CodexStructuredSession(id, endpoint, rpc, brokerTools);
+        main = restored ?? await this.createMainSession(id, endpoint, rpc, brokerTools);
         await (main as CodexStructuredSession).syncState();
         const nativeSpec = this.options.nativeView !== false ? {
           binary: this.options.binary,
@@ -3019,7 +3051,45 @@ export class StructuredAdapter implements AgentAdapter {
     }
     return { main, view, cwd, ...(pendingNative ? { pendingNative } : {}) };
   }
+  private async restoreRecoveryObserver(scope: string, id: string, cwd: string, endpoint: string, artifact: ArtifactDeliveryEnv): Promise<void> {
+    if (!normalizeProviderRecovery(this.options.providerRecovery).enabled || process.platform === 'win32') return;
+    const rpc = await this.connectExisting(endpoint);
+    let observer: CodexStructuredSession | undefined;
+    try {
+      await rpc.initialize();
+      const loaded = await rpc.request('thread/loaded/list', {}, 5_000);
+      if (!loaded.data?.includes(id)) { rpc.close(); return; }
+      const marker = this.brokerThreads.get(id);
+      const brokerTools = marker ? this.brokerController(id, scope, cwd, marker.namespace) : undefined;
+      observer = await this.createMainSession(id, endpoint, rpc, brokerTools);
+      await resumeCodexThread(rpc, { threadId: id, cwd, excludeTurns: true }, {}, 10_000, { preserveProviderModel: true });
+      await observer.syncState();
+      await observer.refreshBrokerArtifactDelivery(artifact);
+      if (this.sessions.has(scope) || this.starting.has(scope)) { await observer.close(); rpc.close(); return; }
+      this.recoveryObservers.set(scope, observer);
+      log.info('agent', 'provider-recovery-attached', { scope, thread: id });
+    } catch (error) { await observer?.close(); rpc.close(); throw error; }
+  }
+  private async createMainSession(id: string, endpoint: string, rpc: RpcClient, brokerTools?: BrokerToolController): Promise<CodexStructuredSession> {
+    const root = this.options.configFile ? await loadRootConfig(this.options.configFile) : undefined;
+    const profile = this.options.profile ? root?.profiles[this.options.profile] : undefined;
+    const policy = normalizeProviderRecovery(profile?.codex?.providerRecovery ?? this.options.providerRecovery);
+    const hosts = await readHostRegistry(this.options.profileDir);
+    const host = hosts.find(value => endpoint === `unix://${join(value.directory, 'server.sock')}`);
+    // Use the running host's identity, not a cc-switch setting that might
+    // have changed while this thread stayed on its previous provider.
+    const providerIds = host?.runtimeIdentity
+      ? [host.runtimeIdentity.ccSwitchProviderId, host.runtimeIdentity.codexProviderId].filter((value): value is string => !!value)
+      : [];
+    if (!providerIds.length && policy.providers.length) {
+      const config: Wire = await rpc.request('config/read', {}).catch(() => ({}));
+      if (typeof config.config?.model_provider === 'string') providerIds.push(config.config.model_provider);
+    }
+    return new CodexStructuredSession(id, endpoint, rpc, brokerTools, { policy, providerIds });
+  }
   async shutdown(): Promise<void> {
+    for (const observer of this.recoveryObservers.values()) { await observer.close(); observer.disconnect(); }
+    this.recoveryObservers.clear();
     const signal = new AbortController().signal;
     for (const side of [...this.mixagentsSides.values()]) {
       await this.closeMixagentsSide(side, signal).catch(() => {});

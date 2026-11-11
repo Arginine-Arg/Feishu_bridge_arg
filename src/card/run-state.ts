@@ -17,6 +17,7 @@ export type Block =
       streaming: boolean;
       /** Local provenance used by the presentation layer; never sent to the agent. */
       origin?: 'agent' | 'terminal';
+      itemId?: string;
     }
   | { kind: 'tool'; tool: ToolEntry };
 
@@ -89,6 +90,18 @@ function withLiveness(
 export function reduce(state: RunState, evt: AgentEvent): RunState {
   switch (evt.type) {
     case 'text': {
+      if (evt.itemId) {
+        const index = state.blocks.findIndex(block => block.kind === 'text' && block.itemId === evt.itemId);
+        const existing = state.blocks[index];
+        const block: Block = {
+          kind: 'text', itemId: evt.itemId, origin: 'agent', streaming: !evt.replace,
+          content: evt.replace ? evt.delta : (existing?.kind === 'text' ? existing.content : '') + evt.delta,
+        };
+        return withLiveness({ ...state,
+          blocks: index < 0 ? [...state.blocks, block] : state.blocks.map((value, i) => i === index ? block : value),
+          reasoning: { ...state.reasoning, active: false }, footer: 'streaming',
+        }, Date.now());
+      }
       const last = state.blocks[state.blocks.length - 1];
       const origin =
         evt.source === 'live-terminal'
@@ -100,6 +113,7 @@ export function reduce(state: RunState, evt: AgentEvent): RunState {
         last &&
         last.kind === 'text' &&
         last.streaming &&
+        !last.itemId &&
         (last.origin ?? undefined) === origin
       ) {
         const next: Block = { ...last, content: last.content + evt.delta };

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { initialState, reduce } from '../card/run-state';
 import { mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { CommentEvent, LarkChannel } from '@larksuite/channel';
@@ -281,6 +282,7 @@ export async function handleCommentMention(deps: CommentDeps): Promise<void> {
       });
       if (!execution) return;
       let answer = '';
+      let answerState = initialState;
       let errorMsg: string | undefined;
       let terminal = false;
       let timedOut = false;
@@ -328,11 +330,13 @@ export async function handleCommentMention(deps: CommentDeps): Promise<void> {
           }
           switch (e.type) {
             case 'text':
-              answer += e.delta;
+              answerState = reduce(answerState, e);
+              answer = answerState.blocks.filter(block => block.kind === 'text').map(block => block.content).join('');
               break;
             case 'tool_use':
             case 'tool_result':
               answer = '';
+              answerState = initialState;
               break;
             case 'system':
               break;

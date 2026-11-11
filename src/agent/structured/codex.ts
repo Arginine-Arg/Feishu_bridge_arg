@@ -13,6 +13,8 @@ import { SIDE_BOUNDARY_PROMPT, SIDE_DEVELOPER_INSTRUCTIONS } from './side-bounda
 import { codexTurnPermissionOverrides } from './permissions';
 import type { BrokerToolHost, WriteAuthorization } from '../subagents/broker-tools';
 import type { ArtifactDeliveryEnv } from '../lark-channel-env';
+import { isTransientProviderError, type ProviderRecoveryConfig } from '../../config/provider-recovery';
+import { log } from '../../core/logger';
 
 const toolItems = new Set(['commandExecution', 'fileChange', 'mcpToolCall', 'collabAgentToolCall', 'webSearch', 'imageGeneration', 'dynamicToolCall']);
 
@@ -32,6 +34,22 @@ export class CodexStructuredSession implements StructuredSession {
   private pending = new Map<string, { choices: Map<string, unknown>; freeText?: boolean; respond(value: unknown): Promise<void> }>();
   private menus = new Set<string>();
   private deltas = new Map<string, string>();
+  private completedMessages = new Map<string, string>();
+  private recoveryTimer?: NodeJS.Timeout;
+  private recoveryEpoch = 0;
+  private recoveryAttempts = 0;
+  private recoveryStarting = false;
+  private recoveryChecking = false;
+  private recoveryWork: Promise<void> = Promise.resolve();
+  private recoveryTurnIds = new Set<string>();
+  private recoveryBlocked = false;
+  private internalRetries = 0;
+  private lastRetryNoticeAt = 0;
+  private providerError?: { turnId: string; error: Wire };
+  private retryStallTimer?: NodeJS.Timeout;
+  private retryInterruptTurnId?: string;
+  private retryInterruptTimer?: NodeJS.Timeout;
+  private activeTools = new Set<string>();
   private acknowledgements = new Map<string, { resolve(): void; reject(error: Error): void }>();
   private deferredInteractions: AgentEvent[] = [];
   private usageTotal?: { inputTokens: number; outputTokens: number; cachedInputTokens: number };
@@ -42,6 +60,7 @@ export class CodexStructuredSession implements StructuredSession {
     readonly endpoint: string,
     private readonly rpc: RpcClient,
     private readonly brokerTools?: BrokerToolHost,
+    private readonly recovery?: { policy: ProviderRecoveryConfig; providerIds: string[] },
   ) {
     this.listener = message => this.receive(message);
     rpc.on('message', this.listener);
@@ -52,6 +71,7 @@ export class CodexStructuredSession implements StructuredSession {
   /** Why the channel died, when it did. */
   get failureReason(): string | undefined { return this.rpc.failureReason?.message; }
   private disconnected = (error: Error) => {
+    this.cancelRecovery();
     for (const waiter of this.acknowledgements.values()) waiter.reject(error);
     this.acknowledgements.clear();
     this.phase = 'failed';
@@ -71,6 +91,7 @@ export class CodexStructuredSession implements StructuredSession {
     const p = message.params ?? {};
     if (p.threadId !== this.id) return;
     if (message.id !== undefined && message.method) {
+      this.clearRetryStall();
       const requestId = String(message.id);
       if (message.method === 'item/commandExecution/requestApproval' || message.method === 'item/fileChange/requestApproval') {
         const choices = new Map<string, unknown>();
@@ -103,29 +124,57 @@ export class CodexStructuredSession implements StructuredSession {
       }
       return;
     }
-    if (message.method === 'turn/started') { this.turnId = p.turn?.id; this.phase = 'busy'; }
+    if (message.method === 'turn/started') {
+      if (!p.turn?.id || this.finishedTurns.has(p.turn.id)) return;
+      if (!this.recoveryStarting && !this.recoveryTurnIds.has(p.turn?.id)) {
+        if (!this.emit && p.turn.id !== this.turnId) this.recoveryBlocked = false;
+        this.cancelRecovery(); this.recoveryAttempts = 0;
+      }
+      this.turnId = p.turn?.id; this.phase = 'busy';
+      this.providerError = undefined;
+      this.activeTools.clear();
+    }
+    if (message.method === 'error' && p.turnId === this.turnId) {
+      this.providerError = { turnId: p.turnId, error: p.error ?? {} };
+      if (p.willRetry === true) {
+        this.internalRetries += 1;
+        if (!this.lastRetryNoticeAt || Date.now() - this.lastRetryNoticeAt >= 15_000) {
+          this.lastRetryNoticeAt = Date.now();
+          const timeout = this.recoveryAllowed() ? this.recovery?.policy.retryStallSeconds : 0;
+          this.emit?.(textEvent(`\n⏳ Provider 连接异常，Codex 正在重连${timeout ? `；连续 ${timeout} 秒无进展将中断本轮并尝试继续` : ''}。\n`));
+        }
+        this.watchRetryStall(p.turnId, p.error);
+      }
+    }
+    if (p.turnId === this.turnId && (
+      (message.method === 'item/agentMessage/delta' && p.delta) ||
+      (message.method === 'item/reasoning/summaryTextDelta' && p.delta) ||
+      message.method === 'item/commandExecution/outputDelta' ||
+      message.method === 'item/started' || message.method === 'item/completed'
+    )) this.clearRetryStall();
     if (message.method === 'item/agentMessage/delta') {
-      const key = `${p.turnId}:${p.itemId}`;
+      const key = this.messageKey(p.turnId, p.itemId);
+      if (!key) return;
+      if (typeof p.delta !== 'string' || this.completedMessages.has(key)) return;
       this.deltas.set(key, (this.deltas.get(key) ?? '') + p.delta);
       this.lastAssistantText = `${this.lastAssistantText}${String(p.delta ?? '')}`.slice(-2000);
-      this.emit?.(textEvent(p.delta));
+      this.emit?.({ type: 'text', source: 'agent', delta: p.delta, itemId: key });
     }
     if (message.method === 'item/started' && toolItems.has(p.item?.type)) {
+      this.activeTools.add(p.item.id);
       this.lastToolStatus = `${p.item.type}: started`;
       this.emit?.({ type: 'tool_use', id: p.item.id, name: p.item.type, input: p.item.input ?? p.item.arguments ?? { command: p.item.command, cwd: p.item.cwd } });
     }
     if (message.method === 'item/completed') {
       const item = p.item ?? {};
       if (item.type === 'agentMessage') {
-        const key = `${p.turnId}:${item.id}`;
-        const sent = this.deltas.get(key) ?? '';
-        if (typeof item.text === 'string' && item.text.startsWith(sent) && item.text.length > sent.length) this.emit?.(textEvent(item.text.slice(sent.length)));
-        this.deltas.delete(key);
+        this.completeMessage(p.turnId, item);
       }
       if (toolItems.has(item.type)) this.emit?.({ type: 'tool_result', id: item.id,
         output: item.aggregatedOutput ?? JSON.stringify(item.result ?? item.error ?? item.changes ?? ''),
         isError: item.status === 'failed' || (item.exitCode != null && item.exitCode !== 0) });
       if (toolItems.has(item.type)) {
+        this.activeTools.delete(item.id);
         this.lastToolStatus = `${item.type}: ${item.status ?? (item.exitCode != null && item.exitCode !== 0 ? 'failed' : 'completed')}`;
       }
     }
@@ -134,11 +183,15 @@ export class CodexStructuredSession implements StructuredSession {
       if (typeof p.goal?.objective === 'string' && p.goal.objective.trim()) {
         this.lastGoalText = p.goal.objective.trim().slice(0, 800);
       }
-      if (!this.goalActive && !this.turnId) this.finish();
+      if (!this.goalActive) {
+        this.cancelAutoRecovery();
+        if (!this.turnId) { this.emit?.({ type: 'done', terminationReason: 'interrupted' }); this.finish(); }
+      }
     }
     if (message.method === 'thread/goal/cleared') {
       this.goalActive = false;
       this.lastGoalText = undefined;
+      this.cancelAutoRecovery();
       if (!this.turnId) this.finish();
     }
     if (message.method === 'thread/tokenUsage/updated') {
@@ -160,15 +213,178 @@ export class CodexStructuredSession implements StructuredSession {
       if (!this.pending.size) this.phase = this.turnId ? 'busy' : 'idle';
     }
     if (message.method === 'turn/completed' && (!this.turnId || p.turn?.id === this.turnId)) {
+      if (!p.turn?.id || this.finishedTurns.has(p.turn.id)) return;
+      const preempted = this.retryInterruptTurnId === p.turn.id && !this.recoveryBlocked;
+      this.clearRetryStall();
+      if (this.retryInterruptTimer) clearTimeout(this.retryInterruptTimer);
+      this.retryInterruptTimer = undefined;
+      this.retryInterruptTurnId = undefined;
+      this.activeTools.clear();
+      for (const item of p.turn.items ?? []) if (item.type === 'agentMessage') this.completeMessage(p.turn.id, item, true);
+      for (const key of this.deltas.keys()) if (key.startsWith(`${p.turn.id}:`)) this.deltas.delete(key);
       this.finishedTurns.add(p.turn.id);
       if (this.finishedTurns.size > 100) this.finishedTurns.delete(this.finishedTurns.values().next().value!);
       this.turnId = undefined; this.phase = 'idle';
-      if (p.turn?.status === 'failed') { this.emit?.({ type: 'error', message: p.turn.error?.message ?? 'Codex turn failed', terminationReason: 'failed' }); this.finish(); }
+      if (p.turn?.status === 'failed' || (preempted && p.turn.status === 'interrupted')) {
+        const error = p.turn.error ?? (this.providerError?.turnId === p.turn.id ? this.providerError?.error : undefined);
+        if (!this.scheduleRecovery(p.turn.id, error, preempted ? p.turn.status : 'failed', preempted)) {
+          this.emit?.({ type: 'error', message: preempted ? 'Provider 重连无进展，已中断；自动恢复次数已耗尽。' : error?.message ?? 'Codex turn failed', terminationReason: this.recoveryBlocked ? 'interrupted' : 'failed' }); this.finish();
+        }
+      }
       else if (!this.goalActive || p.turn?.status === 'interrupted') {
+        this.cancelRecovery(); this.recoveryAttempts = 0;
         if (p.turn?.status === 'interrupted') this.emit?.({ type: 'done', terminationReason: 'interrupted' });
         this.finish();
       }
     }
+  }
+  private messageKey(turnId: unknown, itemId: unknown): string | undefined {
+    const turn = typeof turnId === 'string' ? turnId : this.turnId;
+    return turn && typeof itemId === 'string' && itemId ? `${turn}:${itemId}` : undefined;
+  }
+  private completeMessage(turnId: string, item: Wire, authoritative = false): void {
+    const key = this.messageKey(turnId, item.id);
+    if (!key || typeof item.text !== 'string' || !item.text) return;
+    const draft = this.completedMessages.get(key) ?? this.deltas.get(key) ?? '';
+    if (!authoritative && draft.startsWith(item.text) && draft.length > item.text.length) return;
+    this.completedMessages.set(key, item.text);
+    if (this.completedMessages.size > 1000) this.completedMessages.delete(this.completedMessages.keys().next().value!);
+    this.lastAssistantText = item.text.slice(-2000);
+    // A provider may normalize or rewrite its final item. Replace the exact
+    // draft by identity, rather than dropping a non-prefix completion.
+    if (!item.text.startsWith(draft)) {
+      this.emit?.({ type: 'text', source: 'agent', itemId: key, replace: true, delta: item.text });
+    } else if (item.text.length > draft.length) {
+      this.emit?.({ type: 'text', source: 'agent', itemId: key, delta: item.text.slice(draft.length) });
+    }
+    this.deltas.delete(key);
+  }
+  private cancelRecovery(): boolean {
+    const pending = Boolean(this.recoveryTimer || this.recoveryStarting || this.recoveryChecking);
+    if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
+    this.recoveryTimer = undefined;
+    this.clearRetryStall();
+    if (this.retryInterruptTimer) clearTimeout(this.retryInterruptTimer);
+    this.retryInterruptTimer = undefined;
+    this.retryInterruptTurnId = undefined;
+    this.recoveryEpoch += 1;
+    return pending;
+  }
+  cancelAutoRecovery(): void { this.recoveryBlocked = true; this.cancelRecovery(); }
+  private recoveryAllowed(): boolean {
+    const policy = this.recovery?.policy;
+    return Boolean(policy?.enabled && !this.recoveryBlocked && this.isAlive() &&
+      (!policy.providers.length || this.recovery?.providerIds.some(id => policy.providers.includes(id))));
+  }
+  private clearRetryStall(): void {
+    if (this.retryStallTimer) clearTimeout(this.retryStallTimer);
+    this.retryStallTimer = undefined;
+  }
+  private watchRetryStall(turnId: string, error: Wire): void {
+    const seconds = this.recovery?.policy.retryStallSeconds;
+    if (!seconds || !this.recoveryAllowed() || !isTransientProviderError(error) ||
+      this.retryStallTimer || this.retryInterruptTurnId || this.pending.size || this.activeTools.size) return;
+    const epoch = this.recoveryEpoch;
+    this.retryStallTimer = setTimeout(() => {
+      // Keep the timer identity until preflight finishes; a new token/tool or
+      // user interaction clears it and invalidates this specific attempt.
+      const timer = this.retryStallTimer;
+      void (async () => {
+        const turns = await this.rpc.request('thread/turns/list', { threadId: this.id, limit: 1, sortDirection: 'desc' });
+        if (!timer || this.retryStallTimer !== timer || epoch !== this.recoveryEpoch ||
+          !this.recoveryAllowed() || this.turnId !== turnId || this.pending.size || this.activeTools.size) return;
+        if (turns.data?.[0]?.id !== turnId || turns.data[0].status !== 'inProgress') return;
+        this.retryInterruptTurnId = turnId;
+        this.emit?.(textEvent(`\n⏳ 重连连续 ${seconds} 秒无进展，正在中断本轮；确认结束后才会继续。\n`));
+        log.info('agent', 'provider-retry-stalled', { thread: this.id, turn: turnId, seconds });
+        // Arm before sending: a notification can arrive before the RPC reply.
+        this.retryInterruptTimer = setTimeout(() => {
+          if (this.retryInterruptTurnId !== turnId) return;
+          this.cancelAutoRecovery();
+          this.emit?.({ type: 'error', message: '未收到本轮中断确认，已停止自动恢复；请检查 /status。', terminationReason: 'failed' });
+          this.finish();
+        }, 15_000);
+        await this.rpc.request('turn/interrupt', { threadId: this.id, turnId }, 15_000);
+      })().catch(() => {
+        if (epoch !== this.recoveryEpoch || this.recoveryBlocked) return;
+        this.cancelAutoRecovery();
+        this.emit?.({ type: 'error', message: '无法确认重连中的 turn 已停止；未发送继续请求。', terminationReason: 'failed' });
+        this.finish();
+      }).finally(() => { if (this.retryStallTimer === timer) this.clearRetryStall(); });
+    }, seconds * 1000);
+    this.retryStallTimer.unref?.();
+  }
+  private scheduleRecovery(failedTurnId: string, error: Wire | undefined, expectedStatus = 'failed', preempted = false): boolean {
+    const policy = this.recovery?.policy;
+    if (!policy || !this.recoveryAllowed() || this.pending.size ||
+      this.recoveryAttempts >= policy.maxAttempts || !isTransientProviderError(error)) return false;
+    this.cancelRecovery();
+    const epoch = this.recoveryEpoch;
+    const goalWasActive = this.goalActive;
+    const attempt = ++this.recoveryAttempts;
+    const delay = preempted ? 5 : Math.min(policy.maxDelaySeconds, policy.delaySeconds * 2 ** (attempt - 1));
+    this.phase = 'busy';
+    this.emit?.(textEvent(`\n⏳ Provider 临时错误，本轮已结束；${delay} 秒后自动继续（${attempt}/${policy.maxAttempts}）。/stop 可取消。\n`));
+    log.info('agent', 'provider-recovery-scheduled', { thread: this.id, attempt, delaySeconds: delay });
+    const previousWork = this.recoveryWork;
+    this.recoveryTimer = setTimeout(() => {
+      this.recoveryTimer = undefined;
+      this.recoveryWork = (async () => {
+        // Completion can precede the turn/start RPC reply. Serialize the next
+        // attempt behind that acknowledgement instead of overlapping starts.
+        await previousWork;
+        if (epoch !== this.recoveryEpoch || this.recoveryBlocked) return;
+        this.recoveryChecking = true;
+        const turns = await this.rpc.request('thread/turns/list', { threadId: this.id, limit: 1, sortDirection: 'desc' });
+        if (epoch !== this.recoveryEpoch || this.recoveryBlocked || this.turnId) return;
+        if (this.pending.size) {
+          this.emit?.({ type: 'error', message: '自动继续已取消：会话存在待处理交互。', terminationReason: 'failed' }); this.finish(); return;
+        }
+        const latest = turns.data?.[0];
+        if (latest?.id !== failedTurnId || latest.status !== expectedStatus) {
+          if (latest?.status === 'inProgress') { this.turnId = latest.id; this.phase = 'busy'; }
+          else {
+            this.emit?.(latest?.status === 'completed' || latest?.status === 'interrupted'
+              ? { type: 'done', terminationReason: latest.status === 'interrupted' ? 'interrupted' : 'normal' }
+              : { type: 'error', message: '自动继续已取消：会话状态已变化。', terminationReason: 'failed' });
+            this.finish();
+          }
+          return;
+        }
+        if (goalWasActive) {
+          const result = await this.rpc.request('thread/goal/get', { threadId: this.id });
+          if (epoch !== this.recoveryEpoch || this.recoveryBlocked) return;
+          if (result.goal?.status !== 'active') {
+            this.goalActive = false;
+            this.emit?.({ type: 'done', terminationReason: 'interrupted' }); this.finish(); return;
+          }
+        }
+        if (epoch !== this.recoveryEpoch || this.recoveryBlocked || this.turnId) return;
+        this.recoveryStarting = true;
+        this.emit?.(textEvent(`\n↪ 正在自动继续（${attempt}/${policy.maxAttempts}）。\n`));
+        // Never replay the original task: prior tools may already have made
+        // changes. Keep the same thread, provider and permission policy.
+        const result = await this.rpc.request('turn/start', { threadId: this.id, input: [{ type: 'text',
+          text: 'Continue the existing task after the temporary provider/API failure. Check the current state and prior tool results first; do not repeat completed actions. Respect any pause, stop, approval or budget limits already in this conversation.',
+        }] });
+        if (epoch !== this.recoveryEpoch) {
+          if (this.recoveryBlocked && result.turn?.id && !this.finishedTurns.has(result.turn.id)) {
+            await this.rpc.request('turn/interrupt', { threadId: this.id, turnId: result.turn.id });
+          }
+          return;
+        }
+        if (result.turn?.id) this.recoveryTurnIds.add(result.turn.id);
+        if (this.recoveryTurnIds.size > 20) this.recoveryTurnIds.delete(this.recoveryTurnIds.values().next().value!);
+        if (!this.finishedTurns.has(result.turn?.id)) this.turnId = result.turn?.id ?? this.turnId;
+        if (this.recoveryBlocked && this.turnId) await this.rpc.request('turn/interrupt', { threadId: this.id, turnId: this.turnId });
+      })().catch(() => {
+        if (epoch !== this.recoveryEpoch) return;
+        this.emit?.({ type: 'error', message: '自动继续未能确认会话状态或请求结果；已停止重试，请检查 /status。', terminationReason: 'failed' });
+        this.finish();
+      }).finally(() => { this.recoveryStarting = false; this.recoveryChecking = false; });
+    }, delay * 1000);
+    this.recoveryTimer.unref?.();
+    return true;
   }
   private async handleDynamicToolCall(id: string | number, params: Wire): Promise<void> {
     const expectedNamespace = this.brokerTools?.specs[0]?.name;
@@ -196,7 +412,9 @@ export class CodexStructuredSession implements StructuredSession {
   }
   async submit(options: AgentRunOptions, emit: (event: AgentEvent) => void, signal: AbortSignal): Promise<void> {
     if (this.emit) throw new Error('Structured thread already has an active relay');
+    if (this.recoveryStarting || this.recoveryChecking) throw new Error('自动恢复请求仍在确认结果，请稍后再发送新任务。');
     if (signal.aborted) return;
+    this.cancelRecovery(); this.recoveryAttempts = 0; this.recoveryBlocked = false;
     this.lastUserText = options.prompt.slice(0, 800);
     this.lastCwd = options.cwd;
     this.emit = emit;
@@ -346,7 +564,8 @@ export class CodexStructuredSession implements StructuredSession {
    * server is consulted before deciding that a `/stop` had nothing to do.
    */
   async interrupt(): Promise<boolean> {
-    let acted = false;
+    let acted = this.cancelRecovery();
+    this.recoveryBlocked = true;
     try { await this.syncState(); } catch { /* keep local state */ }
     if (this.goalActive) {
       await this.rpc.request('thread/goal/set', { threadId: this.id, status: 'paused' });
@@ -374,10 +593,13 @@ export class CodexStructuredSession implements StructuredSession {
         }
       } catch { /* an unmaterialized thread has no turns to list */ }
     }
-    if (!acted) this.finish();
+    if (!this.turnId) {
+      if (acted) this.emit?.({ type: 'done', terminationReason: 'interrupted' });
+      this.finish();
+    }
     return acted;
   }
-  diagnostics(): LiveSessionDiagnostics { return { phase: this.goalActive && this.phase === 'idle' ? 'busy' : this.phase, inputState: this.turnId || this.goalActive ? 'submitted' : 'empty', retryCount: 0 }; }
+  diagnostics(): LiveSessionDiagnostics { return { phase: this.goalActive && this.phase === 'idle' ? 'busy' : this.phase, inputState: this.turnId || this.goalActive || this.recoveryTimer || this.recoveryStarting || this.recoveryChecking ? 'submitted' : 'empty', retryCount: this.internalRetries + this.recoveryAttempts }; }
   steerCapability(): AgentSteerCapability {
     if (!this.isAlive()) {
       return { available: false, kind: 'run', reason: 'Codex App Server connection is closed' };
@@ -498,6 +720,8 @@ export class CodexStructuredSession implements StructuredSession {
     await this.close();
   }
   async close(): Promise<void> {
+    this.recoveryBlocked = true; this.cancelRecovery();
+    await this.recoveryWork;
     this.toolAbort.abort();
     this.rpc.off('message', this.listener); this.rpc.off('disconnected', this.disconnected);
     for (const waiter of this.acknowledgements.values()) waiter.reject(new Error('Session closed'));

@@ -317,3 +317,65 @@ the shared-server native-view path requires Unix sockets and tmux.
 References: [Codex App Server](https://developers.openai.com/codex/app-server),
 [Claude streaming input](https://platform.claude.com/docs/en/agent-sdk/streaming-vs-single-mode),
 [Claude system prompt presets](https://platform.claude.com/docs/en/agent-sdk/modifying-system-prompts).
+
+## Provider recovery (1.19.0)
+
+Codex structured main sessions recover from recognized transient provider
+failures automatically. This applies to turns submitted through Feishu and
+native turns on the main thread subscribed by the running bot. It does not
+change provider/model, clone a thread, or replay the original task prompt.
+
+- A confirmed failed turn retries after 30, 60 and 120 seconds, at most three
+  continuation turns. Authentication, quota, budget, context, sandbox and
+  unknown failures are surfaced instead of automatically retried.
+- `error.willRetry=true` starts a silence watchdog. After 60 seconds without
+  new assistant text, reasoning summary or tool activity, Bridge interrupts
+  that exact turn. Only a confirmed interrupted/failed terminal event allows
+  a continuation five seconds later. Missing interruption confirmation stops
+  automatic recovery. A quiet long-running command or model thought without
+  a provider retry event does not trigger the watchdog.
+- `/stop`, a paused/cleared goal, detachment and shutdown cancel pending
+  recovery. Before continuation, Bridge checks that the latest turn still
+  matches the failed/interrupted turn. Active work is observed, not replayed.
+- On restart, the bot can subscribe to an unambiguous saved, already-loaded
+  main thread. It does not start a host or resurrect a dormant thread for this
+  purpose. When several saved candidates cannot be disambiguated, normal
+  Feishu input or an explicit binding establishes the current thread.
+- API reconnection is distinct from losing the local App Server socket. An
+  unknown `turn/start` result or local connection loss is not replayed.
+- This policy covers the Codex structured main thread. MixAgents `/btw` and
+  model-visible workers retain their existing Broker lifecycle and approval
+  handling; arbitrary terminal-only Codex panes are not controlled by it.
+
+Use `arg-bridge settings --profile codex` to select all providers (default),
+specific cc-switch/Codex provider IDs, or disable recovery. Restart the profile
+to apply changes to already-attached sessions. Advanced profile JSON:
+
+```json
+{
+  "codex": {
+    "binaryPath": "codex",
+    "providerRecovery": {
+      "enabled": true,
+      "providers": [],
+      "maxAttempts": 3,
+      "delaySeconds": 30,
+      "maxDelaySeconds": 120,
+      "retryStallSeconds": 60
+    }
+  }
+}
+```
+
+`providers: []` means all providers. `maxAttempts` is bounded to 0–5;
+`retryStallSeconds: 0` disables early interruption while retaining terminal
+failure continuation. Positive watchdog values are bounded to 15–600 seconds.
+A recovery continuation asks the model to inspect prior results and avoid
+repeating completed actions; arbitrary provider behavior and tool side effects
+cannot be guaranteed idempotent.
+
+Structured Feishu replies use full-card snapshots at most every 400 ms during
+streaming, check actual PATCH responses, and force a final flush. They do not
+use the SDK's typewriter buffer or its time-based rollover. Completed Codex
+items reconcile the draft by message ID. Oversized final prose is split by the
+existing complete-reply path; hidden tool bodies stay hidden.

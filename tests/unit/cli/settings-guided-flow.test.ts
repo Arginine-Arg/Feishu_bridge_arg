@@ -100,7 +100,8 @@ describe('guided settings flow', () => {
       .mockResolvedValueOnce(provider)
       .mockResolvedValueOnce(model)
       .mockResolvedValueOnce(effort)
-      .mockResolvedValueOnce('off');
+      .mockResolvedValueOnce('off')
+      .mockResolvedValueOnce('all');
     if (model === '__custom_model__') prompts.text.mockResolvedValueOnce('custom/model-v3');
     prompts.confirm
       .mockResolvedValueOnce(true)
@@ -136,6 +137,7 @@ describe('guided settings flow', () => {
       },
     });
     expect(savedProfile!.rsi?.mode).toBe('off');
+    expect(savedProfile!.codex?.providerRecovery).toMatchObject({ enabled: true, providers: [], maxAttempts: 3, retryStallSeconds: 60 });
     await expect(readFile(join(xdg, 'arg-bridge', 'broker-routes.json'), 'utf8'))
       .rejects.toMatchObject({ code: 'ENOENT' });
     expect(prompts.note.mock.calls.map(call => call[1])).toEqual(expect.arrayContaining([

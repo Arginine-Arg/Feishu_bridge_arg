@@ -2,6 +2,7 @@ import { realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, parse, resolve } from 'node:path';
 import * as p from '@clack/prompts';
+import { normalizeProviderRecovery, type ProviderRecoveryConfig } from '../../config/provider-recovery';
 import {
   collectSubagentDiagnostics,
   type SubagentDiagnostics,
@@ -47,6 +48,7 @@ export interface SettingsOptions {
 }
 
 export interface SettingsSnapshot {
+  providerRecovery: ProviderRecoveryConfig;
   version: 1;
   profile: string;
   agentKind: 'codex' | 'claude';
@@ -666,6 +668,33 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
     advanced ? '高级参数：已展开编辑' : '高级参数：保持原值',
   ].join('\n'), '步骤 5 / 5 · 保存前确认');
 
+  let providerRecovery = snapshot.providerRecovery;
+  if (snapshot.agentKind === 'codex') {
+    const mode = await p.select({
+      message: '主会话遇到临时 API 错误后自动继续？',
+      initialValue: !providerRecovery.enabled ? 'off' : providerRecovery.providers.length ? 'selected' : 'all',
+      options: [
+        { value: 'all', label: '所有 provider（推荐）', hint: `本轮确认失败后退避重试，最多 ${providerRecovery.maxAttempts} 次；/stop 可取消` },
+        { value: 'selected', label: '仅选定 provider' },
+        { value: 'off', label: '关闭自动继续' },
+      ],
+    });
+    assertPrompt(mode);
+    let providers = providerRecovery.providers;
+    if (mode === 'selected') {
+      const choices = new Map(ccProviders.map(provider => [provider.id, provider.name]));
+      for (const id of providers) if (!choices.has(id)) choices.set(id, id);
+      if (snapshot.mainProvider.configuredCodexProviderId) choices.set(snapshot.mainProvider.configuredCodexProviderId, `Codex: ${snapshot.mainProvider.configuredCodexProviderId}`);
+      if (!choices.size) throw new Error('没有可识别的 provider；请先配置 cc-switch。');
+      const selected = await p.multiselect({ message: '允许自动继续的 provider',
+        options: [...choices].map(([value, label]) => ({ value, label })), initialValues: providers, required: true });
+      assertPrompt(selected);
+      providers = selected;
+    }
+    providerRecovery = { ...providerRecovery, enabled: mode !== 'off', providers: mode === 'all' ? [] : providers };
+    p.note(`自动继续：${providerRecovery.enabled ? '开启' : '关闭'}；最多 ${providerRecovery.maxAttempts} 次，首次间隔 ${providerRecovery.delaySeconds} 秒。` +
+      `重连静默上限：${providerRecovery.retryStallSeconds ? `${providerRecovery.retryStallSeconds} 秒` : '关闭提前中断'}。/stop 可取消；已连接会话重启 profile 后生效。`, '主会话恢复');
+  }
   const save = await p.confirm({
     message: '按以上设置保存？',
     initialValue: true,
@@ -708,6 +737,7 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
       : undefined;
     root.profiles[snapshot.profile] = {
       ...profile,
+      ...(profile.codex ? { codex: { ...profile.codex, providerRecovery } } : {}),
       subagents: {
         ...DEFAULT_SUBAGENT_CONFIG,
         ...profile.subagents,
@@ -823,6 +853,7 @@ export async function loadSettingsSnapshot(
   };
   return {
     version: 1,
+    providerRecovery: normalizeProviderRecovery(profile.codex?.providerRecovery),
     profile: profileName,
     agentKind: profile.agentKind,
     workspace: cwd,

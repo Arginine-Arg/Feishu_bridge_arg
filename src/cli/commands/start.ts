@@ -451,6 +451,7 @@ export function createRuntimeAgent(
       profileDir: appPaths.profileDir,
       codexHome: profileConfig.codex?.codexHome ?? (profileConfig.codex?.inheritCodexHome === true ? undefined : `${appPaths.profileDir}/codex-home`),
       nativeView: profileConfig.preferences.structuredNativeView !== false,
+      providerRecovery: profileConfig.codex?.providerRecovery,
       sandbox: profileConfig.sandbox.defaultMode,
       network: profileConfig.network,
       subagents: profileConfig.subagents,

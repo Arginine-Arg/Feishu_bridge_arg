@@ -81,6 +81,9 @@ export type AgentEvent =
       source?: 'live-terminal' | 'agent';
       /** Monotonic within one live terminal turn. */
       sequence?: number;
+      /** Structured message identity; a completed item can replace its draft. */
+      itemId?: string;
+      replace?: boolean;
     }
   | { type: 'interactive'; text: string; phase: 'startup' | 'turn'; interaction?: import('./structured/contracts').StructuredInteraction }
   | { type: 'thinking'; delta: string }

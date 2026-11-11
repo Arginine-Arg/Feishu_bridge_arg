@@ -23,6 +23,9 @@ type AgentEvent = {
     source?: 'live-terminal' | 'agent';
     /** Monotonic within one live terminal turn. */
     sequence?: number;
+    /** Structured message identity; a completed item can replace its draft. */
+    itemId?: string;
+    replace?: boolean;
 } | {
     type: 'interactive';
     text: string;
@@ -73,6 +76,7 @@ type Block = {
     streaming: boolean;
     /** Local provenance used by the presentation layer; never sent to the agent. */
     origin?: 'agent' | 'terminal';
+    itemId?: string;
 } | {
     kind: 'tool';
     tool: ToolEntry;

@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.18.1",
+  version: "1.19.0",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -369,6 +369,41 @@ import { dirname as dirname8, join as join9 } from "path";
 import { mkdir, realpath as realpath2 } from "fs/promises";
 import { join as join2 } from "path";
 
+// src/config/provider-recovery.ts
+function normalizeProviderRecovery(value) {
+  const bounded = (n, fallback, min, max) => typeof n === "number" && Number.isFinite(n) ? Math.min(max, Math.max(min, Math.floor(n))) : fallback;
+  return {
+    enabled: value?.enabled !== false,
+    providers: Array.isArray(value?.providers) ? [...new Set(value.providers.filter((id) => typeof id === "string" && !!id.trim()).map((id) => id.trim()))] : [],
+    maxAttempts: bounded(value?.maxAttempts, 3, 0, 5),
+    delaySeconds: bounded(value?.delaySeconds, 30, 5, 600),
+    maxDelaySeconds: bounded(value?.maxDelaySeconds, 120, 5, 900),
+    retryStallSeconds: value?.retryStallSeconds === 0 ? 0 : bounded(value?.retryStallSeconds, 60, 15, 600)
+  };
+}
+function isTransientProviderError(error) {
+  if (!error) return false;
+  const info = error.codexErrorInfo;
+  const kind = typeof info === "string" ? info : info && typeof info === "object" ? Object.keys(info)[0] : void 0;
+  const detail = info && typeof info === "object" && kind ? info[kind] : void 0;
+  const status = detail && typeof detail === "object" ? detail.httpStatusCode : void 0;
+  if (status && status >= 400 && status < 500 && ![408, 429].includes(status)) return false;
+  if (kind && [
+    "rateLimitExceeded",
+    "serverOverloaded",
+    "internalServerError",
+    "flexUnavailable",
+    "httpConnectionFailed",
+    "responseStreamConnectionFailed",
+    "responseStreamDisconnected",
+    "responseTooManyFailedAttempts"
+  ].includes(kind)) return true;
+  if (kind && kind !== "other") return false;
+  const text2 = error.message ?? "";
+  if (/unauthori[sz]ed|forbidden|api.?key|insufficient.quota|usage.limit|billing|context.window|budget|permission|sandbox/i.test(text2)) return false;
+  return /\b(?:429|500|502|503|504)\b|stream disconnected|connection reset|ECONNRESET|ETIMEDOUT|reconnect(?:ion|ing).*\d|temporarily unavailable|server overloaded/i.test(text2);
+}
+
 // src/config/permissions.ts
 var ACCESS_ORDER = {
   "read-only": 0,
@@ -681,7 +716,8 @@ function normalizeCodex(input) {
     ...typeof input.codexHome === "string" ? { codexHome: input.codexHome } : {},
     inheritCodexHome: input.inheritCodexHome !== false,
     ignoreUserConfig: input.ignoreUserConfig === true,
-    ignoreRules: input.ignoreRules !== false
+    ignoreRules: input.ignoreRules !== false,
+    ...input.providerRecovery ? { providerRecovery: normalizeProviderRecovery(input.providerRecovery) } : {}
   };
   return codex;
 }
@@ -17485,11 +17521,12 @@ function proxyEnvironment(env) {
 // src/agent/structured/codex.ts
 var toolItems = /* @__PURE__ */ new Set(["commandExecution", "fileChange", "mcpToolCall", "collabAgentToolCall", "webSearch", "imageGeneration", "dynamicToolCall"]);
 var CodexStructuredSession = class _CodexStructuredSession {
-  constructor(id, endpoint, rpc, brokerTools) {
+  constructor(id, endpoint, rpc, brokerTools, recovery) {
     this.id = id;
     this.endpoint = endpoint;
     this.rpc = rpc;
     this.brokerTools = brokerTools;
+    this.recovery = recovery;
     this.listener = (message) => this.receive(message);
     rpc.on("message", this.listener);
     rpc.on("disconnected", this.disconnected);
@@ -17498,6 +17535,7 @@ var CodexStructuredSession = class _CodexStructuredSession {
   endpoint;
   rpc;
   brokerTools;
+  recovery;
   emit;
   complete;
   turnId;
@@ -17513,6 +17551,22 @@ var CodexStructuredSession = class _CodexStructuredSession {
   pending = /* @__PURE__ */ new Map();
   menus = /* @__PURE__ */ new Set();
   deltas = /* @__PURE__ */ new Map();
+  completedMessages = /* @__PURE__ */ new Map();
+  recoveryTimer;
+  recoveryEpoch = 0;
+  recoveryAttempts = 0;
+  recoveryStarting = false;
+  recoveryChecking = false;
+  recoveryWork = Promise.resolve();
+  recoveryTurnIds = /* @__PURE__ */ new Set();
+  recoveryBlocked = false;
+  internalRetries = 0;
+  lastRetryNoticeAt = 0;
+  providerError;
+  retryStallTimer;
+  retryInterruptTurnId;
+  retryInterruptTimer;
+  activeTools = /* @__PURE__ */ new Set();
   acknowledgements = /* @__PURE__ */ new Map();
   deferredInteractions = [];
   usageTotal;
@@ -17527,6 +17581,7 @@ var CodexStructuredSession = class _CodexStructuredSession {
     return this.rpc.failureReason?.message;
   }
   disconnected = (error) => {
+    this.cancelRecovery();
     for (const waiter of this.acknowledgements.values()) waiter.reject(error);
     this.acknowledgements.clear();
     this.phase = "failed";
@@ -17548,6 +17603,7 @@ var CodexStructuredSession = class _CodexStructuredSession {
     const p4 = message.params ?? {};
     if (p4.threadId !== this.id) return;
     if (message.id !== void 0 && message.method) {
+      this.clearRetryStall();
       const requestId = String(message.id);
       if (message.method === "item/commandExecution/requestApproval" || message.method === "item/fileChange/requestApproval") {
         const choices = /* @__PURE__ */ new Map();
@@ -17593,26 +17649,49 @@ ${p4.command ?? JSON.stringify(p4.changes ?? {})}`,
       return;
     }
     if (message.method === "turn/started") {
+      if (!p4.turn?.id || this.finishedTurns.has(p4.turn.id)) return;
+      if (!this.recoveryStarting && !this.recoveryTurnIds.has(p4.turn?.id)) {
+        if (!this.emit && p4.turn.id !== this.turnId) this.recoveryBlocked = false;
+        this.cancelRecovery();
+        this.recoveryAttempts = 0;
+      }
       this.turnId = p4.turn?.id;
       this.phase = "busy";
+      this.providerError = void 0;
+      this.activeTools.clear();
     }
+    if (message.method === "error" && p4.turnId === this.turnId) {
+      this.providerError = { turnId: p4.turnId, error: p4.error ?? {} };
+      if (p4.willRetry === true) {
+        this.internalRetries += 1;
+        if (!this.lastRetryNoticeAt || Date.now() - this.lastRetryNoticeAt >= 15e3) {
+          this.lastRetryNoticeAt = Date.now();
+          const timeout = this.recoveryAllowed() ? this.recovery?.policy.retryStallSeconds : 0;
+          this.emit?.(textEvent(`
+\u23F3 Provider \u8FDE\u63A5\u5F02\u5E38\uFF0CCodex \u6B63\u5728\u91CD\u8FDE${timeout ? `\uFF1B\u8FDE\u7EED ${timeout} \u79D2\u65E0\u8FDB\u5C55\u5C06\u4E2D\u65AD\u672C\u8F6E\u5E76\u5C1D\u8BD5\u7EE7\u7EED` : ""}\u3002
+`));
+        }
+        this.watchRetryStall(p4.turnId, p4.error);
+      }
+    }
+    if (p4.turnId === this.turnId && (message.method === "item/agentMessage/delta" && p4.delta || message.method === "item/reasoning/summaryTextDelta" && p4.delta || message.method === "item/commandExecution/outputDelta" || message.method === "item/started" || message.method === "item/completed")) this.clearRetryStall();
     if (message.method === "item/agentMessage/delta") {
-      const key = `${p4.turnId}:${p4.itemId}`;
+      const key = this.messageKey(p4.turnId, p4.itemId);
+      if (!key) return;
+      if (typeof p4.delta !== "string" || this.completedMessages.has(key)) return;
       this.deltas.set(key, (this.deltas.get(key) ?? "") + p4.delta);
       this.lastAssistantText = `${this.lastAssistantText}${String(p4.delta ?? "")}`.slice(-2e3);
-      this.emit?.(textEvent(p4.delta));
+      this.emit?.({ type: "text", source: "agent", delta: p4.delta, itemId: key });
     }
     if (message.method === "item/started" && toolItems.has(p4.item?.type)) {
+      this.activeTools.add(p4.item.id);
       this.lastToolStatus = `${p4.item.type}: started`;
       this.emit?.({ type: "tool_use", id: p4.item.id, name: p4.item.type, input: p4.item.input ?? p4.item.arguments ?? { command: p4.item.command, cwd: p4.item.cwd } });
     }
     if (message.method === "item/completed") {
       const item = p4.item ?? {};
       if (item.type === "agentMessage") {
-        const key = `${p4.turnId}:${item.id}`;
-        const sent = this.deltas.get(key) ?? "";
-        if (typeof item.text === "string" && item.text.startsWith(sent) && item.text.length > sent.length) this.emit?.(textEvent(item.text.slice(sent.length)));
-        this.deltas.delete(key);
+        this.completeMessage(p4.turnId, item);
       }
       if (toolItems.has(item.type)) this.emit?.({
         type: "tool_result",
@@ -17621,6 +17700,7 @@ ${p4.command ?? JSON.stringify(p4.changes ?? {})}`,
         isError: item.status === "failed" || item.exitCode != null && item.exitCode !== 0
       });
       if (toolItems.has(item.type)) {
+        this.activeTools.delete(item.id);
         this.lastToolStatus = `${item.type}: ${item.status ?? (item.exitCode != null && item.exitCode !== 0 ? "failed" : "completed")}`;
       }
     }
@@ -17629,11 +17709,18 @@ ${p4.command ?? JSON.stringify(p4.changes ?? {})}`,
       if (typeof p4.goal?.objective === "string" && p4.goal.objective.trim()) {
         this.lastGoalText = p4.goal.objective.trim().slice(0, 800);
       }
-      if (!this.goalActive && !this.turnId) this.finish();
+      if (!this.goalActive) {
+        this.cancelAutoRecovery();
+        if (!this.turnId) {
+          this.emit?.({ type: "done", terminationReason: "interrupted" });
+          this.finish();
+        }
+      }
     }
     if (message.method === "thread/goal/cleared") {
       this.goalActive = false;
       this.lastGoalText = void 0;
+      this.cancelAutoRecovery();
       if (!this.turnId) this.finish();
     }
     if (message.method === "thread/tokenUsage/updated") {
@@ -17657,18 +17744,186 @@ ${p4.command ?? JSON.stringify(p4.changes ?? {})}`,
       if (!this.pending.size) this.phase = this.turnId ? "busy" : "idle";
     }
     if (message.method === "turn/completed" && (!this.turnId || p4.turn?.id === this.turnId)) {
+      if (!p4.turn?.id || this.finishedTurns.has(p4.turn.id)) return;
+      const preempted = this.retryInterruptTurnId === p4.turn.id && !this.recoveryBlocked;
+      this.clearRetryStall();
+      if (this.retryInterruptTimer) clearTimeout(this.retryInterruptTimer);
+      this.retryInterruptTimer = void 0;
+      this.retryInterruptTurnId = void 0;
+      this.activeTools.clear();
+      for (const item of p4.turn.items ?? []) if (item.type === "agentMessage") this.completeMessage(p4.turn.id, item, true);
+      for (const key of this.deltas.keys()) if (key.startsWith(`${p4.turn.id}:`)) this.deltas.delete(key);
       this.finishedTurns.add(p4.turn.id);
       if (this.finishedTurns.size > 100) this.finishedTurns.delete(this.finishedTurns.values().next().value);
       this.turnId = void 0;
       this.phase = "idle";
-      if (p4.turn?.status === "failed") {
-        this.emit?.({ type: "error", message: p4.turn.error?.message ?? "Codex turn failed", terminationReason: "failed" });
-        this.finish();
+      if (p4.turn?.status === "failed" || preempted && p4.turn.status === "interrupted") {
+        const error = p4.turn.error ?? (this.providerError?.turnId === p4.turn.id ? this.providerError?.error : void 0);
+        if (!this.scheduleRecovery(p4.turn.id, error, preempted ? p4.turn.status : "failed", preempted)) {
+          this.emit?.({ type: "error", message: preempted ? "Provider \u91CD\u8FDE\u65E0\u8FDB\u5C55\uFF0C\u5DF2\u4E2D\u65AD\uFF1B\u81EA\u52A8\u6062\u590D\u6B21\u6570\u5DF2\u8017\u5C3D\u3002" : error?.message ?? "Codex turn failed", terminationReason: this.recoveryBlocked ? "interrupted" : "failed" });
+          this.finish();
+        }
       } else if (!this.goalActive || p4.turn?.status === "interrupted") {
+        this.cancelRecovery();
+        this.recoveryAttempts = 0;
         if (p4.turn?.status === "interrupted") this.emit?.({ type: "done", terminationReason: "interrupted" });
         this.finish();
       }
     }
+  }
+  messageKey(turnId, itemId) {
+    const turn = typeof turnId === "string" ? turnId : this.turnId;
+    return turn && typeof itemId === "string" && itemId ? `${turn}:${itemId}` : void 0;
+  }
+  completeMessage(turnId, item, authoritative = false) {
+    const key = this.messageKey(turnId, item.id);
+    if (!key || typeof item.text !== "string" || !item.text) return;
+    const draft = this.completedMessages.get(key) ?? this.deltas.get(key) ?? "";
+    if (!authoritative && draft.startsWith(item.text) && draft.length > item.text.length) return;
+    this.completedMessages.set(key, item.text);
+    if (this.completedMessages.size > 1e3) this.completedMessages.delete(this.completedMessages.keys().next().value);
+    this.lastAssistantText = item.text.slice(-2e3);
+    if (!item.text.startsWith(draft)) {
+      this.emit?.({ type: "text", source: "agent", itemId: key, replace: true, delta: item.text });
+    } else if (item.text.length > draft.length) {
+      this.emit?.({ type: "text", source: "agent", itemId: key, delta: item.text.slice(draft.length) });
+    }
+    this.deltas.delete(key);
+  }
+  cancelRecovery() {
+    const pending = Boolean(this.recoveryTimer || this.recoveryStarting || this.recoveryChecking);
+    if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
+    this.recoveryTimer = void 0;
+    this.clearRetryStall();
+    if (this.retryInterruptTimer) clearTimeout(this.retryInterruptTimer);
+    this.retryInterruptTimer = void 0;
+    this.retryInterruptTurnId = void 0;
+    this.recoveryEpoch += 1;
+    return pending;
+  }
+  cancelAutoRecovery() {
+    this.recoveryBlocked = true;
+    this.cancelRecovery();
+  }
+  recoveryAllowed() {
+    const policy = this.recovery?.policy;
+    return Boolean(policy?.enabled && !this.recoveryBlocked && this.isAlive() && (!policy.providers.length || this.recovery?.providerIds.some((id) => policy.providers.includes(id))));
+  }
+  clearRetryStall() {
+    if (this.retryStallTimer) clearTimeout(this.retryStallTimer);
+    this.retryStallTimer = void 0;
+  }
+  watchRetryStall(turnId, error) {
+    const seconds = this.recovery?.policy.retryStallSeconds;
+    if (!seconds || !this.recoveryAllowed() || !isTransientProviderError(error) || this.retryStallTimer || this.retryInterruptTurnId || this.pending.size || this.activeTools.size) return;
+    const epoch = this.recoveryEpoch;
+    this.retryStallTimer = setTimeout(() => {
+      const timer = this.retryStallTimer;
+      void (async () => {
+        const turns = await this.rpc.request("thread/turns/list", { threadId: this.id, limit: 1, sortDirection: "desc" });
+        if (!timer || this.retryStallTimer !== timer || epoch !== this.recoveryEpoch || !this.recoveryAllowed() || this.turnId !== turnId || this.pending.size || this.activeTools.size) return;
+        if (turns.data?.[0]?.id !== turnId || turns.data[0].status !== "inProgress") return;
+        this.retryInterruptTurnId = turnId;
+        this.emit?.(textEvent(`
+\u23F3 \u91CD\u8FDE\u8FDE\u7EED ${seconds} \u79D2\u65E0\u8FDB\u5C55\uFF0C\u6B63\u5728\u4E2D\u65AD\u672C\u8F6E\uFF1B\u786E\u8BA4\u7ED3\u675F\u540E\u624D\u4F1A\u7EE7\u7EED\u3002
+`));
+        log.info("agent", "provider-retry-stalled", { thread: this.id, turn: turnId, seconds });
+        this.retryInterruptTimer = setTimeout(() => {
+          if (this.retryInterruptTurnId !== turnId) return;
+          this.cancelAutoRecovery();
+          this.emit?.({ type: "error", message: "\u672A\u6536\u5230\u672C\u8F6E\u4E2D\u65AD\u786E\u8BA4\uFF0C\u5DF2\u505C\u6B62\u81EA\u52A8\u6062\u590D\uFF1B\u8BF7\u68C0\u67E5 /status\u3002", terminationReason: "failed" });
+          this.finish();
+        }, 15e3);
+        await this.rpc.request("turn/interrupt", { threadId: this.id, turnId }, 15e3);
+      })().catch(() => {
+        if (epoch !== this.recoveryEpoch || this.recoveryBlocked) return;
+        this.cancelAutoRecovery();
+        this.emit?.({ type: "error", message: "\u65E0\u6CD5\u786E\u8BA4\u91CD\u8FDE\u4E2D\u7684 turn \u5DF2\u505C\u6B62\uFF1B\u672A\u53D1\u9001\u7EE7\u7EED\u8BF7\u6C42\u3002", terminationReason: "failed" });
+        this.finish();
+      }).finally(() => {
+        if (this.retryStallTimer === timer) this.clearRetryStall();
+      });
+    }, seconds * 1e3);
+    this.retryStallTimer.unref?.();
+  }
+  scheduleRecovery(failedTurnId, error, expectedStatus = "failed", preempted = false) {
+    const policy = this.recovery?.policy;
+    if (!policy || !this.recoveryAllowed() || this.pending.size || this.recoveryAttempts >= policy.maxAttempts || !isTransientProviderError(error)) return false;
+    this.cancelRecovery();
+    const epoch = this.recoveryEpoch;
+    const goalWasActive = this.goalActive;
+    const attempt = ++this.recoveryAttempts;
+    const delay3 = preempted ? 5 : Math.min(policy.maxDelaySeconds, policy.delaySeconds * 2 ** (attempt - 1));
+    this.phase = "busy";
+    this.emit?.(textEvent(`
+\u23F3 Provider \u4E34\u65F6\u9519\u8BEF\uFF0C\u672C\u8F6E\u5DF2\u7ED3\u675F\uFF1B${delay3} \u79D2\u540E\u81EA\u52A8\u7EE7\u7EED\uFF08${attempt}/${policy.maxAttempts}\uFF09\u3002/stop \u53EF\u53D6\u6D88\u3002
+`));
+    log.info("agent", "provider-recovery-scheduled", { thread: this.id, attempt, delaySeconds: delay3 });
+    const previousWork = this.recoveryWork;
+    this.recoveryTimer = setTimeout(() => {
+      this.recoveryTimer = void 0;
+      this.recoveryWork = (async () => {
+        await previousWork;
+        if (epoch !== this.recoveryEpoch || this.recoveryBlocked) return;
+        this.recoveryChecking = true;
+        const turns = await this.rpc.request("thread/turns/list", { threadId: this.id, limit: 1, sortDirection: "desc" });
+        if (epoch !== this.recoveryEpoch || this.recoveryBlocked || this.turnId) return;
+        if (this.pending.size) {
+          this.emit?.({ type: "error", message: "\u81EA\u52A8\u7EE7\u7EED\u5DF2\u53D6\u6D88\uFF1A\u4F1A\u8BDD\u5B58\u5728\u5F85\u5904\u7406\u4EA4\u4E92\u3002", terminationReason: "failed" });
+          this.finish();
+          return;
+        }
+        const latest = turns.data?.[0];
+        if (latest?.id !== failedTurnId || latest.status !== expectedStatus) {
+          if (latest?.status === "inProgress") {
+            this.turnId = latest.id;
+            this.phase = "busy";
+          } else {
+            this.emit?.(latest?.status === "completed" || latest?.status === "interrupted" ? { type: "done", terminationReason: latest.status === "interrupted" ? "interrupted" : "normal" } : { type: "error", message: "\u81EA\u52A8\u7EE7\u7EED\u5DF2\u53D6\u6D88\uFF1A\u4F1A\u8BDD\u72B6\u6001\u5DF2\u53D8\u5316\u3002", terminationReason: "failed" });
+            this.finish();
+          }
+          return;
+        }
+        if (goalWasActive) {
+          const result2 = await this.rpc.request("thread/goal/get", { threadId: this.id });
+          if (epoch !== this.recoveryEpoch || this.recoveryBlocked) return;
+          if (result2.goal?.status !== "active") {
+            this.goalActive = false;
+            this.emit?.({ type: "done", terminationReason: "interrupted" });
+            this.finish();
+            return;
+          }
+        }
+        if (epoch !== this.recoveryEpoch || this.recoveryBlocked || this.turnId) return;
+        this.recoveryStarting = true;
+        this.emit?.(textEvent(`
+\u21AA \u6B63\u5728\u81EA\u52A8\u7EE7\u7EED\uFF08${attempt}/${policy.maxAttempts}\uFF09\u3002
+`));
+        const result = await this.rpc.request("turn/start", { threadId: this.id, input: [{
+          type: "text",
+          text: "Continue the existing task after the temporary provider/API failure. Check the current state and prior tool results first; do not repeat completed actions. Respect any pause, stop, approval or budget limits already in this conversation."
+        }] });
+        if (epoch !== this.recoveryEpoch) {
+          if (this.recoveryBlocked && result.turn?.id && !this.finishedTurns.has(result.turn.id)) {
+            await this.rpc.request("turn/interrupt", { threadId: this.id, turnId: result.turn.id });
+          }
+          return;
+        }
+        if (result.turn?.id) this.recoveryTurnIds.add(result.turn.id);
+        if (this.recoveryTurnIds.size > 20) this.recoveryTurnIds.delete(this.recoveryTurnIds.values().next().value);
+        if (!this.finishedTurns.has(result.turn?.id)) this.turnId = result.turn?.id ?? this.turnId;
+        if (this.recoveryBlocked && this.turnId) await this.rpc.request("turn/interrupt", { threadId: this.id, turnId: this.turnId });
+      })().catch(() => {
+        if (epoch !== this.recoveryEpoch) return;
+        this.emit?.({ type: "error", message: "\u81EA\u52A8\u7EE7\u7EED\u672A\u80FD\u786E\u8BA4\u4F1A\u8BDD\u72B6\u6001\u6216\u8BF7\u6C42\u7ED3\u679C\uFF1B\u5DF2\u505C\u6B62\u91CD\u8BD5\uFF0C\u8BF7\u68C0\u67E5 /status\u3002", terminationReason: "failed" });
+        this.finish();
+      }).finally(() => {
+        this.recoveryStarting = false;
+        this.recoveryChecking = false;
+      });
+    }, delay3 * 1e3);
+    this.recoveryTimer.unref?.();
+    return true;
   }
   async handleDynamicToolCall(id, params) {
     const expectedNamespace = this.brokerTools?.specs[0]?.name;
@@ -17694,7 +17949,11 @@ ${p4.command ?? JSON.stringify(p4.changes ?? {})}`,
   }
   async submit(options, emit2, signal) {
     if (this.emit) throw new Error("Structured thread already has an active relay");
+    if (this.recoveryStarting || this.recoveryChecking) throw new Error("\u81EA\u52A8\u6062\u590D\u8BF7\u6C42\u4ECD\u5728\u786E\u8BA4\u7ED3\u679C\uFF0C\u8BF7\u7A0D\u540E\u518D\u53D1\u9001\u65B0\u4EFB\u52A1\u3002");
     if (signal.aborted) return;
+    this.cancelRecovery();
+    this.recoveryAttempts = 0;
+    this.recoveryBlocked = false;
     this.lastUserText = options.prompt.slice(0, 800);
     this.lastCwd = options.cwd;
     this.emit = emit2;
@@ -17882,7 +18141,8 @@ ${options.prompt}` : options.prompt }];
    * server is consulted before deciding that a `/stop` had nothing to do.
    */
   async interrupt() {
-    let acted = false;
+    let acted = this.cancelRecovery();
+    this.recoveryBlocked = true;
     try {
       await this.syncState();
     } catch {
@@ -17915,11 +18175,14 @@ ${options.prompt}` : options.prompt }];
       } catch {
       }
     }
-    if (!acted) this.finish();
+    if (!this.turnId) {
+      if (acted) this.emit?.({ type: "done", terminationReason: "interrupted" });
+      this.finish();
+    }
     return acted;
   }
   diagnostics() {
-    return { phase: this.goalActive && this.phase === "idle" ? "busy" : this.phase, inputState: this.turnId || this.goalActive ? "submitted" : "empty", retryCount: 0 };
+    return { phase: this.goalActive && this.phase === "idle" ? "busy" : this.phase, inputState: this.turnId || this.goalActive || this.recoveryTimer || this.recoveryStarting || this.recoveryChecking ? "submitted" : "empty", retryCount: this.internalRetries + this.recoveryAttempts };
   }
   steerCapability() {
     if (!this.isAlive()) {
@@ -18025,6 +18288,9 @@ ${options.prompt}` : options.prompt }];
     await this.close();
   }
   async close() {
+    this.recoveryBlocked = true;
+    this.cancelRecovery();
+    await this.recoveryWork;
     this.toolAbort.abort();
     this.rpc.off("message", this.listener);
     this.rpc.off("disconnected", this.disconnected);
@@ -20062,6 +20328,14 @@ var StructuredAdapter = class {
       list: async (socket) => this.listStructuredPanes(socket),
       bind: async (scope, selector) => this.bindTmuxPane(scope, selector),
       unbind: async (scope) => {
+        const observer = this.recoveryObservers.get(scope);
+        if (observer) {
+          await observer.close();
+          observer.disconnect();
+          this.recoveryObservers.delete(scope);
+        }
+        const main = this.sessions.get(scope)?.main;
+        if (main instanceof CodexStructuredSession) main.cancelAutoRecovery();
         const removed = this.bindings.delete(scope);
         if (removed) this.autoDiscoveryDisabled.add(scope);
         if (removed) await this.saveBindings();
@@ -20119,6 +20393,13 @@ var StructuredAdapter = class {
           return acted !== false;
         }
         if (options2?.sideOnly) return false;
+        const observer = this.recoveryObservers.get(scope);
+        if (observer?.isAlive()) return observer.interrupt();
+        if (observer) {
+          await observer.close();
+          observer.disconnect();
+          this.recoveryObservers.delete(scope);
+        }
         const binding = this.bindings.get(scope);
         if (binding) return this.interruptBinding(binding);
         if (this.id !== "codex" || !cwd) return false;
@@ -20148,6 +20429,7 @@ var StructuredAdapter = class {
   displayName;
   tmux;
   sessions = /* @__PURE__ */ new Map();
+  recoveryObservers = /* @__PURE__ */ new Map();
   starting = /* @__PURE__ */ new Map();
   bindings = /* @__PURE__ */ new Map();
   autoDiscoveryDisabled = /* @__PURE__ */ new Set();
@@ -20257,9 +20539,11 @@ var StructuredAdapter = class {
   async restoreArtifactDelivery(scope, artifact) {
     if (this.id !== "codex") return false;
     const threads = /* @__PURE__ */ new Map();
+    const recoverable = /* @__PURE__ */ new Map();
     const binding = this.bindings.get(scope);
     if (binding) {
       threads.set(binding.threadId, binding.cwd);
+      recoverable.set(binding.threadId, { cwd: binding.cwd, endpoint: binding.endpoint });
       const pane = listStructuredTmuxPanes(binding.target.socketPath).find(
         (candidate) => candidate.paneId === binding.target.paneId && candidate.sessionName === binding.target.sessionName
       );
@@ -20272,7 +20556,10 @@ var StructuredAdapter = class {
       if (!/^[a-f0-9]{64}\.json$/u.test(name)) continue;
       try {
         const saved = JSON.parse(await readFile21(join35(directory, name), "utf8"));
-        if (saved.scope === scope && saved.kind === "codex" && saved.id && saved.cwd) threads.set(saved.id, saved.cwd);
+        if (saved.scope === scope && saved.kind === "codex" && saved.id && saved.cwd) {
+          threads.set(saved.id, saved.cwd);
+          if (saved.endpoint) recoverable.set(saved.id, { cwd: saved.cwd, endpoint: saved.endpoint });
+        }
       } catch {
       }
     }
@@ -20302,6 +20589,13 @@ var StructuredAdapter = class {
       side.artifactToken = artifact.token;
     }
     if (current?.main instanceof CodexStructuredSession) await current.main.refreshBrokerArtifactDelivery(artifact);
+    const recoveryTargets = binding ? [...recoverable].filter(([id]) => id === binding.threadId) : [...recoverable];
+    if (!current && !this.recoveryObservers.has(scope) && recoveryTargets.length === 1) {
+      const [id, target] = recoveryTargets[0];
+      await this.restoreRecoveryObserver(scope, id, target.cwd, target.endpoint, artifact).catch((error) => {
+        log.warn("agent", "provider-recovery-attach-unavailable", { scope, thread: id, reason: redactDiagnosticText(String(error)) });
+      });
+    }
     return threads.size > 0 || [...this.mixagentsSides.values()].some((side) => side.scope === scope && subagentThreadId(side.agent));
   }
   loadCandidates() {
@@ -22023,6 +22317,7 @@ ${prompt}
       },
       detach: async () => {
         detached = true;
+        if (activeTarget instanceof CodexStructuredSession) activeTarget.cancelAutoRecovery();
         events.close();
       },
       waitForExit: async () => true
@@ -22121,6 +22416,13 @@ ${prompt}
     }
   }
   async createSession(scope, options, bound2) {
+    const observer = this.recoveryObservers.get(scope);
+    if (observer) {
+      observer.cancelAutoRecovery();
+      await observer.close();
+      observer.disconnect();
+      this.recoveryObservers.delete(scope);
+    }
     const cwd = options.cwd;
     const directory = join35(this.options.profileDir, "structured");
     const stateFile = this.stateFile(scope, cwd);
@@ -22222,7 +22524,7 @@ ${prompt}
             cwd,
             brokerState.config.toolNamespace
           ) : void 0;
-          const attached = new CodexStructuredSession(bound2.threadId, endpoint2, rpc2, brokerTools);
+          const attached = await this.createMainSession(bound2.threadId, endpoint2, rpc2, brokerTools);
           await attached.syncState();
           await writeFileAtomic(stateFile, JSON.stringify({
             id: bound2.threadId,
@@ -22377,8 +22679,8 @@ ${prompt}
           cwd,
           brokerState.config.toolNamespace
         ) : void 0;
-        restored = saved && brokerState.enabled ? new CodexStructuredSession(saved.id, endpoint, rpc, brokerTools) : void 0;
-        main = restored ?? new CodexStructuredSession(id, endpoint, rpc, brokerTools);
+        restored = saved && brokerState.enabled ? await this.createMainSession(saved.id, endpoint, rpc, brokerTools) : void 0;
+        main = restored ?? await this.createMainSession(id, endpoint, rpc, brokerTools);
         await main.syncState();
         const nativeSpec = this.options.nativeView !== false ? {
           binary: this.options.binary,
@@ -22426,7 +22728,55 @@ ${prompt}
     }
     return { main, view, cwd, ...pendingNative ? { pendingNative } : {} };
   }
+  async restoreRecoveryObserver(scope, id, cwd, endpoint, artifact) {
+    if (!normalizeProviderRecovery(this.options.providerRecovery).enabled || process.platform === "win32") return;
+    const rpc = await this.connectExisting(endpoint);
+    let observer;
+    try {
+      await rpc.initialize();
+      const loaded = await rpc.request("thread/loaded/list", {}, 5e3);
+      if (!loaded.data?.includes(id)) {
+        rpc.close();
+        return;
+      }
+      const marker = this.brokerThreads.get(id);
+      const brokerTools = marker ? this.brokerController(id, scope, cwd, marker.namespace) : void 0;
+      observer = await this.createMainSession(id, endpoint, rpc, brokerTools);
+      await resumeCodexThread(rpc, { threadId: id, cwd, excludeTurns: true }, {}, 1e4, { preserveProviderModel: true });
+      await observer.syncState();
+      await observer.refreshBrokerArtifactDelivery(artifact);
+      if (this.sessions.has(scope) || this.starting.has(scope)) {
+        await observer.close();
+        rpc.close();
+        return;
+      }
+      this.recoveryObservers.set(scope, observer);
+      log.info("agent", "provider-recovery-attached", { scope, thread: id });
+    } catch (error) {
+      await observer?.close();
+      rpc.close();
+      throw error;
+    }
+  }
+  async createMainSession(id, endpoint, rpc, brokerTools) {
+    const root = this.options.configFile ? await loadRootConfig(this.options.configFile) : void 0;
+    const profile2 = this.options.profile ? root?.profiles[this.options.profile] : void 0;
+    const policy = normalizeProviderRecovery(profile2?.codex?.providerRecovery ?? this.options.providerRecovery);
+    const hosts = await readHostRegistry(this.options.profileDir);
+    const host = hosts.find((value) => endpoint === `unix://${join35(value.directory, "server.sock")}`);
+    const providerIds = host?.runtimeIdentity ? [host.runtimeIdentity.ccSwitchProviderId, host.runtimeIdentity.codexProviderId].filter((value) => !!value) : [];
+    if (!providerIds.length && policy.providers.length) {
+      const config = await rpc.request("config/read", {}).catch(() => ({}));
+      if (typeof config.config?.model_provider === "string") providerIds.push(config.config.model_provider);
+    }
+    return new CodexStructuredSession(id, endpoint, rpc, brokerTools, { policy, providerIds });
+  }
   async shutdown() {
+    for (const observer of this.recoveryObservers.values()) {
+      await observer.close();
+      observer.disconnect();
+    }
+    this.recoveryObservers.clear();
     const signal = new AbortController().signal;
     for (const side of [...this.mixagentsSides.values()]) {
       await this.closeMixagentsSide(side, signal).catch(() => {
@@ -25062,9 +25412,26 @@ function withLiveness(state, now, opts = {}) {
 function reduce(state, evt) {
   switch (evt.type) {
     case "text": {
+      if (evt.itemId) {
+        const index = state.blocks.findIndex((block2) => block2.kind === "text" && block2.itemId === evt.itemId);
+        const existing = state.blocks[index];
+        const block = {
+          kind: "text",
+          itemId: evt.itemId,
+          origin: "agent",
+          streaming: !evt.replace,
+          content: evt.replace ? evt.delta : (existing?.kind === "text" ? existing.content : "") + evt.delta
+        };
+        return withLiveness({
+          ...state,
+          blocks: index < 0 ? [...state.blocks, block] : state.blocks.map((value, i) => i === index ? block : value),
+          reasoning: { ...state.reasoning, active: false },
+          footer: "streaming"
+        }, Date.now());
+      }
       const last = state.blocks[state.blocks.length - 1];
       const origin = evt.source === "live-terminal" ? "terminal" : evt.source === "agent" ? "agent" : void 0;
-      if (last && last.kind === "text" && last.streaming && (last.origin ?? void 0) === origin) {
+      if (last && last.kind === "text" && last.streaming && !last.itemId && (last.origin ?? void 0) === origin) {
         const next = { ...last, content: last.content + evt.delta };
         return withLiveness(
           {
@@ -30839,6 +31206,7 @@ async function handleCommentMention(deps) {
       });
       if (!execution) return;
       let answer = "";
+      let answerState = initialState;
       let errorMsg;
       let terminal = false;
       let timedOut = false;
@@ -30886,11 +31254,13 @@ async function handleCommentMention(deps) {
           }
           switch (e.type) {
             case "text":
-              answer += e.delta;
+              answerState = reduce(answerState, e);
+              answer = answerState.blocks.filter((block) => block.kind === "text").map((block) => block.content).join("");
               break;
             case "tool_use":
             case "tool_result":
               answer = "";
+              answerState = initialState;
               break;
             case "system":
               break;
@@ -32130,6 +32500,102 @@ function trimTail2(value, maxChars) {
   return value.length <= maxChars ? value : value.slice(-maxChars);
 }
 
+// src/bot/acknowledged-stream.ts
+async function acknowledgedStream(channel, chatId, input, options) {
+  let current = "card" in input && input.card ? input.card.initial : markdownCard("\u{1F9E0} \u6B63\u5728\u601D\u8003\u2026");
+  let messageId = (await channel.send(chatId, { card: stationary(current) }, options)).messageId;
+  if (!messageId) throw new Error("Streaming reply did not return a message ID");
+  let pending = false;
+  let timer;
+  let failure2;
+  let replacements = 0;
+  let tail = Promise.resolve();
+  let last = JSON.stringify(current);
+  const flush = () => {
+    if (timer) clearTimeout(timer);
+    timer = void 0;
+    const operation = tail.then(async () => {
+      if (failure2) throw failure2;
+      if (!pending) return;
+      pending = false;
+      const snapshot = current;
+      const serialized = JSON.stringify(snapshot);
+      if (serialized === last) return;
+      try {
+        const response = await channel.rawClient.im.v1.message.patch({
+          path: { message_id: messageId },
+          data: { content: JSON.stringify(stationary(snapshot)) }
+        });
+        if (response.code !== void 0 && response.code !== 0) throw new Error(`Feishu PATCH rejected (${response.code})`);
+      } catch (error) {
+        if (replacements >= 1) throw error;
+        const replacement = await channel.send(chatId, { card: stationary(snapshot) }, options);
+        if (!replacement.messageId) throw error;
+        messageId = replacement.messageId;
+        replacements += 1;
+      }
+      last = serialized;
+    });
+    tail = operation.catch((error) => {
+      failure2 = error;
+    });
+    return operation;
+  };
+  const update = async (next) => {
+    if (failure2) throw failure2;
+    current = next;
+    pending = true;
+    if (!timer) timer = setTimeout(() => {
+      void flush().catch(() => {
+      });
+    }, 400);
+  };
+  try {
+    if ("card" in input && input.card) {
+      await input.card.producer({
+        messageId,
+        get current() {
+          return current;
+        },
+        update: (next) => update(typeof next === "function" ? next(current) : next)
+      });
+    } else if ("markdown" in input && input.markdown) {
+      let text2 = "";
+      await input.markdown({
+        messageId,
+        append: async (chunk) => {
+          text2 += chunk;
+          await update(markdownCard(text2));
+        },
+        setContent: async (content) => {
+          text2 = content;
+          await update(markdownCard(text2));
+        }
+      });
+    }
+    await flush();
+    if (failure2) throw failure2;
+  } catch (error) {
+    await flush().catch(() => {
+    });
+    throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
+    await tail;
+  }
+}
+function stationary(card) {
+  const value = card;
+  return { ...card, config: { ...value.config, streaming_mode: false } };
+}
+function markdownCard(content) {
+  return {
+    schema: "2.0",
+    config: { streaming_mode: false },
+    body: { elements: [{ tag: "markdown", content: content || "\u2026" }] }
+  };
+}
+
 // src/bot/cot.ts
 var ENDPOINTS2 = {
   feishu: "https://open.feishu.cn",
@@ -32386,6 +32852,7 @@ async function consumeCotEvents(events, publisher, opts) {
         continue;
       }
       if (evt.type === "text") {
+        if (evt.replace) closeTextIfNeeded();
         closeReasoningIfNeeded();
         if (!textStepOpen) {
           textStepOpen = true;
@@ -34380,6 +34847,10 @@ ${delta}`.slice(-64e3);
     };
   };
   const prepareStateForReply = (state) => filterForPrefs(withNativeEmptyFallback(state));
+  const streamReply = agent.structuredControl ? async (to, input, options) => {
+    await acknowledgedStream(channel, to, input, options);
+    return { messageId: "" };
+  } : channel.stream.bind(channel);
   const cardRenderOptions = callbackAuth ? {
     structuredOnly: Boolean(agent.structuredControl),
     signCallback: (action) => callbackAuth.sign({
@@ -34587,8 +35058,6 @@ ${delta}`.slice(-64e3);
       const deliverLongReply = async () => {
         if (!longReplyText || longReplyDelivered || handle.detached) return;
         if (currentOutputMode() === "off") return;
-        longReplyDelivered = true;
-        freshFinalPosted = true;
         await sendCompleteReplyChunks({
           channel,
           chatId,
@@ -34597,12 +35066,13 @@ ${delta}`.slice(-64e3);
           scope,
           replyMode: "card"
         });
+        longReplyDelivered = true;
+        freshFinalPosted = true;
       };
       const postFreshFinal = async (state) => {
         if (handle.detached) return;
         if (freshFinalPosted) return;
         if (currentOutputMode() === "off") return;
-        freshFinalPosted = true;
         const replyState = currentOutputMode() === "final" ? finalAnswerOnlyState(prepareStateForReply(state)) : prepareStateForReply(state);
         const complete = completeReplyText(replyState);
         if (isLongReplyText(complete) && !looksLikeAgentPicker(complete, useLiveSession ? false : true)) {
@@ -34620,6 +35090,7 @@ ${delta}`.slice(-64e3);
           ),
           { scope, chunk: 0, total: 0, warning: true }
         );
+        freshFinalPosted = true;
       };
       let lastSentCardSerialized;
       const renderDone = processAgentStream(
@@ -34688,6 +35159,8 @@ ${delta}`.slice(-64e3);
       );
       await runRollingReplyStream({
         mode: replyMode,
+        rolloverMs: agent.structuredControl ? 0 : void 0,
+        terminalGraceMs: agent.structuredControl ? 35e3 : void 0,
         renderDone,
         startSegment: (segmentDone, markProducerStarted, segment) => {
           segmentBaseText = segment === 1 ? "" : runStateTextCursor(prepareStateForReply(latestState));
@@ -34703,7 +35176,7 @@ ${delta}`.slice(-64e3);
             if (segment > 1 && !hasNewText) return;
             if (segment > 1 && !segmentTextReadyFlag) return;
             const currentSegmentState = stateForDelivery(latestState);
-            return channel.stream(
+            return streamReply(
               chatId,
               {
                 card: {
@@ -34782,8 +35255,6 @@ ${delta}`.slice(-64e3);
       const deliverLongReply = async () => {
         if (!longReplyText || longReplyDelivered || handle.detached) return;
         if (currentOutputMode() === "off") return;
-        longReplyDelivered = true;
-        freshFinalPosted = true;
         await sendCompleteReplyChunks({
           channel,
           chatId,
@@ -34792,12 +35263,13 @@ ${delta}`.slice(-64e3);
           scope,
           replyMode: "markdown"
         });
+        longReplyDelivered = true;
+        freshFinalPosted = true;
       };
       const postFreshFinal = async (state) => {
         if (handle.detached) return;
         if (freshFinalPosted) return;
         if (currentOutputMode() === "off") return;
-        freshFinalPosted = true;
         const replyState = currentOutputMode() === "final" ? finalAnswerOnlyState(prepareStateForReply(state)) : prepareStateForReply(state);
         const complete = completeReplyText(replyState);
         if (isLongReplyText(complete) && !looksLikeAgentPicker(complete, useLiveSession ? false : true)) {
@@ -34811,6 +35283,7 @@ ${delta}`.slice(-64e3);
             () => channel.send(chatId, { markdown: body }, sendOpts),
             { scope, chunk: 0, total: 0, warning: true }
           );
+          freshFinalPosted = true;
         }
       };
       let lastSentMarkdownText;
@@ -34872,6 +35345,8 @@ ${delta}`.slice(-64e3);
       );
       await runRollingReplyStream({
         mode: replyMode,
+        rolloverMs: agent.structuredControl ? 0 : void 0,
+        terminalGraceMs: agent.structuredControl ? 35e3 : void 0,
         renderDone,
         startSegment: (segmentDone, markProducerStarted, segment) => {
           segmentBaseText = segment === 1 ? "" : runStateTextCursor(prepareStateForReply(latestState));
@@ -34887,7 +35362,7 @@ ${delta}`.slice(-64e3);
             if (segment > 1 && !hasNewText) return;
             if (segment > 1 && !segmentTextReadyFlag) return;
             const currentSegmentState = stateForDelivery(latestState);
-            return channel.stream(
+            return streamReply(
               chatId,
               {
                 markdown: async (ctrl) => {
@@ -35349,7 +35824,7 @@ async function runRollingReplyStream(input) {
     let producerStarted = false;
     let rolloverTimer;
     const rollover = new Promise((resolve11) => {
-      rolloverTimer = setTimeout(resolve11, rolloverMs);
+      if (rolloverMs > 0) rolloverTimer = setTimeout(resolve11, rolloverMs);
     });
     const segmentDone = Promise.race([
       renderResult.then(() => void 0),
@@ -35384,7 +35859,7 @@ async function runRollingReplyStream(input) {
       }
       const terminal = await Promise.race([
         streamResult,
-        delay2(STREAM_TERMINAL_GRACE_MS).then(() => void 0)
+        delay2(input.terminalGraceMs ?? STREAM_TERMINAL_GRACE_MS).then(() => void 0)
       ]);
       if (!terminal) {
         log.warn("stream", "terminal-grace-expired", {
@@ -35404,7 +35879,10 @@ async function runRollingReplyStream(input) {
         await runFallbackReply(input.mode, first.state, input.fallback);
         return;
       }
-      if (!terminal.ok) throw terminal.err;
+      if (!terminal.ok) {
+        log.fail("stream", terminal.err, { mode: input.mode, segment, step: "terminal" });
+        await runFallbackReply(input.mode, first.state, input.fallback);
+      }
       return;
     }
     if (renderSettled) {
@@ -35427,6 +35905,7 @@ async function runFallbackReply(mode, state, fallback) {
     await fallback(state);
   } catch (err) {
     log.fail("stream", err, { mode, step: "fallback" });
+    throw err;
   }
 }
 function scheduleWorkingReactionCleanup(channel, messageId, reactionPromise) {
@@ -36817,6 +37296,7 @@ function createRuntimeAgent(profileConfig, appPaths2) {
       profileDir: appPaths2.profileDir,
       codexHome: profileConfig.codex?.codexHome ?? (profileConfig.codex?.inheritCodexHome === true ? void 0 : `${appPaths2.profileDir}/codex-home`),
       nativeView: profileConfig.preferences.structuredNativeView !== false,
+      providerRecovery: profileConfig.codex?.providerRecovery,
       sandbox: profileConfig.sandbox.defaultMode,
       network: profileConfig.network,
       subagents: profileConfig.subagents,
@@ -38196,6 +38676,36 @@ async function runSettings(options = {}) {
     `\u9879\u76EE\u8BC1\u636E\u6821\u9A8C\uFF1A${rsiMode === "off" ? "\u5173\u95ED" : "\u81EA\u52A8\uFF08\u53EA\u5BF9\u5DF2\u521D\u59CB\u5316\u9879\u76EE\uFF09"}`,
     advanced ? "\u9AD8\u7EA7\u53C2\u6570\uFF1A\u5DF2\u5C55\u5F00\u7F16\u8F91" : "\u9AD8\u7EA7\u53C2\u6570\uFF1A\u4FDD\u6301\u539F\u503C"
   ].join("\n"), "\u6B65\u9AA4 5 / 5 \xB7 \u4FDD\u5B58\u524D\u786E\u8BA4");
+  let providerRecovery = snapshot.providerRecovery;
+  if (snapshot.agentKind === "codex") {
+    const mode = await p3.select({
+      message: "\u4E3B\u4F1A\u8BDD\u9047\u5230\u4E34\u65F6 API \u9519\u8BEF\u540E\u81EA\u52A8\u7EE7\u7EED\uFF1F",
+      initialValue: !providerRecovery.enabled ? "off" : providerRecovery.providers.length ? "selected" : "all",
+      options: [
+        { value: "all", label: "\u6240\u6709 provider\uFF08\u63A8\u8350\uFF09", hint: `\u672C\u8F6E\u786E\u8BA4\u5931\u8D25\u540E\u9000\u907F\u91CD\u8BD5\uFF0C\u6700\u591A ${providerRecovery.maxAttempts} \u6B21\uFF1B/stop \u53EF\u53D6\u6D88` },
+        { value: "selected", label: "\u4EC5\u9009\u5B9A provider" },
+        { value: "off", label: "\u5173\u95ED\u81EA\u52A8\u7EE7\u7EED" }
+      ]
+    });
+    assertPrompt(mode);
+    let providers = providerRecovery.providers;
+    if (mode === "selected") {
+      const choices = new Map(ccProviders.map((provider) => [provider.id, provider.name]));
+      for (const id of providers) if (!choices.has(id)) choices.set(id, id);
+      if (snapshot.mainProvider.configuredCodexProviderId) choices.set(snapshot.mainProvider.configuredCodexProviderId, `Codex: ${snapshot.mainProvider.configuredCodexProviderId}`);
+      if (!choices.size) throw new Error("\u6CA1\u6709\u53EF\u8BC6\u522B\u7684 provider\uFF1B\u8BF7\u5148\u914D\u7F6E cc-switch\u3002");
+      const selected = await p3.multiselect({
+        message: "\u5141\u8BB8\u81EA\u52A8\u7EE7\u7EED\u7684 provider",
+        options: [...choices].map(([value, label]) => ({ value, label })),
+        initialValues: providers,
+        required: true
+      });
+      assertPrompt(selected);
+      providers = selected;
+    }
+    providerRecovery = { ...providerRecovery, enabled: mode !== "off", providers: mode === "all" ? [] : providers };
+    p3.note(`\u81EA\u52A8\u7EE7\u7EED\uFF1A${providerRecovery.enabled ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF1B\u6700\u591A ${providerRecovery.maxAttempts} \u6B21\uFF0C\u9996\u6B21\u95F4\u9694 ${providerRecovery.delaySeconds} \u79D2\u3002\u91CD\u8FDE\u9759\u9ED8\u4E0A\u9650\uFF1A${providerRecovery.retryStallSeconds ? `${providerRecovery.retryStallSeconds} \u79D2` : "\u5173\u95ED\u63D0\u524D\u4E2D\u65AD"}\u3002/stop \u53EF\u53D6\u6D88\uFF1B\u5DF2\u8FDE\u63A5\u4F1A\u8BDD\u91CD\u542F profile \u540E\u751F\u6548\u3002`, "\u4E3B\u4F1A\u8BDD\u6062\u590D");
+  }
   const save = await p3.confirm({
     message: "\u6309\u4EE5\u4E0A\u8BBE\u7F6E\u4FDD\u5B58\uFF1F",
     initialValue: true
@@ -38229,6 +38739,7 @@ async function runSettings(options = {}) {
     } : void 0;
     root.profiles[snapshot.profile] = {
       ...profile2,
+      ...profile2.codex ? { codex: { ...profile2.codex, providerRecovery } } : {},
       subagents: {
         ...DEFAULT_SUBAGENT_CONFIG,
         ...profile2.subagents,
@@ -38320,6 +38831,7 @@ async function loadSettingsSnapshot(options = {}) {
   };
   return {
     version: 1,
+    providerRecovery: normalizeProviderRecovery(profile2.codex?.providerRecovery),
     profile: profileName,
     agentKind: profile2.agentKind,
     workspace: cwd,

@@ -1492,9 +1492,26 @@ function withLiveness(state, now, opts = {}) {
 function reduce(state, evt) {
   switch (evt.type) {
     case "text": {
+      if (evt.itemId) {
+        const index = state.blocks.findIndex((block2) => block2.kind === "text" && block2.itemId === evt.itemId);
+        const existing = state.blocks[index];
+        const block = {
+          kind: "text",
+          itemId: evt.itemId,
+          origin: "agent",
+          streaming: !evt.replace,
+          content: evt.replace ? evt.delta : (existing?.kind === "text" ? existing.content : "") + evt.delta
+        };
+        return withLiveness({
+          ...state,
+          blocks: index < 0 ? [...state.blocks, block] : state.blocks.map((value, i) => i === index ? block : value),
+          reasoning: { ...state.reasoning, active: false },
+          footer: "streaming"
+        }, Date.now());
+      }
       const last = state.blocks[state.blocks.length - 1];
       const origin = evt.source === "live-terminal" ? "terminal" : evt.source === "agent" ? "agent" : void 0;
-      if (last && last.kind === "text" && last.streaming && (last.origin ?? void 0) === origin) {
+      if (last && last.kind === "text" && last.streaming && !last.itemId && (last.origin ?? void 0) === origin) {
         const next = { ...last, content: last.content + evt.delta };
         return withLiveness(
           {
