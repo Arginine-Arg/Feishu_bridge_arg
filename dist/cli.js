@@ -17874,7 +17874,7 @@ ${p4.command ?? JSON.stringify(p4.changes ?? {})}`,
         this.clearRetryStall();
         if (epoch === this.recoveryEpoch && this.turnId === turnId) this.watchRetryStall(turnId, error);
       });
-    }, Math.min(seconds * 1e3, (this.retrySteerState.get(turnId)?.attempts ?? 3) < 3 ? 5e3 : Infinity));
+    }, seconds * 1e3);
     this.retryStallTimer.unref?.();
   }
   scheduleRecovery(failedTurnId, error, expectedStatus = "failed") {
