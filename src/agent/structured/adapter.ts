@@ -467,6 +467,7 @@ export class StructuredAdapter implements AgentAdapter {
   readonly tmux: AgentTmuxControl;
   private sessions = new Map<string, ScopeSession>();
   private recoveryObservers = new Map<string, CodexStructuredSession>();
+  private recoveryControlWrites: Promise<void> = Promise.resolve();
   private starting = new Map<string, Promise<ScopeSession>>();
   private bindings = new Map<string, StructuredBinding>();
   private autoDiscoveryDisabled = new Set<string>();
@@ -2190,7 +2191,7 @@ export class StructuredAdapter implements AgentAdapter {
     if (!target) throw new Error('请求已失效或不属于此会话');
     const events = await target.command(input);
     const extra = target instanceof CodexStructuredSession || target instanceof ClaudeStructuredSession ? target.drainCommands() : [];
-    for (const event of [...events, ...extra]) (current.sideView ?? current.view).event(event);
+    for (const event of [...events, ...extra]) (target === current.side ? current.sideView : current.view)?.event(event);
     return [...events, ...extra];
   };
   /** Locate an existing same-thread native TUI without starting/resuming work. */
@@ -3052,7 +3053,7 @@ export class StructuredAdapter implements AgentAdapter {
     return { main, view, cwd, ...(pendingNative ? { pendingNative } : {}) };
   }
   private async restoreRecoveryObserver(scope: string, id: string, cwd: string, endpoint: string, artifact: ArtifactDeliveryEnv): Promise<void> {
-    if (!normalizeProviderRecovery(this.options.providerRecovery).enabled || process.platform === 'win32') return;
+    if (process.platform === 'win32') return;
     const rpc = await this.connectExisting(endpoint);
     let observer: CodexStructuredSession | undefined;
     try {
@@ -3085,7 +3086,31 @@ export class StructuredAdapter implements AgentAdapter {
       const config: Wire = await rpc.request('config/read', {}).catch(() => ({}));
       if (typeof config.config?.model_provider === 'string') providerIds.push(config.config.model_provider);
     }
-    return new CodexStructuredSession(id, endpoint, rpc, brokerTools, { policy, providerIds });
+    const controls = await this.readRecoveryControls();
+    return new CodexStructuredSession(id, endpoint, rpc, brokerTools, {
+      policy, providerIds, enabled: controls[id],
+      onEnabledChange: enabled => this.saveRecoveryControl(id, enabled),
+    });
+  }
+  private async readRecoveryControls(): Promise<Record<string, boolean>> {
+    try {
+      const saved = JSON.parse(await readFile(join(this.options.profileDir, 'structured', 'recovery-controls.json'), 'utf8'));
+      return Object.fromEntries(Object.entries(saved.threads ?? {}).filter((entry): entry is [string, boolean] => typeof entry[1] === 'boolean'));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      return {};
+    }
+  }
+  private saveRecoveryControl(id: string, enabled: boolean): Promise<void> {
+    const work = this.recoveryControlWrites.catch(() => {}).then(async () => {
+      const controls = await this.readRecoveryControls();
+      controls[id] = enabled;
+      await mkdir(join(this.options.profileDir, 'structured'), { recursive: true, mode: 0o700 });
+      await writeFileAtomic(join(this.options.profileDir, 'structured', 'recovery-controls.json'),
+        JSON.stringify({ version: 1, threads: controls }, null, 2) + '\n', { mode: 0o600 });
+    });
+    this.recoveryControlWrites = work;
+    return work;
   }
   async shutdown(): Promise<void> {
     for (const observer of this.recoveryObservers.values()) { await observer.close(); observer.disconnect(); }

@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -47,5 +47,23 @@ describe('recovery after bot restart', () => {
     await (adapter as any).restoreRecoveryObserver('scope', 'main', root, 'unix:///existing.sock', { scope: 'scope', token: 'test', socketPath: '/test.sock' });
     expect(rpc.request).toHaveBeenCalledTimes(1); expect(rpc.close).toHaveBeenCalledOnce();
     expect((adapter as any).recoveryObservers.size).toBe(0);
+  });
+  it('persists the session recovery override across adapters without changing another thread', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'bridge-recovery-controls-'));
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const rpc = new EventEmitter() as any;
+    rpc.request = vi.fn(async () => ({}));
+    const adapter = new StructuredAdapter({ kind: 'codex', binary: 'unused', profileDir: root });
+    const first = await (adapter as any).createMainSession('first', '', rpc);
+    const other = await (adapter as any).createMainSession('other', '', rpc);
+    await first.command('/recover off');
+    expect((await other.command('/recover status'))[0].delta).toContain('"enabled": true');
+    const restored = new StructuredAdapter({ kind: 'codex', binary: 'unused', profileDir: root });
+    const same = await (restored as any).createMainSession('first', '', rpc);
+    expect((await same.command('/recover status'))[0].delta).toContain('"enabled": false');
+    await same.command('/recover on');
+    const saved = JSON.parse(await readFile(join(root, 'structured', 'recovery-controls.json'), 'utf8'));
+    expect(saved.threads).toEqual({ first: true });
+    await first.close(); await other.close(); await same.close();
   });
 });

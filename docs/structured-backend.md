@@ -321,46 +321,52 @@ References: [Codex App Server](https://developers.openai.com/codex/app-server),
 <a id="provider-recovery-1200"></a>
 <a id="provider-recovery-1190"></a>
 
-## Provider recovery (1.20.0)
+## Provider recovery (1.21.0)
 
-Codex structured main sessions recover from recognized transient provider
-failures automatically. This applies to turns submitted through Feishu and
-native turns on the main thread subscribed by the running bot. It does not
-change provider/model, clone a thread, or replay the original task prompt.
+Codex structured main sessions continuously recover from recognized transient
+provider failures. This covers Feishu turns and native main-thread turns
+subscribed by the bot. Bridge preserves the thread, provider/model and permission
+policy, and sends exactly `continue` instead of replaying the original task.
 
-- Each retrying active turn receives at most three idempotent `turn/steer`
-  nudges containing `continue`. If those nudges do not restore progress, the
-  turn keeps Codex's native reconnect attempts. After a terminal transient
-  failure or retry-associated interruption, Bridge starts another same-thread
-  continuation round after 30/60/120 seconds, with at most three rounds.
-  Authentication, quota, budget, context, sandbox and unknown failures are
-  surfaced instead of automatically retried.
-- `error.willRetry=true` starts read-only state polling every 60 seconds.
-  An `inProgress` turn keeps its full Codex native reconnect budget; Bridge
-  never interrupts it. A missing terminal notification is reconciled from
-  the latest turn's confirmed status. A failed read keeps observing.
-  A retry-associated `interrupted` turn can also schedule the next round,
-  subject to the same provider policy, user stop and paused-goal guards.
-- Real assistant text, reasoning or tool progress resets the current round's
-  three-steer nudge count. Empty message lifecycle notifications do not reset
-  it. When the three-round budget is exhausted, Bridge reports Codex's original
-  terminal error and does not interrupt anything or emit its own retry error.
-- `/stop`, a paused/cleared goal, detachment and shutdown cancel pending
-  recovery. Before continuation, Bridge checks that the latest turn still
-  matches the failed/interrupted turn. Active work is observed, not replayed.
-- On restart, the bot can subscribe to an unambiguous saved, already-loaded
-  main thread. It does not start a host or resurrect a dormant thread for this
-  purpose. When several saved candidates cannot be disambiguated, normal
-  Feishu input or an explicit binding establishes the current thread.
-- API reconnection is distinct from losing the local App Server socket. An
-  unknown `turn/start` result or local connection loss is not replayed.
-- This policy covers the Codex structured main thread. MixAgents `/btw` and
-  model-visible workers retain their existing Broker lifecycle and approval
-  handling; arbitrary terminal-only Codex panes are not controlled by it.
+- An explicit `error.willRetry=true` starts same-turn `turn/steer` nudges. The
+  first nudge is immediate; subsequent nudges and state checks default to every
+  15 seconds. No recovery path interrupts an active turn. Codex's native
+  reconnect attempts remain available. A steer acknowledgement confirms input
+  acceptance, not that an arbitrary provider immediately reconnects.
+- Confirmed transient `failed` or retry-associated `interrupted` turns continue
+  after 5 seconds, following a fresh read of the latest turn and goal status.
+  A missing terminal notification is reconciled from the status poll. An
+  unavailable status read is retried without sending a new turn or consuming
+  a continuation attempt.
+- Continuous mode has no Bridge attempt limit. Real text, reasoning summaries
+  or tool activity stop the current nudges and reset consecutive failure
+  counts. Tools, pending approvals and unanswered questions are never bypassed.
+- `/recover off` disables Bridge recovery for this main conversation without
+  interrupting its running Codex turn. It also releases an idle relay waiting
+  to recover. An already submitted request can still be accepted, but no
+  additional continue is sent after off. `/recover on` enables future recovery
+  and resumes monitoring an active retry; it does not resurrect an old idle
+  task. `/recover status` reports the setting, provider match, current turn and
+  counters. The setting is stored per thread and survives bot restarts.
+- `/recover` targets the main thread even while `/btw` is open. Profile
+  `enabled` is the default for conversations without an override; a provider
+  allowlist remains binding when a conversation is enabled.
+- `/stop`, goal pause/clear, detachment and shutdown cancel pending recovery.
+  Only an explicit stop may interrupt its already submitted turn; bot restart
+  or observer teardown leaves accepted backend work running.
+  Turning recovery back on does not override a paused goal or revive the task
+  cancelled by `/stop`.
+- Authentication, quota, budget, context, sandbox and unknown failures surface
+  Codex's original error. A local App Server disconnection or an unknown
+  `turn/start` result is not blindly replayed. This cannot repair an API outage
+  or guarantee a shorter provider backoff.
+- On restart the bot subscribes only to an unambiguous already-loaded saved
+  main thread; it does not start dormant work. MixAgents `/btw`, Broker workers
+  and arbitrary terminal-only panes retain their own lifecycle.
 
-Use `arg-bridge settings --profile codex` to select all providers (default),
-specific cc-switch/Codex provider IDs, or disable recovery. Restart the profile
-to apply changes to already-attached sessions. Advanced profile JSON:
+Use `arg-bridge settings --profile codex` to set the default and provider
+allowlist. In-chat `/recover` commands take effect immediately. Advanced profile
+JSON:
 
 ```json
 {
@@ -368,24 +374,28 @@ to apply changes to already-attached sessions. Advanced profile JSON:
     "binaryPath": "codex",
     "providerRecovery": {
       "enabled": true,
+      "continuous": true,
       "providers": [],
-      "maxAttempts": 3,
-      "delaySeconds": 30,
+      "maxAttempts": 0,
+      "delaySeconds": 5,
       "maxDelaySeconds": 120,
-      "retryStallSeconds": 60
+      "retryStallSeconds": 15
     }
   }
 }
 ```
 
-`providers: []` means all providers. `maxAttempts` is bounded to 0–3;
-`retryStallSeconds: 0` disables polling while retaining terminal failure
-continuation. Positive polling intervals are bounded to 15–600 seconds.
-The recovery prompt and every active-turn nudge are exactly `continue`.
-`maxAttempts` controls same-thread continuation rounds; each round can send at
-most three idempotent active-turn steers before waiting for Codex. No setting
-enables early interruption. Arbitrary provider behavior and tool side effects
-cannot be guaranteed idempotent.
+`providers: []` allows all providers. `continuous: true` ignores legacy attempt
+limits. To opt into finite rounds, set `continuous: false` and a positive
+`maxAttempts` (1–100); zero means unlimited rounds. Finite mode sends up to three
+same-turn nudges and uses capped exponential backoff between terminal rounds.
+When its budget is exhausted, Bridge reports the last original Codex error
+without interrupting an active turn. Old default profiles with no `continuous`
+field and `maxAttempts: 3`, `delaySeconds: 30`, `retryStallSeconds: 60` migrate to
+continuous mode with 5/15-second delays; explicit finite settings are preserved.
+`retryStallSeconds: 0` disables periodic polling, leaving event-driven nudges and
+terminal continuation active. Positive polling intervals are bounded to
+5–600 seconds. No recovery setting enables early interruption.
 
 Structured Feishu replies use full-card snapshots at most every 400 ms during
 streaming, check actual PATCH responses, and force a final flush. They do not

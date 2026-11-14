@@ -1,5 +1,7 @@
 export interface ProviderRecoveryConfig {
   enabled: boolean;
+  /** Keep recovering until user/provider policy stops it. */
+  continuous: boolean;
   /** cc-switch provider IDs or Codex model_provider IDs; empty means all. */
   providers: string[];
   maxAttempts: number;
@@ -12,13 +14,17 @@ export interface ProviderRecoveryConfig {
 export function normalizeProviderRecovery(value?: Partial<ProviderRecoveryConfig>): ProviderRecoveryConfig {
   const bounded = (n: unknown, fallback: number, min: number, max: number): number =>
     typeof n === 'number' && Number.isFinite(n) ? Math.min(max, Math.max(min, Math.floor(n))) : fallback;
+  const legacyDefaults = value?.continuous === undefined && value?.maxAttempts === 3;
   return {
     enabled: value?.enabled !== false,
     providers: Array.isArray(value?.providers) ? [...new Set(value.providers.filter((id): id is string => typeof id === 'string' && !!id.trim()).map(id => id.trim()))] : [],
-    maxAttempts: bounded(value?.maxAttempts, 3, 0, 3),
-    delaySeconds: bounded(value?.delaySeconds, 30, 5, 600),
+    // Existing profiles may still contain 1.20's default of 3. Continuous
+    // mode deliberately ignores that legacy value unless explicitly disabled.
+    continuous: value?.continuous !== false,
+    maxAttempts: bounded(value?.maxAttempts, 0, 0, 100),
+    delaySeconds: bounded(legacyDefaults && value?.delaySeconds === 30 ? undefined : value?.delaySeconds, 5, 5, 600),
     maxDelaySeconds: bounded(value?.maxDelaySeconds, 120, 5, 900),
-    retryStallSeconds: value?.retryStallSeconds === 0 ? 0 : bounded(value?.retryStallSeconds, 60, 15, 600),
+    retryStallSeconds: value?.retryStallSeconds === 0 ? 0 : bounded(legacyDefaults && value?.retryStallSeconds === 60 ? undefined : value?.retryStallSeconds, 15, 5, 600),
   };
 }
 
@@ -26,6 +32,8 @@ export function normalizeProviderRecovery(value?: Partial<ProviderRecoveryConfig
  * safely be treated as evidence that a turn ended. */
 export function isTransientProviderError(error: { codexErrorInfo?: unknown; message?: string } | undefined): boolean {
   if (!error) return false;
+  const text = error.message ?? '';
+  if (/unauthori[sz]ed|forbidden|api.?key|quota|usage.limit|billing|context.window|budget|permission|sandbox/i.test(text)) return false;
   const info = error.codexErrorInfo;
   const kind = typeof info === 'string' ? info : info && typeof info === 'object' ? Object.keys(info)[0] : undefined;
   const detail = info && typeof info === 'object' && kind ? (info as Record<string, unknown>)[kind] : undefined;
@@ -34,7 +42,5 @@ export function isTransientProviderError(error: { codexErrorInfo?: unknown; mess
   if (kind && ['rateLimitExceeded', 'serverOverloaded', 'internalServerError', 'flexUnavailable',
     'httpConnectionFailed', 'responseStreamConnectionFailed', 'responseStreamDisconnected', 'responseTooManyFailedAttempts'].includes(kind)) return true;
   if (kind && kind !== 'other') return false;
-  const text = error.message ?? '';
-  if (/unauthori[sz]ed|forbidden|api.?key|insufficient.quota|usage.limit|billing|context.window|budget|permission|sandbox/i.test(text)) return false;
   return /\b(?:429|500|502|503|504)\b|stream disconnected|connection reset|ECONNRESET|ETIMEDOUT|reconnect(?:ion|ing).*\d|temporarily unavailable|server overloaded/i.test(text);
 }

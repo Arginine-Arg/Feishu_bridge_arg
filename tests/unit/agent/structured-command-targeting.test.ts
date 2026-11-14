@@ -44,7 +44,7 @@ it('recognizes a slash command that still carries a leading mention', () => {
 });
 
 it('classifies state-changing native commands as main-scoped', () => {
-  for (const command of ['/goal x', '/goal', '/model', '/stop', '/compact']) {
+  for (const command of ['/goal x', '/goal', '/model', '/stop', '/compact', '/recover off', '/recover on', '/recover status']) {
     expect(isMainScopedNativeCommand(command), command).toBe(true);
   }
   // Conversation-following commands stay with the side the user is in.
@@ -71,6 +71,18 @@ it('runs /goal on the main thread while a side conversation is open', async () =
   expect(goalCalls[0]?.[1]).toMatchObject({ threadId: 'main', status: 'active' });
   // The side must not receive the goal as a prompt.
   expect(rpc.request.mock.calls.some(call => call[0] === 'turn/start' && call[1]?.threadId === 'side')).toBe(false);
+  await main.close(); await side.close();
+});
+
+it('routes recovery controls to the main session while a side is open without starting a turn', async () => {
+  const rpc = fakeRpc();
+  const main = new CodexStructuredSession('main', '', rpc as unknown as RpcClient);
+  const side = new CodexStructuredSession('side', '', rpc as unknown as RpcClient);
+  const adapter = scopeWithSide(rpc, main, side);
+  await adapter.structuredControl('scope', '/recover off');
+  expect((await main.command('/recover status'))[0]).toMatchObject({ delta: expect.stringContaining('"enabled": false') });
+  expect((await side.command('/recover status'))[0]).toMatchObject({ delta: expect.stringContaining('"enabled": true') });
+  expect(rpc.request).not.toHaveBeenCalled();
   await main.close(); await side.close();
 });
 

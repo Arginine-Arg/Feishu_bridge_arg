@@ -137,7 +137,7 @@ describe('guided settings flow', () => {
       },
     });
     expect(savedProfile!.rsi?.mode).toBe('off');
-    expect(savedProfile!.codex?.providerRecovery).toMatchObject({ enabled: true, providers: [], maxAttempts: 3, retryStallSeconds: 60 });
+    expect(savedProfile!.codex?.providerRecovery).toMatchObject({ enabled: true, continuous: true, providers: [], maxAttempts: 0, retryStallSeconds: 15 });
     await expect(readFile(join(xdg, 'arg-bridge', 'broker-routes.json'), 'utf8'))
       .rejects.toMatchObject({ code: 'ENOENT' });
     expect(prompts.note.mock.calls.map(call => call[1])).toEqual(expect.arrayContaining([

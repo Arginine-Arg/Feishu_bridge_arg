@@ -10,7 +10,7 @@ import type { AgentEvent } from '../../src/agent/types';
 import { initialState, reduce } from '../../src/card/run-state';
 
 const native = process.env.ARG_BRIDGE_RECOVERY_E2E === '1' && process.platform !== 'win32' ? it : it.skip;
-native.each(['active continue', 'terminal continuation'])('real Codex recovers via %s without a Bridge interrupt', async mode => {
+native.each(['active continue', 'terminal continuation', 'recovery disabled', 'lost steer acknowledgement'])('real Codex recovers via %s without a Bridge interrupt', async mode => {
   const root = await mkdtemp(join(tmpdir(), 'bridge-recovery-e2e-'));
   const home = join(root, 'codex-home');
   const profile = join(root, 'profile');
@@ -44,22 +44,35 @@ native.each(['active continue', 'terminal continuation'])('real Codex recovers v
     'approval_policy = "never"', 'sandbox_mode = "read-only"',
     '[model_providers.recovery-local]', 'name = "Local test"',
     `base_url = "http://127.0.0.1:${port}/v1"`, 'wire_api = "responses"',
-    'requires_openai_auth = false', 'stream_max_retries = 5', 'request_max_retries = 0',
+    'requires_openai_auth = false', `stream_max_retries = ${mode === 'lost steer acknowledgement' ? 20 : 5}`, 'request_max_retries = 0',
   ].join('\n'));
   const env = { ...process.env, CODEX_HOME: home, OPENAI_API_KEY: 'local-test-only',
     HTTP_PROXY: '', HTTPS_PROXY: '', ALL_PROXY: '', http_proxy: '', https_proxy: '', all_proxy: '', NO_PROXY: '127.0.0.1' };
   const host = await connectCodexHost({ binary: 'codex', profileDir: profile, scope: 'test', cwd: root, env });
   let session: CodexStructuredSession | undefined;
   const wire: any[] = [];
+  const request = host.rpc.request.bind(host.rpc);
   const outgoing = vi.spyOn(host.rpc, 'request');
+  let lostAcknowledgement = false;
+  outgoing.mockImplementation(async (...args) => {
+    const result = await request(...args);
+    if (mode === 'lost steer acknowledgement' && args[0] === 'turn/steer' && !lostAcknowledgement) {
+      lostAcknowledgement = true;
+      throw new Error('Simulated lost steer acknowledgement');
+    }
+    return result;
+  });
   host.rpc.on('message', message => {
     if (['error', 'turn/started', 'turn/completed'].includes(message.method)) wire.push(message);
     if (message.method === 'turn/completed' && message.params.turn.status === 'failed') healthy = true;
+    if (mode === 'recovery disabled' && message.method === 'error' && message.params.willRetry === true) {
+      void session?.command('/recover off').then(() => { healthy = true; });
+    }
   });
   try {
     const started = await host.rpc.request('thread/start', { cwd: root, approvalPolicy: 'never', sandbox: 'read-only' });
     session = new CodexStructuredSession(started.thread.id, host.endpoint, host.rpc, undefined, {
-      policy: normalizeProviderRecovery({ retryStallSeconds: 15, delaySeconds: 5 }), providerIds: ['recovery-local'],
+      policy: normalizeProviderRecovery({ retryStallSeconds: mode === 'lost steer acknowledgement' ? 5 : 15, delaySeconds: 5 }), providerIds: ['recovery-local'],
     });
     const events: AgentEvent[] = [];
     const stop = new AbortController();
@@ -67,23 +80,31 @@ native.each(['active continue', 'terminal continuation'])('real Codex recovers v
     try {
       await session.submit({ runId: 'e2e', prompt: 'Return the test answer.', cwd: root, sandbox: 'read-only' }, event => {
         events.push(event);
-        if (mode === 'active continue' && event.type === 'text' && event.delta.trim() === 'continue') healthy = true;
+        if (mode !== 'terminal continuation' && event.type === 'text' && event.delta.trim() === 'continue') healthy = true;
       }, stop.signal);
     } finally { clearTimeout(timeout); }
     expect(events.filter(e => e.type === 'error')).toEqual([]);
     expect(wire.some(m => m.method === 'error' && m.params.willRetry === true)).toBe(true);
     expect(wire.filter(m => m.method === 'turn/completed').map(m => m.params.turn.status)).toEqual(
-      mode === 'active continue' ? ['completed'] : ['failed', 'completed']);
+      mode === 'terminal continuation' ? ['failed', 'completed'] : ['completed']);
     expect(outgoing.mock.calls.filter(([method]) => method === 'turn/interrupt')).toEqual([]);
     const text = events.reduce(reduce, initialState).blocks.filter(b => b.kind === 'text').map(b => b.content).join('');
     expect(text).toContain(finalText);
     expect(requests.length).toBeGreaterThan(1);
     const starts = outgoing.mock.calls.filter(([method]) => method === 'turn/start');
-    expect(starts).toHaveLength(mode === 'active continue' ? 1 : 2);
+    expect(starts).toHaveLength(mode === 'terminal continuation' ? 2 : 1);
     const steers = outgoing.mock.calls.filter(([method]) => method === 'turn/steer');
-    expect(steers.length).toBeGreaterThan(0);
+    if (mode === 'recovery disabled') expect(steers).toHaveLength(0);
+    else expect(steers.length).toBeGreaterThan(0);
     expect(steers.every(([, params]) => params.input[0].text === 'continue')).toBe(true);
     if (mode === 'terminal continuation') expect(starts[1]?.[1].input).toEqual([{ type: 'text', text: 'continue' }]);
+    if (mode === 'lost steer acknowledgement') {
+      expect(steers).toHaveLength(1);
+      const snapshot = await host.rpc.request('thread/read', { threadId: started.thread.id, includeTurns: true });
+      const continues = snapshot.thread.turns.flatMap((turn: any) => turn.items).filter((item: any) =>
+        item.type === 'userMessage' && item.content?.some((part: any) => part.text === 'continue'));
+      expect(continues).toHaveLength(1);
+    }
     expect(new Set(wire.map(m => m.params.threadId))).toEqual(new Set([started.thread.id]));
   } finally {
     await session?.close(); host.rpc.close();

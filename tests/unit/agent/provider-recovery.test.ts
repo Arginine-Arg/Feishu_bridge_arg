@@ -22,7 +22,7 @@ function harness(policy: Partial<ProviderRecoveryConfig> = {}) {
     return {};
   });
   const session = new CodexStructuredSession('thread', '', rpc as unknown as RpcClient, undefined, {
-    policy: normalizeProviderRecovery(policy), providerIds: ['provider-a'],
+    policy: normalizeProviderRecovery({ continuous: false, maxAttempts: 3, delaySeconds: 30, retryStallSeconds: 60, ...policy }), providerIds: ['provider-a'],
   });
   sessions.push(session);
   const events: AgentEvent[] = [];
@@ -191,7 +191,7 @@ describe('provider recovery', () => {
     expect(h.starts()).toHaveLength(3);
     h.complete('completed'); await h.done;
   });
-  it('waits for a starting continuation before observer teardown and interrupts that exact turn', async () => {
+  it('waits for a starting continuation before observer teardown and preserves the backend turn', async () => {
     const h = harness({ delaySeconds: 5 }); await Promise.resolve();
     const normal = h.rpc.request.getMockImplementation()!;
     let acknowledge!: (value: object) => void;
@@ -204,13 +204,33 @@ describe('provider recovery', () => {
     const closing = h.session.close().then(() => { closed = true; });
     await Promise.resolve(); expect(closed).toBe(false);
     acknowledge({ turn: { id: 'late-recovery-turn' } }); await closing; await h.done;
+    expect(h.interrupts()).toHaveLength(0);
+    expect(h.starts()).toHaveLength(2);
+  });
+
+  it('an explicit stop still interrupts a late continuation accepted while stopping', async () => {
+    const h = harness({ delaySeconds: 5 }); await Promise.resolve();
+    const normal = h.rpc.request.getMockImplementation()!;
+    let acknowledge!: (value: object) => void;
+    h.rpc.request.mockImplementation(async (method: string, ...args: unknown[]) => {
+      if (method === 'turn/start') return new Promise(resolve => { acknowledge = resolve; });
+      return normal(method, ...args);
+    });
+    h.complete('failed', transient); await vi.advanceTimersByTimeAsync(5_000);
+    await h.session.interrupt();
+    acknowledge({ turn: { id: 'late-recovery-turn' } }); await vi.advanceTimersByTimeAsync(0);
+    await h.done;
     expect(h.interrupts()).toContainEqual(['turn/interrupt', { threadId: 'thread', turnId: 'late-recovery-turn' }]);
     expect(h.starts()).toHaveLength(2);
   });
   it('bounds config and rejects authentication even inside network error variants', () => {
-    expect(normalizeProviderRecovery({ maxAttempts: 999, delaySeconds: -1, retryStallSeconds: 0 })).toMatchObject({ maxAttempts: 3, delaySeconds: 5, retryStallSeconds: 0 });
-    expect(normalizeProviderRecovery()).toMatchObject({ maxAttempts: 3 });
+    expect(normalizeProviderRecovery({ maxAttempts: 999, delaySeconds: -1, retryStallSeconds: 0 })).toMatchObject({ maxAttempts: 100, delaySeconds: 5, retryStallSeconds: 0 });
+    expect(normalizeProviderRecovery()).toMatchObject({ continuous: true, maxAttempts: 0, delaySeconds: 5, retryStallSeconds: 15 });
+    expect(normalizeProviderRecovery({ maxAttempts: 3 })).toMatchObject({ continuous: true, maxAttempts: 3 });
+    expect(normalizeProviderRecovery({ maxAttempts: 3, delaySeconds: 30, retryStallSeconds: 60 })).toMatchObject({ continuous: true, delaySeconds: 5, retryStallSeconds: 15 });
+    expect(normalizeProviderRecovery({ continuous: false, maxAttempts: 3, delaySeconds: 30, retryStallSeconds: 60 })).toMatchObject({ continuous: false, delaySeconds: 30, retryStallSeconds: 60 });
     expect(isTransientProviderError({ codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 401 } } })).toBe(false);
+    expect(isTransientProviderError({ message: 'You exceeded your current quota', codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: 429 } } })).toBe(false);
   });
   it('keeps five native reconnect attempts through three Bridge continuation rounds', async () => {
     const h = harness({ maxAttempts: 3, delaySeconds: 5 }); await Promise.resolve();
@@ -269,6 +289,161 @@ describe('provider recovery', () => {
     await vi.advanceTimersByTimeAsync(60_000);
     await vi.advanceTimersByTimeAsync(5_000);
     expect(h.starts()).toHaveLength(2); expect(h.interrupts()).toHaveLength(0);
+    h.complete('completed'); await h.done;
+  });
+
+  it('continues indefinitely across terminal failures with a legacy three-attempt profile', async () => {
+    const h = harness({ continuous: true, maxAttempts: 3, delaySeconds: 5 }); await Promise.resolve();
+    for (let round = 0; round < 12; round++) {
+      h.complete('failed', transient);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(h.starts()).toHaveLength(round + 2);
+    }
+    expect(h.events.filter(e => e.type === 'error')).toEqual([]);
+    expect(h.interrupts()).toHaveLength(0);
+    h.complete('completed'); await h.done;
+  });
+
+  it('keeps nudging a retrying turn past three messages and stops after progress', async () => {
+    const h = harness({ continuous: true, retryStallSeconds: 15 }); await Promise.resolve(); h.retry();
+    await vi.advanceTimersByTimeAsync(120_000);
+    const steers = () => h.rpc.request.mock.calls.filter(([m]) => m === 'turn/steer');
+    expect(steers()).toHaveLength(9);
+    h.emit('item/agentMessage/delta', { turnId: 't1', itemId: 'a', delta: 'real progress' });
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(steers()).toHaveLength(9);
+    expect(h.interrupts()).toHaveLength(0);
+    h.complete('completed'); await h.done;
+  });
+
+  it('disables and re-enables recovery without interrupting or replacing the active turn', async () => {
+    const h = harness({ continuous: true, retryStallSeconds: 15 }); await Promise.resolve(); h.retry();
+    await vi.advanceTimersByTimeAsync(0);
+    await h.session.command('/recover off');
+    h.retry(); await vi.advanceTimersByTimeAsync(120_000);
+    expect(h.rpc.request.mock.calls.filter(([m]) => m === 'turn/steer')).toHaveLength(1);
+    const status = await h.session.command('/recover status');
+    expect(status[0]).toMatchObject({ type: 'text', delta: expect.stringContaining('"enabled": false') });
+    await h.session.command('/recover on'); await vi.advanceTimersByTimeAsync(30_000);
+    expect(h.rpc.request.mock.calls.filter(([m]) => m === 'turn/steer').length).toBeGreaterThan(1);
+    expect(h.starts()).toHaveLength(1); expect(h.interrupts()).toHaveLength(0);
+    h.complete('completed'); await h.done;
+  });
+
+  it('off releases a relay waiting for continuation and on does not resurrect the old task', async () => {
+    const h = harness({ continuous: true, delaySeconds: 5 }); await Promise.resolve(); h.complete('failed', transient);
+    await h.session.command('/recover off'); await h.done;
+    await h.session.command('/recover on');
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(h.starts()).toHaveLength(1); expect(h.interrupts()).toHaveLength(0);
+    expect(h.session.diagnostics().inputState).toBe('empty');
+  });
+
+  it('off invalidates an outstanding status check without starting a new turn', async () => {
+    const h = harness({ continuous: true, delaySeconds: 5 }); await Promise.resolve(); h.complete('failed', transient);
+    let resolveRead!: (value: object) => void;
+    h.rpc.request.mockImplementationOnce(() => new Promise(resolve => { resolveRead = resolve; }));
+    await vi.advanceTimersByTimeAsync(5_000);
+    await h.session.command('/recover off'); await h.done;
+    resolveRead({ data: [{ id: 't1', status: 'failed' }] });
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(h.starts()).toHaveLength(1); expect(h.interrupts()).toHaveLength(0);
+  });
+
+  it('off observes an already submitted continuation without interrupting it', async () => {
+    const h = harness({ continuous: true, delaySeconds: 5 }); await Promise.resolve();
+    const normal = h.rpc.request.getMockImplementation()!;
+    let acknowledge!: (value: object) => void;
+    h.rpc.request.mockImplementation(async (method: string, ...args: unknown[]) => {
+      if (method === 'turn/start') {
+        await normal(method, ...args);
+        return new Promise(resolve => { acknowledge = resolve; });
+      }
+      return normal(method, ...args);
+    });
+    h.complete('failed', transient); await vi.advanceTimersByTimeAsync(5_000);
+    await h.session.command('/recover off');
+    acknowledge({ turn: { id: 't2' } }); await vi.advanceTimersByTimeAsync(0);
+    expect(h.session.snapshot().turnId).toBe('t2');
+    h.complete('completed'); await h.done;
+    expect(h.interrupts()).toHaveLength(0); expect(h.starts()).toHaveLength(2);
+  });
+
+  it('does not send a stale continue when recovery is enabled after a user stop', async () => {
+    const h = harness({ continuous: true }); await Promise.resolve(); h.retry(); await vi.advanceTimersByTimeAsync(0);
+    await h.session.interrupt();
+    await h.session.command('/recover on');
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(h.rpc.request.mock.calls.filter(([m]) => m === 'turn/steer')).toHaveLength(1);
+    h.complete('interrupted'); await h.done;
+    expect(h.starts()).toHaveLength(1);
+  });
+
+  it('reconciles an accepted continue after a missing acknowledgement without replaying its identity', async () => {
+    const h = harness({ continuous: true, retryStallSeconds: 15 }); await Promise.resolve();
+    const normal = h.rpc.request.getMockImplementation()!;
+    let attempts = 0;
+    h.rpc.request.mockImplementation(async (method: string, ...args: unknown[]) => {
+      if (method === 'turn/steer' && ++attempts === 1) throw new Error('RPC timeout');
+      if (method === 'thread/turns/list') return { data: [{ id: 't1', status: 'inProgress', items: [{ type: 'userMessage', clientId: h.rpc.request.mock.calls.find(([m]) => m === 'turn/steer')![1].clientUserMessageId }] }] };
+      return normal(method, ...args);
+    });
+    h.retry(); await vi.advanceTimersByTimeAsync(30_000);
+    const steers = h.rpc.request.mock.calls.filter(([m]) => m === 'turn/steer');
+    expect(steers).toHaveLength(2);
+    expect(steers[0]![1].clientUserMessageId).not.toBe(steers[1]![1].clientUserMessageId);
+    expect(h.interrupts()).toHaveLength(0); h.complete('completed'); await h.done;
+  });
+
+  it('does not replay an uncertain steer without evidence of acceptance', async () => {
+    const h = harness({ continuous: true, retryStallSeconds: 15 }); await Promise.resolve();
+    const normal = h.rpc.request.getMockImplementation()!;
+    h.rpc.request.mockImplementation(async (method: string, ...args: unknown[]) => {
+      if (method === 'turn/steer') throw new Error('RPC timeout');
+      return normal(method, ...args);
+    });
+    h.retry(); await vi.advanceTimersByTimeAsync(120_000);
+    expect(h.rpc.request.mock.calls.filter(([m]) => m === 'turn/steer')).toHaveLength(1);
+    expect(h.interrupts()).toHaveLength(0); h.complete('completed'); await h.done;
+  });
+
+  it('allows a session override of the disabled profile default, but retains provider restrictions', async () => {
+    const h = harness({ enabled: false }); await Promise.resolve();
+    await h.session.command('/recover on'); h.retry(); await vi.advanceTimersByTimeAsync(0);
+    expect(h.rpc.request.mock.calls.filter(([m]) => m === 'turn/steer')).toHaveLength(1);
+    h.complete('completed'); await h.done;
+    const restricted = harness({ providers: ['provider-b'] }); await Promise.resolve();
+    await restricted.session.command('/recover on'); restricted.retry(); await vi.advanceTimersByTimeAsync(120_000);
+    expect(restricted.rpc.request.mock.calls.filter(([m]) => m === 'turn/steer')).toHaveLength(0);
+    restricted.complete('completed'); await restricted.done;
+  });
+
+  it('retries an unavailable terminal preflight without spending a continuation or interrupting', async () => {
+    const h = harness({ continuous: true, delaySeconds: 5 }); await Promise.resolve();
+    const normal = h.rpc.request.getMockImplementation()!;
+    let reads = 0;
+    h.rpc.request.mockImplementation(async (method: string, ...args: unknown[]) => {
+      if (method === 'thread/turns/list' && ++reads <= 4) throw new Error('temporary read failure');
+      return normal(method, ...args);
+    });
+    h.complete('failed', transient);
+    await vi.advanceTimersByTimeAsync(25_000);
+    expect(h.starts()).toHaveLength(2); expect(h.interrupts()).toHaveLength(0);
+    expect(h.events.filter(e => e.type === 'error')).toEqual([]);
+    h.complete('completed'); await h.done;
+  });
+
+  it('a later off wins over an on command still persisting its preference', async () => {
+    const h = harness({ continuous: true }); await Promise.resolve();
+    let saved!: () => void;
+    (h.session as any).recovery.onEnabledChange = (enabled: boolean) => enabled
+      ? new Promise<void>(resolve => { saved = resolve; }) : Promise.resolve();
+    const enabling = h.session.command('/recover on');
+    await h.session.command('/recover off'); saved(); await enabling;
+    const status = await h.session.command('/recover status');
+    expect(status[0]).toMatchObject({ delta: expect.stringContaining('"enabled": false') });
+    h.retry(); await vi.advanceTimersByTimeAsync(120_000);
+    expect(h.rpc.request.mock.calls.filter(([m]) => m === 'turn/steer')).toHaveLength(0);
     h.complete('completed'); await h.done;
   });
 });

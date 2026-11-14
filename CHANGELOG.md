@@ -1,18 +1,23 @@
 # Changelog
 
-## 1.20.0
+## 1.21.0
 
-- Preserves Codex's native provider reconnect budget. Recovery polls turn state
-  without interrupting an active turn, and reconciles missed terminal events.
-  Failed status reads leave the ongoing reconnect intact.
-- Keeps three Bridge continuation rounds. During an active provider retry, up
-  to three idempotent `continue` steers try to wake the same turn; Codex retains
-  its own reconnect attempts afterward. Real text, reasoning or tool progress
-  resets the per-round nudge count. Exhaustion surfaces Codex's original
-  terminal error without interrupting.
-- Sends only `continue` as recovery input. User stops, paused goals and provider
-  restrictions still cancel automatic continuation.
-
+- Removes Bridge's provider-recovery interrupts. Codex keeps its native
+  reconnect attempts; Bridge only steers explicit transient retries with the
+  exact text `continue` and starts a new turn after a confirmed terminal state.
+- Enables continuous recovery by default. Active-turn nudges and same-thread
+  continuation rounds no longer stop after three attempts. Nudges are spaced
+  at least 15 seconds apart by default; terminal continuations wait 5 seconds.
+  Legacy default profiles migrate to the continuous policy. Explicit finite
+  budgets remain available with `continuous: false`.
+- Adds main-session `/recover on|off|status`, available while work or a side
+  conversation is active. Overrides persist per thread across bot restarts.
+  Turning recovery off leaves an active Codex turn running and releases a
+  pending recovery wait. `/stop`, paused goals, approvals and provider
+  restrictions remain effective.
+- Keeps original Codex errors for non-retryable failures and exhausted finite
+  budgets. Unknown start results are not blindly replayed. Retains the complete
+  structured text delivery fix from 1.19.0.
 
 ## 1.19.0
 
