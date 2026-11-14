@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.19.0",
+  version: "1.20.0",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -375,7 +375,7 @@ function normalizeProviderRecovery(value) {
   return {
     enabled: value?.enabled !== false,
     providers: Array.isArray(value?.providers) ? [...new Set(value.providers.filter((id) => typeof id === "string" && !!id.trim()).map((id) => id.trim()))] : [],
-    maxAttempts: bounded(value?.maxAttempts, 3, 0, 5),
+    maxAttempts: bounded(value?.maxAttempts, 3, 0, 3),
     delaySeconds: bounded(value?.delaySeconds, 30, 5, 600),
     maxDelaySeconds: bounded(value?.maxDelaySeconds, 120, 5, 900),
     retryStallSeconds: value?.retryStallSeconds === 0 ? 0 : bounded(value?.retryStallSeconds, 60, 15, 600)
@@ -17563,9 +17563,9 @@ var CodexStructuredSession = class _CodexStructuredSession {
   internalRetries = 0;
   lastRetryNoticeAt = 0;
   providerError;
+  providerRetryTurns = /* @__PURE__ */ new Set();
+  retrySteerState = /* @__PURE__ */ new Map();
   retryStallTimer;
-  retryInterruptTurnId;
-  retryInterruptTimer;
   activeTools = /* @__PURE__ */ new Set();
   acknowledgements = /* @__PURE__ */ new Map();
   deferredInteractions = [];
@@ -17663,18 +17663,22 @@ ${p4.command ?? JSON.stringify(p4.changes ?? {})}`,
     if (message.method === "error" && p4.turnId === this.turnId) {
       this.providerError = { turnId: p4.turnId, error: p4.error ?? {} };
       if (p4.willRetry === true) {
+        this.providerRetryTurns.add(p4.turnId);
         this.internalRetries += 1;
         if (!this.lastRetryNoticeAt || Date.now() - this.lastRetryNoticeAt >= 15e3) {
           this.lastRetryNoticeAt = Date.now();
-          const timeout = this.recoveryAllowed() ? this.recovery?.policy.retryStallSeconds : 0;
-          this.emit?.(textEvent(`
-\u23F3 Provider \u8FDE\u63A5\u5F02\u5E38\uFF0CCodex \u6B63\u5728\u91CD\u8FDE${timeout ? `\uFF1B\u8FDE\u7EED ${timeout} \u79D2\u65E0\u8FDB\u5C55\u5C06\u4E2D\u65AD\u672C\u8F6E\u5E76\u5C1D\u8BD5\u7EE7\u7EED` : ""}\u3002
-`));
+          this.emit?.(textEvent("\n\u23F3 Provider \u8FDE\u63A5\u5F02\u5E38\uFF0CCodex \u6B63\u5728\u91CD\u8FDE\u3002\n"));
         }
+        this.sendRetryContinue(p4.turnId);
         this.watchRetryStall(p4.turnId, p4.error);
       }
     }
-    if (p4.turnId === this.turnId && (message.method === "item/agentMessage/delta" && p4.delta || message.method === "item/reasoning/summaryTextDelta" && p4.delta || message.method === "item/commandExecution/outputDelta" || message.method === "item/started" || message.method === "item/completed")) this.clearRetryStall();
+    if (p4.turnId === this.turnId && (message.method === "item/agentMessage/delta" && p4.delta || message.method === "item/reasoning/summaryTextDelta" && p4.delta || message.method === "item/commandExecution/outputDelta" && p4.delta || (message.method === "item/started" || message.method === "item/completed") && toolItems.has(p4.item?.type))) {
+      this.clearRetryStall();
+      this.recoveryAttempts = 0;
+      const retryState = this.retrySteerState.get(p4.turnId);
+      if (retryState) retryState.attempts = 0;
+    }
     if (message.method === "item/agentMessage/delta") {
       const key = this.messageKey(p4.turnId, p4.itemId);
       if (!key) return;
@@ -17745,11 +17749,7 @@ ${p4.command ?? JSON.stringify(p4.changes ?? {})}`,
     }
     if (message.method === "turn/completed" && (!this.turnId || p4.turn?.id === this.turnId)) {
       if (!p4.turn?.id || this.finishedTurns.has(p4.turn.id)) return;
-      const preempted = this.retryInterruptTurnId === p4.turn.id && !this.recoveryBlocked;
       this.clearRetryStall();
-      if (this.retryInterruptTimer) clearTimeout(this.retryInterruptTimer);
-      this.retryInterruptTimer = void 0;
-      this.retryInterruptTurnId = void 0;
       this.activeTools.clear();
       for (const item of p4.turn.items ?? []) if (item.type === "agentMessage") this.completeMessage(p4.turn.id, item, true);
       for (const key of this.deltas.keys()) if (key.startsWith(`${p4.turn.id}:`)) this.deltas.delete(key);
@@ -17757,10 +17757,12 @@ ${p4.command ?? JSON.stringify(p4.changes ?? {})}`,
       if (this.finishedTurns.size > 100) this.finishedTurns.delete(this.finishedTurns.values().next().value);
       this.turnId = void 0;
       this.phase = "idle";
-      if (p4.turn?.status === "failed" || preempted && p4.turn.status === "interrupted") {
+      const providerRetry = this.providerRetryTurns.delete(p4.turn.id);
+      this.retrySteerState.delete(p4.turn.id);
+      if (p4.turn?.status === "failed" || p4.turn.status === "interrupted" && providerRetry) {
         const error = p4.turn.error ?? (this.providerError?.turnId === p4.turn.id ? this.providerError?.error : void 0);
-        if (!this.scheduleRecovery(p4.turn.id, error, preempted ? p4.turn.status : "failed", preempted)) {
-          this.emit?.({ type: "error", message: preempted ? "Provider \u91CD\u8FDE\u65E0\u8FDB\u5C55\uFF0C\u5DF2\u4E2D\u65AD\uFF1B\u81EA\u52A8\u6062\u590D\u6B21\u6570\u5DF2\u8017\u5C3D\u3002" : error?.message ?? "Codex turn failed", terminationReason: this.recoveryBlocked ? "interrupted" : "failed" });
+        if (!this.scheduleRecovery(p4.turn.id, error, p4.turn.status)) {
+          this.emit?.({ type: "error", message: error?.message ?? "Codex turn failed", terminationReason: this.recoveryBlocked ? "interrupted" : "failed" });
           this.finish();
         }
       } else if (!this.goalActive || p4.turn?.status === "interrupted") {
@@ -17795,14 +17797,13 @@ ${p4.command ?? JSON.stringify(p4.changes ?? {})}`,
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
     this.recoveryTimer = void 0;
     this.clearRetryStall();
-    if (this.retryInterruptTimer) clearTimeout(this.retryInterruptTimer);
-    this.retryInterruptTimer = void 0;
-    this.retryInterruptTurnId = void 0;
     this.recoveryEpoch += 1;
     return pending;
   }
   cancelAutoRecovery() {
     this.recoveryBlocked = true;
+    this.providerRetryTurns.clear();
+    this.retrySteerState.clear();
     this.cancelRecovery();
   }
   recoveryAllowed() {
@@ -17813,51 +17814,78 @@ ${p4.command ?? JSON.stringify(p4.changes ?? {})}`,
     if (this.retryStallTimer) clearTimeout(this.retryStallTimer);
     this.retryStallTimer = void 0;
   }
+  sendRetryContinue(turnId) {
+    if (!this.recoveryAllowed() || !this.recovery?.policy.maxAttempts || this.turnId !== turnId || this.pending.size || this.activeTools.size || !isTransientProviderError(this.providerError?.error)) return;
+    let state = this.retrySteerState.get(turnId);
+    if (!state) {
+      state = { attempts: 0, lastAt: 0, inFlight: false };
+      this.retrySteerState.set(turnId, state);
+    }
+    if (state.attempts >= 3 || state.inFlight || state.attempts > 0 && Date.now() - state.lastAt < 5e3) return;
+    state.attempts += 1;
+    state.lastAt = Date.now();
+    state.inFlight = true;
+    const attempt = state.attempts;
+    void this.rpc.request("turn/steer", {
+      threadId: this.id,
+      expectedTurnId: turnId,
+      clientUserMessageId: `arg-bridge-recovery-${randomUUID()}`,
+      input: [{ type: "text", text: "continue" }]
+    }, 2e4).then((result) => {
+      if (result.turnId !== turnId) {
+        state.attempts = 3;
+        return;
+      }
+      if (this.turnId !== turnId || !this.recoveryAllowed()) return;
+      this.emit?.(textEvent("\ncontinue\n"));
+      this.lastUserText = "continue";
+      log.info("agent", "provider-recovery-steered", { thread: this.id, turn: turnId, attempt });
+    }).catch((error) => {
+      const reason = error instanceof Error ? error.message : String(error);
+      state.attempts = 3;
+      log.info("agent", "provider-recovery-steer-unavailable", { thread: this.id, turn: turnId, attempt, reason });
+    }).finally(() => {
+      state.inFlight = false;
+    });
+  }
   watchRetryStall(turnId, error) {
     const seconds = this.recovery?.policy.retryStallSeconds;
-    if (!seconds || !this.recoveryAllowed() || !isTransientProviderError(error) || this.retryStallTimer || this.retryInterruptTurnId || this.pending.size || this.activeTools.size) return;
+    if (!seconds || !this.recoveryAllowed() || !isTransientProviderError(error) || this.retryStallTimer || this.pending.size || this.activeTools.size) return;
+    if ((this.retrySteerState.get(turnId)?.attempts ?? 0) >= 3) return;
     const epoch = this.recoveryEpoch;
     this.retryStallTimer = setTimeout(() => {
       const timer = this.retryStallTimer;
       void (async () => {
         const turns = await this.rpc.request("thread/turns/list", { threadId: this.id, limit: 1, sortDirection: "desc" });
         if (!timer || this.retryStallTimer !== timer || epoch !== this.recoveryEpoch || !this.recoveryAllowed() || this.turnId !== turnId || this.pending.size || this.activeTools.size) return;
-        if (turns.data?.[0]?.id !== turnId || turns.data[0].status !== "inProgress") return;
-        this.retryInterruptTurnId = turnId;
-        this.emit?.(textEvent(`
-\u23F3 \u91CD\u8FDE\u8FDE\u7EED ${seconds} \u79D2\u65E0\u8FDB\u5C55\uFF0C\u6B63\u5728\u4E2D\u65AD\u672C\u8F6E\uFF1B\u786E\u8BA4\u7ED3\u675F\u540E\u624D\u4F1A\u7EE7\u7EED\u3002
-`));
-        log.info("agent", "provider-retry-stalled", { thread: this.id, turn: turnId, seconds });
-        this.retryInterruptTimer = setTimeout(() => {
-          if (this.retryInterruptTurnId !== turnId) return;
-          this.cancelAutoRecovery();
-          this.emit?.({ type: "error", message: "\u672A\u6536\u5230\u672C\u8F6E\u4E2D\u65AD\u786E\u8BA4\uFF0C\u5DF2\u505C\u6B62\u81EA\u52A8\u6062\u590D\uFF1B\u8BF7\u68C0\u67E5 /status\u3002", terminationReason: "failed" });
-          this.finish();
-        }, 15e3);
-        await this.rpc.request("turn/interrupt", { threadId: this.id, turnId }, 15e3);
-      })().catch(() => {
+        const latest = turns.data?.[0];
+        if (latest?.id !== turnId) return;
+        if (["failed", "interrupted", "completed"].includes(latest.status)) {
+          this.receive({ method: "turn/completed", params: { threadId: this.id, turn: latest } });
+          return;
+        }
+        log.info("agent", "provider-retry-observed", { thread: this.id, turn: turnId, status: latest.status });
+        this.sendRetryContinue(turnId);
+      })().catch((error2) => {
         if (epoch !== this.recoveryEpoch || this.recoveryBlocked) return;
-        this.cancelAutoRecovery();
-        this.emit?.({ type: "error", message: "\u65E0\u6CD5\u786E\u8BA4\u91CD\u8FDE\u4E2D\u7684 turn \u5DF2\u505C\u6B62\uFF1B\u672A\u53D1\u9001\u7EE7\u7EED\u8BF7\u6C42\u3002", terminationReason: "failed" });
-        this.finish();
+        log.warn("agent", "provider-retry-state-unavailable", { thread: this.id, turn: turnId, reason: String(error2) });
       }).finally(() => {
-        if (this.retryStallTimer === timer) this.clearRetryStall();
+        if (this.retryStallTimer !== timer) return;
+        this.clearRetryStall();
+        if (epoch === this.recoveryEpoch && this.turnId === turnId) this.watchRetryStall(turnId, error);
       });
-    }, seconds * 1e3);
+    }, Math.min(seconds * 1e3, (this.retrySteerState.get(turnId)?.attempts ?? 3) < 3 ? 5e3 : Infinity));
     this.retryStallTimer.unref?.();
   }
-  scheduleRecovery(failedTurnId, error, expectedStatus = "failed", preempted = false) {
+  scheduleRecovery(failedTurnId, error, expectedStatus = "failed") {
     const policy = this.recovery?.policy;
     if (!policy || !this.recoveryAllowed() || this.pending.size || this.recoveryAttempts >= policy.maxAttempts || !isTransientProviderError(error)) return false;
     this.cancelRecovery();
     const epoch = this.recoveryEpoch;
     const goalWasActive = this.goalActive;
     const attempt = ++this.recoveryAttempts;
-    const delay3 = preempted ? 5 : Math.min(policy.maxDelaySeconds, policy.delaySeconds * 2 ** (attempt - 1));
+    const delay3 = Math.min(policy.maxDelaySeconds, policy.delaySeconds * 2 ** (attempt - 1));
     this.phase = "busy";
-    this.emit?.(textEvent(`
-\u23F3 Provider \u4E34\u65F6\u9519\u8BEF\uFF0C\u672C\u8F6E\u5DF2\u7ED3\u675F\uFF1B${delay3} \u79D2\u540E\u81EA\u52A8\u7EE7\u7EED\uFF08${attempt}/${policy.maxAttempts}\uFF09\u3002/stop \u53EF\u53D6\u6D88\u3002
-`));
     log.info("agent", "provider-recovery-scheduled", { thread: this.id, attempt, delaySeconds: delay3 });
     const previousWork = this.recoveryWork;
     this.recoveryTimer = setTimeout(() => {
@@ -17896,13 +17924,8 @@ ${p4.command ?? JSON.stringify(p4.changes ?? {})}`,
         }
         if (epoch !== this.recoveryEpoch || this.recoveryBlocked || this.turnId) return;
         this.recoveryStarting = true;
-        this.emit?.(textEvent(`
-\u21AA \u6B63\u5728\u81EA\u52A8\u7EE7\u7EED\uFF08${attempt}/${policy.maxAttempts}\uFF09\u3002
-`));
-        const result = await this.rpc.request("turn/start", { threadId: this.id, input: [{
-          type: "text",
-          text: "Continue the existing task after the temporary provider/API failure. Check the current state and prior tool results first; do not repeat completed actions. Respect any pause, stop, approval or budget limits already in this conversation."
-        }] });
+        this.emit?.(textEvent("\ncontinue\n"));
+        const result = await this.rpc.request("turn/start", { threadId: this.id, input: [{ type: "text", text: "continue" }] });
         if (epoch !== this.recoveryEpoch) {
           if (this.recoveryBlocked && result.turn?.id && !this.finishedTurns.has(result.turn.id)) {
             await this.rpc.request("turn/interrupt", { threadId: this.id, turnId: result.turn.id });
@@ -17954,6 +17977,8 @@ ${p4.command ?? JSON.stringify(p4.changes ?? {})}`,
     this.cancelRecovery();
     this.recoveryAttempts = 0;
     this.recoveryBlocked = false;
+    this.providerRetryTurns.clear();
+    this.retrySteerState.clear();
     this.lastUserText = options.prompt.slice(0, 800);
     this.lastCwd = options.cwd;
     this.emit = emit2;
@@ -18143,6 +18168,8 @@ ${options.prompt}` : options.prompt }];
   async interrupt() {
     let acted = this.cancelRecovery();
     this.recoveryBlocked = true;
+    this.providerRetryTurns.clear();
+    this.retrySteerState.clear();
     try {
       await this.syncState();
     } catch {
@@ -38682,7 +38709,7 @@ async function runSettings(options = {}) {
       message: "\u4E3B\u4F1A\u8BDD\u9047\u5230\u4E34\u65F6 API \u9519\u8BEF\u540E\u81EA\u52A8\u7EE7\u7EED\uFF1F",
       initialValue: !providerRecovery.enabled ? "off" : providerRecovery.providers.length ? "selected" : "all",
       options: [
-        { value: "all", label: "\u6240\u6709 provider\uFF08\u63A8\u8350\uFF09", hint: `\u672C\u8F6E\u786E\u8BA4\u5931\u8D25\u540E\u9000\u907F\u91CD\u8BD5\uFF0C\u6700\u591A ${providerRecovery.maxAttempts} \u6B21\uFF1B/stop \u53EF\u53D6\u6D88` },
+        { value: "all", label: "\u6240\u6709 provider\uFF08\u63A8\u8350\uFF09", hint: `\u6D3B\u52A8\u91CD\u8FDE\u6700\u591A\u53D1\u9001 3 \u6B21 continue\uFF1B\u7EC8\u6001\u540E\u6700\u591A\u7EE7\u7EED ${providerRecovery.maxAttempts} \u8F6E` },
         { value: "selected", label: "\u4EC5\u9009\u5B9A provider" },
         { value: "off", label: "\u5173\u95ED\u81EA\u52A8\u7EE7\u7EED" }
       ]
@@ -38704,7 +38731,7 @@ async function runSettings(options = {}) {
       providers = selected;
     }
     providerRecovery = { ...providerRecovery, enabled: mode !== "off", providers: mode === "all" ? [] : providers };
-    p3.note(`\u81EA\u52A8\u7EE7\u7EED\uFF1A${providerRecovery.enabled ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF1B\u6700\u591A ${providerRecovery.maxAttempts} \u6B21\uFF0C\u9996\u6B21\u95F4\u9694 ${providerRecovery.delaySeconds} \u79D2\u3002\u91CD\u8FDE\u9759\u9ED8\u4E0A\u9650\uFF1A${providerRecovery.retryStallSeconds ? `${providerRecovery.retryStallSeconds} \u79D2` : "\u5173\u95ED\u63D0\u524D\u4E2D\u65AD"}\u3002/stop \u53EF\u53D6\u6D88\uFF1B\u5DF2\u8FDE\u63A5\u4F1A\u8BDD\u91CD\u542F profile \u540E\u751F\u6548\u3002`, "\u4E3B\u4F1A\u8BDD\u6062\u590D");
+    p3.note(`\u81EA\u52A8\u7EE7\u7EED\uFF1A${providerRecovery.enabled ? "\u5F00\u542F" : "\u5173\u95ED"}\uFF1B\u6D3B\u52A8\u91CD\u8FDE\u6700\u591A 3 \u6B21 continue\uFF0C\u7EC8\u6001\u540E\u6700\u591A\u7EE7\u7EED ${providerRecovery.maxAttempts} \u8F6E\u3002\u72B6\u6001\u68C0\u67E5\uFF1A${providerRecovery.retryStallSeconds ? `\u6BCF ${providerRecovery.retryStallSeconds} \u79D2` : "\u5173\u95ED"}\uFF1BBridge \u4E0D\u4E3B\u52A8\u4E2D\u65AD\u6D3B\u52A8 turn\u3002/stop \u53EF\u53D6\u6D88\uFF1B\u91CD\u542F profile \u540E\u751F\u6548\u3002`, "\u4E3B\u4F1A\u8BDD\u6062\u590D");
   }
   const save = await p3.confirm({
     message: "\u6309\u4EE5\u4E0A\u8BBE\u7F6E\u4FDD\u5B58\uFF1F",

@@ -5,7 +5,7 @@ export interface ProviderRecoveryConfig {
   maxAttempts: number;
   delaySeconds: number;
   maxDelaySeconds: number;
-  /** Maximum silence after an explicit provider-retry notification; 0 disables preemption. */
+  /** State-check interval after explicit provider retry; never interrupts. 0 disables checks. */
   retryStallSeconds: number;
 }
 
@@ -15,7 +15,7 @@ export function normalizeProviderRecovery(value?: Partial<ProviderRecoveryConfig
   return {
     enabled: value?.enabled !== false,
     providers: Array.isArray(value?.providers) ? [...new Set(value.providers.filter((id): id is string => typeof id === 'string' && !!id.trim()).map(id => id.trim()))] : [],
-    maxAttempts: bounded(value?.maxAttempts, 3, 0, 5),
+    maxAttempts: bounded(value?.maxAttempts, 3, 0, 3),
     delaySeconds: bounded(value?.delaySeconds, 30, 5, 600),
     maxDelaySeconds: bounded(value?.maxDelaySeconds, 120, 5, 900),
     retryStallSeconds: value?.retryStallSeconds === 0 ? 0 : bounded(value?.retryStallSeconds, 60, 15, 600),

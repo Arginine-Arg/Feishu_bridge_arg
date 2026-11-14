@@ -4,7 +4,7 @@
 
 [English README](./README.md)
 
-`1.19.0` 增加 provider 临时错误的有界自动继续。收到明确 API 重连事件后，连续 60 秒无正文或工具进展会中断本轮，确认结束后再继续；settings 可关闭或限定 provider。结构化回复改用合并更新、校验响应的完整卡片快照，并补齐最终消息正文，修复只转发前几个字的问题。详见 [恢复设置与边界](./docs/structured-backend.md#provider-recovery-1190)。
+`1.20.0` 保留 Codex 官方 reconnect 机会：Bridge 在活动重连 turn 上最多用三个带幂等 ID 的 `continue` steer 尝试唤醒，之后交给 Codex 官方 reconnect；当前 turn 终止后再开启下一轮，最多三轮。三轮仍失败时显示 Codex 原始红色错误。保留 1.19.0 的完整结构化文本转发修复。详见 [恢复设置与边界](./docs/structured-backend.md#provider-recovery-1200)。
 
 `1.6.7` 引入 provider-aware Codex resume，`1.7.0` 增加 idle 边界重绑。`1.9.1` 收紧重连语义：附着已有 native 或 structured thread 时，保留该 thread 记录的 provider/model，不会因为 cc-switch 后来切换了 route 而静默改路。
 
@@ -60,7 +60,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.19.0
+sh /tmp/install-arg-bridge.sh --version 1.20.0
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.19.0"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.20.0"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.19.0`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.20.0`。
 
 ### 4. Node 或 npm 全局目录错误
 

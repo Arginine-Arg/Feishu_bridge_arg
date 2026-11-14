@@ -4,7 +4,7 @@ A lightweight bot that bridges Feishu / Lark messenger with your local Claude Co
 
 [中文 README](./README.zh.md)
 
-Version 1.19.0 adds bounded automatic continuation for temporary provider failures and stalled API reconnections. After 60 seconds of explicit retry silence, Bridge interrupts that turn and confirms it has ended before continuing. Settings can limit recovery to selected providers. Structured replies use acknowledged, coalesced full-card updates and reconcile complete message text, fixing frozen prefixes and missing final text. See [recovery settings and limits](./docs/structured-backend.md#provider-recovery-1190).
+Version 1.20.0 preserves Codex's native reconnect budget: Bridge can nudge an active retry with up to three idempotent `continue` steers, then leaves the turn to Codex's own reconnect attempts. Confirmed terminal failures start another same-thread round, up to three rounds. Exhaustion surfaces Codex's original final error. Complete structured text delivery from 1.19.0 is retained. See [recovery settings and limits](./docs/structured-backend.md#provider-recovery-1200).
 
 Version 1.6.7 introduced provider-aware Codex resume, and 1.7.0 added idle-boundary rebinding. Version 1.9.1 narrows reattachment semantics: reconnecting to an existing native or structured thread preserves the provider/model recorded by that thread instead of silently following a newly selected cc-switch route.
 
@@ -60,7 +60,7 @@ Install a pinned release or use a writable custom npm prefix when required:
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.19.0
+sh /tmp/install-arg-bridge.sh --version 1.20.0
 # Example for a machine without permission to write npm's configured global prefix:
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ Release tarballs are preferred. If a Git install is required, keep both compatib
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.19.0"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.20.0"
 ```
 
-`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.19.0`.
+`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.20.0`.
 
 ### 4. Node or npm global-prefix errors
 

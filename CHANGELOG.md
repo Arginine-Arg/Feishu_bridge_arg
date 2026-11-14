@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.20.0
+
+- Preserves Codex's native provider reconnect budget. Recovery polls turn state
+  without interrupting an active turn, and reconciles missed terminal events.
+  Failed status reads leave the ongoing reconnect intact.
+- Keeps three Bridge continuation rounds. During an active provider retry, up
+  to three idempotent `continue` steers try to wake the same turn; Codex retains
+  its own reconnect attempts afterward. Real text, reasoning or tool progress
+  resets the per-round nudge count. Exhaustion surfaces Codex's original
+  terminal error without interrupting.
+- Sends only `continue` as recovery input. User stops, paused goals and provider
+  restrictions still cancel automatic continuation.
+
+
 ## 1.19.0
 
 - Adds bounded provider-error continuation for Codex structured main sessions.

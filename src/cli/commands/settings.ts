@@ -674,7 +674,7 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
       message: '主会话遇到临时 API 错误后自动继续？',
       initialValue: !providerRecovery.enabled ? 'off' : providerRecovery.providers.length ? 'selected' : 'all',
       options: [
-        { value: 'all', label: '所有 provider（推荐）', hint: `本轮确认失败后退避重试，最多 ${providerRecovery.maxAttempts} 次；/stop 可取消` },
+        { value: 'all', label: '所有 provider（推荐）', hint: `活动重连最多发送 3 次 continue；终态后最多继续 ${providerRecovery.maxAttempts} 轮` },
         { value: 'selected', label: '仅选定 provider' },
         { value: 'off', label: '关闭自动继续' },
       ],
@@ -692,8 +692,8 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
       providers = selected;
     }
     providerRecovery = { ...providerRecovery, enabled: mode !== 'off', providers: mode === 'all' ? [] : providers };
-    p.note(`自动继续：${providerRecovery.enabled ? '开启' : '关闭'}；最多 ${providerRecovery.maxAttempts} 次，首次间隔 ${providerRecovery.delaySeconds} 秒。` +
-      `重连静默上限：${providerRecovery.retryStallSeconds ? `${providerRecovery.retryStallSeconds} 秒` : '关闭提前中断'}。/stop 可取消；已连接会话重启 profile 后生效。`, '主会话恢复');
+    p.note(`自动继续：${providerRecovery.enabled ? '开启' : '关闭'}；活动重连最多 3 次 continue，终态后最多继续 ${providerRecovery.maxAttempts} 轮。` +
+      `状态检查：${providerRecovery.retryStallSeconds ? `每 ${providerRecovery.retryStallSeconds} 秒` : '关闭'}；Bridge 不主动中断活动 turn。/stop 可取消；重启 profile 后生效。`, '主会话恢复');
   }
   const save = await p.confirm({
     message: '按以上设置保存？',

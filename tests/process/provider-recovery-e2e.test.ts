@@ -2,7 +2,7 @@ import { createServer } from 'node:http';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import { connectCodexHost, shutdownProfileHosts } from '../../src/agent/structured/host';
 import { CodexStructuredSession } from '../../src/agent/structured/codex';
 import { normalizeProviderRecovery } from '../../src/config/provider-recovery';
@@ -10,7 +10,7 @@ import type { AgentEvent } from '../../src/agent/types';
 import { initialState, reduce } from '../../src/card/run-state';
 
 const native = process.env.ARG_BRIDGE_RECOVERY_E2E === '1' && process.platform !== 'win32' ? it : it.skip;
-native('real Codex interrupts a retrying provider and continues the same thread with complete text', async () => {
+native.each(['active continue', 'terminal continuation'])('real Codex recovers via %s without a Bridge interrupt', async mode => {
   const root = await mkdtemp(join(tmpdir(), 'bridge-recovery-e2e-'));
   const home = join(root, 'codex-home');
   const profile = join(root, 'profile');
@@ -44,34 +44,46 @@ native('real Codex interrupts a retrying provider and continues the same thread 
     'approval_policy = "never"', 'sandbox_mode = "read-only"',
     '[model_providers.recovery-local]', 'name = "Local test"',
     `base_url = "http://127.0.0.1:${port}/v1"`, 'wire_api = "responses"',
-    'requires_openai_auth = false', 'stream_max_retries = 100', 'request_max_retries = 0',
+    'requires_openai_auth = false', 'stream_max_retries = 5', 'request_max_retries = 0',
   ].join('\n'));
   const env = { ...process.env, CODEX_HOME: home, OPENAI_API_KEY: 'local-test-only',
     HTTP_PROXY: '', HTTPS_PROXY: '', ALL_PROXY: '', http_proxy: '', https_proxy: '', all_proxy: '', NO_PROXY: '127.0.0.1' };
   const host = await connectCodexHost({ binary: 'codex', profileDir: profile, scope: 'test', cwd: root, env });
   let session: CodexStructuredSession | undefined;
   const wire: any[] = [];
-  host.rpc.on('message', message => { if (['error', 'turn/started', 'turn/completed'].includes(message.method)) wire.push(message); });
+  const outgoing = vi.spyOn(host.rpc, 'request');
+  host.rpc.on('message', message => {
+    if (['error', 'turn/started', 'turn/completed'].includes(message.method)) wire.push(message);
+    if (message.method === 'turn/completed' && message.params.turn.status === 'failed') healthy = true;
+  });
   try {
     const started = await host.rpc.request('thread/start', { cwd: root, approvalPolicy: 'never', sandbox: 'read-only' });
     session = new CodexStructuredSession(started.thread.id, host.endpoint, host.rpc, undefined, {
-      policy: normalizeProviderRecovery({ retryStallSeconds: 15 }), providerIds: ['recovery-local'],
+      policy: normalizeProviderRecovery({ retryStallSeconds: 15, delaySeconds: 5 }), providerIds: ['recovery-local'],
     });
     const events: AgentEvent[] = [];
     const stop = new AbortController();
-    const timeout = setTimeout(() => stop.abort(), 75_000);
+    const timeout = setTimeout(() => stop.abort(), 150_000);
     try {
       await session.submit({ runId: 'e2e', prompt: 'Return the test answer.', cwd: root, sandbox: 'read-only' }, event => {
         events.push(event);
-        if (event.type === 'text' && event.delta.includes('正在中断本轮')) healthy = true;
+        if (mode === 'active continue' && event.type === 'text' && event.delta.trim() === 'continue') healthy = true;
       }, stop.signal);
     } finally { clearTimeout(timeout); }
     expect(events.filter(e => e.type === 'error')).toEqual([]);
     expect(wire.some(m => m.method === 'error' && m.params.willRetry === true)).toBe(true);
-    expect(wire.filter(m => m.method === 'turn/completed').map(m => m.params.turn.status)).toEqual(['interrupted', 'completed']);
+    expect(wire.filter(m => m.method === 'turn/completed').map(m => m.params.turn.status)).toEqual(
+      mode === 'active continue' ? ['completed'] : ['failed', 'completed']);
+    expect(outgoing.mock.calls.filter(([method]) => method === 'turn/interrupt')).toEqual([]);
     const text = events.reduce(reduce, initialState).blocks.filter(b => b.kind === 'text').map(b => b.content).join('');
     expect(text).toContain(finalText);
-    expect(requests.some(r => JSON.stringify(r.input).includes('do not repeat completed actions'))).toBe(true);
+    expect(requests.length).toBeGreaterThan(1);
+    const starts = outgoing.mock.calls.filter(([method]) => method === 'turn/start');
+    expect(starts).toHaveLength(mode === 'active continue' ? 1 : 2);
+    const steers = outgoing.mock.calls.filter(([method]) => method === 'turn/steer');
+    expect(steers.length).toBeGreaterThan(0);
+    expect(steers.every(([, params]) => params.input[0].text === 'continue')).toBe(true);
+    if (mode === 'terminal continuation') expect(starts[1]?.[1].input).toEqual([{ type: 'text', text: 'continue' }]);
     expect(new Set(wire.map(m => m.params.threadId))).toEqual(new Set([started.thread.id]));
   } finally {
     await session?.close(); host.rpc.close();
@@ -79,4 +91,4 @@ native('real Codex interrupts a retrying provider and continues the same thread 
     provider.closeAllConnections(); await new Promise<void>(resolve => provider.close(() => resolve()));
     await rm(root, { recursive: true, force: true });
   }
-}, 100_000);
+}, 180_000);

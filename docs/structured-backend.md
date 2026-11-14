@@ -318,22 +318,33 @@ References: [Codex App Server](https://developers.openai.com/codex/app-server),
 [Claude streaming input](https://platform.claude.com/docs/en/agent-sdk/streaming-vs-single-mode),
 [Claude system prompt presets](https://platform.claude.com/docs/en/agent-sdk/modifying-system-prompts).
 
-## Provider recovery (1.19.0)
+<a id="provider-recovery-1200"></a>
+<a id="provider-recovery-1190"></a>
+
+## Provider recovery (1.20.0)
 
 Codex structured main sessions recover from recognized transient provider
 failures automatically. This applies to turns submitted through Feishu and
 native turns on the main thread subscribed by the running bot. It does not
 change provider/model, clone a thread, or replay the original task prompt.
 
-- A confirmed failed turn retries after 30, 60 and 120 seconds, at most three
-  continuation turns. Authentication, quota, budget, context, sandbox and
-  unknown failures are surfaced instead of automatically retried.
-- `error.willRetry=true` starts a silence watchdog. After 60 seconds without
-  new assistant text, reasoning summary or tool activity, Bridge interrupts
-  that exact turn. Only a confirmed interrupted/failed terminal event allows
-  a continuation five seconds later. Missing interruption confirmation stops
-  automatic recovery. A quiet long-running command or model thought without
-  a provider retry event does not trigger the watchdog.
+- Each retrying active turn receives at most three idempotent `turn/steer`
+  nudges containing `continue`. If those nudges do not restore progress, the
+  turn keeps Codex's native reconnect attempts. After a terminal transient
+  failure or retry-associated interruption, Bridge starts another same-thread
+  continuation round after 30/60/120 seconds, with at most three rounds.
+  Authentication, quota, budget, context, sandbox and unknown failures are
+  surfaced instead of automatically retried.
+- `error.willRetry=true` starts read-only state polling every 60 seconds.
+  An `inProgress` turn keeps its full Codex native reconnect budget; Bridge
+  never interrupts it. A missing terminal notification is reconciled from
+  the latest turn's confirmed status. A failed read keeps observing.
+  A retry-associated `interrupted` turn can also schedule the next round,
+  subject to the same provider policy, user stop and paused-goal guards.
+- Real assistant text, reasoning or tool progress resets the current round's
+  three-steer nudge count. Empty message lifecycle notifications do not reset
+  it. When the three-round budget is exhausted, Bridge reports Codex's original
+  terminal error and does not interrupt anything or emit its own retry error.
 - `/stop`, a paused/cleared goal, detachment and shutdown cancel pending
   recovery. Before continuation, Bridge checks that the latest turn still
   matches the failed/interrupted turn. Active work is observed, not replayed.
@@ -367,11 +378,13 @@ to apply changes to already-attached sessions. Advanced profile JSON:
 }
 ```
 
-`providers: []` means all providers. `maxAttempts` is bounded to 0–5;
-`retryStallSeconds: 0` disables early interruption while retaining terminal
-failure continuation. Positive watchdog values are bounded to 15–600 seconds.
-A recovery continuation asks the model to inspect prior results and avoid
-repeating completed actions; arbitrary provider behavior and tool side effects
+`providers: []` means all providers. `maxAttempts` is bounded to 0–3;
+`retryStallSeconds: 0` disables polling while retaining terminal failure
+continuation. Positive polling intervals are bounded to 15–600 seconds.
+The recovery prompt and every active-turn nudge are exactly `continue`.
+`maxAttempts` controls same-thread continuation rounds; each round can send at
+most three idempotent active-turn steers before waiting for Codex. No setting
+enables early interruption. Arbitrary provider behavior and tool side effects
 cannot be guaranteed idempotent.
 
 Structured Feishu replies use full-card snapshots at most every 400 ms during

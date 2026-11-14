@@ -46,9 +46,9 @@ export class CodexStructuredSession implements StructuredSession {
   private internalRetries = 0;
   private lastRetryNoticeAt = 0;
   private providerError?: { turnId: string; error: Wire };
+  private providerRetryTurns = new Set<string>();
+  private retrySteerState = new Map<string, { attempts: number; lastAt: number; inFlight: boolean }>();
   private retryStallTimer?: NodeJS.Timeout;
-  private retryInterruptTurnId?: string;
-  private retryInterruptTimer?: NodeJS.Timeout;
   private activeTools = new Set<string>();
   private acknowledgements = new Map<string, { resolve(): void; reject(error: Error): void }>();
   private deferredInteractions: AgentEvent[] = [];
@@ -137,21 +137,27 @@ export class CodexStructuredSession implements StructuredSession {
     if (message.method === 'error' && p.turnId === this.turnId) {
       this.providerError = { turnId: p.turnId, error: p.error ?? {} };
       if (p.willRetry === true) {
+        this.providerRetryTurns.add(p.turnId);
         this.internalRetries += 1;
         if (!this.lastRetryNoticeAt || Date.now() - this.lastRetryNoticeAt >= 15_000) {
           this.lastRetryNoticeAt = Date.now();
-          const timeout = this.recoveryAllowed() ? this.recovery?.policy.retryStallSeconds : 0;
-          this.emit?.(textEvent(`\n⏳ Provider 连接异常，Codex 正在重连${timeout ? `；连续 ${timeout} 秒无进展将中断本轮并尝试继续` : ''}。\n`));
+          this.emit?.(textEvent('\n⏳ Provider 连接异常，Codex 正在重连。\n'));
         }
+        this.sendRetryContinue(p.turnId);
         this.watchRetryStall(p.turnId, p.error);
       }
     }
     if (p.turnId === this.turnId && (
       (message.method === 'item/agentMessage/delta' && p.delta) ||
       (message.method === 'item/reasoning/summaryTextDelta' && p.delta) ||
-      message.method === 'item/commandExecution/outputDelta' ||
-      message.method === 'item/started' || message.method === 'item/completed'
-    )) this.clearRetryStall();
+      (message.method === 'item/commandExecution/outputDelta' && p.delta) ||
+      ((message.method === 'item/started' || message.method === 'item/completed') && toolItems.has(p.item?.type))
+    )) {
+      this.clearRetryStall();
+      this.recoveryAttempts = 0;
+      const retryState = this.retrySteerState.get(p.turnId);
+      if (retryState) retryState.attempts = 0;
+    }
     if (message.method === 'item/agentMessage/delta') {
       const key = this.messageKey(p.turnId, p.itemId);
       if (!key) return;
@@ -214,21 +220,19 @@ export class CodexStructuredSession implements StructuredSession {
     }
     if (message.method === 'turn/completed' && (!this.turnId || p.turn?.id === this.turnId)) {
       if (!p.turn?.id || this.finishedTurns.has(p.turn.id)) return;
-      const preempted = this.retryInterruptTurnId === p.turn.id && !this.recoveryBlocked;
       this.clearRetryStall();
-      if (this.retryInterruptTimer) clearTimeout(this.retryInterruptTimer);
-      this.retryInterruptTimer = undefined;
-      this.retryInterruptTurnId = undefined;
       this.activeTools.clear();
       for (const item of p.turn.items ?? []) if (item.type === 'agentMessage') this.completeMessage(p.turn.id, item, true);
       for (const key of this.deltas.keys()) if (key.startsWith(`${p.turn.id}:`)) this.deltas.delete(key);
       this.finishedTurns.add(p.turn.id);
       if (this.finishedTurns.size > 100) this.finishedTurns.delete(this.finishedTurns.values().next().value!);
       this.turnId = undefined; this.phase = 'idle';
-      if (p.turn?.status === 'failed' || (preempted && p.turn.status === 'interrupted')) {
+      const providerRetry = this.providerRetryTurns.delete(p.turn.id);
+      this.retrySteerState.delete(p.turn.id);
+      if (p.turn?.status === 'failed' || (p.turn.status === 'interrupted' && providerRetry)) {
         const error = p.turn.error ?? (this.providerError?.turnId === p.turn.id ? this.providerError?.error : undefined);
-        if (!this.scheduleRecovery(p.turn.id, error, preempted ? p.turn.status : 'failed', preempted)) {
-          this.emit?.({ type: 'error', message: preempted ? 'Provider 重连无进展，已中断；自动恢复次数已耗尽。' : error?.message ?? 'Codex turn failed', terminationReason: this.recoveryBlocked ? 'interrupted' : 'failed' }); this.finish();
+        if (!this.scheduleRecovery(p.turn.id, error, p.turn.status)) {
+          this.emit?.({ type: 'error', message: error?.message ?? 'Codex turn failed', terminationReason: this.recoveryBlocked ? 'interrupted' : 'failed' }); this.finish();
         }
       }
       else if (!this.goalActive || p.turn?.status === 'interrupted') {
@@ -264,13 +268,10 @@ export class CodexStructuredSession implements StructuredSession {
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
     this.recoveryTimer = undefined;
     this.clearRetryStall();
-    if (this.retryInterruptTimer) clearTimeout(this.retryInterruptTimer);
-    this.retryInterruptTimer = undefined;
-    this.retryInterruptTurnId = undefined;
     this.recoveryEpoch += 1;
     return pending;
   }
-  cancelAutoRecovery(): void { this.recoveryBlocked = true; this.cancelRecovery(); }
+  cancelAutoRecovery(): void { this.recoveryBlocked = true; this.providerRetryTurns.clear(); this.retrySteerState.clear(); this.cancelRecovery(); }
   private recoveryAllowed(): boolean {
     const policy = this.recovery?.policy;
     return Boolean(policy?.enabled && !this.recoveryBlocked && this.isAlive() &&
@@ -280,10 +281,42 @@ export class CodexStructuredSession implements StructuredSession {
     if (this.retryStallTimer) clearTimeout(this.retryStallTimer);
     this.retryStallTimer = undefined;
   }
+  private sendRetryContinue(turnId: string): void {
+    if (!this.recoveryAllowed() || !this.recovery?.policy.maxAttempts || this.turnId !== turnId ||
+      this.pending.size || this.activeTools.size || !isTransientProviderError(this.providerError?.error)) return;
+    let state = this.retrySteerState.get(turnId);
+    if (!state) {
+      state = { attempts: 0, lastAt: 0, inFlight: false };
+      this.retrySteerState.set(turnId, state);
+    }
+    if (state.attempts >= 3 || state.inFlight || (state.attempts > 0 && Date.now() - state.lastAt < 5_000)) return;
+    state.attempts += 1;
+    state.lastAt = Date.now();
+    state.inFlight = true;
+    const attempt = state.attempts;
+    void this.rpc.request('turn/steer', {
+      threadId: this.id,
+      expectedTurnId: turnId,
+      clientUserMessageId: `arg-bridge-recovery-${randomUUID()}`,
+      input: [{ type: 'text', text: 'continue' }],
+    }, 20_000).then(result => {
+      if (result.turnId !== turnId) { state!.attempts = 3; return; }
+      if (this.turnId !== turnId || !this.recoveryAllowed()) return;
+      this.emit?.(textEvent('\ncontinue\n'));
+      this.lastUserText = 'continue';
+      log.info('agent', 'provider-recovery-steered', { thread: this.id, turn: turnId, attempt });
+    }).catch(error => {
+      const reason = error instanceof Error ? error.message : String(error);
+      // Do not repeat a submission whose acknowledgement is unavailable.
+      state!.attempts = 3;
+      log.info('agent', 'provider-recovery-steer-unavailable', { thread: this.id, turn: turnId, attempt, reason });
+    }).finally(() => { state!.inFlight = false; });
+  }
   private watchRetryStall(turnId: string, error: Wire): void {
     const seconds = this.recovery?.policy.retryStallSeconds;
     if (!seconds || !this.recoveryAllowed() || !isTransientProviderError(error) ||
-      this.retryStallTimer || this.retryInterruptTurnId || this.pending.size || this.activeTools.size) return;
+      this.retryStallTimer || this.pending.size || this.activeTools.size) return;
+    if ((this.retrySteerState.get(turnId)?.attempts ?? 0) >= 3) return;
     const epoch = this.recoveryEpoch;
     this.retryStallTimer = setTimeout(() => {
       // Keep the timer identity until preflight finishes; a new token/tool or
@@ -293,28 +326,32 @@ export class CodexStructuredSession implements StructuredSession {
         const turns = await this.rpc.request('thread/turns/list', { threadId: this.id, limit: 1, sortDirection: 'desc' });
         if (!timer || this.retryStallTimer !== timer || epoch !== this.recoveryEpoch ||
           !this.recoveryAllowed() || this.turnId !== turnId || this.pending.size || this.activeTools.size) return;
-        if (turns.data?.[0]?.id !== turnId || turns.data[0].status !== 'inProgress') return;
-        this.retryInterruptTurnId = turnId;
-        this.emit?.(textEvent(`\n⏳ 重连连续 ${seconds} 秒无进展，正在中断本轮；确认结束后才会继续。\n`));
-        log.info('agent', 'provider-retry-stalled', { thread: this.id, turn: turnId, seconds });
-        // Arm before sending: a notification can arrive before the RPC reply.
-        this.retryInterruptTimer = setTimeout(() => {
-          if (this.retryInterruptTurnId !== turnId) return;
-          this.cancelAutoRecovery();
-          this.emit?.({ type: 'error', message: '未收到本轮中断确认，已停止自动恢复；请检查 /status。', terminationReason: 'failed' });
-          this.finish();
-        }, 15_000);
-        await this.rpc.request('turn/interrupt', { threadId: this.id, turnId }, 15_000);
-      })().catch(() => {
+        const latest = turns.data?.[0];
+        if (latest?.id !== turnId) return;
+        if (['failed', 'interrupted', 'completed'].includes(latest.status)) {
+          this.receive({ method: 'turn/completed', params: { threadId: this.id, turn: latest } });
+          return;
+        }
+        // An active turn retains its complete native reconnect budget.
+        log.info('agent', 'provider-retry-observed', { thread: this.id, turn: turnId, status: latest.status });
+        this.sendRetryContinue(turnId);
+      })().catch(error => {
         if (epoch !== this.recoveryEpoch || this.recoveryBlocked) return;
-        this.cancelAutoRecovery();
-        this.emit?.({ type: 'error', message: '无法确认重连中的 turn 已停止；未发送继续请求。', terminationReason: 'failed' });
-        this.finish();
-      }).finally(() => { if (this.retryStallTimer === timer) this.clearRetryStall(); });
+        // A failed read is not evidence that Codex stopped. Keep observing.
+        log.warn('agent', 'provider-retry-state-unavailable', { thread: this.id, turn: turnId, reason: String(error) });
+      }).finally(() => {
+        if (this.retryStallTimer !== timer) return;
+        this.clearRetryStall();
+        if (epoch === this.recoveryEpoch && this.turnId === turnId) this.watchRetryStall(turnId, error);
+      });
     }, seconds * 1000);
     this.retryStallTimer.unref?.();
   }
-  private scheduleRecovery(failedTurnId: string, error: Wire | undefined, expectedStatus = 'failed', preempted = false): boolean {
+  private scheduleRecovery(
+    failedTurnId: string,
+    error: Wire | undefined,
+    expectedStatus = 'failed',
+  ): boolean {
     const policy = this.recovery?.policy;
     if (!policy || !this.recoveryAllowed() || this.pending.size ||
       this.recoveryAttempts >= policy.maxAttempts || !isTransientProviderError(error)) return false;
@@ -322,9 +359,8 @@ export class CodexStructuredSession implements StructuredSession {
     const epoch = this.recoveryEpoch;
     const goalWasActive = this.goalActive;
     const attempt = ++this.recoveryAttempts;
-    const delay = preempted ? 5 : Math.min(policy.maxDelaySeconds, policy.delaySeconds * 2 ** (attempt - 1));
+    const delay = Math.min(policy.maxDelaySeconds, policy.delaySeconds * 2 ** (attempt - 1));
     this.phase = 'busy';
-    this.emit?.(textEvent(`\n⏳ Provider 临时错误，本轮已结束；${delay} 秒后自动继续（${attempt}/${policy.maxAttempts}）。/stop 可取消。\n`));
     log.info('agent', 'provider-recovery-scheduled', { thread: this.id, attempt, delaySeconds: delay });
     const previousWork = this.recoveryWork;
     this.recoveryTimer = setTimeout(() => {
@@ -361,12 +397,10 @@ export class CodexStructuredSession implements StructuredSession {
         }
         if (epoch !== this.recoveryEpoch || this.recoveryBlocked || this.turnId) return;
         this.recoveryStarting = true;
-        this.emit?.(textEvent(`\n↪ 正在自动继续（${attempt}/${policy.maxAttempts}）。\n`));
+        this.emit?.(textEvent('\ncontinue\n'));
         // Never replay the original task: prior tools may already have made
         // changes. Keep the same thread, provider and permission policy.
-        const result = await this.rpc.request('turn/start', { threadId: this.id, input: [{ type: 'text',
-          text: 'Continue the existing task after the temporary provider/API failure. Check the current state and prior tool results first; do not repeat completed actions. Respect any pause, stop, approval or budget limits already in this conversation.',
-        }] });
+        const result = await this.rpc.request('turn/start', { threadId: this.id, input: [{ type: 'text', text: 'continue' }] });
         if (epoch !== this.recoveryEpoch) {
           if (this.recoveryBlocked && result.turn?.id && !this.finishedTurns.has(result.turn.id)) {
             await this.rpc.request('turn/interrupt', { threadId: this.id, turnId: result.turn.id });
@@ -414,7 +448,7 @@ export class CodexStructuredSession implements StructuredSession {
     if (this.emit) throw new Error('Structured thread already has an active relay');
     if (this.recoveryStarting || this.recoveryChecking) throw new Error('自动恢复请求仍在确认结果，请稍后再发送新任务。');
     if (signal.aborted) return;
-    this.cancelRecovery(); this.recoveryAttempts = 0; this.recoveryBlocked = false;
+    this.cancelRecovery(); this.recoveryAttempts = 0; this.recoveryBlocked = false; this.providerRetryTurns.clear(); this.retrySteerState.clear();
     this.lastUserText = options.prompt.slice(0, 800);
     this.lastCwd = options.cwd;
     this.emit = emit;
@@ -566,6 +600,8 @@ export class CodexStructuredSession implements StructuredSession {
   async interrupt(): Promise<boolean> {
     let acted = this.cancelRecovery();
     this.recoveryBlocked = true;
+    this.providerRetryTurns.clear();
+    this.retrySteerState.clear();
     try { await this.syncState(); } catch { /* keep local state */ }
     if (this.goalActive) {
       await this.rpc.request('thread/goal/set', { threadId: this.id, status: 'paused' });

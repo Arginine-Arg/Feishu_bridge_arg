@@ -16,6 +16,7 @@ function harness(policy: Partial<ProviderRecoveryConfig> = {}) {
   const rpc = new EventEmitter() as EventEmitter & { request: ReturnType<typeof vi.fn> };
   rpc.request = vi.fn(async (method: string) => {
     if (method === 'turn/start') { latest = { id: `t${++count}`, status: 'inProgress' }; return { turn: latest }; }
+    if (method === 'turn/steer') return { turnId: latest.id };
     if (method === 'thread/turns/list') return { data: [latest] };
     if (method === 'thread/goal/get') return { goal: null };
     return {};
@@ -43,7 +44,7 @@ describe('provider recovery', () => {
     h.complete('failed', transient);
     await vi.advanceTimersByTimeAsync(29_999); expect(h.starts()).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(1); expect(h.starts()).toHaveLength(2);
-    expect(h.starts()[1]![1]).toEqual({ threadId: 'thread', input: [{ type: 'text', text: expect.stringContaining('do not repeat completed actions') }] });
+    expect(h.starts()[1]![1]).toEqual({ threadId: 'thread', input: [{ type: 'text', text: 'continue' }] });
     expect(h.events.some(e => e.type === 'error')).toBe(false);
     h.complete('completed'); await h.done;
   });
@@ -76,17 +77,34 @@ describe('provider recovery', () => {
     expect(h.events).toContainEqual({ type: 'done', terminationReason: 'interrupted' });
   });
   it('does not revive a user-interrupted turn', async () => {
-    const h = harness(); await Promise.resolve(); h.retry(); h.complete('interrupted'); await h.done;
+    const h = harness(); await Promise.resolve(); h.complete('interrupted'); await h.done;
     await vi.advanceTimersByTimeAsync(600_000); expect(h.starts()).toHaveLength(1); expect(h.interrupts()).toHaveLength(0);
   });
-  it('preempts stalled API retries after 60s and waits for confirmed interruption before continuing', async () => {
+  it('never interrupts an active Codex reconnect and continues only after its terminal interruption', async () => {
     const h = harness(); await Promise.resolve(); h.retry();
     await vi.advanceTimersByTimeAsync(30_000); h.retry();
-    await vi.advanceTimersByTimeAsync(29_999); expect(h.interrupts()).toHaveLength(0);
-    await vi.advanceTimersByTimeAsync(1); expect(h.interrupts()).toHaveLength(1); expect(h.starts()).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(60_000); expect(h.interrupts()).toHaveLength(0); expect(h.starts()).toHaveLength(1);
     h.complete('interrupted');
-    await vi.advanceTimersByTimeAsync(4_999); expect(h.starts()).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(29_999); expect(h.starts()).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(1); expect(h.starts()).toHaveLength(2);
+    expect(h.starts()[1]![1]).toEqual({ threadId: 'thread', input: [{ type: 'text', text: 'continue' }] });
+    h.complete('completed'); await h.done;
+  });
+  it('sends up to three idempotent continue nudges while the same turn reconnects', async () => {
+    const h = harness(); await Promise.resolve();
+    h.retry(); await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(5_000); h.retry(); await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(5_000); h.retry(); await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(5_000); h.retry(); await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(180_000);
+    const steers = h.rpc.request.mock.calls.filter(([method]) => method === 'turn/steer');
+    expect(steers).toHaveLength(3);
+    expect(steers.map(([, params]) => params)).toEqual(steers.map(([, params]) => expect.objectContaining({
+      threadId: 'thread', expectedTurnId: 't1', input: [{ type: 'text', text: 'continue' }],
+    })));
+    expect(new Set(steers.map(([, params]) => params.clientUserMessageId)).size).toBe(3);
+    expect(h.interrupts()).toHaveLength(0);
+    expect(h.starts()).toHaveLength(1);
     h.complete('completed'); await h.done;
   });
   it('cancels the stall watchdog when real text or tool progress resumes', async () => {
@@ -98,13 +116,16 @@ describe('provider recovery', () => {
     await vi.advanceTimersByTimeAsync(120_000); expect(h.interrupts()).toHaveLength(0);
     h.complete('completed'); await h.done;
   });
-  it('never continues when the interrupt acknowledgement is missing', async () => {
-    const h = harness(); await Promise.resolve(); h.retry();
-    await vi.advanceTimersByTimeAsync(75_000); await h.done;
-    expect(h.starts()).toHaveLength(1); expect(h.events).toContainEqual(expect.objectContaining({ type: 'error', message: expect.stringContaining('中断确认') }));
+  it('reports Codex original error after recovery attempts are exhausted', async () => {
+    const h = harness({ maxAttempts: 1, delaySeconds: 5 }); await Promise.resolve();
+    h.complete('failed', transient); await vi.advanceTimersByTimeAsync(5_000);
+    h.complete('failed', transient); await h.done;
+    expect(h.starts()).toHaveLength(2);
+    expect(h.events).toContainEqual(expect.objectContaining({ type: 'error', message: 'stream disconnected' }));
   });
-  it('stop wins over a watchdog-initiated interrupt', async () => {
+  it('stop cancels retry polling and prevents automatic continuation', async () => {
     const h = harness(); await Promise.resolve(); h.retry(); await vi.advanceTimersByTimeAsync(60_000);
+    expect(h.interrupts()).toHaveLength(0);
     await h.session.interrupt(); h.complete('interrupted'); await h.done;
     await vi.advanceTimersByTimeAsync(600_000); expect(h.starts()).toHaveLength(1);
   });
@@ -187,7 +208,67 @@ describe('provider recovery', () => {
     expect(h.starts()).toHaveLength(2);
   });
   it('bounds config and rejects authentication even inside network error variants', () => {
-    expect(normalizeProviderRecovery({ maxAttempts: 999, delaySeconds: -1, retryStallSeconds: 0 })).toMatchObject({ maxAttempts: 5, delaySeconds: 5, retryStallSeconds: 0 });
+    expect(normalizeProviderRecovery({ maxAttempts: 999, delaySeconds: -1, retryStallSeconds: 0 })).toMatchObject({ maxAttempts: 3, delaySeconds: 5, retryStallSeconds: 0 });
+    expect(normalizeProviderRecovery()).toMatchObject({ maxAttempts: 3 });
     expect(isTransientProviderError({ codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 401 } } })).toBe(false);
+  });
+  it('keeps five native reconnect attempts through three Bridge continuation rounds', async () => {
+    const h = harness({ maxAttempts: 3, delaySeconds: 5 }); await Promise.resolve();
+    for (let cycle = 0; cycle < 4; cycle++) {
+      for (let retry = 0; retry < 5; retry++) {
+        h.retry(); await vi.advanceTimersByTimeAsync(20 * 60_000);
+        expect(h.interrupts()).toHaveLength(0);
+        expect(h.starts()).toHaveLength(cycle + 1);
+      }
+      h.complete('failed', transient);
+      if (cycle < 3) await vi.advanceTimersByTimeAsync(5_000 * 2 ** cycle);
+    }
+    await h.done;
+    expect(h.events.filter(e => e.type === 'error')).toEqual([{ type: 'error', message: transient.message, terminationReason: 'failed' }]);
+    expect(h.interrupts()).toHaveLength(0);
+    expect(h.starts()).toHaveLength(4);
+  });
+  it('resets consecutive failures on real progress across a long-running conversation', async () => {
+    const h = harness({ maxAttempts: 1, delaySeconds: 5 }); await Promise.resolve();
+    for (let cycle = 0; cycle < 8; cycle++) {
+      h.complete('failed', transient); await vi.advanceTimersByTimeAsync(5_000);
+      expect(h.starts()).toHaveLength(cycle + 2);
+      const turnId = `t${cycle + 2}`;
+      h.emit('item/agentMessage/delta', { turnId, itemId: `a${cycle}`, delta: 'progress' });
+      await vi.advanceTimersByTimeAsync(20 * 60_000);
+    }
+    h.complete('completed'); await h.done;
+    expect(h.events.filter(e => e.type === 'error')).toEqual([]);
+    expect(h.interrupts()).toHaveLength(0);
+  });
+  it('does not reset the failure budget on empty message lifecycle notifications', async () => {
+    const h = harness({ maxAttempts: 1, delaySeconds: 5 }); await Promise.resolve();
+    h.complete('failed', transient); await vi.advanceTimersByTimeAsync(5_000);
+    h.emit('item/started', { turnId: 't2', item: { id: 'empty', type: 'agentMessage' } });
+    h.emit('item/completed', { turnId: 't2', item: { id: 'empty', type: 'agentMessage', text: '' } });
+    h.complete('failed', transient); await h.done;
+    expect(h.starts()).toHaveLength(2);
+  });
+  it('keeps observing an active reconnect when the status query fails', async () => {
+    const h = harness(); await Promise.resolve(); h.retry();
+    h.rpc.request.mockRejectedValueOnce(new Error('temporary read failure'));
+    await vi.advanceTimersByTimeAsync(180_000);
+    expect(h.interrupts()).toHaveLength(0);
+    expect(h.events.filter(e => e.type === 'error')).toEqual([]);
+    expect(h.rpc.request.mock.calls.filter(([method]) => method === 'thread/turns/list').length).toBeGreaterThanOrEqual(3);
+    h.complete('completed'); await h.done;
+  });
+  it('recovers a missed terminal notification using the read-only status poll', async () => {
+    const h = harness({ delaySeconds: 5 }); await Promise.resolve(); h.retry();
+    const original = h.rpc.request.getMockImplementation()!;
+    h.rpc.request.mockImplementation(async (method: string) => {
+      if (method === 'turn/steer') return { turnId: 't1' };
+      if (method === 'thread/turns/list') return { data: [{ id: 't1', status: 'interrupted', error: transient }] };
+      return original(method);
+    });
+    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(h.starts()).toHaveLength(2); expect(h.interrupts()).toHaveLength(0);
+    h.complete('completed'); await h.done;
   });
 });
