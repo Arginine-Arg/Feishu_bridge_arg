@@ -4,7 +4,7 @@
 
 [English README](./README.md)
 
-`1.21.0` 默认持续恢复明确的临时 API 故障：活动 reconnect 期间只追加简短的 `continue`，不主动 interrupt；确认当前 turn 终止后才在同一 thread 继续。每个会话可用 `/recover off`、`/recover on`、`/recover status` 单独控制，开关在 bot 重启后保留；`/stop` 会停止当前任务并取消恢复。保留 1.19.0 的完整结构化文本转发修复。详见 [恢复设置与边界](./docs/structured-backend.md#provider-recovery-1210)。
+`1.21.1` 修复超大会话执行 `native --adopt` 时出现的 `Max payload size exceeded` 和错误的空 `recent-tail`。现在改用分页摘要；遇到超过 App Server 32 MiB 单帧限制时，直接从本地 rollout JSONL 流式提取最近 48k 用户/助手文本，并在断线后重建 RPC 再继续迁移。`1.21.0` 的持续 provider 恢复、会话级 `/recover` 开关和完整结构化文本转发保持不变。
 
 `1.6.7` 引入 provider-aware Codex resume，`1.7.0` 增加 idle 边界重绑。`1.9.1` 收紧重连语义：附着已有 native 或 structured thread 时，保留该 thread 记录的 provider/model，不会因为 cc-switch 后来切换了 route 而静默改路。
 
@@ -60,7 +60,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.21.0
+sh /tmp/install-arg-bridge.sh --version 1.21.1
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.21.0"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.21.1"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.21.0`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.21.1`。
 
 ### 4. Node 或 npm 全局目录错误
 

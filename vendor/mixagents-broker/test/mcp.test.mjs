@@ -310,11 +310,19 @@ test("an approved workspace is reused for descendants during the MCP connection"
       app.client.elicitationRequests[0].message,
       new RegExp((await realpath(app.workspace)).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
     );
+    const waited = await app.client.request("tools/call", {
+      name: "wait_agent",
+      arguments: {
+        agentIds: [first.structuredContent.agentId],
+        timeoutMs: 2_000,
+      },
+    });
+    assert.equal(waited.structuredContent.agents[0].status, "completed");
 
     const nested = path.join(app.workspace, "nested");
     await mkdir(nested);
     const second = await spawnAgent(app.client, nested);
-    assert.equal(second.isError, undefined);
+    assert.equal(second.isError, undefined, JSON.stringify(second));
     assert.equal(app.client.elicitationRequests.length, 1);
   } finally {
     await app.close();

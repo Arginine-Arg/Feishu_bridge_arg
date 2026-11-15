@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import { mkdir, open, readFile, readdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { createInterface } from 'node:readline';
 import type { ProfileConfig, SubagentConfig } from '../../config/profile-schema';
 import { loadRootConfig } from '../../config/profile-store';
 import { materializeCcSwitchBrokerRuntime } from '../../integrations/cc-switch-provider';
@@ -43,6 +45,8 @@ import { resolveAppServerSocketPath } from './socket-security';
 import { discoverCodexThreadWriterOwners } from './thread-owner';
 
 const MAX_HANDOFF_CHARS = 48_000;
+const THREAD_HISTORY_PAGE_SIZE = 20;
+const MAX_THREAD_HISTORY_PAGE_REQUESTS = 8;
 
 export interface NativeCodexEnvironment {
   env: NodeJS.ProcessEnv;
@@ -458,7 +462,24 @@ export async function createNativeBridgeSession(
             '为避免丢失最近上下文，已拒绝复用更早的 provider branch。请先恢复该 thread 的 owner 后重试。',
         );
       }
-      const old = await readIdleThread(sourceHost?.rpc ?? rpc, sourceThreadId);
+      const old = await readIdleThread(
+        sourceHost?.rpc ?? rpc,
+        sourceThreadId,
+        {
+          codexHome: env.CODEX_HOME ?? defaultCodexHome(env),
+          ...(!sourceHost ? {
+            reconnect: async (): Promise<RpcClient> => {
+              const reconnected = await reconnectCodexRpc(
+                endpoint,
+                env.CODEX_HOME ?? defaultCodexHome(env),
+              );
+              rpc = reconnected;
+              host.rpc = reconnected;
+              return reconnected;
+            },
+          } : {}),
+        },
+      );
       sourceHost?.rpc.close();
       sourceHost = undefined;
       const sourceSnapshot = await readThreadHistorySnapshot(input.profileDir, sourceThreadId);
@@ -825,7 +846,14 @@ async function materializeBridgeThread(
   });
 }
 
-async function readIdleThread(rpc: RpcClient, threadId: string): Promise<Wire> {
+export async function readIdleThread(
+  rpc: RpcClient,
+  threadId: string,
+  options: {
+    codexHome?: string;
+    reconnect?: () => Promise<RpcClient>;
+  } = {},
+): Promise<Wire> {
   const statusResult = await rpc.request('thread/read', {
     threadId,
     includeTurns: false,
@@ -842,38 +870,239 @@ async function readIdleThread(rpc: RpcClient, threadId: string): Promise<Wire> {
   }
   if (turns.length > 0) return statusResult;
 
+  let paginatedHistory: Wire | undefined;
+  let paginatedError: unknown;
   try {
-    return await rpc.request('thread/read', {
-      threadId,
-      includeTurns: true,
-    }, 180_000);
+    paginatedHistory = await readPaginatedThreadHistoryTail(rpc, threadId);
   } catch (error) {
-    log.warn('agent', 'native-adopt-full-history-unavailable', {
-      threadId,
-      reason: error instanceof Error ? error.message : String(error),
-      fallback: 'recent-tail',
-    });
+    paginatedError = error;
   }
 
-  // Full `thread/read` can exceed the RPC budget for very long histories.
-  // Recent turns are sufficient because the handoff itself keeps only a
-  // bounded text tail.
-  const recent: Wire = await rpc.request('thread/turns/list', {
-    threadId,
-    limit: 200,
-    sortDirection: 'desc',
-  }, 180_000).catch(() => ({}));
-  const newest = Array.isArray(recent.data) ? recent.data : [];
-  if (newest.length === 0) {
-    throw new Error(`无法读取旧 thread ${threadId} 的最近历史；完整读取超时且 recent-tail 为空`);
+  const paginatedExtracted = paginatedHistory
+    ? extractAssistantHistory(paginatedHistory)
+    : undefined;
+  if (paginatedExtracted?.items.length) {
+    if (rpc.closed && options.reconnect) await options.reconnect();
+    return paginatedHistory!;
   }
+
+  // Full thread hydration is deliberately avoided: a single JSON-RPC frame
+  // over 32 MiB closes the websocket. Rollout JSONL is already local, has the
+  // same canonical message ids, and can be streamed with bounded memory.
+  const localHistory = options.codexHome
+    ? await readThreadHistoryFromRollout(options.codexHome, threadId).catch(error => {
+        log.warn('agent', 'native-adopt-rollout-history-unavailable', {
+          threadId,
+          reason: error instanceof Error ? error.message : String(error),
+        });
+        return undefined;
+      })
+    : undefined;
+  if (localHistory) {
+    if (rpc.closed && options.reconnect) await options.reconnect();
+    return {
+      ...statusResult,
+      thread: {
+        ...thread,
+        turns: localHistory.thread.turns,
+      },
+    };
+  }
+
+  const reason = paginatedError instanceof Error
+    ? `；分页读取失败：${paginatedError.message}`
+    : '';
+  throw new Error(
+    `无法读取旧 thread ${threadId} 的最近历史；分页历史为空，本地 rollout 也不可用${reason}`,
+  );
+}
+
+async function readPaginatedThreadHistoryTail(
+  rpc: RpcClient,
+  threadId: string,
+): Promise<Wire | undefined> {
+  const turns: Wire[] = [];
+  let cursor: string | null | undefined;
+  for (
+    let pageIndex = 0;
+    pageIndex < MAX_THREAD_HISTORY_PAGE_REQUESTS;
+    pageIndex += 1
+  ) {
+    let page: Wire;
+    try {
+      page = await rpc.request('thread/turns/list', {
+        threadId,
+        limit: THREAD_HISTORY_PAGE_SIZE,
+        sortDirection: 'desc',
+        // The protocol default is the bounded summary view. Omitting the
+        // explicit field keeps compatibility with older 0.16x App Servers.
+        ...(cursor ? { cursor } : {}),
+      }, 180_000);
+    } catch (error) {
+      // Keep a valid partial page if a later request closes the socket.
+      if (turns.length === 0) throw error;
+      break;
+    }
+    const data = Array.isArray(page.data) ? page.data : [];
+    turns.push(...data);
+    const history = extractAssistantHistory({ thread: { turns } });
+    if (history.sourceChars >= MAX_HANDOFF_CHARS) break;
+    if (!page.nextCursor || data.length === 0) break;
+    cursor = page.nextCursor;
+  }
+  if (turns.length === 0) return undefined;
   return {
-    ...statusResult,
     thread: {
-      ...thread,
-      turns: [...newest].reverse(),
+      turns: [...turns].reverse(),
     },
   };
+}
+
+export async function readThreadHistoryFromRollout(
+  codexHome: string,
+  threadId: string,
+): Promise<Wire | undefined> {
+  const filePath = await findThreadRolloutFile(codexHome, threadId);
+  if (!filePath) return undefined;
+
+  type RolloutEntry = HandoffEntry & {
+    id: string;
+    ordinal: number;
+    turnId?: string;
+  };
+  const selected: RolloutEntry[] = [];
+  const selectedById = new Map<string, RolloutEntry>();
+  let selectedChars = 0;
+  let observed = 0;
+  const stream = createReadStream(filePath, { encoding: 'utf8' });
+  const lines = createInterface({ input: stream, crlfDelay: Infinity });
+  try {
+    for await (const line of lines) {
+      observed += 1;
+      let record: Wire;
+      try {
+        record = JSON.parse(line) as Wire;
+      } catch {
+        continue;
+      }
+      const payload: Wire = record.payload ?? {};
+      const ordinal = typeof record.ordinal === 'number' && Number.isFinite(record.ordinal)
+        ? record.ordinal
+        : observed;
+      let id: string | undefined;
+      let role: 'user' | 'assistant' | undefined;
+      let text = '';
+      let turnId =
+        typeof payload.turn_id === 'string'
+          ? payload.turn_id
+          : typeof payload.internal_chat_message_metadata_passthrough?.turn_id === 'string'
+            ? payload.internal_chat_message_metadata_passthrough.turn_id
+            : undefined;
+
+      if (
+        record.type === 'response_item' &&
+        payload.type === 'message' &&
+        (payload.role === 'user' || payload.role === 'assistant')
+      ) {
+        id = typeof payload.id === 'string' ? payload.id : undefined;
+        role = payload.role;
+        text = textFromMessageContent(payload.content);
+      } else if (
+        record.type === 'event_msg' &&
+        payload.type === 'item_completed' &&
+        (payload.item?.type === 'UserMessage' || payload.item?.type === 'AgentMessage')
+      ) {
+        const item: Wire = payload.item;
+        id = typeof item.id === 'string' ? item.id : undefined;
+        role = item.type === 'UserMessage' ? 'user' : 'assistant';
+        text = role === 'user'
+          ? textFromMessageContent(item.content)
+          : typeof item.text === 'string' ? item.text : '';
+        turnId ??= typeof payload.turn_id === 'string' ? payload.turn_id : undefined;
+      }
+
+      text = role === 'assistant' ? redactSecrets(text.trim()) : text.trim();
+      if (!role || !text) continue;
+      const key = id ?? `${record.type}:${ordinal}`;
+      const boundedText = text.length > MAX_HANDOFF_CHARS
+        ? text.slice(-MAX_HANDOFF_CHARS)
+        : text;
+      const existing = selectedById.get(key);
+      if (existing) {
+        selectedChars -= existing.text.length;
+        existing.text = boundedText;
+        existing.ordinal = ordinal;
+        if (turnId) existing.turnId = turnId;
+        selectedChars += existing.text.length;
+      } else {
+        const entry: RolloutEntry = {
+          id: key,
+          ordinal,
+          role,
+          text: boundedText,
+          ...(turnId ? { turnId } : {}),
+        };
+        selected.push(entry);
+        selectedById.set(key, entry);
+        selectedChars += entry.text.length;
+      }
+      while (selectedChars > MAX_HANDOFF_CHARS && selected.length > 1) {
+        const removed = selected.shift()!;
+        selectedChars -= removed.text.length;
+        if (selectedById.get(removed.id) === removed) selectedById.delete(removed.id);
+      }
+      if (selectedChars > MAX_HANDOFF_CHARS) {
+        const only = selected[0]!;
+        only.text = only.text.slice(-MAX_HANDOFF_CHARS);
+        selectedChars = only.text.length;
+      }
+    }
+  } finally {
+    lines.close();
+    stream.destroy();
+  }
+
+  if (selected.length === 0) return undefined;
+
+  const grouped = new Map<string, Wire[]>();
+  for (const entry of selected) {
+    const turnId = entry.turnId ?? `rollout-${entry.ordinal}`;
+    const items = grouped.get(turnId) ?? [];
+    items.push(entry.role === 'user'
+      ? {
+          type: 'userMessage',
+          content: [{ type: 'input_text', text: entry.text }],
+        }
+      : {
+          type: 'agentMessage',
+          text: entry.text,
+        });
+    grouped.set(turnId, items);
+  }
+  return {
+    thread: {
+      turns: [...grouped.entries()].map(([id, items]) => ({ id, items })),
+    },
+  };
+}
+
+async function reconnectCodexRpc(
+  endpoint: string,
+  codexHome: string | undefined,
+): Promise<RpcClient> {
+  const url = endpoint.startsWith('unix://')
+    ? `ws+unix://${endpoint.slice('unix://'.length)}:/`
+    : endpoint;
+  const reconnected = await RpcClient.connect(url, {
+    ...(codexHome ? { codexHome } : {}),
+  });
+  try {
+    await reconnected.initialize();
+    return reconnected;
+  } catch (error) {
+    reconnected.close();
+    throw error;
+  }
 }
 
 async function assertIdleThread(
@@ -981,8 +1210,42 @@ async function readHistoricalThreadIdentity(
   codexHome: string,
   threadId: string,
 ): Promise<{ modelProvider?: string; model?: string }> {
+  const filePath = await findThreadRolloutFile(codexHome, threadId);
+  if (!filePath) return {};
+  const file = await open(filePath, 'r');
+  try {
+    const buffer = Buffer.alloc(64 * 1024);
+    const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
+    for (const line of buffer.subarray(0, bytesRead).toString('utf8').split('\n')) {
+      try {
+        const entry = JSON.parse(line) as Wire;
+        if (entry.type !== 'session_meta') continue;
+        const payload = entry.payload ?? entry;
+        return {
+          ...(typeof payload.model_provider === 'string' && payload.model_provider.trim()
+            ? { modelProvider: payload.model_provider.trim() }
+            : {}),
+          ...(typeof payload.model === 'string' && payload.model.trim()
+            ? { model: payload.model.trim() }
+            : {}),
+        };
+      } catch {
+        // The first line can be partially buffered only if it exceeds
+        // the safety window; try the next complete line.
+      }
+    }
+  } finally {
+    await file.close();
+  }
+  return {};
+}
+
+async function findThreadRolloutFile(
+  codexHome: string,
+  threadId: string,
+): Promise<string | undefined> {
   if (!/^[a-f0-9]{8}-[a-f0-9]{4}-7[a-f0-9]{3}-[a-f0-9]{4}-[a-f0-9]{12}$/iu.test(threadId)) {
-    return {};
+    return undefined;
   }
   const timestamp = Number.parseInt(threadId.replaceAll('-', '').slice(0, 12), 16);
   for (const rootName of ['sessions', 'archived_sessions']) {
@@ -990,36 +1253,11 @@ async function readHistoricalThreadIdentity(
       const date = new Date(timestamp + offset).toISOString().slice(0, 10).split('-');
       const directory = join(codexHome, rootName, ...date);
       for (const name of await readdir(directory).catch(() => [] as string[])) {
-        if (!name.endsWith(`-${threadId}.jsonl`)) continue;
-        const file = await open(join(directory, name), 'r');
-        try {
-          const buffer = Buffer.alloc(64 * 1024);
-          const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
-          for (const line of buffer.subarray(0, bytesRead).toString('utf8').split('\n')) {
-            try {
-              const entry = JSON.parse(line) as Wire;
-              if (entry.type !== 'session_meta') continue;
-              const payload = entry.payload ?? entry;
-              return {
-                ...(typeof payload.model_provider === 'string' && payload.model_provider.trim()
-                  ? { modelProvider: payload.model_provider.trim() }
-                  : {}),
-                ...(typeof payload.model === 'string' && payload.model.trim()
-                  ? { model: payload.model.trim() }
-                  : {}),
-              };
-            } catch {
-              // The first line can be partially buffered only if it exceeds
-              // the safety window; try the next complete line.
-            }
-          }
-        } finally {
-          await file.close();
-        }
+        if (name.endsWith(`-${threadId}.jsonl`)) return join(directory, name);
       }
     }
   }
-  return {};
+  return undefined;
 }
 
 export async function findLoadedThreadHost(
@@ -1308,6 +1546,17 @@ async function writeThreadMarker(
 }
 
 function textFromUserContent(content: unknown): string {
+  if (!Array.isArray(content)) return '';
+  return content.flatMap((entry): string[] => {
+    if (typeof entry === 'string') return [entry];
+    if (!entry || typeof entry !== 'object') return [];
+    const value = entry as Record<string, unknown>;
+    return typeof value.text === 'string' ? [value.text] : [];
+  }).join('\n').trim();
+}
+
+function textFromMessageContent(content: unknown): string {
+  if (typeof content === 'string') return content.trim();
   if (!Array.isArray(content)) return '';
   return content.flatMap((entry): string[] => {
     if (typeof entry === 'string') return [entry];

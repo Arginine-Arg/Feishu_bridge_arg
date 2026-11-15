@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.21.0",
+  version: "1.21.1",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -6247,7 +6247,7 @@ function agentDisplay(agentKind) {
 // src/cli/commands/start.ts
 import dns from "dns";
 import os from "os";
-import { createInterface as createInterface8 } from "readline";
+import { createInterface as createInterface9 } from "readline";
 
 // src/agent/claude/adapter.ts
 import { tmpdir as tmpdir2 } from "os";
@@ -18736,8 +18736,10 @@ ${JSON.stringify(input, null, 2)}`,
 
 // src/agent/structured/native-bridge.ts
 import { createHash as createHash9 } from "crypto";
+import { createReadStream } from "fs";
 import { mkdir as mkdir20, open as open4, readFile as readFile20, readdir as readdir7 } from "fs/promises";
 import { dirname as dirname19, join as join33 } from "path";
+import { createInterface as createInterface6 } from "readline";
 
 // src/agent/structured/socket-security.ts
 import { lstat as lstat5, realpath as realpath8, stat as stat7 } from "fs/promises";
@@ -18979,6 +18981,8 @@ function processOwnedByCurrentUser(pid) {
 
 // src/agent/structured/native-bridge.ts
 var MAX_HANDOFF_CHARS = 48e3;
+var THREAD_HISTORY_PAGE_SIZE = 20;
+var MAX_THREAD_HISTORY_PAGE_REQUESTS = 8;
 async function prepareNativeCodexEnvironment(input) {
   const sourceEnv = { ...input.env ?? process.env };
   const activeHome = input.codexHome ?? defaultCodexHome(sourceEnv);
@@ -19233,7 +19237,24 @@ async function createNativeBridgeSession(input) {
           `\u6700\u65B0 provider lineage head ${sourceThreadId} \u7684 owner App Server \u5F53\u524D\u4E0D\u53EF\u7528\uFF1B\u4E3A\u907F\u514D\u4E22\u5931\u6700\u8FD1\u4E0A\u4E0B\u6587\uFF0C\u5DF2\u62D2\u7EDD\u590D\u7528\u66F4\u65E9\u7684 provider branch\u3002\u8BF7\u5148\u6062\u590D\u8BE5 thread \u7684 owner \u540E\u91CD\u8BD5\u3002`
         );
       }
-      const old = await readIdleThread(sourceHost?.rpc ?? rpc, sourceThreadId);
+      const old = await readIdleThread(
+        sourceHost?.rpc ?? rpc,
+        sourceThreadId,
+        {
+          codexHome: env.CODEX_HOME ?? defaultCodexHome(env),
+          ...!sourceHost ? {
+            reconnect: async () => {
+              const reconnected = await reconnectCodexRpc(
+                endpoint,
+                env.CODEX_HOME ?? defaultCodexHome(env)
+              );
+              rpc = reconnected;
+              host.rpc = reconnected;
+              return reconnected;
+            }
+          } : {}
+        }
+      );
       sourceHost?.rpc.close();
       sourceHost = void 0;
       const sourceSnapshot = await readThreadHistorySnapshot(input.profileDir, sourceThreadId);
@@ -19516,7 +19537,7 @@ async function materializeBridgeThread(rpc, threadId, adoptedFrom) {
     }]
   });
 }
-async function readIdleThread(rpc, threadId) {
+async function readIdleThread(rpc, threadId, options = {}) {
   const statusResult = await rpc.request("thread/read", {
     threadId,
     includeTurns: false
@@ -19531,34 +19552,177 @@ async function readIdleThread(rpc, threadId) {
     throw new Error(`thread ${threadId} \u4ECD\u5728\u8FD0\u884C\uFF1B\u8BF7\u7B49\u5F53\u524D turn \u5B8C\u6210\u540E\u518D\u6267\u884C --adopt`);
   }
   if (turns.length > 0) return statusResult;
+  let paginatedHistory;
+  let paginatedError;
   try {
-    return await rpc.request("thread/read", {
-      threadId,
-      includeTurns: true
-    }, 18e4);
+    paginatedHistory = await readPaginatedThreadHistoryTail(rpc, threadId);
   } catch (error) {
-    log.warn("agent", "native-adopt-full-history-unavailable", {
+    paginatedError = error;
+  }
+  const paginatedExtracted = paginatedHistory ? extractAssistantHistory(paginatedHistory) : void 0;
+  if (paginatedExtracted?.items.length) {
+    if (rpc.closed && options.reconnect) await options.reconnect();
+    return paginatedHistory;
+  }
+  const localHistory = options.codexHome ? await readThreadHistoryFromRollout(options.codexHome, threadId).catch((error) => {
+    log.warn("agent", "native-adopt-rollout-history-unavailable", {
       threadId,
-      reason: error instanceof Error ? error.message : String(error),
-      fallback: "recent-tail"
+      reason: error instanceof Error ? error.message : String(error)
     });
+    return void 0;
+  }) : void 0;
+  if (localHistory) {
+    if (rpc.closed && options.reconnect) await options.reconnect();
+    return {
+      ...statusResult,
+      thread: {
+        ...thread,
+        turns: localHistory.thread.turns
+      }
+    };
   }
-  const recent = await rpc.request("thread/turns/list", {
-    threadId,
-    limit: 200,
-    sortDirection: "desc"
-  }, 18e4).catch(() => ({}));
-  const newest = Array.isArray(recent.data) ? recent.data : [];
-  if (newest.length === 0) {
-    throw new Error(`\u65E0\u6CD5\u8BFB\u53D6\u65E7 thread ${threadId} \u7684\u6700\u8FD1\u5386\u53F2\uFF1B\u5B8C\u6574\u8BFB\u53D6\u8D85\u65F6\u4E14 recent-tail \u4E3A\u7A7A`);
+  const reason = paginatedError instanceof Error ? `\uFF1B\u5206\u9875\u8BFB\u53D6\u5931\u8D25\uFF1A${paginatedError.message}` : "";
+  throw new Error(
+    `\u65E0\u6CD5\u8BFB\u53D6\u65E7 thread ${threadId} \u7684\u6700\u8FD1\u5386\u53F2\uFF1B\u5206\u9875\u5386\u53F2\u4E3A\u7A7A\uFF0C\u672C\u5730 rollout \u4E5F\u4E0D\u53EF\u7528${reason}`
+  );
+}
+async function readPaginatedThreadHistoryTail(rpc, threadId) {
+  const turns = [];
+  let cursor;
+  for (let pageIndex = 0; pageIndex < MAX_THREAD_HISTORY_PAGE_REQUESTS; pageIndex += 1) {
+    let page;
+    try {
+      page = await rpc.request("thread/turns/list", {
+        threadId,
+        limit: THREAD_HISTORY_PAGE_SIZE,
+        sortDirection: "desc",
+        // The protocol default is the bounded summary view. Omitting the
+        // explicit field keeps compatibility with older 0.16x App Servers.
+        ...cursor ? { cursor } : {}
+      }, 18e4);
+    } catch (error) {
+      if (turns.length === 0) throw error;
+      break;
+    }
+    const data = Array.isArray(page.data) ? page.data : [];
+    turns.push(...data);
+    const history = extractAssistantHistory({ thread: { turns } });
+    if (history.sourceChars >= MAX_HANDOFF_CHARS) break;
+    if (!page.nextCursor || data.length === 0) break;
+    cursor = page.nextCursor;
   }
+  if (turns.length === 0) return void 0;
   return {
-    ...statusResult,
     thread: {
-      ...thread,
-      turns: [...newest].reverse()
+      turns: [...turns].reverse()
     }
   };
+}
+async function readThreadHistoryFromRollout(codexHome, threadId) {
+  const filePath = await findThreadRolloutFile(codexHome, threadId);
+  if (!filePath) return void 0;
+  const selected = [];
+  const selectedById = /* @__PURE__ */ new Map();
+  let selectedChars = 0;
+  let observed = 0;
+  const stream2 = createReadStream(filePath, { encoding: "utf8" });
+  const lines = createInterface6({ input: stream2, crlfDelay: Infinity });
+  try {
+    for await (const line of lines) {
+      observed += 1;
+      let record;
+      try {
+        record = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      const payload = record.payload ?? {};
+      const ordinal = typeof record.ordinal === "number" && Number.isFinite(record.ordinal) ? record.ordinal : observed;
+      let id;
+      let role;
+      let text2 = "";
+      let turnId = typeof payload.turn_id === "string" ? payload.turn_id : typeof payload.internal_chat_message_metadata_passthrough?.turn_id === "string" ? payload.internal_chat_message_metadata_passthrough.turn_id : void 0;
+      if (record.type === "response_item" && payload.type === "message" && (payload.role === "user" || payload.role === "assistant")) {
+        id = typeof payload.id === "string" ? payload.id : void 0;
+        role = payload.role;
+        text2 = textFromMessageContent(payload.content);
+      } else if (record.type === "event_msg" && payload.type === "item_completed" && (payload.item?.type === "UserMessage" || payload.item?.type === "AgentMessage")) {
+        const item = payload.item;
+        id = typeof item.id === "string" ? item.id : void 0;
+        role = item.type === "UserMessage" ? "user" : "assistant";
+        text2 = role === "user" ? textFromMessageContent(item.content) : typeof item.text === "string" ? item.text : "";
+        turnId ??= typeof payload.turn_id === "string" ? payload.turn_id : void 0;
+      }
+      text2 = role === "assistant" ? redactSecrets(text2.trim()) : text2.trim();
+      if (!role || !text2) continue;
+      const key = id ?? `${record.type}:${ordinal}`;
+      const boundedText = text2.length > MAX_HANDOFF_CHARS ? text2.slice(-MAX_HANDOFF_CHARS) : text2;
+      const existing = selectedById.get(key);
+      if (existing) {
+        selectedChars -= existing.text.length;
+        existing.text = boundedText;
+        existing.ordinal = ordinal;
+        if (turnId) existing.turnId = turnId;
+        selectedChars += existing.text.length;
+      } else {
+        const entry = {
+          id: key,
+          ordinal,
+          role,
+          text: boundedText,
+          ...turnId ? { turnId } : {}
+        };
+        selected.push(entry);
+        selectedById.set(key, entry);
+        selectedChars += entry.text.length;
+      }
+      while (selectedChars > MAX_HANDOFF_CHARS && selected.length > 1) {
+        const removed = selected.shift();
+        selectedChars -= removed.text.length;
+        if (selectedById.get(removed.id) === removed) selectedById.delete(removed.id);
+      }
+      if (selectedChars > MAX_HANDOFF_CHARS) {
+        const only = selected[0];
+        only.text = only.text.slice(-MAX_HANDOFF_CHARS);
+        selectedChars = only.text.length;
+      }
+    }
+  } finally {
+    lines.close();
+    stream2.destroy();
+  }
+  if (selected.length === 0) return void 0;
+  const grouped = /* @__PURE__ */ new Map();
+  for (const entry of selected) {
+    const turnId = entry.turnId ?? `rollout-${entry.ordinal}`;
+    const items = grouped.get(turnId) ?? [];
+    items.push(entry.role === "user" ? {
+      type: "userMessage",
+      content: [{ type: "input_text", text: entry.text }]
+    } : {
+      type: "agentMessage",
+      text: entry.text
+    });
+    grouped.set(turnId, items);
+  }
+  return {
+    thread: {
+      turns: [...grouped.entries()].map(([id, items]) => ({ id, items }))
+    }
+  };
+}
+async function reconnectCodexRpc(endpoint, codexHome) {
+  const url = endpoint.startsWith("unix://") ? `ws+unix://${endpoint.slice("unix://".length)}:/` : endpoint;
+  const reconnected = await RpcClient.connect(url, {
+    ...codexHome ? { codexHome } : {}
+  });
+  try {
+    await reconnected.initialize();
+    return reconnected;
+  } catch (error) {
+    reconnected.close();
+    throw error;
+  }
 }
 async function assertIdleThread(rpc, threadId, operation) {
   const result = await rpc.request("thread/read", {
@@ -19632,8 +19796,32 @@ function configPathSegment(key) {
   return /^[A-Za-z0-9_-]+$/u.test(key) ? key : JSON.stringify(key);
 }
 async function readHistoricalThreadIdentity(codexHome, threadId) {
+  const filePath = await findThreadRolloutFile(codexHome, threadId);
+  if (!filePath) return {};
+  const file = await open4(filePath, "r");
+  try {
+    const buffer = Buffer.alloc(64 * 1024);
+    const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
+    for (const line of buffer.subarray(0, bytesRead).toString("utf8").split("\n")) {
+      try {
+        const entry = JSON.parse(line);
+        if (entry.type !== "session_meta") continue;
+        const payload = entry.payload ?? entry;
+        return {
+          ...typeof payload.model_provider === "string" && payload.model_provider.trim() ? { modelProvider: payload.model_provider.trim() } : {},
+          ...typeof payload.model === "string" && payload.model.trim() ? { model: payload.model.trim() } : {}
+        };
+      } catch {
+      }
+    }
+  } finally {
+    await file.close();
+  }
+  return {};
+}
+async function findThreadRolloutFile(codexHome, threadId) {
   if (!/^[a-f0-9]{8}-[a-f0-9]{4}-7[a-f0-9]{3}-[a-f0-9]{4}-[a-f0-9]{12}$/iu.test(threadId)) {
-    return {};
+    return void 0;
   }
   const timestamp = Number.parseInt(threadId.replaceAll("-", "").slice(0, 12), 16);
   for (const rootName of ["sessions", "archived_sessions"]) {
@@ -19641,30 +19829,11 @@ async function readHistoricalThreadIdentity(codexHome, threadId) {
       const date = new Date(timestamp + offset).toISOString().slice(0, 10).split("-");
       const directory = join33(codexHome, rootName, ...date);
       for (const name of await readdir7(directory).catch(() => [])) {
-        if (!name.endsWith(`-${threadId}.jsonl`)) continue;
-        const file = await open4(join33(directory, name), "r");
-        try {
-          const buffer = Buffer.alloc(64 * 1024);
-          const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
-          for (const line of buffer.subarray(0, bytesRead).toString("utf8").split("\n")) {
-            try {
-              const entry = JSON.parse(line);
-              if (entry.type !== "session_meta") continue;
-              const payload = entry.payload ?? entry;
-              return {
-                ...typeof payload.model_provider === "string" && payload.model_provider.trim() ? { modelProvider: payload.model_provider.trim() } : {},
-                ...typeof payload.model === "string" && payload.model.trim() ? { model: payload.model.trim() } : {}
-              };
-            } catch {
-            }
-          }
-        } finally {
-          await file.close();
-        }
+        if (name.endsWith(`-${threadId}.jsonl`)) return join33(directory, name);
       }
     }
   }
-  return {};
+  return void 0;
 }
 async function findLoadedThreadHost(profileDir, threadId, env) {
   if (!threadId) return void 0;
@@ -19816,6 +19985,16 @@ async function writeThreadMarker(path, threadId, namespace, adoptedFrom, provide
   });
 }
 function textFromUserContent(content) {
+  if (!Array.isArray(content)) return "";
+  return content.flatMap((entry) => {
+    if (typeof entry === "string") return [entry];
+    if (!entry || typeof entry !== "object") return [];
+    const value = entry;
+    return typeof value.text === "string" ? [value.text] : [];
+  }).join("\n").trim();
+}
+function textFromMessageContent(content) {
+  if (typeof content === "string") return content.trim();
   if (!Array.isArray(content)) return "";
   return content.flatMap((entry) => {
     if (typeof entry === "string") return [entry];
@@ -25746,11 +25925,11 @@ function finalizeIfRunning(state) {
 }
 
 // src/session/history.ts
-import { createReadStream } from "fs";
+import { createReadStream as createReadStream2 } from "fs";
 import { readdir as readdir10, stat as stat9 } from "fs/promises";
 import { homedir as homedir15 } from "os";
 import { join as join38 } from "path";
-import { createInterface as createInterface6 } from "readline";
+import { createInterface as createInterface7 } from "readline";
 
 // src/session/preview.ts
 var DEFAULT_PREVIEW_MAX_CHARS = 80;
@@ -25821,8 +26000,8 @@ async function listRecentSessions(cwd, limit = 5) {
   );
 }
 async function summarize(path) {
-  const stream2 = createReadStream(path, { encoding: "utf8" });
-  const rl = createInterface6({ input: stream2 });
+  const stream2 = createReadStream2(path, { encoding: "utf8" });
+  const rl = createInterface7({ input: stream2 });
   let preview2 = "";
   let lineCount = 0;
   try {
@@ -25872,7 +26051,7 @@ function formatRelTime(mtime) {
 }
 
 // src/session/codex-history.ts
-import { createInterface as createInterface7 } from "readline";
+import { createInterface as createInterface8 } from "readline";
 import { join as join39 } from "path";
 var CodexHistoryError = class extends Error {
   code;
@@ -25896,7 +26075,7 @@ async function listCodexThreadHistory(options) {
   const stderrChunks = [];
   let settled = false;
   const result = await new Promise((resolve11, reject4) => {
-    const rl = createInterface7({ input: child.stdout, crlfDelay: Infinity });
+    const rl = createInterface8({ input: child.stdout, crlfDelay: Infinity });
     let timer;
     const fail = (err) => {
       if (settled) return;
@@ -29903,7 +30082,7 @@ function footerLine(status) {
 
 // src/media/cache.ts
 import { createHash as createHash14 } from "crypto";
-import { createReadStream as createReadStream2 } from "fs";
+import { createReadStream as createReadStream3 } from "fs";
 import { mkdir as mkdir25, readdir as readdir11, rename as rename4, rm as rm14, stat as stat10 } from "fs/promises";
 import { join as join40 } from "path";
 
@@ -30129,7 +30308,7 @@ async function listFiles(root) {
 }
 async function hashFile(path) {
   const hash = createHash14("sha256");
-  for await (const chunk of createReadStream2(path)) {
+  for await (const chunk of createReadStream3(path)) {
     hash.update(chunk);
   }
   return hash.digest("hex");
@@ -37509,7 +37688,7 @@ async function resolveConflict(conflicts) {
     );
     return false;
   }
-  const rl = createInterface8({ input: process.stdin, output: process.stdout });
+  const rl = createInterface9({ input: process.stdin, output: process.stdout });
   const ask = (q) => new Promise((resolve11) => rl.question(q, resolve11));
   try {
     const verb = conflicts.length > 1 ? "\u5B83\u4EEC" : "\u90A3\u4E2A";
@@ -37562,7 +37741,7 @@ async function confirmStopRuntimeLockProcess2(err) {
       `\u5F53\u524D ${err.kind === "profile" ? "profile" : "app"} \u5DF2\u6709 bridge \u8FDB\u7A0B\u5360\u7528\uFF1B\u975E\u4EA4\u4E92\u6A21\u5F0F\u65E0\u6CD5\u786E\u8BA4\u505C\u6B62\uFF0C\u8BF7\u5148\u7528 \`arg-bridge ps\` \u67E5\u770B\u5E76\u7528 \`arg-bridge kill <bot id>\` \u505C\u6B62\u540E\u91CD\u8BD5`
     );
   }
-  const rl = createInterface8({ input: process.stdin, output: process.stdout });
+  const rl = createInterface9({ input: process.stdin, output: process.stdout });
   try {
     const answer = (await new Promise(
       (resolve11) => rl.question("\u662F\u5426\u505C\u6B62\u65E7\u8FDB\u7A0B\u5E76\u91CD\u65B0\u542F\u52A8? [y/N]: ", resolve11)

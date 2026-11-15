@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.21.1
+
+- Fixes `arg-bridge native --adopt ... --follow-current-provider` failing on
+  very large Codex sessions with `Max payload size exceeded` followed by an
+  empty or misleading `recent-tail` error.
+- Replaces unbounded full-history hydration with small
+  `thread/turns/list(itemsView=summary)` pages and a bounded rollout JSONL
+  fallback. The fallback streams the complete file without retaining tool
+  output and keeps only the latest 48k characters of user/assistant text.
+- Reconnects and reinitializes the App Server RPC before continuing adoption
+  when a large response closes the websocket. Provider identity lookup and
+  rollout discovery now share the same bounded file locator.
+- Adds regression coverage for a 40 MiB tool output, a simulated 32 MiB RPC
+  disconnect, message de-duplication/redaction, and the reported 210 MiB
+  session.
+
 ## 1.21.0
 
 - Removes Bridge's provider-recovery interrupts. Codex keeps its native

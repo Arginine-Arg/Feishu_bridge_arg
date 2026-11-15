@@ -89,10 +89,13 @@ This is an in-place provider rebind, not an adoption:
   repeated commands idempotent and allowing the compatibility host to be
   reconstructed after cleanup.
 
-Very long histories no longer require one unbounded `thread/read` response.
-Status is read separately, then a 180-second full-history attempt is used when
-possible; if it times out, Bridge falls back to the recent turn tail before
-applying the bounded handoff.
+Very long histories never require one unbounded `thread/read` response. Bridge
+reads status separately, then requests small `thread/turns/list` pages using
+the protocol's default summary item view. If a page would exceed the 32 MiB frame
+limit, or pagination cannot provide text, Bridge streams the local rollout JSONL
+and keeps only the latest 48,000 characters of user/assistant text. Tool output
+and reasoning are never retained. A websocket closed by an oversized response
+is reconnected and initialized before migration continues.
 
 Plain `--adopt` continues to preserve the source thread's provider/model.
 

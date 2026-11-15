@@ -1,15 +1,18 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   extractAssistantHistory,
   findAdoptedThreadMarker,
   findLatestAdoptedThreadMarker,
+  readIdleThread,
+  readThreadHistoryFromRollout,
   resolveFollowCurrentProviderSelection,
   type NativeCodexEnvironment,
   type NativeBridgeProviderSelection,
 } from '../../../src/agent/structured/native-bridge';
+import type { RpcClient } from '../../../src/agent/structured/rpc';
 
 const temporary: string[] = [];
 
@@ -18,6 +21,153 @@ afterEach(async () => {
 });
 
 describe('Bridge managed native history migration', () => {
+  it('falls back to rollout history and reconnects after an oversized RPC frame', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'native-adopt-reconnect-'));
+    temporary.push(root);
+    const threadId = '01a1bc10-2f32-7ad0-992c-1363bf478450';
+    const directory = join(root, 'sessions', '2026', '11', '08');
+    await mkdir(directory, { recursive: true });
+    await writeFile(
+      join(directory, `rollout-2026-11-08T00-00-00-${threadId}.jsonl`),
+      [
+        {
+          type: 'response_item',
+          ordinal: 1,
+          payload: {
+            type: 'message',
+            id: 'oversized-user',
+            role: 'user',
+            content: [{ type: 'input_text', text: 'preserve this after reconnect' }],
+            internal_chat_message_metadata_passthrough: { turn_id: 'turn-large' },
+          },
+        },
+      ].map(record => JSON.stringify(record)).join('\n') + '\n',
+      'utf8',
+    );
+
+    let closed = false;
+    let reconnects = 0;
+    const request = vi.fn(async (method: string, params: Record<string, unknown>) => {
+      if (method === 'thread/read') {
+        expect(params).toEqual({ threadId, includeTurns: false });
+        return { thread: { id: threadId, status: { type: 'idle' }, turns: [] } };
+      }
+      if (method === 'thread/turns/list') {
+        closed = true;
+        throw new Error('Max payload size exceeded');
+      }
+      throw new Error(`unexpected RPC ${method}`);
+    });
+    const rpc = {
+      request,
+      get closed() {
+        return closed;
+      },
+    } as unknown as RpcClient;
+
+    const result = await readIdleThread(rpc, threadId, {
+      codexHome: root,
+      reconnect: async () => {
+        reconnects += 1;
+        return rpc;
+      },
+    });
+
+    expect(extractAssistantHistory(result).items).toEqual([
+      expect.objectContaining({
+        role: 'user',
+        content: [{ type: 'input_text', text: 'preserve this after reconnect' }],
+      }),
+    ]);
+    expect(request.mock.calls.map(([method]) => method)).toEqual([
+      'thread/read',
+      'thread/turns/list',
+    ]);
+    expect(reconnects).toBe(1);
+  });
+
+  it('streams a bounded text tail from a rollout with an oversized tool output', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'native-adopt-rollout-'));
+    temporary.push(root);
+    const threadId = '01a1bc10-2f32-7ad0-992c-1363bf478450';
+    const directory = join(root, 'sessions', '2026', '11', '08');
+    await mkdir(directory, { recursive: true });
+    const records = [
+      {
+        type: 'response_item',
+        ordinal: 1,
+        payload: {
+          type: 'message',
+          id: 'user-before-tool',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'question before the large tool output' }],
+          internal_chat_message_metadata_passthrough: { turn_id: 'turn-1' },
+        },
+      },
+      {
+        type: 'response_item',
+        ordinal: 2,
+        payload: {
+          type: 'function_call_output',
+          call_id: 'large-tool',
+          output: 'TOOL_OUTPUT_MUST_NOT_BE_COPIED'.repeat(1_300_000),
+        },
+      },
+      {
+        type: 'response_item',
+        ordinal: 3,
+        payload: {
+          type: 'message',
+          id: 'assistant-after-tool',
+          role: 'assistant',
+          content: [{
+            type: 'output_text',
+            text: 'latest answer with sk-this-value-must-be-redacted',
+          }],
+          internal_chat_message_metadata_passthrough: { turn_id: 'turn-1' },
+        },
+      },
+      {
+        type: 'event_msg',
+        ordinal: 4,
+        payload: {
+          type: 'item_completed',
+          turn_id: 'turn-2',
+          item: {
+            type: 'UserMessage',
+            id: 'event-only-user',
+            content: [{ type: 'text', text: 'event-only follow-up' }],
+          },
+        },
+      },
+      {
+        type: 'response_item',
+        ordinal: 5,
+        payload: {
+          type: 'message',
+          id: 'developer-message',
+          role: 'developer',
+          content: [{ type: 'input_text', text: 'DEVELOPER_MESSAGE_MUST_NOT_BE_COPIED' }],
+        },
+      },
+    ];
+    await writeFile(
+      join(directory, `rollout-2026-11-08T00-00-00-${threadId}.jsonl`),
+      `${records.map(record => JSON.stringify(record)).join('\n')}\n`,
+      'utf8',
+    );
+
+    const rollout = await readThreadHistoryFromRollout(root, threadId);
+    const history = extractAssistantHistory(rollout!);
+    const serialized = JSON.stringify(history);
+
+    expect(history.sourceChars).toBeLessThanOrEqual(48_000);
+    expect(serialized).toContain('latest answer with sk-[REDACTED]');
+    expect(serialized).toContain('event-only follow-up');
+    expect(serialized).not.toContain('TOOL_OUTPUT_MUST_NOT_BE_COPIED');
+    expect(serialized).not.toContain('DEVELOPER_MESSAGE_MUST_NOT_BE_COPIED');
+  }, 20_000);
+
   it('migrates bounded user and assistant text without tool or encrypted items', () => {
     const history = extractAssistantHistory({
       thread: {
