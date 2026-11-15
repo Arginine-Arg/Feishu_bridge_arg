@@ -327,6 +327,8 @@ Codex structured main sessions continuously recover from recognized transient
 provider failures. This covers Feishu turns and native main-thread turns
 subscribed by the bot. Bridge preserves the thread, provider/model and permission
 policy, and sends exactly `continue` instead of replaying the original task.
+This `continue` is private Codex input: Bridge never emits it as an assistant
+text delta or a separate Feishu message.
 
 - An explicit `error.willRetry=true` starts same-turn `turn/steer` nudges. The
   first nudge is immediate; subsequent nudges and state checks default to every

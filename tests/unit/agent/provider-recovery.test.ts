@@ -105,6 +105,9 @@ describe('provider recovery', () => {
     expect(new Set(steers.map(([, params]) => params.clientUserMessageId)).size).toBe(3);
     expect(h.interrupts()).toHaveLength(0);
     expect(h.starts()).toHaveLength(1);
+    expect(h.events.some(event =>
+      event.type === 'text' && event.delta.trim().toLowerCase() === 'continue'
+    )).toBe(false);
     h.complete('completed'); await h.done;
   });
   it('cancels the stall watchdog when real text or tool progress resumes', async () => {
@@ -309,6 +312,9 @@ describe('provider recovery', () => {
     await vi.advanceTimersByTimeAsync(120_000);
     const steers = () => h.rpc.request.mock.calls.filter(([m]) => m === 'turn/steer');
     expect(steers()).toHaveLength(9);
+    expect(h.events.some(event =>
+      event.type === 'text' && event.delta.trim().toLowerCase() === 'continue'
+    )).toBe(false);
     h.emit('item/agentMessage/delta', { turnId: 't1', itemId: 'a', delta: 'real progress' });
     await vi.advanceTimersByTimeAsync(120_000);
     expect(steers()).toHaveLength(9);
@@ -327,6 +333,9 @@ describe('provider recovery', () => {
     await h.session.command('/recover on'); await vi.advanceTimersByTimeAsync(30_000);
     expect(h.rpc.request.mock.calls.filter(([m]) => m === 'turn/steer').length).toBeGreaterThan(1);
     expect(h.starts()).toHaveLength(1); expect(h.interrupts()).toHaveLength(0);
+    expect(h.events.some(event =>
+      event.type === 'text' && event.delta.trim().toLowerCase() === 'continue'
+    )).toBe(false);
     h.complete('completed'); await h.done;
   });
 

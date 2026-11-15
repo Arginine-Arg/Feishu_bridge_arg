@@ -56,6 +56,12 @@ native.each(['active continue', 'terminal continuation', 'recovery disabled', 'l
   let lostAcknowledgement = false;
   outgoing.mockImplementation(async (...args) => {
     const result = await request(...args);
+    if (
+      (mode === 'active continue' || mode === 'lost steer acknowledgement') &&
+      args[0] === 'turn/steer'
+    ) {
+      healthy = true;
+    }
     if (mode === 'lost steer acknowledgement' && args[0] === 'turn/steer' && !lostAcknowledgement) {
       lostAcknowledgement = true;
       throw new Error('Simulated lost steer acknowledgement');
@@ -80,10 +86,10 @@ native.each(['active continue', 'terminal continuation', 'recovery disabled', 'l
     try {
       await session.submit({ runId: 'e2e', prompt: 'Return the test answer.', cwd: root, sandbox: 'read-only' }, event => {
         events.push(event);
-        if (mode !== 'terminal continuation' && event.type === 'text' && event.delta.trim() === 'continue') healthy = true;
       }, stop.signal);
     } finally { clearTimeout(timeout); }
     expect(events.filter(e => e.type === 'error')).toEqual([]);
+    expect(events.some(e => e.type === 'text' && e.delta.trim() === 'continue')).toBe(false);
     expect(wire.some(m => m.method === 'error' && m.params.willRetry === true)).toBe(true);
     expect(wire.filter(m => m.method === 'turn/completed').map(m => m.params.turn.status)).toEqual(
       mode === 'terminal continuation' ? ['failed', 'completed'] : ['completed']);

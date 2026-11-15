@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.21.1",
+  version: "1.21.2",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -17857,7 +17857,6 @@ ${p4.command ?? JSON.stringify(p4.changes ?? {})}`,
       if (result.turnId !== turnId) return;
       state.pendingMessageId = void 0;
       if (epoch !== this.recoveryEpoch || this.turnId !== turnId || !this.recoveryAllowed() || this.retrySteerState.get(turnId) !== state || !this.providerError) return;
-      this.emit?.(textEvent("\ncontinue\n"));
       this.lastUserText = "continue";
       log.info("agent", "provider-recovery-steered", { thread: this.id, turn: turnId, attempt });
     }).catch((error) => {
@@ -17887,7 +17886,6 @@ ${p4.command ?? JSON.stringify(p4.changes ?? {})}`,
         if (state?.pendingMessageId && latest.items?.some((item) => item.type === "userMessage" && item.clientId === state.pendingMessageId)) {
           state.pendingMessageId = void 0;
           state.lastAt = Date.now();
-          this.emit?.(textEvent("\ncontinue\n"));
           this.lastUserText = "continue";
           return;
         }
@@ -17951,7 +17949,6 @@ ${p4.command ?? JSON.stringify(p4.changes ?? {})}`,
         }
         if (epoch !== this.recoveryEpoch || this.recoveryBlocked || this.turnId) return;
         this.recoveryStarting = true;
-        this.emit?.(textEvent("\ncontinue\n"));
         submitted = true;
         const result = await this.rpc.request("turn/start", { threadId: this.id, input: [{ type: "text", text: "continue" }] });
         if (epoch !== this.recoveryEpoch) {

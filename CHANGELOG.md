@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.21.2
+
+- Fixes provider recovery leaking its internal `continue` nudge into the
+  assistant text stream, which caused repeated user-visible `continue`
+  messages in Feishu.
+- Recovery now sends `continue` only through the active Codex turn using
+  `turn/steer`, or starts a private continuation turn after a confirmed
+  terminal failure. It never emits recovery input as an agent text delta.
+- Adds regression assertions that continuous same-turn nudges, terminal
+  continuations, and `/recover on` monitoring produce no `continue` text event.
+
 ## 1.21.1
 
 - Fixes `arg-bridge native --adopt ... --follow-current-provider` failing on

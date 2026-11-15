@@ -321,7 +321,6 @@ export class CodexStructuredSession implements StructuredSession {
       state!.pendingMessageId = undefined;
       if (epoch !== this.recoveryEpoch || this.turnId !== turnId || !this.recoveryAllowed() ||
         this.retrySteerState.get(turnId) !== state || !this.providerError) return;
-      this.emit?.(textEvent('\ncontinue\n'));
       this.lastUserText = 'continue';
       log.info('agent', 'provider-recovery-steered', { thread: this.id, turn: turnId, attempt });
     }).catch(error => {
@@ -356,7 +355,6 @@ export class CodexStructuredSession implements StructuredSession {
         if (state?.pendingMessageId && latest.items?.some((item: Wire) => item.type === 'userMessage' && item.clientId === state.pendingMessageId)) {
           state.pendingMessageId = undefined;
           state.lastAt = Date.now();
-          this.emit?.(textEvent('\ncontinue\n'));
           this.lastUserText = 'continue';
           return;
         }
@@ -427,7 +425,6 @@ export class CodexStructuredSession implements StructuredSession {
         }
         if (epoch !== this.recoveryEpoch || this.recoveryBlocked || this.turnId) return;
         this.recoveryStarting = true;
-        this.emit?.(textEvent('\ncontinue\n'));
         // Never replay the original task: prior tools may already have made
         // changes. Keep the same thread, provider and permission policy.
         submitted = true;
