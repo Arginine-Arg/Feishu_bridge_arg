@@ -206,6 +206,23 @@ describe('bounded terminal-only provider recovery', () => {
     expect(h.events.reduce(reduce, initialState).recovery?.state).toBe('provider_retrying');
     h.complete('completed'); await h.done;
   });
+  it('resets after successful requests inside a continuing goal without ending its relay', async () => {
+    const h = harness(); await tick();
+    h.emit('thread/goal/updated', { goal: { status: 'active' } });
+    const normal = h.rpc.request.getMockImplementation()!;
+    h.rpc.request.mockImplementation(async (method: string, ...args: unknown[]) => method === 'thread/goal/get'
+      ? { goal: { status: 'active' } } : normal(method, ...args));
+    h.complete('failed', transient); await tick(30_000);
+    h.complete('completed'); await tick();
+    expect(h.session.diagnostics().recovery!.attempts).toBe(0);
+    await tick(3_600_000);
+    expect(h.session.diagnostics().recovery!.state).toBe('normal');
+    h.setLatest({ id: 'native-next', status: 'inProgress' });
+    h.emit('turn/started', { turn: { id: 'native-next' } });
+    h.complete('failed', transient); await tick(30_000);
+    expect(h.calls('turn/start')).toHaveLength(3);
+    await h.session.close(); await h.done;
+  });
   it('reconciles corrected complete messages and turn snapshots without duplication', async () => {
     const h = harness(); await tick();
     h.emit('item/agentMessage/delta', { turnId: 't1', itemId: 'a', delta: 'Hello wor' });

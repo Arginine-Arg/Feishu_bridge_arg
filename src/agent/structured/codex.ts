@@ -310,12 +310,14 @@ export class CodexStructuredSession implements StructuredSession {
           this.emit?.({ type: 'error', message: error?.message ?? 'Codex turn failed', terminationReason: this.recoveryBlocked ? 'interrupted' : 'failed' }); this.finish();
         }
       }
-      else if (!this.goalActive || p.turn?.status === 'interrupted') {
+      else {
         this.cancelRecovery();
         this.queueRecoveryEvent(() => p.turn.status === 'completed' ? this.ledger.reset('completed') : this.ledger.invalidate('interrupted'));
         this.notifyRecovery(p.turn.status === 'completed' ? 'normal' : 'stopped', true);
-        if (p.turn?.status === 'interrupted') this.emit?.({ type: 'done', terminationReason: 'interrupted' });
-        this.finish();
+        if (!this.goalActive || p.turn.status === 'interrupted') {
+          if (p.turn.status === 'interrupted') this.emit?.({ type: 'done', terminationReason: 'interrupted' });
+          this.finish();
+        }
       }
     }
   }
@@ -664,7 +666,10 @@ export class CodexStructuredSession implements StructuredSession {
           input,
           ...codexTurnPermissionOverrides(options.sandbox, options.cwd),
         });
-        if (!this.finishedTurns.has(result.turn?.id)) this.turnId = result.turn?.id ?? this.turnId;
+        if (!this.finishedTurns.has(result.turn?.id)) {
+          this.turnId = result.turn?.id ?? this.turnId;
+          if (this.turnId) this.underlyingTurn = 'running';
+        }
         if (signal.aborted) await this.interrupt();
       }
       await completion;
