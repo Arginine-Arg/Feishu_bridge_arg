@@ -11,7 +11,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest, windows-latest]
+        # macos-latest selects arm64; that hosted fleet can cancel queued
+        # jobs without acquiring a runner. Keep the same macOS tests on Intel.
+        os: [macos-26-intel, ubuntu-latest, windows-latest]
 
     steps:
       - name: Checkout
