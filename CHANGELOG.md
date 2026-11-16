@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.22.0
+
+- Automatically transfers an idle native thread to the selected provider: real
+  Bot subscribers release their own subscriptions, the writer lock is checked,
+  and only an exclusive idle orphan host can be stopped. Concurrent native
+  attempts are serialized across profiles; shared/active hosts stay intact.
+- Fixes stale model errors with `--adopt/--bridge --follow-current-provider`.
+  Resume checks the effective top-level identity and applies an explicitly
+  requested model to an idle loaded thread before verifying the result.
+- Removes recovery input injection into active provider reconnects. Only a
+  confirmed transient terminal failure can start a concise continuation.
+- Bounds each failure episode to one hour across automatic turns/restarts,
+  with 30/60/120-second backoff, jitter and Retry-After. Recovery operations
+  have persisted identities, one owner and uncertain-result reconciliation.
+- Adds separate recovery status, pending waits and accurate user controls.
+  Monitoring and worker wait deadlines retain the underlying long task.
+- Adds ordered subagent providers with one or two discovered models each.
+  Authenticated model catalogues and short failed-route cooldowns guide NEW
+  dispatches; existing workers are never copied to a fallback route.
+- Migrates old default infinite recovery to the bounded version-2 policy.
+  No research history, model, provider or compression setting is rewritten.
+
 ## 1.21.2
 
 - Fixes provider recovery leaking its internal `continue` nudge into the

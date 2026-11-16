@@ -2657,7 +2657,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   // subagents.workerTimeoutMs; applying the conversational idle watchdog here
   // killed healthy side workers after the first quiet period.
   const idleTimeoutMs = effectiveRunIdleTimeoutMs(
-    configuredIdleTimeoutMs,
+    agent.structuredControl ? undefined : configuredIdleTimeoutMs,
     liveInputMode,
   );
   if (idleTimeoutMs) {
@@ -3933,6 +3933,8 @@ function runStateDeliveryFingerprint(state: RunState): string {
     error: state.errorMsg,
     idleTimeoutMinutes: state.idleTimeoutMinutes,
     currentToolElapsedMs: state.currentToolElapsedMs,
+    recovery: state.recovery,
+    pending: state.pendingMsg,
   });
 }
 

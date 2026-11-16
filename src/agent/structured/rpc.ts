@@ -1,5 +1,7 @@
 import { EventEmitter } from 'node:events';
 import WebSocket from 'ws';
+import { realpath } from 'node:fs/promises';
+import { assertThreadNotHandingOff, withHostConnectionLock } from './thread-handoff';
 
 export type Wire = Record<string, any>;
 
@@ -39,6 +41,13 @@ export class RpcClient extends EventEmitter {
     socket.on('close', () => this.fail(new Error('Codex App Server connection closed; input will not be replayed')));
   }
   static async connect(url: string, options: { codexHome?: string } = {}): Promise<RpcClient> {
+    if (url.startsWith('ws+unix://')) {
+      const path = await realpath(url.slice('ws+unix://'.length).split(':/')[0]!);
+      return withHostConnectionLock(path, () => RpcClient.open(url, options));
+    }
+    return RpcClient.open(url, options);
+  }
+  private static async open(url: string, options: { codexHome?: string }): Promise<RpcClient> {
     const socket = new WebSocket(url, { handshakeTimeout: 5000, maxPayload: 32 * 1024 * 1024, perMessageDeflate: false });
     const client = new RpcClient(socket);
     if (options.codexHome) client.codexHome = options.codexHome;
@@ -62,7 +71,11 @@ export class RpcClient extends EventEmitter {
     if (typeof result.codexHome === 'string' && result.codexHome) this.codexHome = result.codexHome;
     this.notify('initialized', {});
   }
-  request(method: string, params: Wire, timeoutMs = 30000): Promise<Wire> {
+  async request(method: string, params: Wire, timeoutMs = 30000): Promise<Wire> {
+    if (this.codexHome && typeof params.threadId === 'string' &&
+        ['thread/resume', 'thread/fork', 'turn/start', 'turn/steer'].includes(method)) {
+      await assertThreadNotHandingOff(this.codexHome, params.threadId);
+    }
     if (this.failure || this.socket.readyState !== WebSocket.OPEN) return Promise.reject(this.failure ?? new Error('RPC connection is not open'));
     const id = this.nextId++;
     return new Promise((resolve, reject) => {

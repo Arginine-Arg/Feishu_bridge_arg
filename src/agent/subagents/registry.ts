@@ -101,6 +101,7 @@ export async function resolveSubagents(input: ResolveSubagentInput): Promise<Res
           webSearch: config.webSearch,
           sideReasoningEffort: config.sideReasoningEffort,
           providerOverrides: config.providerOverrides,
+          providerPriority: config.providerPriority,
         },
       });
       runtime = {
@@ -108,6 +109,7 @@ export async function resolveSubagents(input: ResolveSubagentInput): Promise<Res
         credentials: generated.credentials,
         fingerprint: generated.fingerprint,
         route: generated.route,
+        healthFile: generated.healthFile,
       };
     }
     backend = new MixAgentsBrokerBackend(config, env, runtime);

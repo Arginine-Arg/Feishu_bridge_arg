@@ -925,6 +925,7 @@ export class StructuredAdapter implements AgentAdapter {
         webSearch: config.webSearch,
         sideReasoningEffort: config.sideReasoningEffort,
         providerOverrides: config.providerOverrides,
+        providerPriority: config.providerPriority,
       },
     });
     return {
@@ -932,6 +933,7 @@ export class StructuredAdapter implements AgentAdapter {
       credentials: generated.credentials,
       fingerprint: generated.fingerprint,
       route: generated.route,
+      healthFile: generated.healthFile,
     };
   }
   private async reloadProfileConfig() {
@@ -1548,7 +1550,7 @@ export class StructuredAdapter implements AgentAdapter {
             emit(textEvent(
               `⏳ MixAgents side 已超过 ${Math.max(1, Math.round(softBudgetMs / 1_000))} 秒快速等待提示；` +
               'worker 仍在后台继续，最终结果会继续通过本 side 返回。' +
-              '硬上限由 workerTimeoutMs 控制，无需重新提问。\n',
+              '本次等待窗口由 workerTimeoutMs 控制；超时返回仍在运行，不会中断 worker。\n',
             ));
             return;
           }
@@ -1578,24 +1580,15 @@ export class StructuredAdapter implements AgentAdapter {
     onProgress: (progress: SideAgentProgress) => void;
     initial?: SideAgentResult;
   }): Promise<SideAgentResult> {
-    let result = input.initial;
-    while (!result || result.status === 'timeout') {
-      if (result?.status === 'timeout') {
-        input.emit(textEvent(
-          `当前 MixAgents 等待窗口（${Math.round(input.timeoutMs / 60_000)} 分钟）结束，` +
-          'worker 仍在运行；Bridge 将自动继续等待，无需重新提问或发送 /btw result。\n',
-        ));
-      }
-      result = await input.backend.wait(
-        input.agent,
-        input.signal,
-        input.timeoutMs,
-        input.onProgress,
-        input.streamedProgress.cursor ?? 0,
-      );
-    }
-    return result;
+    if (input.initial) return input.initial;
+    // One bounded window. A pending worker is retained for /btw result; do
+    // not hide an unbounded chain of waits inside a single tool invocation.
+    return input.backend.wait(
+      input.agent, input.signal, input.timeoutMs, input.onProgress,
+      input.streamedProgress.cursor ?? 0,
+    );
   }
+
   private async interruptAbortedMixagentsSide(state: MixAgentsSideState): Promise<void> {
     const backend = state.backend;
     if (!backend) return;
@@ -1613,7 +1606,7 @@ export class StructuredAdapter implements AgentAdapter {
     timeoutSetting = 'sideTimeoutMs',
     streamedText = '',
   ): Promise<void> {
-    state.agent.status = result.status;
+    state.agent.status = result.status === 'timeout' ? 'running' : result.status;
     state.updatedAt = Date.now();
     await this.saveMixagentsSides();
     if (result.status === 'completed') {
@@ -1638,13 +1631,9 @@ export class StructuredAdapter implements AgentAdapter {
     }
     if (result.status === 'timeout') {
       emit({
-        type: 'error',
-        message:
-          `MixAgents side ${timeoutMs ? `${Math.round(timeoutMs / 1_000)} 秒` : ''}达到硬等待上限；` +
-          'Bridge 停止等待但保留 worker 和 mailbox。' +
-          '迟到结果可用 /btw result 收取；/btw out 会明确中断并丢弃该 side。' +
-          `也可在设置中调整 ${timeoutSetting}。`,
-        terminationReason: 'timeout',
+        type: 'pending', taskId: state.agent.agentId,
+        message: `MixAgents 等待窗口已结束，worker ${state.agent.agentId} 仍在后台运行。` +
+          '未宣布任务失败、未重新启动。使用 /btw result 查询下一次实际状态；/btw out 明确中断。',
       });
       return;
     }
@@ -2263,7 +2252,7 @@ export class StructuredAdapter implements AgentAdapter {
           if (isHighImpactConclusion(assistantOutput)) highImpact = true;
         }
       }
-      if (event.type === 'error' || event.type === 'done') terminal = true;
+      if (event.type === 'error' || event.type === 'done' || event.type === 'pending') terminal = true;
       events.push(event);
       const current = this.sessions.get(options.scopeId ?? options.cwd ?? '');
       (side ? current?.sideView : current?.view)?.event(event);
@@ -3087,10 +3076,17 @@ export class StructuredAdapter implements AgentAdapter {
       if (typeof config.config?.model_provider === 'string') providerIds.push(config.config.model_provider);
     }
     const controls = await this.readRecoveryControls();
-    return new CodexStructuredSession(id, endpoint, rpc, brokerTools, {
+    const session = new CodexStructuredSession(id, endpoint, rpc, brokerTools, {
       policy, providerIds, enabled: controls[id],
       onEnabledChange: enabled => this.saveRecoveryControl(id, enabled),
     });
+    const codexHome = rpc.codexHome ?? this.options.codexHome ?? (rpc instanceof RpcClient ? defaultCodexHome(this.options.env ?? process.env) : undefined);
+    if (codexHome) await session.initializeLifecycle(codexHome, this.options.profile ?? 'unknown', endpoint, () => {
+      for (const current of this.sessions.values()) {
+        if (current.main === session && current.side) throw new Error('该连接仍在承载 side 任务，不能释放共享连接');
+      }
+    });
+    return session;
   }
   private async readRecoveryControls(): Promise<Record<string, boolean>> {
     try {

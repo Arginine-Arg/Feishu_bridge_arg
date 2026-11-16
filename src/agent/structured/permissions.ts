@@ -173,9 +173,11 @@ export async function releaseCodexThreadWriter(
   threadId: string | undefined,
 ): Promise<void> {
   if (!threadId || rpc.closed) return;
-  await rpc.request('thread/unsubscribe', { threadId }, 10_000).catch(() => {
-    // The TUI may already have released it; never turn cleanup into a task
-    // interruption.
+  await rpc.request('thread/unsubscribe', { threadId }, 10_000).catch(error => {
+    log.warn('agent', 'codex-thread-release-failed', {
+      threadId,
+      reason: error instanceof Error ? error.message : String(error),
+    });
   });
 }
 

@@ -459,7 +459,7 @@ describe('Bridge Broker dynamic tools', () => {
     await tool.close();
   });
 
-  it('interrupts and times out workers explicitly', async () => {
+  it('only interrupts on explicit stop and keeps workers running after wait deadlines', async () => {
     const first = await controller();
     await first.tool.call('spawn_agent', { name: 'interrupt-me', task: 'long task' });
     const interrupted = await first.tool.call('interrupt_agent', {
@@ -477,8 +477,9 @@ describe('Bridge Broker dynamic tools', () => {
     const listed = await second.tool.call('list_agents', {});
     expect(JSON.parse(listed.text).agents[0]).toMatchObject({
       logical_name: 'timeout-me',
-      status: 'timeout',
+      status: 'running',
     });
+    expect(second.backend.interrupts).toEqual([]);
     await second.tool.close();
   });
 

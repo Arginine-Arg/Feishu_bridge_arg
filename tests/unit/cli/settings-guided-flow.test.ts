@@ -15,6 +15,8 @@ const prompts = vi.hoisted(() => ({
   outro: vi.fn(),
   note: vi.fn(),
   select: vi.fn(),
+  multiselect: vi.fn(),
+  spinner: vi.fn(() => ({ start: vi.fn(), stop: vi.fn() })),
   text: vi.fn(),
   confirm: vi.fn(),
   cancel: vi.fn(),
@@ -22,6 +24,7 @@ const prompts = vi.hoisted(() => ({
 }));
 
 vi.mock('@clack/prompts', () => prompts);
+vi.mock('../../../src/integrations/provider-models', () => ({ discoverProviderModels: vi.fn(async (provider: any) => ({ models: provider.summary.configuredModels, source: 'api', checkedAt: 1 })) }));
 
 import { runSettings } from '../../../src/cli/commands/settings';
 
@@ -38,6 +41,7 @@ describe('guided settings flow', () => {
     { provider: '__follow_current__', model: 'model-a-v2', effort: 'high', selected: 'provider-a', expected: 'model-a-v2' },
     { provider: 'provider-b', model: '__custom_model__', effort: 'medium', selected: 'provider-b', expected: 'custom/model-v3' },
     { provider: '__follow_current__', model: '__provider_default__', effort: 'inherit', selected: 'provider-a', expected: null },
+    { provider: '__priority__', model: '__provider_default__', effort: 'inherit', selected: 'provider-b', expected: null },
   ])('saves provider-scoped model/effort selections: $provider $model', async ({ provider, model, effort, selected, expected }) => {
     const root = await mkdtemp(join(tmpdir(), 'arg-bridge-guided-settings-'));
     temporary.push(root);
@@ -95,7 +99,13 @@ describe('guided settings flow', () => {
     };
     await saveRootConfig(createRootConfig('codex', profile), paths.configFile);
 
-    prompts.select
+    if (provider === '__priority__') {
+      prompts.select.mockResolvedValueOnce('auto').mockResolvedValueOnce('__priority__')
+        .mockResolvedValueOnce('provider-b').mockResolvedValueOnce('model-b-v2')
+        .mockResolvedValueOnce('off').mockResolvedValueOnce('all');
+      prompts.multiselect.mockResolvedValueOnce(['provider-a', 'provider-b'])
+        .mockResolvedValueOnce(['model-b', 'model-b-v2']).mockResolvedValueOnce(['model-a']);
+    } else prompts.select
       .mockResolvedValueOnce('auto')
       .mockResolvedValueOnce(provider)
       .mockResolvedValueOnce(model)
@@ -125,10 +135,10 @@ describe('guided settings flow', () => {
     expect(savedProfile!.subagents).toMatchObject({
       mode: 'auto',
       routeMode: 'follow-cc-switch',
-      ccSwitchProviderId: provider === '__follow_current__' ? null : provider,
+      ccSwitchProviderId: provider === '__follow_current__' ? null : provider === '__priority__' ? 'provider-b' : provider,
       providerOverrides: {
         untouched: { model: 'keep-model', reasoningEffort: 'low' },
-        [selected]: { model: expected, reasoningEffort: effort },
+        ...(provider === '__priority__' ? {} : { [selected]: { model: expected, reasoningEffort: effort } }),
       },
       readRoute: null,
       allowWriteWorkers: true,
@@ -137,7 +147,10 @@ describe('guided settings flow', () => {
       },
     });
     expect(savedProfile!.rsi?.mode).toBe('off');
-    expect(savedProfile!.codex?.providerRecovery).toMatchObject({ enabled: true, continuous: true, providers: [], maxAttempts: 0, retryStallSeconds: 15 });
+    if (provider === '__priority__') expect(savedProfile!.subagents?.providerPriority).toEqual([
+      { providerId: 'provider-b', models: ['model-b-v2', 'model-b'] }, { providerId: 'provider-a', models: ['model-a'] },
+    ]);
+    expect(savedProfile!.codex?.providerRecovery).toMatchObject({ version: 2, enabled: true, continuous: false, providers: [], maxAttempts: 0, retryStallSeconds: 60, budgetSeconds: 3600 });
     await expect(readFile(join(xdg, 'arg-bridge', 'broker-routes.json'), 'utf8'))
       .rejects.toMatchObject({ code: 'ENOENT' });
     expect(prompts.note.mock.calls.map(call => call[1])).toEqual(expect.arrayContaining([
@@ -149,9 +162,11 @@ describe('guided settings flow', () => {
     ]));
     expect(JSON.stringify(prompts.note.mock.calls)).toContain('provider-a');
     expect(JSON.stringify(prompts.select.mock.calls)).toContain('__follow_current__');
-    const modelPrompt = prompts.select.mock.calls.find(([input]) => input.message === '子代理使用哪个模型版本？')![0];
+    const modelPrompt = prompts.select.mock.calls.find(([input]) => input.message === '子代理使用哪个模型版本？')?.[0];
+    if (provider !== '__priority__') {
     expect(modelPrompt.options).toContainEqual({ value: selected === 'provider-a' ? 'model-a-v2' : 'model-b-v2', label: selected === 'provider-a' ? 'model-a-v2' : 'model-b-v2' });
     expect(JSON.stringify(modelPrompt)).not.toContain(selected === 'provider-a' ? 'model-b' : 'model-a');
+    }
     expect(JSON.stringify(prompts.note.mock.calls)).not.toContain('sk-super-secret-value');
     expect(await readFile(paths.configFile, 'utf8')).not.toContain('sk-super-secret-value');
   });

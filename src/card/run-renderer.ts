@@ -1,5 +1,6 @@
 import type { Block, FooterStatus, RunState, ToolEntry } from './run-state';
 import { toolBodyMd, toolHeaderText } from './tool-render';
+import { recoveryStatusText } from '../agent/structured/recovery-status';
 import {
   activityCardBody,
   activitySummaryLabel,
@@ -86,7 +87,9 @@ export function renderCard(state: RunState, options: RunCardRenderOptions = {}):
     }
   }
 
-  if (state.terminal === 'interrupted') {
+  if (state.terminal === 'pending') {
+    elements.push(noteMd(state.pendingMsg ?? '仍在运行，等待后续查询'));
+  } else if (state.terminal === 'interrupted') {
     elements.push(noteMd('_⏹ 已被中断_'));
   } else if (state.terminal === 'idle_timeout') {
     const mins = state.idleTimeoutMinutes ?? 0;
@@ -98,7 +101,9 @@ export function renderCard(state: RunState, options: RunCardRenderOptions = {}):
   }
 
   if (state.terminal === 'running') {
-    if (state.footer) {
+    if (state.recovery && !['normal', 'tool_running'].includes(state.recovery.state)) {
+      elements.push(noteMd(recoveryStatusText(state.recovery)));
+    } else if (state.footer) {
       // Surface the running tool's elapsed time only while a tool is in
       // flight — for 'thinking'/'streaming' footers there's no useful
       // duration to display.
@@ -437,10 +442,12 @@ function appendElapsed(base: string, ms: number | undefined): string {
 }
 
 function summaryText(state: RunState): string {
+  if (state.terminal === 'pending') return '仍在运行';
   if (state.terminal === 'interrupted') return '已中断';
   if (state.terminal === 'idle_timeout') return '已超时';
   if (state.terminal === 'error') return '出错';
   if (state.terminal === 'done') return '已完成';
+  if (state.recovery && !['normal', 'tool_running'].includes(state.recovery.state)) return recoveryStatusText(state.recovery).split('\n')[0]!;
   if (state.footer === 'tool_running') return '正在调用工具';
   if (state.footer === 'streaming') return '正在输出';
   return '思考中';

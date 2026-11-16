@@ -1,5 +1,6 @@
 import type { Block, RunState, ToolEntry } from './run-state';
 import { toolHeaderText } from './tool-render';
+import { recoveryStatusText } from '../agent/structured/recovery-status';
 import { CARD_BYTE_BUDGET } from './run-renderer';
 import { activityTextBody, presentBlocks, type ActivityTranscript } from './activity-presentation';
 
@@ -56,13 +57,17 @@ export function renderText(state: RunState, options: RenderTextOptions = {}): st
     if (piece) parts.push(piece);
   }
 
-  if (state.terminal === 'interrupted') {
+  if (state.terminal === 'pending') {
+    parts.push(state.pendingMsg ?? '仍在运行，等待后续查询');
+  } else if (state.terminal === 'interrupted') {
     parts.push('_⏹ 已被中断_');
   } else if (state.terminal === 'idle_timeout') {
     const mins = state.idleTimeoutMinutes ?? 0;
     parts.push(`_⏱ ${mins} 分钟无响应,已自动终止_`);
   } else if (state.terminal === 'error' && state.errorMsg) {
     parts.push(`⚠️ agent 失败:${state.errorMsg}`);
+  } else if (state.terminal === 'running' && state.recovery && !['normal', 'tool_running'].includes(state.recovery.state)) {
+    parts.push(recoveryStatusText(state.recovery));
   } else if (state.terminal === 'running' && state.footer) {
     parts.push(footerLine(state.footer));
   }

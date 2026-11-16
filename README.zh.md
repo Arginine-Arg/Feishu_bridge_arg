@@ -4,7 +4,7 @@
 
 [English README](./README.md)
 
-`1.21.2` 修复 provider 自动恢复把内部 `continue` 输入误当成助手正文发到飞书、造成连续可见 `continue` 消息的问题。恢复输入现在只通过 `turn/steer` 进入当前 Codex turn，或在确认终态后启动内部继续轮次，不再产生任何用户可见的 `continue` 文本事件。`1.21.1` 的超大会话迁移修复、持续 provider 恢复、会话级 `/recover` 开关和完整结构化文本转发保持不变。
+`1.22.0` 修复 native 退出后切换 provider 无法恢复、以及恢复时沿用旧模型的问题。活动重连不再追加 continue；自动恢复按同一故障阶段一小时计时。subagent 设置支持多个 provider、自动读取模型列表，并按所选优先级为新任务选择可用线路。
 
 `1.6.7` 引入 provider-aware Codex resume，`1.7.0` 增加 idle 边界重绑。`1.9.1` 收紧重连语义：附着已有 native 或 structured thread 时，保留该 thread 记录的 provider/model，不会因为 cc-switch 后来切换了 route 而静默改路。
 
@@ -60,7 +60,7 @@ arg-bridge --version
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.21.2
+sh /tmp/install-arg-bridge.sh --version 1.22.0
 # 无权写入 npm 默认全局目录时：
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ npm 卸载不会删除 `~/.lark-channel/` 下的配置和会话。
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.21.2"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.22.0"
 ```
 
-`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.21.2`。
+`--install-links=true` 防止 npm 11 把全局包保留为临时 Git clone 的软链；`--ignore-scripts` 避免依赖 lifecycle 出现 `spawn /bin/sh ENOENT`，arg-bridge 运行时不依赖这些依赖包的 postinstall。只能走 SSH 时，保留相同参数并使用 `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.22.0`。
 
 ### 4. Node 或 npm 全局目录错误
 
@@ -312,12 +312,13 @@ head 创建新的 A generation，不会回到旧的 A 分支丢失 B 阶段工�
 provider/model/credential generation 时才幂等复用。
 
 使用 `--bridge <thread-id> --follow-current-provider` 时，Bridge 保留原
-thread ID 和完整 Codex resume 状态。它先确认没有活动 turn；如果旧 provider
-的 App Server 仍持有该 thread，需要先退出该 native TUI 并重启 profile 回收
-空闲 host。随后 Bridge 启动 provider-generation App Server：线程级兼容别名
-保留历史 provider ID 供 Codex 校验，实际 base URL、凭据、wire API 和 headers
-来自当前 cc-switch provider，模型更新为当前选择。marker 会记录
-`compatibilityProvider`，重复执行会幂等重建同一兼容 host。
+thread ID 和完整 Codex resume 状态。它先确认没有活动 turn。若旧 provider
+的 App Server 仍持有线程，Bridge 会请求实际 Bot 订阅者释放目标，确认 writer
+锁释放后恢复。共享 Server 继续服务其他线程；只有没有客户端的独占空闲孤留
+Server 才会被定向停止。新 Server 使用当前 cc-switch 的接口和凭据，并保留
+历史 provider ID 的线程兼容别名。明确指定 follow 时会核对和应用当前模型，
+保留线程 ID、历史、冻结权限和工作目录。存在活动任务或无法释放的客户端时，
+提示实际 PID/profile 和原因，原线程仍可恢复。
 
 ### 长任务中途消息
 

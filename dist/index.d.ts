@@ -8,7 +8,26 @@ interface StructuredInteraction {
     choices: StructuredChoice[];
 }
 
+interface ProviderRecoveryStatus {
+    state: string;
+    lastActivityAt?: number;
+    lastEventAt?: number;
+    lastError?: string;
+    waitingReason?: string;
+    attempts: number;
+    budgetSeconds: number;
+    usedSeconds: number;
+    nextRecoveryAt?: number;
+    underlyingTurn: 'running' | 'terminal' | 'unknown';
+}
 type AgentEvent = {
+    type: 'pending';
+    message: string;
+    taskId?: string;
+} | {
+    type: 'recovery';
+    status: ProviderRecoveryStatus;
+} | {
     type: 'system';
     sessionId?: string;
     threadId?: string;
@@ -82,8 +101,9 @@ type Block = {
     tool: ToolEntry;
 };
 type FooterStatus = 'thinking' | 'tool_running' | 'streaming' | null;
-type Terminal = 'running' | 'done' | 'interrupted' | 'error' | 'idle_timeout';
+type Terminal = 'running' | 'done' | 'pending' | 'interrupted' | 'error' | 'idle_timeout';
 interface RunState {
+    recovery?: ProviderRecoveryStatus;
     blocks: Block[];
     reasoning: {
         content: string;
@@ -92,6 +112,7 @@ interface RunState {
     footer: FooterStatus;
     terminal: Terminal;
     errorMsg?: string;
+    pendingMsg?: string;
     /** Set when terminal === 'idle_timeout' — how long claude was idle before
      * the watchdog gave up (so the message can say "N 分钟无响应"). */
     idleTimeoutMinutes?: number;

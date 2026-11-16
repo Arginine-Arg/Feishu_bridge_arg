@@ -6,6 +6,7 @@ import type { AgentEvent } from '../types';
 import type { TmuxBindingStatus } from '../tmux-control';
 import { codexRemoteResumeArgs, proxyEnvironment } from './permissions';
 import type { CodexSandboxMode } from '../../config/permissions';
+import { recoveryStatusText } from './recovery-status';
 
 const quote = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
 
@@ -115,6 +116,8 @@ export class StructuredView {
     else if (event.type === 'tool_result') text = `\n${event.output}\n`;
     else if (event.type === 'done') text = `\n[${event.terminationReason}]\n`;
     else if (event.type === 'error') text = `\n[错误] ${event.message}\n`;
+    else if (event.type === 'recovery') text = `\n[Bridge 状态] ${recoveryStatusText(event.status)}\n`;
+    else if (event.type === 'pending') text = `\n[仍在运行] ${event.message}\n`;
     if (text) this.tail = this.tail.then(() => appendFile(this.logPath, text.replace(/\x1b/g, ''))).catch(() => {});
   }
   status(): TmuxBindingStatus { return this.statusValue; }

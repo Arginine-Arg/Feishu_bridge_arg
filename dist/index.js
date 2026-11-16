@@ -118,6 +118,26 @@ function truncate(s, max) {
   return s.length > max ? `${s.slice(0, max)}\u2026` : s;
 }
 
+// src/agent/structured/recovery-status.ts
+function recoveryStatusText(status) {
+  const label = {
+    normal: "\u6B63\u5E38\u6267\u884C",
+    tool_running: "\u5DE5\u5177\u8FD0\u884C\u4E2D",
+    provider_retrying: "Provider \u539F\u751F\u91CD\u8BD5\u4E2D",
+    bridge_backoff: "Bridge \u9000\u907F\u7B49\u5F85",
+    recovery_exhausted: "\u6062\u590D\u9884\u7B97\u5DF2\u8017\u5C3D\uFF0C\u7B49\u5F85\u7528\u6237\u5904\u7406",
+    needs_attention: "\u7B49\u5F85\u7528\u6237\u5904\u7406",
+    status_unknown: "\u72B6\u6001\u672A\u77E5",
+    disabled: "Bridge \u81EA\u52A8\u6062\u590D\u5DF2\u5173\u95ED",
+    stopped: "\u5DF2\u505C\u6B62\u81EA\u52A8\u6062\u590D"
+  };
+  const time = (value) => value === void 0 ? "\u672A\u77E5" : new Date(value).toISOString();
+  return `${label[status.state] ?? status.state} \xB7 \u81EA\u52A8\u6062\u590D ${status.attempts} \u6B21 \xB7 \u6545\u969C\u9884\u7B97 ${Math.floor(status.usedSeconds / 60)}/${Math.floor(status.budgetSeconds / 60)} \u5206\u949F
+\u5E95\u5C42 turn\uFF1A${status.underlyingTurn === "running" ? "\u4ECD\u5728\u8FD0\u884C" : status.underlyingTurn === "terminal" ? "\u5DF2\u7ED3\u675F" : "\u672A\u77E5"}\uFF1B\u6700\u8FD1\u6D3B\u52A8\uFF1A${time(status.lastActivityAt)}` + (status.nextRecoveryAt ? `\uFF1B\u4E0B\u6B21\u6062\u590D\uFF1A${time(status.nextRecoveryAt)}` : "") + (status.waitingReason ? `
+${status.waitingReason}` : "") + (status.lastError ? `
+\u6700\u8FD1\u9519\u8BEF\uFF1A${status.lastError.slice(0, 1e3)}` : "");
+}
+
 // src/agent/live-interaction-detection.ts
 var MAX_INTERACTION_LINES = 240;
 var FALLBACK_INTERACTION_LINES = 12;
@@ -1104,7 +1124,9 @@ function renderCard(state, options = {}) {
       groupElementRange.push({ start, toolCount: group.tools.length });
     }
   }
-  if (state.terminal === "interrupted") {
+  if (state.terminal === "pending") {
+    elements.push(noteMd(state.pendingMsg ?? "\u4ECD\u5728\u8FD0\u884C\uFF0C\u7B49\u5F85\u540E\u7EED\u67E5\u8BE2"));
+  } else if (state.terminal === "interrupted") {
     elements.push(noteMd("_\u23F9 \u5DF2\u88AB\u4E2D\u65AD_"));
   } else if (state.terminal === "idle_timeout") {
     const mins = state.idleTimeoutMinutes ?? 0;
@@ -1115,7 +1137,9 @@ function renderCard(state, options = {}) {
     elements.push(noteMd("_\uFF08\u672A\u8FD4\u56DE\u5185\u5BB9\uFF09_"));
   }
   if (state.terminal === "running") {
-    if (state.footer) {
+    if (state.recovery && !["normal", "tool_running"].includes(state.recovery.state)) {
+      elements.push(noteMd(recoveryStatusText(state.recovery)));
+    } else if (state.footer) {
       const elapsedMs = state.footer === "tool_running" ? state.currentToolElapsedMs : void 0;
       elements.push(footerStatus(state.footer, elapsedMs));
     }
@@ -1351,10 +1375,12 @@ function appendElapsed(base, ms) {
   return `${base} \xB7 \u5DF2\u8FD0\u884C ${formatElapsed(ms)}`;
 }
 function summaryText(state) {
+  if (state.terminal === "pending") return "\u4ECD\u5728\u8FD0\u884C";
   if (state.terminal === "interrupted") return "\u5DF2\u4E2D\u65AD";
   if (state.terminal === "idle_timeout") return "\u5DF2\u8D85\u65F6";
   if (state.terminal === "error") return "\u51FA\u9519";
   if (state.terminal === "done") return "\u5DF2\u5B8C\u6210";
+  if (state.recovery && !["normal", "tool_running"].includes(state.recovery.state)) return recoveryStatusText(state.recovery).split("\n")[0];
   if (state.footer === "tool_running") return "\u6B63\u5728\u8C03\u7528\u5DE5\u5177";
   if (state.footer === "streaming") return "\u6B63\u5728\u8F93\u51FA";
   return "\u601D\u8003\u4E2D";
@@ -1382,13 +1408,17 @@ function renderText(state, options = {}) {
     const piece = renderBlock(block);
     if (piece) parts.push(piece);
   }
-  if (state.terminal === "interrupted") {
+  if (state.terminal === "pending") {
+    parts.push(state.pendingMsg ?? "\u4ECD\u5728\u8FD0\u884C\uFF0C\u7B49\u5F85\u540E\u7EED\u67E5\u8BE2");
+  } else if (state.terminal === "interrupted") {
     parts.push("_\u23F9 \u5DF2\u88AB\u4E2D\u65AD_");
   } else if (state.terminal === "idle_timeout") {
     const mins = state.idleTimeoutMinutes ?? 0;
     parts.push(`_\u23F1 ${mins} \u5206\u949F\u65E0\u54CD\u5E94,\u5DF2\u81EA\u52A8\u7EC8\u6B62_`);
   } else if (state.terminal === "error" && state.errorMsg) {
     parts.push(`\u26A0\uFE0F agent \u5931\u8D25:${state.errorMsg}`);
+  } else if (state.terminal === "running" && state.recovery && !["normal", "tool_running"].includes(state.recovery.state)) {
+    parts.push(recoveryStatusText(state.recovery));
   } else if (state.terminal === "running" && state.footer) {
     parts.push(footerLine(state.footer));
   }
@@ -1491,6 +1521,10 @@ function withLiveness(state, now, opts = {}) {
 }
 function reduce(state, evt) {
   switch (evt.type) {
+    case "pending":
+      return { ...state, terminal: "pending", footer: null, pendingMsg: evt.message };
+    case "recovery":
+      return { ...state, recovery: evt.status };
     case "text": {
       if (evt.itemId) {
         const index = state.blocks.findIndex((block2) => block2.kind === "text" && block2.itemId === evt.itemId);
@@ -1946,8 +1980,29 @@ var BRIDGE_AGENT_SYSTEM_PROMPT = `
 // src/agent/subagents/mixagents.ts
 import { existsSync } from "fs";
 import { createRequire } from "module";
-import { basename, isAbsolute } from "path";
+import { basename as basename2, isAbsolute } from "path";
 import { fileURLToPath } from "url";
+import { mkdir as mkdir2 } from "fs/promises";
+import { dirname as dirname2 } from "path";
+
+// src/platform/atomic-write.ts
+import { randomBytes } from "crypto";
+import { chmod, mkdir, open as open2, rm as rm2 } from "fs/promises";
+import { basename, dirname, join as join2 } from "path";
+import { promisify } from "util";
+import gracefulFs from "graceful-fs";
+var gracefulRename = promisify(gracefulFs.rename);
+
+// src/config/provider-recovery.ts
+var PROVIDER_RECOVERY_DEFAULTS = Object.freeze({
+  budgetSeconds: 3600,
+  delaySeconds: 30,
+  maxDelaySeconds: 120,
+  retryStallSeconds: 60,
+  jitterRatio: 0.2,
+  maxStatusChecks: 8,
+  statusTimeoutSeconds: 10
+});
 
 // src/agent/subagents/mcp-client.ts
 import { createInterface } from "readline";

@@ -267,8 +267,8 @@ export function terminateHost(pid: number, signal: NodeJS.Signals = 'SIGTERM'): 
  * killing the server under it produces "Connection lost" / "app-server
  * session could not be restored" on the user's side.
  */
-export function hostHasActiveClients(directory: string): boolean {
-  const socketPath = resolveSocketPath(directory);
+export function hostHasActiveClients(directory: string, endpointPath?: string): boolean {
+  const socketPath = resolveSocketPath(directory, endpointPath);
   if (!socketPath) return false;
   let table: string;
   try {
@@ -284,7 +284,7 @@ export function hostHasActiveClients(directory: string): boolean {
     return true;
   }
   for (const line of table.split('\n').slice(1)) {
-    if (!line.includes(socketPath)) continue;
+    if (line.trim().split(/\s+/u).slice(7).join(' ') !== socketPath) continue;
     // Columns: Num RefCount Protocol Flags Type St Inode Path
     const state = line.trim().split(/\s+/)[5];
     // 03 = connected (a client is attached); 01 = listening socket only.
@@ -302,17 +302,18 @@ export function hostHasActiveClients(directory: string): boolean {
 export async function waitForIdleSocket(
   directory: string,
   timeoutMs = 1_500,
+  endpointPath?: string,
 ): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (!hostHasActiveClients(directory)) return true;
+    if (!hostHasActiveClients(directory, endpointPath)) return true;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  return !hostHasActiveClients(directory);
+  return !hostHasActiveClients(directory, endpointPath);
 }
 
-function resolveSocketPath(directory: string): string | undefined {
-  const candidate = join(directory, 'server.sock');
+function resolveSocketPath(directory: string, endpointPath?: string): string | undefined {
+  const candidate = endpointPath ?? join(directory, 'server.sock');
   try {
     return realpathSync(candidate);
   } catch {
@@ -325,13 +326,13 @@ function resolveSocketPath(directory: string): string | undefined {
  * orphaned child of a dead wrapper (the "parent gone, child draining" state
  * that otherwise rejects every later request with `Server is draining`).
  */
-export function findSocketHolders(directory: string): number[] {
-  const resolved = resolveSocketPath(directory);
+export function findSocketHolders(directory: string, endpointPath?: string): number[] {
+  const resolved = resolveSocketPath(directory, endpointPath);
   if (!resolved) return [];
   const inodes = new Set<string>();
   try {
     for (const line of readFileSync('/proc/net/unix', 'utf8').split('\n').slice(1)) {
-      if (!line.includes(resolved)) continue;
+      if (line.trim().split(/\s+/u).slice(7).join(' ') !== resolved) continue;
       const fields = line.trim().split(/\s+/);
       if (fields.length >= 7) inodes.add(fields[6]!);
     }

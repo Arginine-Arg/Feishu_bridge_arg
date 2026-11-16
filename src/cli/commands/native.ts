@@ -118,7 +118,7 @@ export async function runNative(
         bridge.endpoint,
         bridge.threadId,
       ), {
-        cwd,
+        cwd: bridge.cwd,
         env: bridge.env,
         stdio: 'inherit',
       });

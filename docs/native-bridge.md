@@ -78,8 +78,13 @@ This is an in-place provider rebind, not an adoption:
 
 - the thread ID and full Codex resume state stay unchanged;
 - an active turn is rejected;
-- if the previous provider's App Server still owns the thread, exit that native
-  TUI and restart the profile so the idle host can be reclaimed;
+- actual idle Bot/relay subscribers release their own subscriptions through a
+  private control channel; once the target writer lock is free the same thread
+  can resume while other threads remain on the old shared Server;
+- if an exclusive idle orphan retains the writer, Bridge verifies its PID and
+  lack of clients before targeted SIGTERM; it never deletes a held lock;
+- active tasks, uncooperative clients and shared retained writers produce an
+  accurate PID/profile reason, preserving the Server and recoverable thread;
 - the new provider-generation host gets a thread-scoped compatibility alias:
   Codex still sees the historical provider ID during thread validation, while
   the endpoint, credential, wire API and headers come from the current

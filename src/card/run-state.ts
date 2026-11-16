@@ -1,4 +1,4 @@
-import type { AgentEvent } from '../agent/types';
+import type { AgentEvent, ProviderRecoveryStatus } from '../agent/types';
 
 export type ToolStatus = 'running' | 'done' | 'error';
 
@@ -22,14 +22,16 @@ export type Block =
   | { kind: 'tool'; tool: ToolEntry };
 
 export type FooterStatus = 'thinking' | 'tool_running' | 'streaming' | null;
-export type Terminal = 'running' | 'done' | 'interrupted' | 'error' | 'idle_timeout';
+export type Terminal = 'running' | 'done' | 'pending' | 'interrupted' | 'error' | 'idle_timeout';
 
 export interface RunState {
+  recovery?: ProviderRecoveryStatus;
   blocks: Block[];
   reasoning: { content: string; active: boolean };
   footer: FooterStatus;
   terminal: Terminal;
   errorMsg?: string;
+  pendingMsg?: string;
   /** Set when terminal === 'idle_timeout' — how long claude was idle before
    * the watchdog gave up (so the message can say "N 分钟无响应"). */
   idleTimeoutMinutes?: number;
@@ -89,6 +91,11 @@ function withLiveness(
 
 export function reduce(state: RunState, evt: AgentEvent): RunState {
   switch (evt.type) {
+    case 'pending':
+      return { ...state, terminal: 'pending', footer: null, pendingMsg: evt.message };
+    case 'recovery':
+      // Status is separate from assistant text and never counts as activity.
+      return { ...state, recovery: evt.status };
     case 'text': {
       if (evt.itemId) {
         const index = state.blocks.findIndex(block => block.kind === 'text' && block.itemId === evt.itemId);

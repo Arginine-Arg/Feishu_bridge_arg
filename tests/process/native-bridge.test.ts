@@ -1,12 +1,15 @@
 import { createServer } from 'node:http';
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { expect, it } from 'vitest';
 import { createNativeBridgeSession } from '../../src/agent/structured/native-bridge';
+import { processAlive } from '../../src/agent/structured/host-registry';
 import { shutdownProfileHosts } from '../../src/agent/structured/host';
+import { RpcClient } from '../../src/agent/structured/rpc';
+import { CodexStructuredSession } from '../../src/agent/structured/codex';
 import { createDefaultProfileConfig, DEFAULT_SUBAGENT_CONFIG } from '../../src/config/profile-schema';
 
 const nativeBridge = process.env.ARG_BRIDGE_NATIVE_BRIDGE_E2E === '1' ? it : it.skip;
@@ -236,12 +239,12 @@ nativeBridge('registers dynamic tools and safely migrates a legacy thread into a
 
     dynamicMode = false;
     requests.length = 0;
-    const seed = spawnSync('codex', [
+    const seed = await runCodex([
       'exec',
       '--json',
       '--skip-git-repo-check',
       'Reply exactly LEGACY_THREAD_CONTEXT_ORBIT_731. Do not use tools.',
-    ], { cwd: workspace, env, encoding: 'utf8', timeout: 60_000 });
+    ], workspace, env);
     expect(seed.status, seed.stderr).toBe(0);
     const oldThreadId = seed.stdout.split('\n').flatMap(line => {
       try {
@@ -399,6 +402,10 @@ nativeBridge('registers dynamic tools and safely migrates a legacy thread into a
       runtimeFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
     });
     const followThreadId = bridge.threadId;
+    const retained = await RpcClient.connect(`ws+unix://${bridge.endpoint.slice('unix://'.length)}:/`, { codexHome });
+    await retained.initialize();
+    await retained.request('thread/resume', { threadId: followThreadId, excludeTurns: true });
+    await retained.request('thread/settings/update', { threadId: followThreadId, model: 'native-tui-changed-model' });
     await bridge.close();
     bridge = undefined;
 
@@ -424,6 +431,10 @@ nativeBridge('registers dynamic tools and safely migrates a legacy thread into a
         model: 'native-follow-model',
       },
     });
+    const actualModel = await retained.request('thread/read', { threadId: followThreadId, includeTurns: false });
+    expect(actualModel.thread.model).toBe('native-follow-model');
+    await retained.request('thread/unsubscribe', { threadId: followThreadId });
+    retained.close();
     await bridge.close();
     bridge = undefined;
 
@@ -504,7 +515,7 @@ nativeBridge('registers dynamic tools and safely migrates a legacy thread into a
   }
 }, 180_000);
 
-nativeBridge('rebinds an existing Bridge thread to the current provider without changing its ID', async () => {
+nativeBridge.each([false, true])('resumes exclusive idle writers and preserves shared retained writers: %s', async shared => {
   const root = await mkdtemp(join(tmpdir(), 'arg-bridge-native-rebind-'));
   const codexHome = join(root, 'codex-home');
   const workspace = join(root, 'workspace');
@@ -592,6 +603,8 @@ nativeBridge('rebinds an existing Bridge thread to the current provider without 
   };
 
   let bridge: Awaited<ReturnType<typeof createNativeBridgeSession>> | undefined;
+  let botObserver: CodexStructuredSession | undefined;
+  let otherRpc: RpcClient | undefined;
   try {
     bridge = await createNativeBridgeSession({
       profileName: 'codex',
@@ -616,14 +629,44 @@ nativeBridge('rebinds an existing Bridge thread to the current provider without 
       join(profileDir, 'structured', 'broker-threads.json'),
       'utf8',
     ));
+    const originalEndpoint = bridge.endpoint;
+    if (shared) {
+      const observerRpc = await RpcClient.connect(`ws+unix://${originalEndpoint.slice('unix://'.length)}:/`, { codexHome });
+      await observerRpc.initialize();
+      await observerRpc.request('thread/resume', { threadId, excludeTurns: true });
+      botObserver = new CodexStructuredSession(threadId, originalEndpoint, observerRpc);
+      await botObserver.initializeLifecycle(codexHome, 'background-bot', originalEndpoint);
+      await botObserver.syncState();
+      otherRpc = await RpcClient.connect(`ws+unix://${originalEndpoint.slice('unix://'.length)}:/`, { codexHome });
+      await otherRpc.initialize();
+      await otherRpc.request('thread/start', { cwd: workspace, approvalPolicy: 'never', sandbox: 'read-only' });
+    }
     await bridge.close();
     bridge = undefined;
-    await shutdownProfileHosts(profileDir);
+    const oldHost = JSON.parse(await readFile(
+      join(profileDir, 'structured', 'app-server-registry.json'),
+      'utf8',
+    )).hosts.find((host: { directory: string }) =>
+      host.directory === originalEndpoint.slice('unix://'.length).replace(/\/server\.sock$/u, '')
+    );
+    expect(oldHost).toBeDefined();
+    expect(processAlive(oldHost.pid)).toBe(true);
 
     // The original provider is gone. The current provider must still reopen
-    // the exact same thread ID and use its configured endpoint/model.
+    // the exact same thread ID and safely reclaim the idle old provider host.
     await writeProvider('native-local-follow', 'native-follow-model');
     requests.length = 0;
+    if (shared) {
+      await expect(createNativeBridgeSession({ profileName: 'codex', profileDir, cwd: workspace, config: profile,
+        env, binary: 'codex', codexHome, sandbox: 'read-only', threadId, followCurrentProvider: true,
+      })).rejects.toThrow('保留共享 Server');
+      expect(processAlive(oldHost.pid)).toBe(true);
+      expect(botObserver!.isAlive()).toBe(false);
+      expect(otherRpc!.closed).toBe(false);
+      const after = JSON.parse(await readFile(join(profileDir, 'structured', 'broker-threads.json'), 'utf8'));
+      expect(after.threads[threadId]).toEqual(originalMarker.threads[threadId]);
+      return;
+    }
     bridge = await createNativeBridgeSession({
       profileName: 'codex',
       profileDir,
@@ -646,6 +689,11 @@ nativeBridge('rebinds an existing Bridge thread to the current provider without 
         model: 'native-follow-model',
       },
     });
+    expect(processAlive(oldHost.pid)).toBe(shared);
+    if (shared) {
+      expect(botObserver!.isAlive()).toBe(false);
+      expect(otherRpc!.closed).toBe(false);
+    }
     const reboundEvents: Array<{ type: string; delta?: string }> = [];
     await bridge.session!.submit({
       runId: 'native-after-rebind',
@@ -673,6 +721,7 @@ nativeBridge('rebinds an existing Bridge thread to the current provider without 
     const reboundCreatedAt = marker.threads[threadId].createdAt;
     await bridge.close();
     bridge = undefined;
+    otherRpc?.close(); otherRpc = undefined;
     await shutdownProfileHosts(profileDir);
 
     // Repeating the command is idempotent and reconstructs the same
@@ -709,6 +758,8 @@ nativeBridge('rebinds an existing Bridge thread to the current provider without 
       modelProvider: 'native-local-follow',
     });
   } finally {
+    await botObserver?.close(); botObserver?.disconnect();
+    otherRpc?.close();
     await bridge?.close();
     await shutdownProfileHosts(profileDir);
     await new Promise<void>(resolve => provider.close(() => resolve()));
@@ -773,4 +824,16 @@ function assistantMessage(id: string, text: string): Record<string, unknown> {
       content: [{ type: 'output_text', text }],
     },
   };
+}
+
+async function runCodex(args: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  const child = spawn('codex', args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let stdout = ''; let stderr = '';
+  child.stdout.on('data', data => { stdout += data.toString(); });
+  child.stderr.on('data', data => { stderr += data.toString(); });
+  const timeout = setTimeout(() => child.kill('SIGTERM'), 60_000);
+  try {
+    const status = await new Promise<number | null>((resolve, reject) => { child.once('error', reject); child.once('exit', resolve); });
+    return { status, stdout, stderr };
+  } finally { clearTimeout(timeout); }
 }

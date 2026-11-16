@@ -6,6 +6,7 @@ import type {
   AgentSteerRequest,
   AgentSteerResult,
   LiveSessionDiagnostics,
+  ProviderRecoveryStatus,
 } from '../types';
 import { interactionEvent, textEvent, type StructuredSession } from './contracts';
 import { RpcClient, type Wire } from './rpc';
@@ -13,8 +14,10 @@ import { SIDE_BOUNDARY_PROMPT, SIDE_DEVELOPER_INSTRUCTIONS } from './side-bounda
 import { codexTurnPermissionOverrides } from './permissions';
 import type { BrokerToolHost, WriteAuthorization } from '../subagents/broker-tools';
 import type { ArtifactDeliveryEnv } from '../lark-channel-env';
-import { isTransientProviderError, type ProviderRecoveryConfig } from '../../config/provider-recovery';
-import { log } from '../../core/logger';
+import { isTransientProviderError, providerRecoveryDelayMs, type ProviderRecoveryConfig } from '../../config/provider-recovery';
+import { log, redactDiagnosticText } from '../../core/logger';
+import { RecoveryLedger, type RecoveryPhase } from './recovery-ledger';
+import { registerThreadHandoffClient } from './thread-handoff';
 
 const toolItems = new Set(['commandExecution', 'fileChange', 'mcpToolCall', 'collabAgentToolCall', 'webSearch', 'imageGeneration', 'dynamicToolCall']);
 
@@ -36,8 +39,8 @@ export class CodexStructuredSession implements StructuredSession {
   private deltas = new Map<string, string>();
   private completedMessages = new Map<string, string>();
   private recoveryTimer?: NodeJS.Timeout;
+  private pendingRecoveryTurn?: string;
   private recoveryEpoch = 0;
-  private recoveryAttempts = 0;
   private recoveryStarting = false;
   private recoveryChecking = false;
   private recoveryWork: Promise<void> = Promise.resolve();
@@ -47,10 +50,22 @@ export class CodexStructuredSession implements StructuredSession {
   private recoveryEnabled = true;
   private recoverySettingVersion = 0;
   private internalRetries = 0;
-  private lastRetryNoticeAt = 0;
   private providerError?: { turnId: string; error: Wire };
   private providerRetryTurns = new Set<string>();
-  private retrySteerState = new Map<string, { attempts: number; lastAt: number; inFlight: boolean; pendingMessageId?: string }>();
+  private readonly ledger: RecoveryLedger;
+  private ledgerReady: Promise<void> = Promise.resolve();
+  private recoveryEvents: Promise<void> = Promise.resolve();
+  private deadlineTimer?: NodeJS.Timeout;
+  private statusChecks = 0;
+  private underlyingTurn: ProviderRecoveryStatus['underlyingTurn'] = 'terminal';
+  private recoveryPhase: RecoveryPhase = 'normal';
+  private lastActivityAt?: number;
+  private lastEventAt?: number;
+  private lastStatusNoticeAt = 0;
+  private lastNotifiedPhase?: RecoveryPhase;
+  private unregisterHandoff?: () => Promise<void>;
+  private handoffBlocked = false;
+  private lifecycleInitialized = false;
   private retryStallTimer?: NodeJS.Timeout;
   private activeTools = new Set<string>();
   private acknowledgements = new Map<string, { resolve(): void; reject(error: Error): void }>();
@@ -68,10 +83,37 @@ export class CodexStructuredSession implements StructuredSession {
       enabled?: boolean; onEnabledChange?(enabled: boolean): Promise<void>;
     },
   ) {
+    this.ledger = new RecoveryLedger(id);
     this.recoveryEnabled = recovery?.enabled ?? recovery?.policy.enabled !== false;
     this.listener = message => this.receive(message);
     rpc.on('message', this.listener);
     rpc.on('disconnected', this.disconnected);
+  }
+  async initializeLifecycle(codexHome: string, profile: string, generation = this.endpoint, canRelease?: () => void): Promise<void> {
+    this.lifecycleInitialized = true;
+    this.ledgerReady = this.ledger.persistIn(codexHome, generation);
+    await this.ledgerReady;
+    this.unregisterHandoff = await registerThreadHandoffClient({
+      codexHome, threadId: this.id, endpoint: this.endpoint, profile,
+      inspect: async () => {
+        canRelease?.();
+        if (this.emit || this.turnId || this.goalActive || this.pending.size || this.activeTools.size || this.recoveryStarting || this.recoveryChecking) throw new Error('Bot/relay 仍有任务、目标或交互');
+        const result = await this.rpc.request('thread/read', { threadId: this.id, includeTurns: false }, 10_000);
+        if (result.thread?.status?.type !== 'idle') throw new Error(`线程状态未确认空闲：${result.thread?.status?.type ?? 'unknown'}`);
+      },
+      release: async () => {
+        this.handoffBlocked = true;
+        this.cancelAutoRecovery();
+        await this.recoveryWork;
+        // Check again after blocking local inputs/recovery. A new diagnostic
+        // connection cannot perform this unsubscribe on our behalf.
+        const result = await this.rpc.request('thread/read', { threadId: this.id, includeTurns: false }, 10_000);
+        if (result.thread?.status?.type !== 'idle') { this.handoffBlocked = false; throw new Error('交接期间线程已开始工作'); }
+        await this.rpc.request('thread/unsubscribe', { threadId: this.id }, 10_000);
+        await this.close();
+        this.rpc.close();
+      },
+    });
   }
   /** False when the underlying App Server channel is gone and must be rebuilt. */
   isAlive(): boolean { return !this.rpc.closed; }
@@ -82,7 +124,10 @@ export class CodexStructuredSession implements StructuredSession {
     for (const waiter of this.acknowledgements.values()) waiter.reject(error);
     this.acknowledgements.clear();
     this.phase = 'failed';
-    this.emit?.({ type: 'error', message: error.message, terminationReason: 'failed' });
+    this.underlyingTurn = 'unknown';
+    this.notifyRecovery('status_unknown', true);
+    this.emit?.({ type: 'pending', message: `${error.message}；底层 turn 状态未知，未重放输入。`, taskId: this.id });
+    void this.ledger.release().catch(error => log.fail('agent', error, { step: 'recovery-owner-release' }));
     this.finish();
   };
   private finish(): void {
@@ -131,44 +176,59 @@ export class CodexStructuredSession implements StructuredSession {
       }
       return;
     }
+    this.lastEventAt = Date.now();
     if (message.method === 'turn/started') {
       if (!p.turn?.id || this.finishedTurns.has(p.turn.id)) return;
-      if (!this.recoveryStarting && !this.recoveryTurnIds.has(p.turn?.id)) {
-        if (!this.emit && p.turn.id !== this.turnId) { this.recoveryBlocked = false; this.stopRequested = false; }
-        this.cancelRecovery(); this.recoveryAttempts = 0;
+      if (!this.recoveryStarting && !this.recoveryTurnIds.has(p.turn.id) && p.turn.id !== this.turnId) {
+        this.cancelRecovery();
+        // An externally-started turn supersedes old continuation callbacks.
+        // Merely changing turnId in an automatic continuation does not reset
+        // the persisted failure budget.
+        // Other subscribers see our automatic turn/started notification too.
+        // Only explicit user input may reset/invalidate the shared journal.
       }
-      this.turnId = p.turn?.id; this.phase = 'busy';
+      this.turnId = p.turn.id; this.phase = 'busy'; this.underlyingTurn = 'running';
       this.providerError = undefined;
       this.activeTools.clear();
+      this.notifyRecovery('normal');
     }
     if (message.method === 'error' && p.turnId === this.turnId) {
       this.providerError = { turnId: p.turnId, error: p.error ?? {} };
       if (p.willRetry === true) {
-        this.providerRetryTurns.add(p.turnId);
         this.internalRetries += 1;
-        if (!this.lastRetryNoticeAt || Date.now() - this.lastRetryNoticeAt >= 15_000) {
-          this.lastRetryNoticeAt = Date.now();
-          this.emit?.(textEvent('\n⏳ Provider 连接异常，Codex 正在重连。\n'));
+        const first = !this.providerRetryTurns.has(p.turnId);
+        this.providerRetryTurns.add(p.turnId);
+        if (!first) {
+          const expired = this.ledger.record.deadline !== undefined && Date.now() >= this.ledger.record.deadline;
+          this.notifyRecovery(expired ? 'recovery_exhausted' : 'provider_retrying');
+          if (!expired) this.watchRetryStall(p.turnId, p.error);
         }
-        this.sendRetryContinue(p.turnId);
-        this.watchRetryStall(p.turnId, p.error);
+        // A retry notice is not a terminal failure. No steer, queued input,
+        // interrupt or competing turn/start is permitted here.
+        if (first && isTransientProviderError(p.error)) {
+          const epoch = this.recoveryEpoch;
+          this.queueRecoveryEvent(async () => {
+            if (epoch !== this.recoveryEpoch || !this.recoveryAllowed() || this.turnId !== p.turnId) return;
+            if (await this.ledger.episode(this.recovery!.policy.budgetSeconds, redactDiagnosticText(p.error?.message ?? 'Provider reconnect'), p.turnId)) {
+              if (epoch !== this.recoveryEpoch || !this.recoveryAllowed() || this.turnId !== p.turnId) return;
+              this.armRecoveryDeadline();
+              this.notifyRecovery('provider_retrying', true);
+              this.watchRetryStall(p.turnId, p.error);
+            } else this.notifyRecovery(this.ledger.record.phase);
+          });
+        }
       }
     }
     if (p.turnId === this.turnId && (
-      (message.method === 'item/agentMessage/delta' && p.delta) ||
-      (message.method === 'item/reasoning/summaryTextDelta' && p.delta) ||
-      (message.method === 'item/commandExecution/outputDelta' && p.delta) ||
+      ((message.method === 'item/agentMessage/delta' || message.method === 'item/reasoning/summaryTextDelta' || message.method === 'item/commandExecution/outputDelta') && typeof p.delta === 'string' && p.delta.trim()) ||
       ((message.method === 'item/started' || message.method === 'item/completed') && toolItems.has(p.item?.type))
     )) {
+      this.lastActivityAt = Date.now();
       this.clearRetryStall();
-      this.recoveryAttempts = 0;
-      this.providerError = undefined;
-      this.providerRetryTurns.delete(p.turnId);
-      const retryState = this.retrySteerState.get(p.turnId);
-      if (retryState) {
-        retryState.attempts = 0;
-        retryState.pendingMessageId = undefined;
-      }
+      // Activity is observable; task success cannot be inferred from text or
+      // periodic tool output. Neither activity nor heartbeats extend a budget.
+      if (this.ledger.record.deadline !== undefined && Date.now() >= this.ledger.record.deadline) this.notifyRecovery('recovery_exhausted');
+      else this.notifyRecovery(this.activeTools.size || toolItems.has(p.item?.type) ? 'tool_running' : 'normal');
     }
     if (message.method === 'item/agentMessage/delta') {
       const key = this.messageKey(p.turnId, p.itemId);
@@ -203,6 +263,7 @@ export class CodexStructuredSession implements StructuredSession {
       }
       if (!this.goalActive) {
         this.cancelAutoRecovery();
+        this.queueRecoveryEvent(() => this.ledger.invalidate('goal_paused'));
         if (!this.turnId) { this.emit?.({ type: 'done', terminationReason: 'interrupted' }); this.finish(); }
       }
     }
@@ -210,6 +271,7 @@ export class CodexStructuredSession implements StructuredSession {
       this.goalActive = false;
       this.lastGoalText = undefined;
       this.cancelAutoRecovery();
+      this.queueRecoveryEvent(() => this.ledger.invalidate('goal_cleared'));
       if (!this.turnId) this.finish();
     }
     if (message.method === 'thread/tokenUsage/updated') {
@@ -239,16 +301,19 @@ export class CodexStructuredSession implements StructuredSession {
       this.finishedTurns.add(p.turn.id);
       if (this.finishedTurns.size > 100) this.finishedTurns.delete(this.finishedTurns.values().next().value!);
       this.turnId = undefined; this.phase = 'idle';
-      const providerRetry = this.providerRetryTurns.delete(p.turn.id);
-      this.retrySteerState.delete(p.turn.id);
-      if (p.turn?.status === 'failed' || (p.turn.status === 'interrupted' && providerRetry)) {
+      this.providerRetryTurns.delete(p.turn.id);
+      this.underlyingTurn = 'terminal';
+      if (p.turn?.status === 'failed') {
         const error = p.turn.error ?? (this.providerError?.turnId === p.turn.id ? this.providerError?.error : undefined);
-        if (!this.scheduleRecovery(p.turn.id, error, p.turn.status)) {
+        if (!this.scheduleRecovery(p.turn.id, error)) {
+          this.cancelRecovery();
           this.emit?.({ type: 'error', message: error?.message ?? 'Codex turn failed', terminationReason: this.recoveryBlocked ? 'interrupted' : 'failed' }); this.finish();
         }
       }
       else if (!this.goalActive || p.turn?.status === 'interrupted') {
-        this.cancelRecovery(); this.recoveryAttempts = 0;
+        this.cancelRecovery();
+        this.queueRecoveryEvent(() => p.turn.status === 'completed' ? this.ledger.reset('completed') : this.ledger.invalidate('interrupted'));
+        this.notifyRecovery(p.turn.status === 'completed' ? 'normal' : 'stopped', true);
         if (p.turn?.status === 'interrupted') this.emit?.({ type: 'done', terminationReason: 'interrupted' });
         this.finish();
       }
@@ -275,190 +340,251 @@ export class CodexStructuredSession implements StructuredSession {
     }
     this.deltas.delete(key);
   }
+  private queueRecoveryEvent(work: () => Promise<void>): void {
+    this.recoveryEvents = this.recoveryEvents.then(() => this.ledgerReady).then(work).catch(error => {
+      this.cancelRecovery(); this.notifyRecovery('needs_attention', true);
+      log.fail('agent', error, { step: 'provider-recovery-state' });
+    });
+  }
+  private recoveryStatus(): ProviderRecoveryStatus {
+    const state = this.ledger.record;
+    return {
+      state: this.recoveryPhase,
+      lastActivityAt: this.lastActivityAt, lastEventAt: this.lastEventAt,
+      lastError: state.lastError ?? this.providerError?.error.message,
+      waitingReason: this.recoveryPhase === 'provider_retrying' ? 'Codex 原生重试；Bridge 未注入输入' :
+        this.recoveryPhase === 'bridge_backoff' ? '等待退避和终态复核' :
+        this.recoveryPhase === 'recovery_exhausted' ? '故障预算已用尽或不足以下次退避；等待人工处理，底层任务未被中断' :
+        this.recoveryPhase === 'status_unknown' ? '状态查询不可用或本次有界监视已结束；底层任务未被中断' :
+        this.recoveryPhase === 'needs_attention' ? state.blocked ?? '无法安全确认恢复结果' : undefined,
+      attempts: state.attempts,
+      budgetSeconds: this.recovery?.policy.budgetSeconds ?? 3600,
+      usedSeconds: state.startedAt === undefined ? 0 : Math.max(0, Math.floor((Date.now() - state.startedAt) / 1000)),
+      nextRecoveryAt: state.nextAt, underlyingTurn: this.underlyingTurn,
+    };
+  }
+  private notifyRecovery(phase: RecoveryPhase, force = false): void {
+    this.recoveryPhase = phase;
+    if (!force && phase === this.lastNotifiedPhase && Date.now() - this.lastStatusNoticeAt < 60_000) return;
+    this.lastStatusNoticeAt = Date.now(); this.lastNotifiedPhase = phase;
+    this.emit?.({ type: 'recovery', status: this.recoveryStatus() });
+  }
+  private armRecoveryDeadline(): void {
+    if (this.deadlineTimer) return;
+    const deadline = this.ledger.record.deadline;
+    if (deadline === undefined) return;
+    this.deadlineTimer = setTimeout(() => {
+      this.deadlineTimer = undefined;
+      this.cancelRecovery();
+      this.queueRecoveryEvent(() => this.ledger.waiting('recovery_exhausted'));
+      this.notifyRecovery('recovery_exhausted', true);
+      // A running native request is not killed to satisfy Bridge's deadline.
+      if (!this.turnId && this.underlyingTurn === 'terminal') this.failRecovery();
+    }, Math.max(0, deadline - Date.now()));
+    this.deadlineTimer.unref?.();
+  }
   private cancelRecovery(): boolean {
-    const pending = Boolean(this.recoveryTimer || this.recoveryStarting || this.recoveryChecking);
+    const pending = Boolean(this.pendingRecoveryTurn || this.recoveryTimer || this.recoveryStarting || this.recoveryChecking);
+    this.pendingRecoveryTurn = undefined;
     if (this.recoveryTimer) clearTimeout(this.recoveryTimer);
     this.recoveryTimer = undefined;
+    if (this.deadlineTimer) clearTimeout(this.deadlineTimer);
+    this.deadlineTimer = undefined;
     this.clearRetryStall();
     this.recoveryEpoch += 1;
     return pending;
   }
-  cancelAutoRecovery(): void { this.recoveryBlocked = true; this.providerError = undefined; this.providerRetryTurns.clear(); this.retrySteerState.clear(); this.cancelRecovery(); }
+  cancelAutoRecovery(): void {
+    this.recoveryBlocked = true; this.providerError = undefined;
+    this.providerRetryTurns.clear(); this.cancelRecovery();
+  }
   private recoveryAllowed(): boolean {
     const policy = this.recovery?.policy;
-    return Boolean(policy && this.recoveryEnabled && !this.recoveryBlocked && this.isAlive() &&
+    return Boolean(policy && this.recoveryEnabled && !this.recoveryBlocked && !this.handoffBlocked && this.isAlive() &&
       (!policy.providers.length || this.recovery?.providerIds.some(id => policy.providers.includes(id))));
   }
   private clearRetryStall(): void {
     if (this.retryStallTimer) clearTimeout(this.retryStallTimer);
     this.retryStallTimer = undefined;
   }
-  private sendRetryContinue(turnId: string): void {
-    if (!this.recoveryAllowed() || this.turnId !== turnId ||
-      this.pending.size || this.activeTools.size || !isTransientProviderError(this.providerError?.error)) return;
-    let state = this.retrySteerState.get(turnId);
-    if (!state) {
-      state = { attempts: 0, lastAt: 0, inFlight: false };
-      this.retrySteerState.set(turnId, state);
-    }
-    if (!this.recovery?.policy.continuous && state.attempts >= 3) return;
-    const interval = this.recovery?.policy.continuous ? (this.recovery.policy.retryStallSeconds || 15) * 1000 : 5_000;
-    if (state.inFlight || state.pendingMessageId || (state.attempts > 0 && Date.now() - state.lastAt < interval)) return;
-    state.attempts += 1;
-    state.lastAt = Date.now();
-    state.inFlight = true;
-    const attempt = state.attempts;
-    const epoch = this.recoveryEpoch;
-    const clientUserMessageId = `arg-bridge-recovery-${randomUUID()}`;
-    state.pendingMessageId = clientUserMessageId;
-    void this.rpc.request('turn/steer', {
-      threadId: this.id,
-      expectedTurnId: turnId,
-      clientUserMessageId,
-      input: [{ type: 'text', text: 'continue' }],
-    }, 20_000).then(result => {
-      if (result.turnId !== turnId) return;
-      state!.pendingMessageId = undefined;
-      if (epoch !== this.recoveryEpoch || this.turnId !== turnId || !this.recoveryAllowed() ||
-        this.retrySteerState.get(turnId) !== state || !this.providerError) return;
-      this.lastUserText = 'continue';
-      log.info('agent', 'provider-recovery-steered', { thread: this.id, turn: turnId, attempt });
-    }).catch(error => {
-      const reason = error instanceof Error ? error.message : String(error);
-      // clientUserMessageId identifies history, but Codex does not deduplicate
-      // it. Keep this submission pending until a read confirms acceptance.
-      log.info('agent', 'provider-recovery-steer-unavailable', { thread: this.id, turn: turnId, attempt, reason });
-    }).finally(() => { state!.inFlight = false; });
-  }
+  /** A finite, non-overlapping metadata monitor. Never fetch full history. */
   private watchRetryStall(turnId: string, error: Wire): void {
-    const seconds = this.recovery?.policy.retryStallSeconds;
-    if (!seconds || !this.recoveryAllowed() || !isTransientProviderError(error) ||
-      this.retryStallTimer || this.pending.size || this.activeTools.size) return;
+    const policy = this.recovery?.policy;
+    if (!policy?.retryStallSeconds || !this.recoveryAllowed() || this.retryStallTimer ||
+      this.statusChecks >= policy.maxStatusChecks || this.activeTools.size || this.pending.size) return;
     const epoch = this.recoveryEpoch;
+    const delay = Math.min(300, policy.retryStallSeconds * 2 ** Math.min(this.statusChecks, 3));
     this.retryStallTimer = setTimeout(() => {
-      // Keep the timer identity until preflight finishes; a new token/tool or
-      // user interaction clears it and invalidates this specific attempt.
       const timer = this.retryStallTimer;
+      this.statusChecks += 1;
       void (async () => {
-        const turns = await this.rpc.request('thread/turns/list', { threadId: this.id, limit: 1, sortDirection: 'desc', itemsView: 'full' });
-        if (!timer || this.retryStallTimer !== timer || epoch !== this.recoveryEpoch ||
-          !this.recoveryAllowed() || this.turnId !== turnId || this.pending.size || this.activeTools.size) return;
-        const latest = turns.data?.[0];
-        if (latest?.id !== turnId) return;
+        const result = await this.rpc.request('thread/turns/list', { threadId: this.id, limit: 1, sortDirection: 'desc' }, policy.statusTimeoutSeconds * 1000);
+        if (epoch !== this.recoveryEpoch || this.retryStallTimer !== timer || this.turnId !== turnId) return;
+        const latest = result.data?.[0];
+        if (latest?.id !== turnId) { this.notifyRecovery('status_unknown'); return; }
         if (['failed', 'interrupted', 'completed'].includes(latest.status)) {
           this.receive({ method: 'turn/completed', params: { threadId: this.id, turn: latest } });
-          return;
-        }
-        // An active turn retains its complete native reconnect budget.
-        log.info('agent', 'provider-retry-observed', { thread: this.id, turn: turnId, status: latest.status });
-        const state = this.retrySteerState.get(turnId);
-        if (state?.pendingMessageId && latest.items?.some((item: Wire) => item.type === 'userMessage' && item.clientId === state.pendingMessageId)) {
-          state.pendingMessageId = undefined;
-          state.lastAt = Date.now();
-          this.lastUserText = 'continue';
-          return;
-        }
-        this.sendRetryContinue(turnId);
-      })().catch(error => {
-        if (epoch !== this.recoveryEpoch || this.recoveryBlocked) return;
-        // A failed read is not evidence that Codex stopped. Keep observing.
-        log.warn('agent', 'provider-retry-state-unavailable', { thread: this.id, turn: turnId, reason: String(error) });
+        } else if (latest.status === 'inProgress') {
+          this.underlyingTurn = 'running'; this.notifyRecovery('provider_retrying');
+        } else this.notifyRecovery('status_unknown');
+      })().catch(readError => {
+        if (epoch !== this.recoveryEpoch) return;
+        this.underlyingTurn = 'unknown'; this.notifyRecovery('status_unknown');
+        log.warn('agent', 'provider-retry-state-unavailable', { thread: this.id, reason: String(readError) });
       }).finally(() => {
         if (this.retryStallTimer !== timer) return;
         this.clearRetryStall();
-        if (epoch === this.recoveryEpoch && this.turnId === turnId) this.watchRetryStall(turnId, error);
+        if (epoch === this.recoveryEpoch && this.turnId === turnId) {
+          if (this.statusChecks < policy.maxStatusChecks) this.watchRetryStall(turnId, error);
+          else this.notifyRecovery('status_unknown', true);
+        }
       });
-    }, seconds * 1000);
+    }, delay * 1000);
     this.retryStallTimer.unref?.();
   }
-  private scheduleRecovery(
-    failedTurnId: string,
-    error: Wire | undefined,
-    expectedStatus = 'failed',
-  ): boolean {
-    const policy = this.recovery?.policy;
-    if (!policy || !this.recoveryAllowed() || this.pending.size ||
-      (!policy.continuous && policy.maxAttempts > 0 && this.recoveryAttempts >= policy.maxAttempts) ||
-      !isTransientProviderError(error)) return false;
+  private failRecovery(message?: string): void {
     this.cancelRecovery();
+    if (this.underlyingTurn !== 'terminal') this.emit?.({ type: 'pending', message: message ?? '底层任务状态未知，自动恢复待人工确认。', taskId: this.id });
+    else this.emit?.({ type: 'error', message: message ?? this.ledger.record.lastError ?? this.providerError?.error.message ?? 'Codex turn failed', terminationReason: this.recoveryBlocked ? 'interrupted' : 'failed' });
+    this.finish();
+  }
+  private scheduleRecovery(failedTurnId: string, error: Wire | undefined): boolean {
+    const policy = this.recovery?.policy;
+    if (!policy || !this.recoveryAllowed() || this.pending.size || !isTransientProviderError(error)) return false;
+    this.clearRetryStall();
     const epoch = this.recoveryEpoch;
+    if (this.pendingRecoveryTurn === failedTurnId) return true;
+    this.pendingRecoveryTurn = failedTurnId;
     const goalWasActive = this.goalActive;
-    const attempt = ++this.recoveryAttempts;
-    const delay = policy.continuous || policy.maxAttempts === 0
-      ? policy.delaySeconds
-      : Math.min(policy.maxDelaySeconds, policy.delaySeconds * 2 ** (attempt - 1));
     this.phase = 'busy';
-    log.info('agent', 'provider-recovery-scheduled', { thread: this.id, attempt, delaySeconds: delay });
-    const previousWork = this.recoveryWork;
-    this.recoveryTimer = setTimeout(() => {
-      this.recoveryTimer = undefined;
-      let submitted = false;
-      this.recoveryWork = (async () => {
-        // Completion can precede the turn/start RPC reply. Serialize the next
-        // attempt behind that acknowledgement instead of overlapping starts.
-        await previousWork;
-        if (epoch !== this.recoveryEpoch || this.recoveryBlocked) return;
-        this.recoveryChecking = true;
-        const turns = await this.rpc.request('thread/turns/list', { threadId: this.id, limit: 1, sortDirection: 'desc' });
-        if (epoch !== this.recoveryEpoch || this.recoveryBlocked || this.turnId) return;
-        if (this.pending.size) {
-          this.emit?.({ type: 'error', message: '自动继续已取消：会话存在待处理交互。', terminationReason: 'failed' }); this.finish(); return;
-        }
-        const latest = turns.data?.[0];
-        if (latest?.id !== failedTurnId || latest.status !== expectedStatus) {
-          if (latest?.status === 'inProgress') { this.turnId = latest.id; this.phase = 'busy'; }
-          else {
-            this.emit?.(latest?.status === 'completed' || latest?.status === 'interrupted'
-              ? { type: 'done', terminationReason: latest.status === 'interrupted' ? 'interrupted' : 'normal' }
-              : { type: 'error', message: '自动继续已取消：会话状态已变化。', terminationReason: 'failed' });
-            this.finish();
-          }
-          return;
-        }
-        if (goalWasActive) {
-          const result = await this.rpc.request('thread/goal/get', { threadId: this.id });
-          if (epoch !== this.recoveryEpoch || this.recoveryBlocked) return;
-          if (result.goal?.status !== 'active') {
-            this.goalActive = false;
-            this.emit?.({ type: 'done', terminationReason: 'interrupted' }); this.finish(); return;
-          }
-        }
-        if (epoch !== this.recoveryEpoch || this.recoveryBlocked || this.turnId) return;
-        this.recoveryStarting = true;
-        // Never replay the original task: prior tools may already have made
-        // changes. Keep the same thread, provider and permission policy.
-        submitted = true;
-        const result = await this.rpc.request('turn/start', { threadId: this.id, input: [{ type: 'text', text: 'continue' }] });
-        if (epoch !== this.recoveryEpoch) {
-          if (this.stopRequested && result.turn?.id && !this.finishedTurns.has(result.turn.id)) {
-            await this.rpc.request('turn/interrupt', { threadId: this.id, turnId: result.turn.id });
-          } else if (!this.recoveryEnabled && result.turn?.id && !this.finishedTurns.has(result.turn.id)) {
-            // /recover off cannot retract an already accepted start. Observe
-            // that exact turn without interrupting it or starting another.
-            this.turnId = result.turn.id;
-            this.phase = 'busy';
-          }
-          return;
-        }
-        if (result.turn?.id) this.recoveryTurnIds.add(result.turn.id);
-        if (this.recoveryTurnIds.size > 20) this.recoveryTurnIds.delete(this.recoveryTurnIds.values().next().value!);
-        if (!this.finishedTurns.has(result.turn?.id)) this.turnId = result.turn?.id ?? this.turnId;
-        if (this.stopRequested && this.turnId) await this.rpc.request('turn/interrupt', { threadId: this.id, turnId: this.turnId });
-      })().catch(() => {
-        if (epoch !== this.recoveryEpoch) return;
-        if (!submitted && this.recoveryAllowed()) {
-          // A failed read cannot establish a terminal state or consume a
-          // continuation attempt. Retry the preflight without replaying work.
-          this.recoveryAttempts = Math.max(0, attempt - 1);
-          this.scheduleRecovery(failedTurnId, error, expectedStatus);
-          return;
-        }
-        this.emit?.({ type: 'error', message: '自动继续未能确认会话状态或请求结果；已停止重试，请检查 /status。', terminationReason: 'failed' });
-        this.finish();
-      }).finally(() => { this.recoveryStarting = false; this.recoveryChecking = false; });
-    }, delay * 1000);
-    this.recoveryTimer.unref?.();
+    this.queueRecoveryEvent(async () => {
+      if (epoch !== this.recoveryEpoch || !this.recoveryAllowed()) return;
+      const owned = await this.ledger.episode(policy.budgetSeconds, redactDiagnosticText(error?.message ?? 'Codex turn failed'), failedTurnId);
+      if (epoch !== this.recoveryEpoch || !this.recoveryAllowed()) return;
+      if (!owned) {
+        this.notifyRecovery(this.ledger.record.phase, true);
+        // Another observer is the owner. This observer must not submit.
+        if (this.ledger.record.owner && this.ledger.record.phase !== 'recovery_exhausted') {
+          this.notifyRecovery('needs_attention', true);
+          this.emit?.({ type: 'pending', taskId: this.id, message: `恢复由另一连接（PID ${this.ledger.record.owner.pid}）负责，未重复提交。请查看 /recover status。` });
+          this.finish();
+        } else this.failRecovery(error?.message);
+        return;
+      }
+      this.armRecoveryDeadline();
+      const operation = this.ledger.record.operations[failedTurnId];
+      if (operation) {
+        await this.reconcileRecovery(failedTurnId, operation.turnId, operation.id);
+        return;
+      }
+      const delay = providerRecoveryDelayMs(policy, this.ledger.record.attempts + 1, error);
+      const nextAt = Date.now() + delay;
+      if (nextAt >= this.ledger.record.deadline! || (policy.maxAttempts > 0 && this.ledger.record.attempts >= policy.maxAttempts)) {
+        await this.ledger.waiting('recovery_exhausted'); this.notifyRecovery('recovery_exhausted', true); this.failRecovery(error?.message); return;
+      }
+      await this.ledger.waiting('bridge_backoff', nextAt);
+      if (epoch !== this.recoveryEpoch || !this.recoveryAllowed()) return;
+      this.notifyRecovery('bridge_backoff', true);
+      const ledgerEpoch = this.ledger.record.epoch;
+      this.recoveryTimer = setTimeout(() => {
+        this.recoveryTimer = undefined;
+        this.pendingRecoveryTurn = undefined;
+        const previous = this.recoveryWork;
+        this.recoveryWork = previous.then(() => this.performRecovery(failedTurnId, error, epoch, ledgerEpoch, goalWasActive));
+      }, delay);
+      this.recoveryTimer.unref?.();
+    });
     return true;
+  }
+  private async performRecovery(failedTurnId: string, error: Wire | undefined, epoch: number, ledgerEpoch: number, goalWasActive: boolean): Promise<void> {
+    if (epoch !== this.recoveryEpoch || !this.recoveryAllowed()) return;
+    let submitted = false;
+    this.recoveryChecking = true;
+    try {
+      const result = await this.rpc.request('thread/turns/list', { threadId: this.id, limit: 1, sortDirection: 'desc' }, this.recovery!.policy.statusTimeoutSeconds * 1000);
+      if (epoch !== this.recoveryEpoch || !this.recoveryAllowed() || this.turnId) return;
+      if (this.pending.size || this.activeTools.size) { this.notifyRecovery('needs_attention', true); this.finish(); return; }
+      const latest = result.data?.[0];
+      if (latest?.id !== failedTurnId || latest.status !== 'failed') {
+        if (latest?.status === 'inProgress') { this.turnId = latest.id; this.underlyingTurn = 'running'; this.notifyRecovery('normal'); }
+        else { this.notifyRecovery('needs_attention', true); this.finish(); }
+        return;
+      }
+      if (goalWasActive) {
+        const goal = await this.rpc.request('thread/goal/get', { threadId: this.id }, this.recovery!.policy.statusTimeoutSeconds * 1000);
+        if (epoch !== this.recoveryEpoch || !this.recoveryAllowed()) return;
+        if (goal.goal?.status !== 'active') { await this.ledger.invalidate('goal_paused'); this.notifyRecovery('needs_attention', true); this.finish(); return; }
+      }
+      const operation = await this.ledger.reserve(failedTurnId, ledgerEpoch, this.recovery!.policy.maxAttempts);
+      if (!operation) { this.notifyRecovery(this.ledger.record.phase, true); this.failRecovery(error?.message); return; }
+      if (epoch !== this.recoveryEpoch || !this.recoveryAllowed()) return;
+      await this.ledger.refresh();
+      if (this.ledger.record.epoch !== ledgerEpoch || this.ledger.record.blocked || epoch !== this.recoveryEpoch || !this.recoveryAllowed()) return;
+      this.recoveryStarting = true;
+      this.recoveryChecking = false;
+      submitted = true;
+      const started = await this.rpc.request('turn/start', { threadId: this.id, clientUserMessageId: operation.id, input: [{ type: 'text', text: 'continue' }] });
+      await this.ledger.acknowledge(failedTurnId, started.turn?.id);
+      if (!started.turn?.id) throw new Error('turn/start 缺少确认 ID');
+      this.recoveryTurnIds.add(started.turn.id);
+      if (!this.finishedTurns.has(started.turn.id)) {
+        this.turnId = started.turn.id; this.underlyingTurn = 'running'; this.phase = 'busy';
+      }
+      if (epoch !== this.recoveryEpoch && this.stopRequested && !this.finishedTurns.has(started.turn.id)) {
+        await this.rpc.request('turn/interrupt', { threadId: this.id, turnId: started.turn.id });
+      }
+      // off/teardown leave an already accepted backend turn intact.
+    } catch (failure) {
+      if (epoch !== this.recoveryEpoch) return;
+      if (submitted) {
+        await this.ledger.acknowledge(failedTurnId);
+        const op = this.ledger.record.operations[failedTurnId];
+        await this.reconcileRecovery(failedTurnId, undefined, op?.id);
+      } else {
+        // This bounded wait ended pending/unknown. Do not secretly retry the
+        // read or convert a connection outage into proof of terminal failure.
+        this.underlyingTurn = 'unknown'; this.notifyRecovery('status_unknown', true);
+        this.failRecovery(`状态核实未完成，恢复待人工确认：${failure instanceof Error ? failure.message : String(failure)}`);
+      }
+    } finally { this.recoveryStarting = false; this.recoveryChecking = false; }
+  }
+  private async reconcileRecovery(failedTurnId: string, turnId?: string, operationId?: string): Promise<void> {
+    const epoch = this.recoveryEpoch;
+    const deadline = Date.now() + this.recovery!.policy.statusTimeoutSeconds * 1000;
+    // A just-accepted turn can temporarily appear as an empty interrupted
+    // placeholder before Codex commits its input. Reconcile a bounded number
+    // of metadata/item reads; never replay the turn/start mutation.
+    for (let check = 0; check < 4 && Date.now() < deadline; check += 1) {
+      try {
+        const result = await this.rpc.request('thread/turns/list', { threadId: this.id, limit: 2, sortDirection: 'desc' }, Math.max(1, deadline - Date.now()));
+        if (epoch !== this.recoveryEpoch) return;
+        let accepted = result.data?.find((turn: Wire) => turn.id === turnId || turn.items?.some((item: Wire) => item.type === 'userMessage' && operationId && item.clientId === operationId));
+        if (!accepted && operationId) {
+          const candidate = result.data?.[0];
+          if (candidate?.id && candidate.id !== failedTurnId) {
+            const page = await this.rpc.request('thread/items/list', { threadId: this.id, turnId: candidate.id, limit: 1, sortDirection: 'asc' }, Math.max(1, deadline - Date.now()));
+            if (epoch !== this.recoveryEpoch) return;
+            const item = page.data?.[0]?.item ?? page.data?.[0];
+            if (item?.type === 'userMessage' && item.clientId === operationId) accepted = candidate;
+          }
+        }
+        if (accepted && accepted.id !== failedTurnId) {
+          await this.ledger.acknowledge(failedTurnId, accepted.id);
+          this.recoveryTurnIds.add(accepted.id);
+          if (this.finishedTurns.has(accepted.id)) return;
+          if (accepted.status === 'inProgress') { this.turnId = accepted.id; this.underlyingTurn = 'running'; this.notifyRecovery('normal'); return; }
+          this.turnId = accepted.id;
+          this.receive({ method: 'turn/completed', params: { threadId: this.id, turn: accepted } });
+          return;
+        }
+      } catch { break; }
+      if (check < 3) await new Promise(resolve => setTimeout(resolve, Math.min(250 * 2 ** check, Math.max(0, deadline - Date.now()))));
+      if (epoch !== this.recoveryEpoch) return;
+    }
+    if (epoch !== this.recoveryEpoch) return;
+    this.underlyingTurn = 'unknown';
+    this.notifyRecovery('needs_attention', true);
+    this.failRecovery('continue 提交结果未知；已保留操作标识，未重发。请检查 /recover status。');
   }
   private async handleDynamicToolCall(id: string | number, params: Wire): Promise<void> {
     const expectedNamespace = this.brokerTools?.specs[0]?.name;
@@ -485,17 +611,27 @@ export class CodexStructuredSession implements StructuredSession {
     }
   }
   async submit(options: AgentRunOptions, emit: (event: AgentEvent) => void, signal: AbortSignal): Promise<void> {
+    if (this.handoffBlocked) throw new Error('线程正在交接 provider；未发送输入');
     if (this.emit) throw new Error('Structured thread already has an active relay');
     if (this.recoveryStarting || this.recoveryChecking) throw new Error('自动恢复请求仍在确认结果，请稍后再发送新任务。');
     if (signal.aborted) return;
-    this.cancelRecovery(); this.recoveryAttempts = 0;
+    this.cancelRecovery(); this.statusChecks = 0;
     if (!options.liveInputMode || /^\/goal\s+(?!pause\b|clear\b|status\b|edit\b)/.test(options.prompt)) {
       this.recoveryBlocked = false; this.stopRequested = false;
     }
-    this.providerRetryTurns.clear(); this.retrySteerState.clear();
+    this.providerRetryTurns.clear();
     this.lastUserText = options.prompt.slice(0, 800);
     this.lastCwd = options.cwd;
     this.emit = emit;
+    try {
+      if (this.recovery || this.lifecycleInitialized) {
+        await this.ledgerReady;
+        if (!options.liveInputMode) await this.ledger.reset('user_input');
+      }
+    } catch (error) {
+      this.emit = undefined;
+      throw error;
+    }
     emit({ type: 'system', threadId: this.id, cwd: options.cwd });
     for (const event of this.deferredInteractions.splice(0)) {
       if (event.type === 'interactive' && event.interaction && this.pending.has(event.interaction.id)) emit(event);
@@ -543,6 +679,7 @@ export class CodexStructuredSession implements StructuredSession {
     await this.brokerTools?.refreshArtifactDelivery?.(artifact);
   }
   async command(input: string): Promise<AgentEvent[]> {
+    if (this.handoffBlocked) throw new Error('线程正在交接 provider；未发送控制请求');
     const [name, ...args] = input.trim().split(/\s+/);
     if (name === '/status') return [textEvent(JSON.stringify(await this.rpc.request('thread/read', { threadId: this.id, includeTurns: false }), null, 2))];
     if (name === '/recover') {
@@ -552,11 +689,14 @@ export class CodexStructuredSession implements StructuredSession {
         await this.recovery?.onEnabledChange?.(true);
         if (version !== this.recoverySettingVersion) return [textEvent('恢复设置已被后续命令更新。')];
         this.recoveryEnabled = true;
+        await this.ledgerReady;
+        await this.ledger.enable();
         if (this.turnId && isTransientProviderError(this.providerError?.error)) {
-          this.sendRetryContinue(this.turnId);
+          this.statusChecks = 0;
+          this.armRecoveryDeadline();
           this.watchRetryStall(this.turnId, this.providerError!.error);
         }
-        return [textEvent('持续恢复已开启。')];
+        return [textEvent(`自动恢复已开启；保留原故障阶段的 ${this.recovery?.policy.budgetSeconds ? this.recovery.policy.budgetSeconds / 60 : 60} 分钟预算，不重置，也不续跑已停止的任务。`)];
       }
       if (action === 'off' || action === 'disable') {
         this.recoverySettingVersion += 1;
@@ -567,27 +707,33 @@ export class CodexStructuredSession implements StructuredSession {
           this.emit?.({ type: 'done', terminationReason: 'interrupted' });
           this.finish();
         }
+        await this.ledger.invalidate('off');
+        this.notifyRecovery('disabled', true);
         await this.recovery?.onEnabledChange?.(false);
         return [textEvent('持续恢复已关闭；当前 Codex turn 会继续，但 Bridge 不再发送 continue。')];
       }
       if (action === 'status') {
+        await this.ledgerReady;
+        await this.ledger.refresh();
         const policy = this.recovery?.policy;
-        const state = this.turnId ? this.retrySteerState.get(this.turnId) : undefined;
         return [textEvent(JSON.stringify({
           enabled: this.recoveryEnabled,
           providerAllowed: Boolean(policy && (!policy.providers.length || this.recovery?.providerIds.some(id => policy.providers.includes(id)))),
-          recovering: Boolean(this.recoveryAllowed() && (this.recoveryTimer || this.retryStallTimer || this.recoveryStarting || this.recoveryChecking)),
-          turnId: this.turnId ?? null,
-          activeTurnContinueCount: state?.attempts ?? 0,
-          continuationRounds: this.recoveryAttempts,
-          maxContinuationRounds: policy?.continuous ? 0 : policy?.maxAttempts ?? 0,
-          continuous: policy?.continuous ?? true,
+          ...this.recoveryStatus(),
+          episodeDeadline: this.ledger.record.deadline ?? null,
+          recoveryOwnerPid: this.ledger.record.owner?.pid ?? null,
+          resetPolicy: 'on does not reset budget; only explicit new user work or successful completed turn resets',
+          activeTurnContinueCount: 0,
         }, null, 2))];
       }
       throw new Error('用法：/recover on、/recover off 或 /recover status');
     }
     if (name === '/goal') {
       const action = args[0];
+      if (['pause', 'clear', 'resume'].includes(action ?? '')) {
+        this.cancelAutoRecovery();
+        await this.ledger.invalidate('goal_' + action);
+      }
       let result: Wire;
       if (!action || action === 'status') result = await this.rpc.request('thread/goal/get', { threadId: this.id });
       else if (action === 'clear') {
@@ -604,6 +750,9 @@ export class CodexStructuredSession implements StructuredSession {
         if (typeof result.goal?.objective === 'string' && result.goal.objective.trim()) {
           this.lastGoalText = result.goal.objective.trim().slice(0, 800);
         }
+      }
+      if (['pause', 'clear'].includes(action ?? '') && !this.turnId) {
+        this.emit?.({ type: 'done', terminationReason: 'interrupted' }); this.finish();
       }
       return [textEvent(JSON.stringify(result, null, 2))];
     }
@@ -688,7 +837,9 @@ export class CodexStructuredSession implements StructuredSession {
     this.stopRequested = true;
     this.providerError = undefined;
     this.providerRetryTurns.clear();
-    this.retrySteerState.clear();
+    await this.ledgerReady;
+    await this.ledger.invalidate('stop');
+    this.notifyRecovery('stopped', true);
     try { await this.syncState(); } catch { /* keep local state */ }
     if (this.goalActive) {
       await this.rpc.request('thread/goal/set', { threadId: this.id, status: 'paused' });
@@ -722,7 +873,7 @@ export class CodexStructuredSession implements StructuredSession {
     }
     return acted;
   }
-  diagnostics(): LiveSessionDiagnostics { return { phase: this.goalActive && this.phase === 'idle' ? 'busy' : this.phase, inputState: this.turnId || this.goalActive || this.recoveryTimer || this.recoveryStarting || this.recoveryChecking ? 'submitted' : 'empty', retryCount: this.internalRetries + this.recoveryAttempts }; }
+  diagnostics(): LiveSessionDiagnostics { return { phase: this.goalActive && this.phase === 'idle' ? 'busy' : this.phase, inputState: this.turnId || this.goalActive || this.recoveryTimer || this.recoveryStarting || this.recoveryChecking ? 'submitted' : 'empty', retryCount: this.internalRetries + this.ledger.record.attempts, recovery: this.recoveryStatus() }; }
   steerCapability(): AgentSteerCapability {
     if (!this.isAlive()) {
       return { available: false, kind: 'run', reason: 'Codex App Server connection is closed' };
@@ -743,6 +894,10 @@ export class CodexStructuredSession implements StructuredSession {
     const text = request.text.trim();
     if (!text) return { status: 'unavailable', reason: 'empty input' };
     const expectedTurnId = this.turnId;
+    if (this.handoffBlocked) return { status: 'unavailable', reason: 'provider handoff in progress' };
+    this.cancelRecovery();
+    await this.ledgerReady;
+    await this.ledger.reset('user_input');
     if (!expectedTurnId) return { status: 'unavailable', reason: 'no active turn' };
     try {
       const result = await this.rpc.request('turn/steer', {
@@ -797,6 +952,7 @@ export class CodexStructuredSession implements StructuredSession {
     };
   }
   async syncState(): Promise<void> {
+    await this.ledgerReady;
     try {
       const result = await this.rpc.request('thread/goal/get', { threadId: this.id });
       const status = result.goal?.status;
@@ -813,8 +969,20 @@ export class CodexStructuredSession implements StructuredSession {
     catch { /* Older servers may lack goals; ordinary turns remain available. */ }
     try {
       const result = await this.rpc.request('thread/turns/list', { threadId: this.id, limit: 1, sortDirection: 'desc' });
+      if (!Array.isArray(result.data)) return;
       const active = result.data?.find((turn: Wire) => turn.status === 'inProgress');
-      if (active) { this.turnId = active.id; this.phase = 'busy'; }
+      if (active) {
+        this.turnId = active.id; this.phase = 'busy'; this.underlyingTurn = 'running';
+        if (this.ledger.record.startedAt !== undefined && !this.ledger.record.blocked && this.recoveryAllowed()) this.armRecoveryDeadline();
+      } else {
+        this.underlyingTurn = 'terminal';
+        this.turnId = undefined;
+        const latest = result.data?.[0];
+        if (latest?.status === 'failed' && this.ledger.record.startedAt !== undefined && !this.ledger.record.blocked && !this.stopRequested) {
+          const error = latest.error ?? { message: this.ledger.record.lastError };
+          this.scheduleRecovery(latest.id, error);
+        }
+      }
     } catch { /* An unmaterialized new thread has no turns to list. */ }
   }
   async forkSide(cwd?: string): Promise<CodexStructuredSession> {
@@ -843,8 +1011,12 @@ export class CodexStructuredSession implements StructuredSession {
     await this.close();
   }
   async close(): Promise<void> {
+    await this.unregisterHandoff?.(); this.unregisterHandoff = undefined;
     this.recoveryBlocked = true; this.cancelRecovery();
+    await this.recoveryEvents;
     await this.recoveryWork;
+    await this.ledgerReady;
+    await this.ledger.release();
     this.toolAbort.abort();
     this.rpc.off('message', this.listener); this.rpc.off('disconnected', this.disconnected);
     for (const waiter of this.acknowledgements.values()) waiter.reject(new Error('Session closed'));

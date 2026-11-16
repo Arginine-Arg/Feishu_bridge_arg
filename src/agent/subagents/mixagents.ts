@@ -2,6 +2,10 @@ import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { basename, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { mkdir } from 'node:fs/promises';
+import { dirname } from 'node:path';
+import { writeFileAtomic } from '../../platform/atomic-write';
+import { isTransientProviderError } from '../../config/provider-recovery';
 import type { SubagentConfig, SubagentMixAgentsConfig } from '../../config/profile-schema';
 import { McpStdioClient, McpToolError, redactSecrets } from './mcp-client';
 import {
@@ -42,6 +46,7 @@ export interface MixAgentsLaunchConfig {
 }
 
 export interface MixAgentsRuntimeOverrides {
+  healthFile?: string;
   brokerConfigPath: string;
   credentials: Record<string, string>;
   fingerprint: string;
@@ -377,10 +382,22 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
       }
       if (!snapshot) continue;
       const result = resultFromAgentSnapshot(snapshot);
-      if (result) return result;
+      if (result) {
+        if (result.status === 'failed' && result.error) await this.recordRouteFailure(result.error);
+        return result;
+      }
       // starting/running: wait_agent timed out; loop until the total deadline.
     }
     return { status: 'timeout', error: '子代理等待超时' };
+  }
+
+  private async recordRouteFailure(message: string): Promise<void> {
+    if (!this.runtime?.healthFile) return;
+    if (!isTransientProviderError({ message }) && !/unauthori[sz]ed|forbidden|invalid.*key|model.*(?:not found|not supported|does not exist)|insufficient.*(?:quota|balance)/i.test(message)) return;
+    await mkdir(dirname(this.runtime.healthFile), { recursive: true, mode: 0o700 });
+    // Applies to FUTURE dispatches only. Never replay an existing worker's
+    // task on another route: it may already have performed tool side effects.
+    await writeFileAtomic(this.runtime.healthFile, JSON.stringify({ retryAt: Date.now() + 120_000 }), { mode: 0o600 });
   }
 
   private async readAgentMailboxSnapshot(

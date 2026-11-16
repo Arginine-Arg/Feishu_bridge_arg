@@ -62,6 +62,7 @@ describe('profile schema', () => {
       routeMode: 'follow-cc-switch',
       ccSwitchProviderId: null,
       providerOverrides: {},
+      providerPriority: [],
       readRoute: null,
       writeRoute: null,
       modelTools: true,

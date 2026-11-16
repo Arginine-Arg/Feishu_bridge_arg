@@ -4,7 +4,7 @@ A lightweight bot that bridges Feishu / Lark messenger with your local Claude Co
 
 [中文 README](./README.zh.md)
 
-Version 1.21.2 fixes provider recovery leaking its internal `continue` input into Feishu as visible assistant text. Recovery input now stays on the active Codex turn and is never emitted as a text delta. The large-history adoption fix from 1.21.1, continuous provider recovery, per-conversation `/recover` controls and complete structured text delivery remain unchanged.
+Version 1.22.0 fixes idle native provider handoff and stale-model resume, stops injecting continue into active reconnects, limits automatic recovery to one hour per failure episode, and adds ordered subagent provider/model choices with automatic model catalogue discovery.
 
 Version 1.6.7 introduced provider-aware Codex resume, and 1.7.0 added idle-boundary rebinding. Version 1.9.1 narrows reattachment semantics: reconnecting to an existing native or structured thread preserves the provider/model recorded by that thread instead of silently following a newly selected cc-switch route.
 
@@ -60,7 +60,7 @@ Install a pinned release or use a writable custom npm prefix when required:
 
 ```bash
 curl -fsSL https://github.com/Arginine-Arg/Feishu_bridge_arg/releases/latest/download/install-global.sh -o /tmp/install-arg-bridge.sh
-sh /tmp/install-arg-bridge.sh --version 1.21.2
+sh /tmp/install-arg-bridge.sh --version 1.22.0
 # Example for a machine without permission to write npm's configured global prefix:
 sh /tmp/install-arg-bridge.sh --prefix "$HOME/.local"
 export PATH="$HOME/.local/bin:$PATH"
@@ -104,10 +104,10 @@ Release tarballs are preferred. If a Git install is required, keep both compatib
 
 ```bash
 npm install -g --ignore-scripts --install-links=true \
-  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.21.2"
+  "git+https://github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.22.0"
 ```
 
-`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.21.2`.
+`--install-links=true` prevents npm 11 from keeping a global symlink to its temporary Git clone. `--ignore-scripts` avoids dependency lifecycle failures such as `spawn /bin/sh ENOENT`; arg-bridge does not require those dependency postinstall scripts at runtime. For SSH-only access, use the same flags with `git+ssh://git@github.com/Arginine-Arg/Feishu_bridge_arg.git#v1.22.0`.
 
 ### 4. Node or npm global-prefix errors
 
@@ -317,14 +317,15 @@ source histories. Repeating the command is idempotent only when the newest
 lineage head already matches the selected provider generation.
 
 With `--bridge <thread-id> --follow-current-provider`, Bridge keeps the same
-thread ID and full Codex resume state. It first verifies that no turn is active;
-if the thread is still loaded by the previous provider's App Server, exit that
-TUI and restart the profile to reclaim the idle host. Bridge then starts a
-provider-generation App Server whose scoped compatibility alias retains the
-thread's historical provider ID while endpoint, credentials, wire API and
-headers come from the current cc-switch provider. The model is updated to the
-current selection. The marker records `compatibilityProvider`, so repeating the
-command reconstructs the same host idempotently.
+thread ID and full Codex resume state. It first verifies that no turn is active.
+Bridge asks actual idle Bot subscribers to release the target and verifies the
+writer lock before resuming. Shared Servers continue serving other threads;
+only an exclusive idle orphan can be stopped. The provider-generation host uses
+current credentials and endpoint while retaining a scoped compatibility alias
+for the thread's historical provider ID. `--follow-current-provider` also applies
+the selected model at an idle boundary and verifies its effective value.
+Active turns or unreleased clients produce a PID/profile reason. The thread ID,
+history, frozen permissions and working directory are preserved.
 
 ### Mid-turn messages
 

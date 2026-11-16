@@ -54,6 +54,7 @@ export interface LiveSessionDiagnostics {
   lastInputAt?: number;
   lastOutputAt?: number;
   lastError?: string;
+  recovery?: ProviderRecoveryStatus;
   terminal?: {
     backend: 'tmux' | 'pty' | 'pipe';
     socketPath?: string;
@@ -64,7 +65,22 @@ export interface LiveSessionDiagnostics {
   };
 }
 
+export interface ProviderRecoveryStatus {
+  state: string;
+  lastActivityAt?: number;
+  lastEventAt?: number;
+  lastError?: string;
+  waitingReason?: string;
+  attempts: number;
+  budgetSeconds: number;
+  usedSeconds: number;
+  nextRecoveryAt?: number;
+  underlyingTurn: 'running' | 'terminal' | 'unknown';
+}
+
 export type AgentEvent =
+  | { type: 'pending'; message: string; taskId?: string }
+  | { type: 'recovery'; status: ProviderRecoveryStatus }
   | {
       type: 'system';
       sessionId?: string;

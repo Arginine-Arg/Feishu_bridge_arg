@@ -87,6 +87,17 @@ profile host. Missing owner sockets and multiple owners fail closed. This also
 allows a backend that is idle but kept loaded for Codex's default 30-minute
 unload interval to be reattached without deleting locks or killing processes.
 
+During an explicit `--follow-current-provider` change, Bridge coordinates the
+actual idle Bot subscribers through their private control sockets. Each releases
+its own subscription; a diagnostic connection cannot unsubscribe another client.
+Once the target writer lock is free, a shared Server can stay alive for its other
+threads. If an orphan still holds the writer, only an exclusive idle Server with
+no clients is eligible for targeted SIGTERM. Shared/active/unknown hosts remain
+intact. Codex may keep an unsubscribed writer for its idle retention interval;
+if that retained writer shares a Server, Bridge reports this boundary rather
+than killing other threads. Native leases serialize competing launches across profiles and clear on
+normal exit; dead-process leases are recoverable after abnormal exit.
+
 ### Network policy
 
 A profile may pin the network environment of agent children with
@@ -288,10 +299,10 @@ task. Write tasks require MixAgents and never use fork fallback. The vendored
 MixAgents Broker streams text deltas and safe tool
 lifecycle events through `events-v1`; terminal mailbox text/errors remain
 authoritative. Older Brokers fall back to heartbeat-only progress.
-`sideTimeoutMs` is a soft notice; each `workerTimeoutMs` wait window
-automatically continues until the worker terminates or `/btw out` is issued.
-`/btw result` recovers retained timeout state from interrupted or older runs by
-resuming the persisted cursor.
+`sideTimeoutMs` is a soft notice. A `workerTimeoutMs` wait window ends with
+pending/still-running status and retains the underlying task. It neither
+interrupts the worker nor automatically starts another wait window. `/btw result`
+performs the next bounded check using the saved cursor.
 Scope/cwd/route fingerprint are persisted so a Bridge restart can reconnect the
 same agent.
 Route/provider/model/backend/revision changes replace the old agent with an
@@ -321,83 +332,97 @@ References: [Codex App Server](https://developers.openai.com/codex/app-server),
 <a id="provider-recovery-1200"></a>
 <a id="provider-recovery-1190"></a>
 
-## Provider recovery (1.21.0)
+## Provider recovery (1.22.0)
 
-Codex structured main sessions continuously recover from recognized transient
-provider failures. This covers Feishu turns and native main-thread turns
-subscribed by the bot. Bridge preserves the thread, provider/model and permission
-policy, and sends exactly `continue` instead of replaying the original task.
-This `continue` is private Codex input: Bridge never emits it as an assistant
-text delta or a separate Feishu message.
+An explicit `error.willRetry=true` means Codex is still retrying its API request.
+Bridge records `provider_retrying` and lets that request finish. It never steers
+`continue` into an active retry, queues another turn, or interrupts a request
+because it is quiet. Thinking, tools, training, downloads and failed status
+queries are not proof of a failed turn.
 
-- An explicit `error.willRetry=true` starts same-turn `turn/steer` nudges. The
-  first nudge is immediate; subsequent nudges and state checks default to every
-  15 seconds. No recovery path interrupts an active turn. Codex's native
-  reconnect attempts remain available. A steer acknowledgement confirms input
-  acceptance, not that an arbitrary provider immediately reconnects.
-- Confirmed transient `failed` or retry-associated `interrupted` turns continue
-  after 5 seconds, following a fresh read of the latest turn and goal status.
-  A missing terminal notification is reconciled from the status poll. An
-  unavailable status read is retried without sending a new turn or consuming
-  a continuation attempt.
-- Continuous mode has no Bridge attempt limit. Real text, reasoning summaries
-  or tool activity stop the current nudges and reset consecutive failure
-  counts. Tools, pending approvals and unanswered questions are never bypassed.
-- `/recover off` disables Bridge recovery for this main conversation without
-  interrupting its running Codex turn. It also releases an idle relay waiting
-  to recover. An already submitted request can still be accepted, but no
-  additional continue is sent after off. `/recover on` enables future recovery
-  and resumes monitoring an active retry; it does not resurrect an old idle
-  task. `/recover status` reports the setting, provider match, current turn and
-  counters. The setting is stored per thread and survives bot restarts.
-- `/recover` targets the main thread even while `/btw` is open. Profile
-  `enabled` is the default for conversations without an override; a provider
-  allowlist remains binding when a conversation is enabled.
-- `/stop`, goal pause/clear, detachment and shutdown cancel pending recovery.
-  Only an explicit stop may interrupt its already submitted turn; bot restart
-  or observer teardown leaves accepted backend work running.
-  Turning recovery back on does not override a paused goal or revive the task
-  cancelled by `/stop`.
-- Authentication, quota, budget, context, sandbox and unknown failures surface
-  Codex's original error. A local App Server disconnection or an unknown
-  `turn/start` result is not blindly replayed. This cannot repair an API outage
-  or guarantee a shorter provider backoff.
-- On restart the bot subscribes only to an unambiguous already-loaded saved
-  main thread; it does not start dormant work. MixAgents `/btw`, Broker workers
-  and arbitrary terminal-only panes retain their own lifecycle.
+Only an authoritative `failed` terminal with a recognized transient API error
+can trigger a new `continue` turn in the same thread. Completed turns, user
+interruptions, paused goals, approval requests, authentication/quota/context
+errors and ambiguous connection losses do not authorize continuation. Prior
+prompts and tool calls are never replayed. No model/provider/effort switch is
+part of recovery. There is no verified App Server API that reconnects an active
+request without changing its lifecycle; sending steer input only adds history.
+Esc/interrupt also cancels a request that might still succeed. Local fault tests
+exercise native retries, explicit manual interrupt/continue and terminal
+continuation. In one deterministic one-second local outage, native retry took
+1.469 seconds (one turn/four requests); manual interrupt/continue took 1.624
+seconds (two turns/five requests). This small synthetic comparison does not
+measure a real provider's availability or guarantee lower outage latency.
 
-Use `arg-bridge settings --profile codex` to set the default and provider
-allowlist. In-chat `/recover` commands take effect immediately. Advanced profile
-JSON:
+The default budget is **one hour per continuous failure episode**, starting at
+the first recognized retry/failure. This is a time budget, not a three-attempt
+limit. Continuations use approximately 30/60/120 seconds of exponential backoff
+(capped), with 20% jitter and a supplied Retry-After taking precedence. A wait
+that would exceed the remaining budget requests human attention immediately.
+Changing turn ID, reconnecting, restarting the bot, heartbeats, repeated errors,
+small text fragments and polling output do not reset time or attempts. Only
+explicit new user work or an authoritative successful completed turn resets an
+episode. This is a transport success boundary, not a scientific success score.
+
+The per-CODEX_HOME/thread journal under `arg-bridge/recovery/` records the
+original deadline, one recovery owner, generation, epoch and operation IDs.
+A reservation is written before turn/start. A lost acknowledgement causes
+bounded read-only reconciliation, never a blind retry. A newly accepted turn
+can briefly have an empty interrupted placeholder, so reconciliation allows a
+short settling period and checks its first user item by client ID. Unknown
+outcomes remain `needs_attention`. Research transcripts are untouched.
+
+Monitoring prefers events. After explicit retry evidence, at most eight
+non-overlapping metadata queries back off from 60 seconds to five minutes.
+Each query has a ten-second deadline. No full long history is polled. The
+monitor ends pending/unknown when its bounded checks end. Budget expiry stops
+Bridge submissions, not healthy backend work. Status reports the underlying
+turn as running, terminal or unknown, separately from the monitoring state.
+Feishu/native status includes recent actual activity, recent event, original
+error, waiting reason, attempts, elapsed budget and next recovery time. Status
+and recovery input never become assistant answer text.
+
+`/recover off` disables Bridge recovery for this thread and preserves a legal
+running Codex turn. `/recover on` enables future recovery without resetting the
+hour, replaying a prior operation or reviving a stopped/paused task. Send an
+explicit new task to start a new budget. `/recover status` is read-only and
+reports these semantics. `/stop` cancels all queued recovery and explicitly
+stops the current task. User input, goal pause/clear, provider generation changes
+and teardown invalidate old callbacks; teardown alone leaves accepted work alive.
+
+Advanced profile configuration (settings also saves this policy):
 
 ```json
 {
   "codex": {
-    "binaryPath": "codex",
     "providerRecovery": {
+      "version": 2,
       "enabled": true,
-      "continuous": true,
       "providers": [],
+      "budgetSeconds": 3600,
       "maxAttempts": 0,
-      "delaySeconds": 5,
+      "delaySeconds": 30,
       "maxDelaySeconds": 120,
-      "retryStallSeconds": 15
+      "jitterRatio": 0.2,
+      "retryStallSeconds": 60,
+      "maxStatusChecks": 8,
+      "statusTimeoutSeconds": 10
     }
   }
 }
 ```
 
-`providers: []` allows all providers. `continuous: true` ignores legacy attempt
-limits. To opt into finite rounds, set `continuous: false` and a positive
-`maxAttempts` (1–100); zero means unlimited rounds. Finite mode sends up to three
-same-turn nudges and uses capped exponential backoff between terminal rounds.
-When its budget is exhausted, Bridge reports the last original Codex error
-without interrupting an active turn. Old default profiles with no `continuous`
-field and `maxAttempts: 3`, `delaySeconds: 30`, `retryStallSeconds: 60` migrate to
-continuous mode with 5/15-second delays; explicit finite settings are preserved.
-`retryStallSeconds: 0` disables periodic polling, leaving event-driven nudges and
-terminal continuation active. Positive polling intervals are bounded to
-5–600 seconds. No recovery setting enables early interruption.
+Zero maxAttempts means time is the limiting budget. A positive version-2 value
+adds an optional count limit. Budget can be explicitly extended up to 24 hours;
+it cannot be infinite. Old unversioned continuous=true/maxAttempts=0 defaults
+migrate to the one-hour policy, not user consent to endless retries. enabled=false
+and provider restrictions are preserved. retryStallSeconds=0 disables polling.
+
+Broker waits now return pending at their deadline, retain the worker/mailbox,
+and do not secretly chain infinite waits or interrupt long work. `/btw result`
+performs the next bounded check. `/btw out` is explicit cancellation. Agent
+instructions require task handles, checkpoints, real status and bounded waits;
+Bridge does not scan shell commands or kill arbitrary agent subprocesses.
 
 Structured Feishu replies use full-card snapshots at most every 400 ms during
 streaming, check actual PATCH responses, and force a final flush. They do not

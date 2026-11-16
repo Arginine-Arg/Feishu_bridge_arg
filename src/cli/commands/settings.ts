@@ -34,6 +34,7 @@ import {
 } from '../../agent/codex/provider';
 import { defaultCodexHome } from '../../agent/codex/credentials';
 import { resolveCurrentCcSwitchCodexProvider } from '../../integrations/cc-switch-provider';
+import { discoverProviderModels } from '../../integrations/provider-models';
 import {
   processAlive,
   readHostRegistry,
@@ -164,6 +165,7 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
   let readRoute = currentSubagents.readRoute;
   let selectedCcProvider = currentSubagents.ccSwitchProviderId;
   const providerOverrides = { ...currentSubagents.providerOverrides };
+  let providerPriority = currentSubagents.providerPriority ?? [];
   let selectedModelSummary = '(由 route/provider 决定)';
   let selectedReadRoute = readRoute;
   const routeMapState = await loadBrokerRouteMap(settingsEnv);
@@ -199,10 +201,11 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
     const followCurrent = '__follow_current__';
     const providerChoice = await p.select<string>({
       message: '子代理用哪个 cc-switch Codex provider？',
-      initialValue: selectedCcProvider && ccProviders.some(provider => provider.id === selectedCcProvider)
+      initialValue: providerPriority.length ? '__priority__' : selectedCcProvider && ccProviders.some(provider => provider.id === selectedCcProvider)
         ? selectedCcProvider
         : followCurrent,
       options: [
+        { value: '__priority__', label: '多个 provider，按优先级备用', hint: '自动读取模型列表；每个 provider 选择 1–2 个模型' },
         {
           value: followCurrent,
           label: '跟随当前 provider（推荐）',
@@ -224,6 +227,49 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
       ],
     });
     assertPrompt(providerChoice);
+    if (providerChoice === '__priority__') {
+      const selected = await p.multiselect<string>({ message: '选择子代理可用的 provider',
+        options: ccProviders.map(provider => ({ value: provider.id, label: provider.name })),
+        initialValues: providerPriority.map(target => target.providerId).filter(id => ccProviders.some(provider => provider.id === id)), required: true });
+      assertPrompt(selected);
+      if (selected.length > 16) throw new Error('最多选择 16 个 provider');
+      const remaining = [...selected];
+      const ordered: string[] = [];
+      while (remaining.length) {
+        const id = remaining.length === 1 ? remaining[0]! : await p.select<string>({
+          message: `第 ${ordered.length + 1} 优先使用哪个 provider？`,
+          options: remaining.map(value => ({ value, label: ccProviders.find(provider => provider.id === value)?.name ?? value })),
+        });
+        assertPrompt(id); ordered.push(id); remaining.splice(remaining.indexOf(id), 1);
+      }
+      providerPriority = [];
+      for (const providerId of ordered) {
+        const spinner = p.spinner(); spinner.start(`读取 ${ccProviders.find(provider => provider.id === providerId)?.name ?? providerId} 的模型列表`);
+        const resolved = await resolveCurrentCcSwitchCodexProvider({ env: settingsEnv, providerId });
+        let catalog: Awaited<ReturnType<typeof discoverProviderModels>>;
+        try { catalog = await discoverProviderModels(resolved, { env: settingsEnv }); }
+        finally { spinner.stop(); }
+        if (catalog.notice) p.note(catalog.notice, providerId);
+        let models: string[];
+        for (;;) {
+          const chosen = await p.multiselect<string>({ message: `${resolved.summary.name} 使用哪些模型？选 1–2 个`,
+            options: catalog.models.map(value => ({ value, label: value })),
+            initialValues: [providerOverrides[providerId]?.model ?? resolved.summary.model].filter((model): model is string => !!model && catalog.models.includes(model)), required: true });
+          assertPrompt(chosen);
+          if (chosen.length <= 2) { models = chosen; break; }
+          p.note('每个 provider 最多选择两个模型。', '请重新选择');
+        }
+        if (models.length === 2) {
+          const primary = await p.select<string>({ message: `${resolved.summary.name} 优先使用哪个模型？`, options: models.map(value => ({ value, label: value })) });
+          assertPrompt(primary); models = [primary, ...models.filter(model => model !== primary)];
+        }
+        providerPriority.push({ providerId, models });
+      }
+      selectedCcProvider = providerPriority[0]?.providerId ?? null;
+      selectedModelSummary = providerPriority.map((target, i) => `${i + 1}. ${target.providerId}: ${target.models.join(' → ')}`).join('\n');
+      p.note('新任务按顺序选择可用目录中的模型；明确失败的线路冷却两分钟。已有 worker 不自动复制任务到备用线路，避免重复工具操作。模型目录可用不等于推理请求一定成功。', '优先级路由');
+    } else {
+    providerPriority = [];
     selectedCcProvider = providerChoice === followCurrent ? null : providerChoice;
 
     const effectiveProviderId = selectedCcProvider ?? diagnostics.ccSwitch.currentProviderCodex;
@@ -239,6 +285,13 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
         configuredModels = resolved.summary.configuredModels ?? [resolved.summary.model];
         defaultModel = resolved.summary.model;
         defaultEffort = resolved.summary.reasoningEffort;
+        try {
+          const catalog = await discoverProviderModels(resolved, { env: settingsEnv });
+          configuredModels = catalog.models;
+          if (catalog.notice) p.note(catalog.notice, '模型检测');
+        } catch {
+          p.note('模型目录暂不可用，显示已有 cc-switch 配置；这不代表推理可用性已验证。', '模型检测');
+        }
       } catch {
         p.note('暂时无法读取该 provider 的模型配置；可以跟随默认值或手填模型 ID。', '模型配置');
       }
@@ -291,6 +344,7 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
         value: { model, reasoningEffort: effort }, enumerable: true, configurable: true, writable: true,
       });
       selectedModelSummary = `${effectiveProviderId}: model=${model ?? '(跟随 provider)'} reasoning=${effort}`;
+    }
     }
 
     routeMode = 'follow-cc-switch';
@@ -503,7 +557,7 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
     assertPrompt(concurrencyText);
     maxConcurrentWorkers = boundedIntegerInput(concurrencyText, 1, 32, '最大并发子代理数');
     const timeoutText = await p.text({
-      message: '单个 worker 等待窗口（分钟；/btw 会自动续等）',
+      message: '单个 worker 等待窗口（分钟；超时返回仍在运行）',
       initialValue: String(workerTimeoutMs / 60_000),
     });
     assertPrompt(timeoutText);
@@ -663,7 +717,7 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
         ? '强制原生'
         : '关闭'}`,
     `/btw：备用 reasoning=${sideReasoningEffort} fast-notice=${sideTimeoutMs / 1_000}s；` +
-    `每 ${workerTimeoutMs / 60_000} 分钟等待窗口自动续等；/btw out 取消，/btw result 用于异常恢复`,
+    `等待窗口 ${workerTimeoutMs / 60_000} 分钟；超时返回仍在运行，/btw result 查询，/btw out 取消`,
     `项目证据校验：${rsiMode === 'off' ? '关闭' : '自动（只对已初始化项目）'}`,
     advanced ? '高级参数：已展开编辑' : '高级参数：保持原值',
   ].join('\n'), '步骤 5 / 5 · 保存前确认');
@@ -674,7 +728,7 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
       message: '主会话遇到临时 API 错误后自动继续？',
       initialValue: !providerRecovery.enabled ? 'off' : providerRecovery.providers.length ? 'selected' : 'all',
       options: [
-        { value: 'all', label: '所有 provider（推荐）', hint: '持续发送 continue；可在会话中用 /recover off 关闭' },
+        { value: 'all', label: '所有 provider（推荐）', hint: '终止失败后退避恢复；故障预算一小时，/recover off 关闭' },
         { value: 'selected', label: '仅选定 provider' },
         { value: 'off', label: '关闭自动继续' },
       ],
@@ -694,11 +748,11 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
     providerRecovery = {
       ...providerRecovery,
       enabled: mode !== 'off',
-      continuous: true,
-      maxAttempts: 0,
+      version: 2,
+      continuous: false,
       providers: mode === 'all' ? [] : providers,
     };
-    p.note(`自动恢复：${providerRecovery.enabled ? '持续开启' : '关闭'}；活动重连每 ${providerRecovery.retryStallSeconds} 秒发送 continue。` +
+    p.note(`自动恢复：${providerRecovery.enabled ? '开启' : '关闭'}；故障预算 ${providerRecovery.budgetSeconds / 60} 分钟。活动重连只读观察，不注入 continue。` +
       `当前会话可用 /recover off/on/status 控制；/stop 会停止当前任务。`, '主会话恢复');
   }
   const save = await p.confirm({
@@ -754,6 +808,7 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
           ? selectedCcProvider
           : currentSubagents.ccSwitchProviderId ?? null,
         providerOverrides,
+        providerPriority,
         readRoute,
         writeRoute: routeMode === 'manual' ? writeRoute : null,
         modelTools,

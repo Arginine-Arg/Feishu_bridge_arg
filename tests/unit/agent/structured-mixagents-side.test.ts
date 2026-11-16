@@ -1082,7 +1082,7 @@ describe('structured MixAgents /btw', () => {
     await rm(profileDir, { recursive: true, force: true });
   });
 
-  it('automatically continues across wait windows and returns the late result', async () => {
+  it('returns pending at one wait deadline and collects a late result only on the next query', async () => {
     const profileDir = await mkdtemp(join(tmpdir(), 'arg-bridge-side-timeout-'));
     const backend = new FakeBackend(() => routeA);
     backend.waitProgress = [
@@ -1125,10 +1125,12 @@ describe('structured MixAgents /btw', () => {
     }));
     expect(events.filter(event => event.type === 'error')).toEqual([]);
     expect(events).toContainEqual(expect.objectContaining({
-      type: 'text',
-      delta: expect.stringContaining('自动继续等待'),
+      type: 'pending',
+      message: expect.stringContaining('仍在后台运行'),
     }));
-    expect(events).toContainEqual(expect.objectContaining({
+    expect(backend.waitCursors).toEqual([0]);
+    const later = await drain(adapter.runSide({ runId: 'query', scopeId: 'scope', cwd: '/workspace', prompt: '/btw result', liveInputMode: 'side' }));
+    expect(later).toContainEqual(expect.objectContaining({
       type: 'text',
       delta: expect.stringContaining('late result'),
     }));

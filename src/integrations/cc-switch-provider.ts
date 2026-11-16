@@ -21,6 +21,7 @@ import type {
 import { validSubagentModel } from '../config/profile-schema';
 import { spawnProcess } from '../platform/spawn';
 import { writeFileAtomic } from '../platform/atomic-write';
+import { discoverProviderModels } from './provider-models';
 
 const DEFAULT_CODEX_ENV_KEY = 'OPENAI_API_KEY';
 const MAX_DB_ROW_BYTES = 8 * 1024 * 1024;
@@ -90,6 +91,7 @@ export interface ResolvedCcSwitchProvider {
 }
 
 export interface CcSwitchBrokerRuntime {
+  healthFile?: string;
   summary: CcSwitchProviderSummary;
   route: SubagentRoute;
   credentials: Record<string, string>;
@@ -104,6 +106,7 @@ export interface CcSwitchBrokerRuntime {
 }
 
 export interface CcSwitchRuntimePolicy {
+  providerPriority?: Array<{ providerId: string; models: string[] }>;
   role: 'side' | 'worker' | 'reviewer';
   webSearch: SubagentWebSearchMode;
   sideReasoningEffort?: SubagentReasoningEffort;
@@ -366,6 +369,38 @@ export async function materializeCcSwitchBrokerRuntime(input: {
   stateDir: string;
   runtimePolicy?: CcSwitchRuntimePolicy;
 }): Promise<CcSwitchBrokerRuntime> {
+  const priority = input.runtimePolicy?.providerPriority;
+  if (priority?.length) {
+    const signal = AbortSignal.timeout(30_000);
+    const unavailable: string[] = [];
+    for (const target of priority) {
+      if (signal.aborted) break;
+      try {
+        const provider = await resolveCurrentCcSwitchCodexProvider({ ...input, providerId: target.providerId });
+        const catalog = await discoverProviderModels(provider, { env: input.env, signal });
+        for (const model of target.models) {
+          if (!catalog.models.includes(model)) { unavailable.push(`${target.providerId}/${model}: 未列入模型目录`); continue; }
+          const key = createHash('sha256').update(`${provider.summary.configFingerprint}:${model}`).digest('hex');
+          const healthFile = join(input.stateDir, 'route-health', `${key}.json`);
+          try {
+            const health = JSON.parse(await readFile(healthFile, 'utf8'));
+            if (typeof health.retryAt === 'number' && health.retryAt > Date.now()) { unavailable.push(`${target.providerId}/${model}: 冷却中`); continue; }
+          } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+          const generated = await materializeCcSwitchBrokerRuntime({ ...input, providerId: target.providerId,
+            runtimePolicy: { ...input.runtimePolicy!, providerPriority: [], providerOverrides: {
+              ...input.runtimePolicy?.providerOverrides,
+              [target.providerId]: { model, reasoningEffort: input.runtimePolicy?.providerOverrides?.[target.providerId]?.reasoningEffort ?? 'inherit' },
+            } } });
+          generated.route.selectionReason = `优先级 ${priority.indexOf(target) + 1}: ${target.providerId}/${model}`;
+          generated.healthFile = healthFile;
+          return generated;
+        }
+      } catch (error) {
+        unavailable.push(`${target.providerId}: ${error instanceof CcSwitchProviderError ? error.code : '模型目录暂不可用'}`);
+      }
+    }
+    throw new CcSwitchProviderError('config-invalid', `所选 subagent provider/model 均不可用：${unavailable.join('；') || '探测超时'}`);
+  }
   const resolved = await resolveCurrentCcSwitchCodexProvider(input);
   const summary = resolved.summary;
   if (summary.credential.status === 'oauth-only') {

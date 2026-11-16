@@ -5,8 +5,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
-import { findLoadedThreadHost } from '../../../src/agent/structured/native-bridge';
-import { recordHost } from '../../../src/agent/structured/host-registry';
+import {
+  findLoadedThreadHost,
+  reclaimIdleThreadHost,
+} from '../../../src/agent/structured/native-bridge';
+import { processAlive, recordHost } from '../../../src/agent/structured/host-registry';
 
 const require = createRequire(import.meta.url);
 const children: ChildProcess[] = [];
@@ -92,11 +95,17 @@ linuxIt('follows the writer-lock owner instead of a different host that can read
   expect(host?.endpoint).toBe(`unix://${ownerSocket}`);
   const resumed = await host!.rpc.request('thread/resume', { threadId });
   expect(resumed.thread.id).toBe(threadId);
-  host!.rpc.close();
+  await reclaimIdleThreadHost(profileDir, host!, threadId);
+  expect(processAlive(owner.pid!)).toBe(false);
 
   const ownerMethods = await readCalls(ownerCalls);
-  expect(ownerMethods).toEqual(expect.arrayContaining(['initialize', 'thread/loaded/list', 'thread/resume']));
-  expect(ownerMethods).not.toContain('thread/read');
+  expect(ownerMethods).toEqual(expect.arrayContaining([
+    'initialize',
+    'thread/loaded/list',
+    'thread/resume',
+    'thread/read',
+  ]));
+  expect(ownerMethods).not.toContain('thread/unsubscribe');
   await expect(readCalls(decoyCalls)).rejects.toMatchObject({ code: 'ENOENT' });
 });
 

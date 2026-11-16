@@ -116,6 +116,8 @@ export interface SubagentMixAgentsConfig {
 }
 
 export interface SubagentConfig {
+  /** Ordered provider/model candidates for new workers. Credentials stay in cc-switch. */
+  providerPriority?: Array<{ providerId: string; models: string[] }>;
   enabled: boolean;
   mode: SubagentMode;
   routeMode: SubagentRouteMode;
@@ -454,6 +456,7 @@ export const DEFAULT_SUBAGENT_CONFIG: SubagentConfig = {
   routeMode: 'follow-cc-switch',
   ccSwitchProviderId: null,
   providerOverrides: {},
+  providerPriority: [],
   readRoute: null,
   writeRoute: null,
   modelTools: true,
@@ -530,6 +533,7 @@ function normalizeSubagents(input: unknown): SubagentConfig {
     routeMode,
     ccSwitchProviderId: ccSwitchProviderId(raw.ccSwitchProviderId),
     providerOverrides: normalizeProviderOverrides(raw.providerOverrides),
+    providerPriority: normalizeProviderPriority(raw.providerPriority),
     readRoute: nonEmptyString(raw.readRoute) ?? null,
     writeRoute: nonEmptyString(raw.writeRoute) ?? null,
     modelTools: raw.modelTools !== false,
@@ -548,6 +552,19 @@ function normalizeSubagents(input: unknown): SubagentConfig {
     allowForkFallback: raw.allowForkFallback !== false,
     ...(mixagents && Object.keys(mixagents).length > 0 ? { mixagents } : {}),
   };
+}
+
+function normalizeProviderPriority(value: unknown): Array<{ providerId: string; models: string[] }> {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 16) throw new Error('subagents.providerPriority must contain at most 16 providers');
+  const seen = new Set<string>();
+  return value.map(entry => {
+    if (!isRecord(entry) || !ccSwitchProviderId(entry.providerId) || seen.has(String(entry.providerId))) throw new Error('Invalid/duplicate priority provider');
+    const models = stringArray(entry.models);
+    if (models.length < 1 || models.length > 2 || models.some(model => !validSubagentModel(model)) || new Set(models).size !== models.length) throw new Error('Each priority provider requires one or two distinct model IDs');
+    seen.add(String(entry.providerId));
+    return { providerId: String(entry.providerId), models };
+  });
 }
 
 function normalizeSideReasoningEffort(

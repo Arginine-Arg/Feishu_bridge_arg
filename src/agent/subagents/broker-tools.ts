@@ -176,6 +176,8 @@ export class BrokerToolController implements BrokerToolHost {
       `- Delegate through the dynamic tools in the "${namespace}" namespace. Native Codex collaboration tools are not the authoritative delegation path for this Bridge thread.`,
       `- Use ${namespace}.spawn_agent to create independent workers, ${namespace}.followup_task to send a new task to an existing worker, and ${namespace}.wait_agent to collect its result mailbox.`,
       '- Do not report delegated work as complete until wait_agent has returned the relevant worker result or an explicit terminal status.',
+      '- For long training, downloads and experiments, keep a task/process handle, checkpoints and a concrete next status check. Use bounded waits with a deadline and cancellation. A wait timeout means pending/still running; do not restart work or declare the task failed.',
+      '- Do not create unbounded shell loops that print timestamps, repeated status or sleep to manufacture progress. Query real task status, return pending at the deadline, and preserve explicitly requested long-running experiments and services.',
       `- Use ${namespace}.list_agents / ${namespace}.interrupt_agent / ${namespace}.close_agent to inspect or stop workers, and ${namespace}.list_routes before choosing a non-default route.`,
       '- Task text passed to spawn_agent or followup_task is delivered as ordinary user input. Do not depend on native agent_message, encrypted_content, or a Codex child thread.',
       `- ${namespace}.send_message is queue-only: it stores plaintext locally and returns without waking the worker. The next ${namespace}.followup_task delivers the queued text and the new task together.`,
@@ -501,6 +503,11 @@ export class BrokerToolController implements BrokerToolHost {
           combined,
           requestedTimeout,
         );
+        if (result.status === 'timeout') {
+          return { logical_path: target.logicalPath, agent_id: target.agent.agentId,
+            status: 'pending', underlying_status: 'unknown',
+            message: 'Wait deadline reached; worker retained. Query real status with wait_agent/list_agents; do not restart the task.' };
+        }
         this.applyResult(target, result);
         this.options.onEvent?.(
           result.status === 'completed' ? 'worker_completed' : 'worker_failed',
@@ -523,13 +530,12 @@ export class BrokerToolController implements BrokerToolHost {
           };
         }
         if (combined.aborted) {
-          target.agent.status = 'timeout';
-          target.error = 'wait_agent timed out or was aborted';
           return {
             logical_path: target.logicalPath,
             agent_id: target.agent.agentId,
-            status: 'timeout',
-            error: target.error,
+            status: signal.aborted ? 'cancelled' : 'pending',
+            underlying_status: 'unknown',
+            message: 'Wait ended; worker retained, no interrupt or resubmission.',
           };
         }
         throw error;
@@ -736,8 +742,7 @@ export class BrokerToolController implements BrokerToolHost {
         const elapsed = Math.max(0, Date.now() - worker.updatedAt);
         const remaining = config.workerTimeoutMs - elapsed;
         if (remaining <= 0) {
-          worker.agent.status = 'timeout';
-          worker.error = `worker timed out while Bridge was disconnected`;
+          worker.error = 'Wait window elapsed while Bridge was disconnected; underlying task retained, query status.';
           worker.updatedAt = Date.now();
           continue;
         }
@@ -821,13 +826,8 @@ export class BrokerToolController implements BrokerToolHost {
         record.agent.status !== 'running' &&
         record.agent.status !== 'starting'
       ) return;
-      void (record.backend ?? this.backend)
-        ?.interrupt(record.agent, AbortSignal.timeout(30_000))
-        .catch(() => {});
-      record.agent.status = 'timeout';
-      record.error = `worker timed out after ${config.workerTimeoutMs}ms`;
+      record.error = `Wait window elapsed after ${config.workerTimeoutMs}ms; underlying task retained, query status.`;
       record.updatedAt = Date.now();
-      this.options.onEvent?.('worker_failed', projectWorker(record));
       void this.persist();
     }, delayMs);
     timer.unref?.();
@@ -999,7 +999,7 @@ export function brokerToolSpecs(
       {
         type: 'function',
         name: 'wait_agent',
-        description: 'Collect one or more worker result mailboxes.',
+        description: 'Collect worker mailboxes within a bounded wait. Deadline returns pending and retains the worker; cancellation ends this wait without restarting work. Use real task status, handles and checkpoints; do not make infinite timestamp/sleep polling loops.',
         inputSchema: {
           type: 'object',
           properties: {

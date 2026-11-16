@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { mkdir, open, readFile, readdir } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { mkdir, open, readFile, readdir, realpath } from 'node:fs/promises';
+import { basename, dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { ProfileConfig, SubagentConfig } from '../../config/profile-schema';
 import { loadRootConfig } from '../../config/profile-store';
@@ -34,15 +34,24 @@ import {
 import { connectCodexHost } from './host';
 import {
   fingerprintCredentialEnv,
+  findSocketHolders,
   fileStamp,
+  forgetHost,
   processAlive,
   codexHostRuntimeDirectory,
   dropOwner,
   readHostRegistry,
+  waitForIdleSocket,
 } from './host-registry';
 import { RpcClient, type Wire } from './rpc';
 import { resolveAppServerSocketPath } from './socket-security';
 import { discoverCodexThreadWriterOwners } from './thread-owner';
+import {
+  acquireNativeThreadLease,
+  registerThreadHandoffClient,
+  releaseThreadHandoffClients,
+  withHostConnectionLock,
+} from './thread-handoff';
 
 const MAX_HANDOFF_CHARS = 48_000;
 const THREAD_HISTORY_PAGE_SIZE = 20;
@@ -206,6 +215,52 @@ export function resolveFollowCurrentProviderSelection(
 export async function createNativeBridgeSession(
   input: NativeBridgeSessionOptions,
 ): Promise<NativeBridgeSession> {
+  const codexHome = input.codexHome ?? defaultCodexHome(input.env ?? process.env);
+  if (!codexHome) throw new Error('无法确定 Codex home；未启动 native writer');
+  const leases: Array<Awaited<ReturnType<typeof acquireNativeThreadLease>>> = [];
+  const leased = new Set<string>();
+  const claim = async (id: string) => {
+    if (leased.has(id)) return;
+    leases.push(await acquireNativeThreadLease(codexHome, id, input.profileName)); leased.add(id);
+  };
+  let bridge: NativeBridgeSession | undefined;
+  let unregister: (() => Promise<void>) | undefined;
+  try {
+    if (input.threadId?.trim()) await claim(input.threadId.trim());
+    if (input.adoptThreadId?.trim()) {
+      await claim(`adopt:${input.adoptThreadId.trim()}`);
+      const head = await findLatestAdoptedThreadMarker(join(input.profileDir, 'structured', 'broker-threads.json'), input.adoptThreadId.trim(), input.config.subagents?.toolNamespace || DEFAULT_BROKER_TOOL_NAMESPACE);
+      if (head) await claim(head.threadId);
+    }
+    bridge = await createNativeBridgeSessionInternal(input);
+    await claim(bridge.threadId);
+    unregister = await registerThreadHandoffClient({
+      codexHome,
+      threadId: bridge.threadId,
+      endpoint: bridge.endpoint,
+      profile: input.profileName,
+      inspect: async () => { throw new Error('native 控制连接仍在使用该 thread'); },
+      release: async () => {},
+    });
+    for (const lease of leases) await lease.attached();
+    const close = bridge.close;
+    let closing: Promise<void> | undefined;
+    bridge.close = () => closing ??= (async () => {
+      try { await unregister?.(); await close(); }
+      finally { for (const lease of leases) await lease.release(); }
+    })();
+    return bridge;
+  } catch (error) {
+    await unregister?.();
+    await bridge?.close();
+    for (const lease of leases) await lease.release();
+    throw error;
+  }
+}
+
+async function createNativeBridgeSessionInternal(
+  input: NativeBridgeSessionOptions,
+): Promise<NativeBridgeSession> {
   if (input.adoptThreadId && input.threadId) {
     throw new Error('--adopt and a positional thread cannot be used together');
   }
@@ -309,18 +364,10 @@ export async function createNativeBridgeSession(
     loadedThreadHost &&
     loadedThreadHost.directory !== nativeHostDirectory
   ) {
-    try {
-      await assertIdleThread(
-        loadedThreadHost.rpc,
-        existingThread!,
-        '--bridge <thread-id> --follow-current-provider',
-      );
-    } finally {
-      loadedThreadHost.rpc.close();
-    }
-    throw new Error(
-      `thread ${existingThread} 仍由旧 provider 的 App Server 持有；` +
-        '请先退出该 native TUI，并运行 arg-bridge restart --profile <profile> 回收空闲 App Server 后重试。',
+    await reclaimIdleThreadHost(
+      input.profileDir,
+      loadedThreadHost,
+      existingThread!,
     );
   }
   let host = loadedThreadHost?.directory === nativeHostDirectory
@@ -366,6 +413,7 @@ export async function createNativeBridgeSession(
   let providerRebound = false;
   let controller: BrokerToolController | undefined;
   let session: CodexStructuredSession | undefined;
+  let sessionCwd = input.cwd;
   const owned = ownsHost;
 
   const close = async (): Promise<void> => {
@@ -396,7 +444,6 @@ export async function createNativeBridgeSession(
         {
           threadId: existingThread,
           excludeTurns: true,
-          cwd: input.cwd,
           ...(providerSelection ? {
             modelProvider: providerCompatibility?.resumeProvider
               ?? providerSelection.modelProvider,
@@ -421,29 +468,15 @@ export async function createNativeBridgeSession(
             `实际 ${resumedThreadId || '(missing)'}`,
         );
       }
+      markerThreadId = existingThread;
+      if (typeof resumed.cwd === 'string' && resumed.cwd) sessionCwd = resumed.cwd;
+      else if (typeof resumed.thread?.cwd === 'string' && resumed.thread.cwd) sessionCwd = resumed.thread.cwd;
       if (providerSelection) {
         const expectedProvider = providerCompatibility?.resumeProvider
           ?? providerSelection.modelProvider;
-        const resumedProvider = typeof resumed.thread?.modelProvider === 'string'
-          ? resumed.thread.modelProvider
-          : typeof resumed.modelProvider === 'string'
-            ? resumed.modelProvider
-            : '';
-        const resumedModel = typeof resumed.thread?.model === 'string'
-          ? resumed.thread.model
-          : typeof resumed.model === 'string'
-            ? resumed.model
-            : '';
-        if (
-          resumedProvider !== expectedProvider ||
-          resumedModel !== providerSelection.model
-        ) {
-          throw new Error(
-            `provider rebind 后的 thread provider/model 不匹配：` +
-              `期望 ${expectedProvider}/${providerSelection.model}，` +
-              `实际 ${resumedProvider || '(missing)'}/${resumedModel || '(missing)'}`,
-          );
-        }
+        await verifyNativeProviderSelection(rpc, existingThread, resumed, {
+          modelProvider: expectedProvider, model: providerSelection.model,
+        });
       }
       markerThreadId = existingThread;
       mode = adoptedMarker ? 'adopted' : 'attached';
@@ -555,20 +588,22 @@ export async function createNativeBridgeSession(
           ? { parentProviderId: prepared.runtimeIdentity.ccSwitchProviderId }
           : {}),
         ...(current.ccSwitchProviderId ? { providerId: current.ccSwitchProviderId } : {}),
-        cwd: input.cwd,
+        cwd: sessionCwd,
         codexBin: input.binary,
         stateDir: join(input.profileDir, 'structured'),
+        runtimePolicy: { role: 'worker', webSearch: current.webSearch, sideReasoningEffort: current.sideReasoningEffort, providerOverrides: current.providerOverrides, providerPriority: current.providerPriority },
       });
       return {
         brokerConfigPath: generated.brokerConfigPath,
         credentials: generated.credentials,
         fingerprint: generated.fingerprint,
         route: generated.route,
+        healthFile: generated.healthFile,
       };
     };
     controller = new BrokerToolController({
       threadId: markerThreadId,
-      cwd: input.cwd,
+      cwd: sessionCwd,
       scope: `native-bridge:${input.profileName}:${markerThreadId}`,
       stateFile: join(
         input.profileDir,
@@ -605,7 +640,7 @@ export async function createNativeBridgeSession(
       ...(providerSelection ? { providerSelection } : {}),
       endpoint,
       env,
-      cwd: input.cwd,
+      cwd: sessionCwd,
       markerPath,
       ownsHost: owned,
       controller,
@@ -615,6 +650,32 @@ export async function createNativeBridgeSession(
   } catch (error) {
     await close();
     throw error;
+  }
+}
+
+/** Resume's top-level identity is effective; nested thread metadata can be historical. */
+export async function verifyNativeProviderSelection(
+  rpc: RpcClient,
+  threadId: string,
+  resumed: Wire,
+  expected: { modelProvider: string; model: string },
+): Promise<void> {
+  const provider = typeof resumed.modelProvider === 'string' ? resumed.modelProvider : resumed.thread?.modelProvider;
+  let model = typeof resumed.model === 'string' ? resumed.model : resumed.thread?.model;
+  if (provider === expected.modelProvider && model !== expected.model) {
+    // Codex can reuse an already-loaded thread and ignore model on resume.
+    // Apply only the explicitly requested model at a proved idle boundary.
+    await assertIdleThread(rpc, threadId, '--follow-current-provider model update');
+    let updateError: unknown;
+    try { await rpc.request('thread/settings/update', { threadId, model: expected.model }, 10_000); }
+    catch (error) { updateError = error; }
+    const snapshot = await rpc.request('thread/read', { threadId, includeTurns: false }, 10_000);
+    if (snapshot.thread?.status?.type !== 'idle') throw new Error(`thread ${threadId} 在模型切换期间开始工作；请检查当前线程状态`);
+    model = snapshot.thread?.model;
+    if (model !== expected.model && updateError) throw updateError;
+  }
+  if (provider !== expected.modelProvider || model !== expected.model) {
+    throw new Error(`provider rebind 后的 thread provider/model 不匹配：期望 ${expected.modelProvider}/${expected.model}，实际 ${provider ?? '(missing)'}/${model ?? '(missing)'}；thread=${threadId}，未启动 TUI`);
   }
 }
 
@@ -1123,6 +1184,9 @@ async function assertIdleThread(
       `thread ${threadId} 仍有活动 turn；不能在运行中执行 ${operation}，请等当前 turn 完成`,
     );
   }
+  if (!['idle', 'notLoaded'].includes(thread?.status?.type)) {
+    throw new Error(`thread ${threadId} 未确认空闲（status=${thread?.status?.type ?? 'unknown'}）；未执行 ${operation}`);
+  }
 }
 
 async function buildProviderCompatibilityConfig(
@@ -1260,17 +1324,123 @@ async function findThreadRolloutFile(
   return undefined;
 }
 
+export interface LoadedThreadHost {
+  rpc: RpcClient;
+  endpoint: string;
+  directory: string;
+  /** Direct writer-lock holders discovered from `/proc/locks` on Linux. */
+  ownerPids?: number[];
+}
+
+/**
+ * Release an idle thread from an old provider host before the current
+ * provider generation resumes it. Codex may retain an idle runtime and its
+ * writer lock for an extended period after the native TUI disconnects, while
+ * the App Server itself is no longer serving any client.
+ */
+export async function reclaimIdleThreadHost(
+  profileDir: string,
+  host: LoadedThreadHost,
+  threadId: string,
+): Promise<void> {
+  const codexHome = host.rpc.codexHome;
+  const registrations = await readHostRegistry(profileDir);
+  const registered = registrations.find(item => item.directory === host.directory);
+  const context = `thread ${threadId}, writer PID ${(host.ownerPids ?? []).join(', ') || 'unknown'}, profile=${registered ? basename(profileDir) : 'unknown'}, endpoint=${host.endpoint}`;
+  const owner = () => codexHome ? discoverCodexThreadWriterOwners(codexHome, threadId) : undefined;
+  const unlocked = () => process.platform === 'linux' && owner()?.pids.length === 0;
+  try {
+    if (!codexHome) throw new Error('无法核实 Codex home，未启动竞争 writer');
+    await assertIdleThread(host.rpc, threadId, 'provider 交接');
+    // Address the real Bot/relay RPC connections, not this read-only probe.
+    await releaseThreadHandoffClients(codexHome, threadId, host.endpoint);
+    for (let check = 0; check < 10; check += 1) {
+      if (unlocked()) return;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    // Retained idle runtimes (including pre-upgrade hosts) may keep the writer
+    // even without subscribers. A shared host is never terminated.
+    await assertIdleThread(host.rpc, threadId, 'provider 交接');
+    const loaded = await listLoadedThreadIds(host.rpc);
+    if (loaded.some(id => id !== threadId)) {
+      throw new Error(`目标 writer 尚未释放，旧 Server 还加载其他线程：${loaded.filter(id => id !== threadId).join(', ')}；保留共享 Server`);
+    }
+    if (!loaded.includes(threadId)) {
+      if (unlocked()) return;
+      throw new Error('旧 Server 未报告目标线程，writer 归属未确认');
+    }
+    // A fresh connection's unsubscribe would only affect itself. Closing the
+    // probe lets /proc distinguish a retained runtime from actual clients.
+    await assertIdleThread(host.rpc, threadId, 'provider 交接');
+    host.rpc.close();
+    const socketPath = host.endpoint.slice('unix://'.length);
+    await withHostConnectionLock(socketPath, async () => {
+      if (unlocked()) return;
+      if (process.platform !== 'linux' || !await waitForIdleSocket(host.directory, 2_500, socketPath)) {
+        throw new Error('旧 Server 仍有未释放的客户端连接（可能是 native TUI 或旧版 Bot）；未终止 Server');
+      }
+      const current = owner();
+      const expected = host.ownerPids ?? [];
+      if (!current?.pids.length || !expected.length || current.pids.some(pid => !expected.includes(pid))) {
+        if (unlocked()) return;
+        throw new Error('writer PID 已变化或未能重新确认，未向进程发送信号');
+      }
+      // Only signal the confirmed idle server/writer processes, never a
+      // process group or another thread's host. No forced SIGKILL escalation.
+      const holders = findSocketHolders(host.directory, socketPath);
+      const pids = [...new Set([...current.pids, ...holders])];
+      for (const pid of pids) {
+        try { process.kill(pid, 'SIGTERM'); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
+      }
+      const deadline = Date.now() + 5_000;
+      while (Date.now() < deadline && (!unlocked() || pids.some(processAlive))) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      if (!unlocked() || pids.some(processAlive)) throw new Error(`旧空闲 Server 尚未确认退出（PID ${pids.filter(processAlive).join(', ')}）；交接未完成，可安全重试`);
+      if (registered && !processAlive(registered.pid)) await forgetHost(profileDir, host.directory);
+      log.info('agent', 'provider-host-idle-handoff', { threadId, pids, directory: host.directory });
+    });
+    if (!unlocked()) throw new Error('writer 锁尚未释放，未启动新 writer');
+  } catch (error) {
+    throw new Error(`provider 自动交接失败（${context}）：${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    host.rpc.close();
+  }
+}
+
+async function listLoadedThreadIds(rpc: RpcClient): Promise<string[]> {
+  const ids: string[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < 20; page += 1) {
+    const result = await rpc.request('thread/loaded/list', { limit: 100, ...(cursor ? { cursor } : {}) }, 10_000);
+    if (!Array.isArray(result.data) || result.data.some((id: unknown) => typeof id !== 'string')) throw new Error('loaded/list 响应不完整');
+    ids.push(...result.data);
+    if (!result.nextCursor) return ids;
+    if (result.nextCursor === cursor) break;
+    cursor = result.nextCursor;
+  }
+  throw new Error('loaded/list 分页未完成，未猜测独占所有权');
+}
+
 export async function findLoadedThreadHost(
   profileDir: string,
   threadId: string | undefined,
   env: NodeJS.ProcessEnv,
-): Promise<{ rpc: RpcClient; endpoint: string; directory: string } | undefined> {
+): Promise<LoadedThreadHost | undefined> {
   if (!threadId) return undefined;
   const codexHome = env.CODEX_HOME ?? defaultCodexHome(env);
   const owner = codexHome
     ? discoverCodexThreadWriterOwners(codexHome, threadId)
     : { pids: [], endpoints: [] };
   const registry = (await readHostRegistry(profileDir)).filter(host => processAlive(host.pid));
+  const locateRegistration = async (host: LoadedThreadHost): Promise<LoadedThreadHost> => {
+    for (const registration of registry) {
+      const socket = await realpath(join(registration.directory, 'server.sock')).catch(() => undefined);
+      if (socket && `unix://${socket}` === host.endpoint) return { ...host, directory: registration.directory };
+    }
+    return host;
+  };
 
   // The writer lock is the authoritative ownership signal. A different
   // App Server sharing CODEX_HOME can read this thread's JSONL history, so
@@ -1288,7 +1458,7 @@ export async function findLoadedThreadHost(
       endpoints: owner.endpoints,
     });
     const loaded = await probeLoadedEndpoints(owner.endpoints, threadId, env);
-    if (loaded.length === 1) return loaded[0];
+    if (loaded.length === 1) return locateRegistration({ ...loaded[0]!, ownerPids: owner.pids });
     if (loaded.length > 1) {
       throw new Error(
         `thread ${threadId} 同时出现在多个 writer-owner endpoint；所有权不明确，已拒绝创建竞争 writer。`,
@@ -1314,15 +1484,15 @@ export async function findLoadedThreadHost(
       `thread ${threadId} 同时被多个注册后台报告为已加载；所有权不明确，已拒绝创建竞争 writer。`,
     );
   }
-  return loaded[0];
+  return loaded[0] ? locateRegistration(loaded[0]) : undefined;
 }
 
 async function probeLoadedEndpoints(
   socketPaths: readonly string[],
   threadId: string,
   env: NodeJS.ProcessEnv,
-): Promise<Array<{ rpc: RpcClient; endpoint: string; directory: string }>> {
-  const loaded: Array<{ rpc: RpcClient; endpoint: string; directory: string }> = [];
+): Promise<Array<Omit<LoadedThreadHost, 'ownerPids'>>> {
+  const loaded: Array<Omit<LoadedThreadHost, 'ownerPids'>> = [];
   const seen = new Set<string>();
   for (const candidate of socketPaths) {
     let socketPath: string;
@@ -1339,8 +1509,8 @@ async function probeLoadedEndpoints(
         codexHome: env.CODEX_HOME,
       });
       await rpc.initialize();
-      const result = await rpc.request('thread/loaded/list', {});
-      if (Array.isArray(result.data) && result.data.includes(threadId)) {
+      const ids = await listLoadedThreadIds(rpc);
+      if (ids.includes(threadId)) {
         loaded.push({
           rpc,
           endpoint: `unix://${socketPath}`,
