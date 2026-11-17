@@ -10,7 +10,6 @@ import {
 import {
   DEFAULT_RSI_CONFIG,
   DEFAULT_SUBAGENT_CONFIG,
-  validSubagentModel,
   type RsiConfig,
   type SubagentConfig,
   type SubagentMode,
@@ -113,7 +112,6 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
       ).join('\n')
     : '(cc-switch 未返回可用账号)';
   const availableReadRoutes = diagnostics.readRoutes.filter(route => route.available);
-  const availableWriteRoutes = diagnostics.writeRoutes.filter(route => route.available);
   const unavailableRoutes = diagnostics.readRoutes.filter(route => !route.available);
 
   p.note([
@@ -165,6 +163,8 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
   let readRoute = currentSubagents.readRoute;
   let selectedCcProvider = currentSubagents.ccSwitchProviderId;
   const providerOverrides = { ...currentSubagents.providerOverrides };
+  const previousPriority = currentSubagents.providerPriority ?? [];
+  let unifiedRouting = false;
   let providerPriority = currentSubagents.providerPriority ?? [];
   let selectedModelSummary = '(由 route/provider 决定)';
   let selectedReadRoute = readRoute;
@@ -250,106 +250,73 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
         try { catalog = await discoverProviderModels(resolved, { env: settingsEnv }); }
         finally { spinner.stop(); }
         if (catalog.notice) p.note(catalog.notice, providerId);
-        let models: string[];
-        for (;;) {
-          const chosen = await p.multiselect<string>({ message: `${resolved.summary.name} 使用哪些模型？选 1–2 个`,
-            options: catalog.models.map(value => ({ value, label: value })),
-            initialValues: [providerOverrides[providerId]?.model ?? resolved.summary.model].filter((model): model is string => !!model && catalog.models.includes(model)), required: true });
-          assertPrompt(chosen);
-          if (chosen.length <= 2) { models = chosen; break; }
-          p.note('每个 provider 最多选择两个模型。', '请重新选择');
-        }
-        if (models.length === 2) {
-          const primary = await p.select<string>({ message: `${resolved.summary.name} 优先使用哪个模型？`, options: models.map(value => ({ value, label: value })) });
-          assertPrompt(primary); models = [primary, ...models.filter(model => model !== primary)];
-        }
+        const models = await selectProviderModels(resolved.summary.name, catalog.models,
+          previousPriority.find(target => target.providerId === providerId)?.models
+            ?? [providerOverrides[providerId]?.model ?? resolved.summary.model]);
         providerPriority.push({ providerId, models });
       }
       selectedCcProvider = providerPriority[0]?.providerId ?? null;
       selectedModelSummary = providerPriority.map((target, i) => `${i + 1}. ${target.providerId}: ${target.models.join(' → ')}`).join('\n');
       p.note('新任务按顺序选择可用目录中的模型；明确失败的线路冷却两分钟。已有 worker 不自动复制任务到备用线路，避免重复工具操作。模型目录可用不等于推理请求一定成功。', '优先级路由');
     } else {
-    providerPriority = [];
-    selectedCcProvider = providerChoice === followCurrent ? null : providerChoice;
-
-    const effectiveProviderId = selectedCcProvider ?? diagnostics.ccSwitch.currentProviderCodex;
-    if (effectiveProviderId) {
-      let configuredModels: string[] = [];
-      let defaultModel: string | undefined;
+      providerPriority = [];
+      selectedCcProvider = providerChoice === followCurrent ? null : providerChoice;
+      const effectiveProviderId = selectedCcProvider ?? diagnostics.ccSwitch.currentProviderCodex;
       let defaultEffort: string | null = null;
-      try {
+      if (effectiveProviderId) {
         const resolved = await resolveCurrentCcSwitchCodexProvider({
           env: settingsEnv,
           providerId: effectiveProviderId,
         });
-        configuredModels = resolved.summary.configuredModels ?? [resolved.summary.model];
-        defaultModel = resolved.summary.model;
         defaultEffort = resolved.summary.reasoningEffort;
-        try {
-          const catalog = await discoverProviderModels(resolved, { env: settingsEnv });
-          configuredModels = catalog.models;
-          if (catalog.notice) p.note(catalog.notice, '模型检测');
-        } catch {
-          p.note('模型目录暂不可用，显示已有 cc-switch 配置；这不代表推理可用性已验证。', '模型检测');
+        if (providerChoice === followCurrent) {
+          selectedModelSummary = '跟随当前 provider：每个新任务读取该 provider 配置的默认模型';
+          p.note(
+            '只读 side、可写 worker 和 reviewer 都跟随 cc-switch 当前 provider 的默认模型。需要选择模型和备用顺序时，请选择固定 provider 或“多个 provider，按优先级备用”。',
+            '统一候选线路',
+          );
+        } else {
+          let models: string[] = resolved.summary.configuredModels ?? [resolved.summary.model];
+          try {
+            const catalog = await discoverProviderModels(resolved, { env: settingsEnv });
+            models = catalog.models;
+            if (catalog.notice) p.note(catalog.notice, '模型检测');
+          } catch {
+            p.note('模型目录暂不可用，显示 cc-switch 已配置模型；这不代表推理请求已经验证。', '模型检测');
+          }
+          const ordered = await selectProviderModels(resolved.summary.name, models,
+            previousPriority.find(target => target.providerId === effectiveProviderId)?.models
+              ?? [providerOverrides[effectiveProviderId]?.model ?? resolved.summary.model]);
+          providerPriority = [{ providerId: effectiveProviderId, models: ordered }];
+          selectedModelSummary = `${effectiveProviderId}: ${ordered.join(' → ')}`;
+          p.note('这组模型同时用于只读 side、可写 worker 和 reviewer；可写开关只控制权限，不会切换到另一套模型。', '统一候选线路');
         }
-      } catch {
-        p.note('暂时无法读取该 provider 的模型配置；可以跟随默认值或手填模型 ID。', '模型配置');
-      }
-      const previous = Object.hasOwn(providerOverrides, effectiveProviderId)
-        ? providerOverrides[effectiveProviderId] : undefined;
-      if (previous?.model && !configuredModels.includes(previous.model)) {
-        configuredModels.push(previous.model);
-      }
-      p.note([
-        '模型来自所选 provider 的 cc-switch 配置（默认 model、同 provider 的 profiles、显式模型列表）。',
-        '这里列出的是本地配置，不是服务端支持列表；模型和推理强度是否支持由 provider 决定。',
-        '选择按 provider 保存，应用于 /btw、普通 subagent 和自动 reviewer；主会话保持原配置。',
-        '跟随当前 provider 时，切换后使用新 provider 自己的选择或默认配置。',
-      ].join('\n'), '子代理模型与推理强度');
-      const modelChoice = await p.select<string>({
-        message: '子代理使用哪个模型版本？',
-        initialValue: previous?.model ?? '__provider_default__',
-        options: [
-          { value: '__provider_default__', label: '跟随 provider 配置（推荐）', hint: defaultModel ?? '派发时读取' },
-          ...configuredModels.map(model => ({ value: model, label: model })),
-          { value: '__custom_model__', label: '手动输入模型 ID', hint: '用于 provider 已支持但本地配置未列出的模型' },
-        ],
-      });
-      assertPrompt(modelChoice);
-      let model: string | null = modelChoice === '__provider_default__' ? null : modelChoice;
-      if (modelChoice === '__custom_model__') {
-        const custom = await p.text({
-          message: '模型 ID（使用 provider 的准确名称）',
-          initialValue: previous?.model ?? defaultModel ?? '',
-          validate: value => validSubagentModel(value?.trim()) ? undefined : '请输入有效的模型 ID，不能包含空白或引号',
+        const previous = providerOverrides[effectiveProviderId];
+        const effort = await p.select<SubagentConfig['sideReasoningEffort']>({
+          message: '统一候选线路的推理强度',
+          initialValue: previous?.reasoningEffort ?? 'inherit',
+          options: [
+            { value: 'inherit', label: '跟随 provider 配置（推荐）', hint: defaultEffort ?? 'provider 默认' },
+            { value: 'low', label: 'low · 低' },
+            { value: 'medium', label: 'medium · 中' },
+            { value: 'high', label: 'high · 高' },
+            { value: 'xhigh', label: 'xhigh · 很高' },
+            { value: 'max', label: 'max · 最高（需 provider 支持）' },
+          ],
         });
-        assertPrompt(custom);
-        model = custom.trim();
+        assertPrompt(effort);
+        providerOverrides[effectiveProviderId] = { model: null, reasoningEffort: effort };
       }
-      if (model !== null && !validSubagentModel(model)) throw new Error('无效的子代理模型 ID');
-      const effort = await p.select<SubagentConfig['sideReasoningEffort']>({
-        message: '子代理使用哪个推理强度？',
-        initialValue: previous?.reasoningEffort ?? 'inherit',
-        options: [
-          { value: 'inherit', label: '跟随 provider 配置（推荐）', hint: defaultEffort ?? 'provider 默认' },
-          { value: 'low', label: 'low · 低' },
-          { value: 'medium', label: 'medium · 中' },
-          { value: 'high', label: 'high · 高' },
-          { value: 'xhigh', label: 'xhigh · 很高' },
-          { value: 'max', label: 'max · 最高（需 provider 支持）' },
-        ],
-      });
-      assertPrompt(effort);
-      Object.defineProperty(providerOverrides, effectiveProviderId, {
-        value: { model, reasoningEffort: effort }, enumerable: true, configurable: true, writable: true,
-      });
-      selectedModelSummary = `${effectiveProviderId}: model=${model ?? '(跟随 provider)'} reasoning=${effort}`;
-    }
     }
 
     routeMode = 'follow-cc-switch';
     selectedReadRoute = null;
     readRoute = null;
+    unifiedRouting = true;
+    // A saved priority list (or follow-current choice) is the only model source.
+    for (const [providerId, preference] of Object.entries(providerOverrides)) {
+      providerOverrides[providerId] = { ...preference, model: null };
+    }
   }
 
   const currentCredential = currentMcpCredentials(rawProfile);
@@ -459,48 +426,19 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
   const projectRoot = projectRootText.trim()
     ? await validatedRsiRoot(projectRootText.trim())
     : null;
-  let reviewerRouteMode: SubagentRouteMode = currentRsi.reviewerRouteMode;
-  let reviewerRoute = currentRsi.reviewerRoute;
+  const reviewerRouteMode: SubagentRouteMode = rsiMode === 'auto'
+    ? routeMode
+    : currentRsi.reviewerRouteMode;
+  const reviewerRoute: string | null = rsiMode === 'auto' ? readRoute : currentRsi.reviewerRoute;
   if (rsiMode === 'auto') {
-    const reviewerStrategy = await p.select<'follow' | 'manual'>({
-      message: 'RSI 证据由哪个子代理复核？',
-      initialValue: currentRsi.reviewerRouteMode === 'manual' ? 'manual' : 'follow',
-      options: [
-        {
-          value: 'follow',
-          label: '跟随当前子代理线路（推荐）',
-          hint: '与 /btw、自动派工使用同一 cc-switch 映射',
-        },
-        {
-          value: 'manual',
-          label: '固定一条复核线路',
-          hint: '适合专门使用一个审阅模型',
-        },
-      ],
-    });
-    assertPrompt(reviewerStrategy);
-    reviewerRouteMode = reviewerStrategy === 'follow' ? 'follow-cc-switch' : 'manual';
-    reviewerRoute = reviewerStrategy === 'follow' ? null : reviewerRoute;
-    if (reviewerStrategy === 'manual' && availableReadRoutes.length > 0) {
-      const selected = await p.select<string>({
-        message: '选择固定复核线路',
-        initialValue: reviewerRoute && availableReadRoutes.some(route => route.id === reviewerRoute)
-          ? reviewerRoute
-          : selectedReadRoute && availableReadRoutes.some(route => route.id === selectedReadRoute)
-            ? selectedReadRoute
-            : availableReadRoutes[0]!.id,
-        options: availableReadRoutes.map(route => ({
-          value: route.id,
-          label: `${route.provider} / ${route.model}`,
-          hint: route.id,
-        })),
-      });
-      assertPrompt(selected);
-      reviewerRoute = selected;
-    }
+    p.note(
+      'RSI reviewer 自动继承上面配置的 provider/model 候选顺序；不会再单独选择 route 或模型。',
+      '统一候选线路',
+    );
   }
 
-  let writeRoute = currentSubagents.writeRoute;
+  // Write permission is independent from routing. A writable worker uses the
+  // same provider/model candidates as a read-only side and reviewer.
   let allowWriteWorkers = currentSubagents.allowWriteWorkers;
   let modelTools = currentSubagents.modelTools;
   let nativeToolPolicy = currentSubagents.nativeToolPolicy;
@@ -520,6 +458,10 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
   });
   assertPrompt(advanced);
   if (advanced) {
+    p.note(
+      '只读 /btw、可写 worker、模型可见的 subagent 和 RSI reviewer 共用上面同一组 provider/model 优先级。下面只调整权限、并发、等待、推理强度和工具行为；这里不会再填写模型或选择另一条写 route。',
+      '统一候选线路',
+    );
     const snapshotConfirm = await p.confirm({
       message: '/btw 是否附带已脱敏的主任务进度摘要？',
       initialValue: includeProgressSnapshot,
@@ -573,13 +515,13 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
       boundedNumberInput(sideTimeoutText, 15, 1800, '/btw 快速等待提示秒数') * 1_000,
     );
     const sideEffort = await p.select<SubagentConfig['sideReasoningEffort']>({
-      message: '未单独配置 provider 时，/btw 的备用推理强度',
+      message: '未设置 provider 推理强度时，只读 side 的备用强度（不改变模型）',
       initialValue: sideReasoningEffort,
       options: [
         {
           value: 'low',
           label: '低（推荐）',
-          hint: '仅对没有模型/推理偏好的 provider 生效',
+          hint: '仅在所选 provider 没有单独推理设置时生效',
         },
         { value: 'medium', label: '中', hint: '速度与质量平衡' },
         { value: 'high', label: '高', hint: '更慢，适合复杂复核' },
@@ -623,25 +565,10 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
     });
     assertPrompt(writeWorkers);
     allowWriteWorkers = writeWorkers;
-    if (availableWriteRoutes.length > 0) {
-      const noneValue = '__none__';
-      const selected = await p.select<string>({
-        message: '可写子代理使用哪条线路？',
-        initialValue: writeRoute && availableWriteRoutes.some(route => route.id === writeRoute)
-          ? writeRoute
-          : noneValue,
-        options: [
-          { value: noneValue, label: '不配置可写线路', hint: '只允许只读子代理' },
-          ...availableWriteRoutes.map(route => ({
-            value: route.id,
-            label: `${route.provider} / ${route.model}`,
-            hint: `${route.id} · /btw 需要 --write --workspace 逐任务授权`,
-          })),
-        ],
-      });
-      assertPrompt(selected);
-      writeRoute = selected === noneValue ? null : selected;
-    }
+    p.note(
+      `可写 worker 将继承：${selectedModelSummary}。开启可写权限只允许经过逐任务 workspace 授权，不会创建独立模型配置。`,
+      '可写 worker 路由',
+    );
     const repairText = await p.text({
       message: 'RSI 校验失败后，最多自动修复几轮？（0-10）',
       initialValue: String(maxRepairRounds),
@@ -680,7 +607,6 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
         [selectedCcProvider]: {
           ...existing,
           readRoute: selectedReadRoute,
-          ...(allowWriteWorkers && writeRoute ? { writeRoute } : {}),
         },
       },
     };
@@ -695,7 +621,9 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
         : '关闭子代理';
   const routeText = selectedMode === 'auto' || selectedMode === 'broker'
     ? routeMode === 'follow-cc-switch'
-      ? selectedCcProvider
+      ? providerPriority.length
+        ? `按已选的 ${providerPriority.length} 个 provider 和模型优先级自动选择`
+        : selectedCcProvider
         ? `固定 provider=${selectedCcProvider}，route 自动生成`
         : '跟随 cc-switch 当前 provider，route 自动生成'
       : `固定线路 ${selectedReadRoute ?? readRoute ?? '(none)'}`
@@ -710,6 +638,7 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
     `子代理：${modeText}`,
     `子代理线路：${routeText}`,
     `子代理模型：${selectedModelSummary}`,
+    `可写子代理：${allowWriteWorkers ? '开启，仍需逐任务授权' : '关闭'}；与 side 使用相同模型和备用顺序`,
     `Key：${credentialText}`,
     `子代理 Web Search：${webSearch === 'auto'
       ? `按 provider 能力（当前 ${diagnostics.webSearch.effective}）`
@@ -810,7 +739,7 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
         providerOverrides,
         providerPriority,
         readRoute,
-        writeRoute: routeMode === 'manual' ? writeRoute : null,
+        writeRoute: unifiedRouting ? null : currentSubagents.writeRoute,
         modelTools,
         nativeToolPolicy,
         maxConcurrentWorkers,
@@ -1012,6 +941,7 @@ function formatSnapshot(snapshot: SettingsSnapshot): string {
       ` legacyNpmBroker=${diagnostics.launchCompatibility.legacyNpm}` +
       ` legacyNpmRuntime=${diagnostics.launchCompatibility.legacyNpmRuntime}`,
     `subagent model preferences=${JSON.stringify(snapshot.subagents.config.providerOverrides ?? {})}`,
+    `subagent provider priority=${JSON.stringify(snapshot.subagents.config.providerPriority ?? [])}`,
     `Broker tools=${diagnostics.modelTools.brokerWired ? 'wired' : 'degraded'}` +
       ` namespace=${diagnostics.modelTools.namespace}` +
       ` native=${diagnostics.modelTools.nativeToolPolicy}` +
@@ -1120,6 +1050,36 @@ function assertPrompt<T>(value: T | symbol): asserts value is T {
   if (p.isCancel(value)) {
     p.cancel('已取消，未修改 profile。');
     throw new Error('settings cancelled');
+  }
+}
+
+async function selectProviderModels(
+  providerName: string,
+  models: string[],
+  previous: string[],
+): Promise<string[]> {
+  if (!models.length) throw new Error(`${providerName} 没有可选择的模型`);
+  const initial = previous.filter(model => models.includes(model));
+  for (;;) {
+    const chosen = await p.multiselect<string>({
+      message: `${providerName} 使用哪些模型？选 1–2 个（side、可写子代理和 reviewer 共用）`,
+      options: models.map(value => ({ value, label: value })),
+      initialValues: initial.length ? initial : [models[0]!],
+      required: true,
+    });
+    assertPrompt(chosen);
+    if (chosen.length < 1 || chosen.length > 2) {
+      p.note('每个 provider 请选择一到两个模型。', '请重新选择');
+      continue;
+    }
+    if (chosen.length === 1) return chosen;
+    const primary = await p.select<string>({
+      message: `${providerName} 优先使用哪个模型？`,
+      options: chosen.map(value => ({ value, label: value })),
+      initialValue: initial.find(model => chosen.includes(model)) ?? chosen[0],
+    });
+    assertPrompt(primary);
+    return [primary, ...chosen.filter(model => model !== primary)];
   }
 }
 

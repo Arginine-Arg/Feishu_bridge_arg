@@ -4,7 +4,7 @@ A lightweight bot that bridges Feishu / Lark messenger with your local Claude Co
 
 [中文 README](./README.zh.md)
 
-Version 1.22.0 fixes idle native provider handoff and stale-model resume, stops injecting continue into active reconnects, limits automatic recovery to one hour per failure episode, and adds ordered subagent provider/model choices with automatic model catalogue discovery.
+Version 1.22.1 makes the subagent settings use one provider/model priority list for read-only side sessions, writable workers, Broker tools, and RSI reviewers. The advanced section no longer asks for a separate model or write route; old manual model pins are cleared when settings is saved.
 
 Version 1.6.7 introduced provider-aware Codex resume, and 1.7.0 added idle-boundary rebinding. Version 1.9.1 narrows reattachment semantics: reconnecting to an existing native or structured thread preserves the provider/model recorded by that thread instead of silently following a newly selected cc-switch route.
 
@@ -278,7 +278,7 @@ codex plugin marketplace add Utopia-V/mixagents
 codex plugin add mixagents-broker@mixagents
 ```
 
-`arg-bridge settings` now guides the user through main-account context, fallback policy, **follow current provider or a fixed cc-switch provider**, model version and reasoning effort, automatic cc-switch credential resolution, Project RSI, and a plain-language confirmation. Model choices are read from the selected provider's local configuration; manual model IDs and provider defaults are available. Preferences are saved per provider and apply on the next subagent dispatch. No route ID or Key entry is required. Technical concurrency/native-tool/write-worker controls are behind an explicit advanced prompt. The default flow does not create `broker-routes.json` and never changes the main provider. `arg-bridge doctor --json` is read-only and must not spend money. Only an explicit `--probe-route <id>` sends one read-only generation probe and never retries or falls back.
+`arg-bridge settings` now guides the user through main-account context, fallback policy, an ordered provider/model list, automatic cc-switch credential resolution, Project RSI, and a plain-language confirmation. Settings reads authenticated provider model catalogues and lets you choose one or two models per provider in priority order. The same list is used by read-only side sessions, writable workers, model-visible Broker calls, and RSI reviewers. The advanced section controls permissions and runtime behavior; it does not select another model or route. No route ID or Key entry is required. Technical concurrency/native-tool/write-worker controls are behind an explicit advanced prompt. The default flow does not create `broker-routes.json` and never changes the main provider. `arg-bridge doctor --json` is read-only and must not spend money. Only an explicit `--probe-route <id>` sends one read-only generation probe and never retries or falls back.
 
 The explicit terminal entry points now include in-place provider following:
 
@@ -368,7 +368,7 @@ The optional legacy/manual route map lives at `~/.config/arg-bridge/broker-route
 }
 ```
 
-Run `arg-bridge settings --profile codex` to configure the MCP executable, read/write routes, dynamic-tool exposure, native shadow policy, concurrent-worker limit, timeout, write-worker authorization, RSI repair rounds and credential delegation. Bridge never reads a provider key. `arg-bridge doctor --json` separately reports Broker-tool wiring, native-bypass risk, write-route status, worker-probe status and whether a trusted hook is still required for direct TUI.
+Run `arg-bridge settings --profile codex` to configure the provider/model priority list, dynamic-tool exposure, native shadow policy, concurrent-worker limit, timeout, write-worker authorization, RSI repair rounds and credential delegation. Legacy route files remain readable for compatibility. Bridge never reads a provider key. `arg-bridge doctor --json` separately reports Broker-tool wiring, native-bypass risk, write-route status, worker-probe status and whether a trusted hook is still required for direct TUI.
 
 Project RSI is separate from MixAgents and from historical Task RSI evidence. Bridge discovers only an already initialized `.project-rsi/config.json`; it never initializes `/`, `$HOME`, or a broad parent automatically. A substantive Bridge turn must obtain a fresh upstream validator receipt and reviewer evidence. Validator findings can be returned to the same parent thread for a bounded repair loop (`maxRepairRounds`, timeout), then the upstream runner/validator is rerun. The Bridge never fabricates receipts, lowers thresholds or approves proposals. Direct `codex` and other native TUIs remain outside this gate unless the project installs and verifies a trusted hook.
 

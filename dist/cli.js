@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.22.0",
+  version: "1.22.1",
   description: "Arg bridge for Feishu/Lark messenger and local Claude/Codex CLI agents",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -16224,10 +16224,15 @@ function selectSubagentRoute(input) {
     return route2 && (access3 === "read-only" || route2.maxAccess === "workspace-write") ? { route: route2 } : { error: `\u624B\u52A8\u914D\u7F6E\u7684 MixAgents ${access3} route \u4E0D\u5B58\u5728\u6216\u4E0D\u652F\u6301\u8BE5\u6743\u9650\uFF1A${configured}` };
   }
   const expectedProvider = input.config.ccSwitchProviderId ?? input.ccSwitch.currentProviderCodex;
-  const automatic = input.routes.find(
-    (route2) => route2.source === "cc-switch" && (!expectedProvider || route2.ccSwitchProviderId === expectedProvider) && (access3 === "read-only" || route2.maxAccess === "workspace-write")
+  const priority = input.config.providerPriority ?? [];
+  const automaticRoutes = input.routes.filter(
+    (route2) => route2.source === "cc-switch" && (access3 === "read-only" || route2.maxAccess === "workspace-write")
   );
+  const automatic = priority.length ? priority.flatMap((target) => target.models.map((model) => automaticRoutes.find(
+    (route2) => route2.ccSwitchProviderId === target.providerId && route2.model === model
+  ))).find((route2) => route2 !== void 0) : automaticRoutes.find((route2) => !expectedProvider || route2.ccSwitchProviderId === expectedProvider);
   if (automatic) return { route: automatic };
+  if (priority.length) return { error: "\u6240\u9009 provider/model \u4F18\u5148\u7EA7\u4E2D\u6CA1\u6709\u53EF\u7528\u7684\u81EA\u52A8\u7EBF\u8DEF" };
   const mapped = resolveRouteForProvider(
     input.routeMap,
     input.config.ccSwitchProviderId ?? input.ccSwitch.currentProviderCodex,
@@ -22707,14 +22712,15 @@ ${finalText}`));
     };
   }
   async runRsiReview(projectRoot, runDir, signal, emit2) {
-    const rsi = await this.currentRsiConfig();
     const base = await this.currentSubagentsConfig();
     const reviewerConfig = {
       ...base,
       enabled: true,
       mode: "broker",
-      routeMode: rsi.reviewerRouteMode,
-      readRoute: rsi.reviewerRoute,
+      // Reviewers use the same provider/model candidates as side and worker
+      // tasks. RSI keeps its own enable/disable switch, not a separate model.
+      routeMode: base.routeMode,
+      readRoute: base.readRoute,
       allowForkFallback: false
     };
     let resolved;
@@ -22727,6 +22733,7 @@ ${finalText}`));
         codexBin: this.options.binary,
         ...this.options.codexHome ? { codexHome: this.options.codexHome } : {},
         ...this.runtimeIdentity?.ccSwitchProviderId ? { parentProviderId: this.runtimeIdentity.ccSwitchProviderId } : {},
+        runtimeRole: "reviewer",
         signal
       });
     } catch (error) {
@@ -39207,7 +39214,7 @@ async function collectSubagentDiagnostics(input) {
   }
   let brokerRuntime;
   if (input.config.routeMode === "follow-cc-switch") {
-    if ("error" in providerResolution) {
+    if ("error" in providerResolution && !input.config.providerPriority?.length) {
       return {
         ...base,
         launchCommand: basename11(launch.command),
@@ -39243,7 +39250,8 @@ async function collectSubagentDiagnostics(input) {
           role: "side",
           webSearch: input.config.webSearch,
           sideReasoningEffort: input.config.sideReasoningEffort,
-          providerOverrides: input.config.providerOverrides
+          providerOverrides: input.config.providerOverrides,
+          providerPriority: input.config.providerPriority
         }
       });
       brokerRuntime = {
@@ -39466,7 +39474,6 @@ async function runSettings(options = {}) {
     (provider) => `${provider.current ? "\u25CF" : "\u25CB"} ${provider.name} (${provider.id})`
   ).join("\n") : "(cc-switch \u672A\u8FD4\u56DE\u53EF\u7528\u8D26\u53F7)";
   const availableReadRoutes = diagnostics.readRoutes.filter((route) => route.available);
-  const availableWriteRoutes = diagnostics.writeRoutes.filter((route) => route.available);
   const unavailableRoutes = diagnostics.readRoutes.filter((route) => !route.available);
   p3.note([
     `\u4E3B\u5BF9\u8BDD\u8D26\u53F7\uFF1A${diagnostics.ccSwitch.currentProviderName ?? "(unknown)"} [${diagnostics.ccSwitch.currentProviderCodex ?? "(unknown)"}]`,
@@ -39513,6 +39520,8 @@ async function runSettings(options = {}) {
   let readRoute = currentSubagents.readRoute;
   let selectedCcProvider = currentSubagents.ccSwitchProviderId;
   const providerOverrides = { ...currentSubagents.providerOverrides };
+  const previousPriority = currentSubagents.providerPriority ?? [];
+  let unifiedRouting = false;
   let providerPriority = currentSubagents.providerPriority ?? [];
   let selectedModelSummary = "(\u7531 route/provider \u51B3\u5B9A)";
   let selectedReadRoute = readRoute;
@@ -39580,26 +39589,11 @@ async function runSettings(options = {}) {
           spinner3.stop();
         }
         if (catalog.notice) p3.note(catalog.notice, providerId);
-        let models;
-        for (; ; ) {
-          const chosen = await p3.multiselect({
-            message: `${resolved.summary.name} \u4F7F\u7528\u54EA\u4E9B\u6A21\u578B\uFF1F\u9009 1\u20132 \u4E2A`,
-            options: catalog.models.map((value) => ({ value, label: value })),
-            initialValues: [providerOverrides[providerId]?.model ?? resolved.summary.model].filter((model) => !!model && catalog.models.includes(model)),
-            required: true
-          });
-          assertPrompt(chosen);
-          if (chosen.length <= 2) {
-            models = chosen;
-            break;
-          }
-          p3.note("\u6BCF\u4E2A provider \u6700\u591A\u9009\u62E9\u4E24\u4E2A\u6A21\u578B\u3002", "\u8BF7\u91CD\u65B0\u9009\u62E9");
-        }
-        if (models.length === 2) {
-          const primary = await p3.select({ message: `${resolved.summary.name} \u4F18\u5148\u4F7F\u7528\u54EA\u4E2A\u6A21\u578B\uFF1F`, options: models.map((value) => ({ value, label: value })) });
-          assertPrompt(primary);
-          models = [primary, ...models.filter((model) => model !== primary)];
-        }
+        const models = await selectProviderModels(
+          resolved.summary.name,
+          catalog.models,
+          previousPriority.find((target) => target.providerId === providerId)?.models ?? [providerOverrides[providerId]?.model ?? resolved.summary.model]
+        );
         providerPriority.push({ providerId, models });
       }
       selectedCcProvider = providerPriority[0]?.providerId ?? null;
@@ -39609,61 +39603,40 @@ async function runSettings(options = {}) {
       providerPriority = [];
       selectedCcProvider = providerChoice === followCurrent ? null : providerChoice;
       const effectiveProviderId = selectedCcProvider ?? diagnostics.ccSwitch.currentProviderCodex;
+      let defaultEffort = null;
       if (effectiveProviderId) {
-        let configuredModels = [];
-        let defaultModel;
-        let defaultEffort = null;
-        try {
-          const resolved = await resolveCurrentCcSwitchCodexProvider({
-            env: settingsEnv,
-            providerId: effectiveProviderId
-          });
-          configuredModels = resolved.summary.configuredModels ?? [resolved.summary.model];
-          defaultModel = resolved.summary.model;
-          defaultEffort = resolved.summary.reasoningEffort;
+        const resolved = await resolveCurrentCcSwitchCodexProvider({
+          env: settingsEnv,
+          providerId: effectiveProviderId
+        });
+        defaultEffort = resolved.summary.reasoningEffort;
+        if (providerChoice === followCurrent) {
+          selectedModelSummary = "\u8DDF\u968F\u5F53\u524D provider\uFF1A\u6BCF\u4E2A\u65B0\u4EFB\u52A1\u8BFB\u53D6\u8BE5 provider \u914D\u7F6E\u7684\u9ED8\u8BA4\u6A21\u578B";
+          p3.note(
+            "\u53EA\u8BFB side\u3001\u53EF\u5199 worker \u548C reviewer \u90FD\u8DDF\u968F cc-switch \u5F53\u524D provider \u7684\u9ED8\u8BA4\u6A21\u578B\u3002\u9700\u8981\u9009\u62E9\u6A21\u578B\u548C\u5907\u7528\u987A\u5E8F\u65F6\uFF0C\u8BF7\u9009\u62E9\u56FA\u5B9A provider \u6216\u201C\u591A\u4E2A provider\uFF0C\u6309\u4F18\u5148\u7EA7\u5907\u7528\u201D\u3002",
+            "\u7EDF\u4E00\u5019\u9009\u7EBF\u8DEF"
+          );
+        } else {
+          let models = resolved.summary.configuredModels ?? [resolved.summary.model];
           try {
             const catalog = await discoverProviderModels(resolved, { env: settingsEnv });
-            configuredModels = catalog.models;
+            models = catalog.models;
             if (catalog.notice) p3.note(catalog.notice, "\u6A21\u578B\u68C0\u6D4B");
           } catch {
-            p3.note("\u6A21\u578B\u76EE\u5F55\u6682\u4E0D\u53EF\u7528\uFF0C\u663E\u793A\u5DF2\u6709 cc-switch \u914D\u7F6E\uFF1B\u8FD9\u4E0D\u4EE3\u8868\u63A8\u7406\u53EF\u7528\u6027\u5DF2\u9A8C\u8BC1\u3002", "\u6A21\u578B\u68C0\u6D4B");
+            p3.note("\u6A21\u578B\u76EE\u5F55\u6682\u4E0D\u53EF\u7528\uFF0C\u663E\u793A cc-switch \u5DF2\u914D\u7F6E\u6A21\u578B\uFF1B\u8FD9\u4E0D\u4EE3\u8868\u63A8\u7406\u8BF7\u6C42\u5DF2\u7ECF\u9A8C\u8BC1\u3002", "\u6A21\u578B\u68C0\u6D4B");
           }
-        } catch {
-          p3.note("\u6682\u65F6\u65E0\u6CD5\u8BFB\u53D6\u8BE5 provider \u7684\u6A21\u578B\u914D\u7F6E\uFF1B\u53EF\u4EE5\u8DDF\u968F\u9ED8\u8BA4\u503C\u6216\u624B\u586B\u6A21\u578B ID\u3002", "\u6A21\u578B\u914D\u7F6E");
+          const ordered = await selectProviderModels(
+            resolved.summary.name,
+            models,
+            previousPriority.find((target) => target.providerId === effectiveProviderId)?.models ?? [providerOverrides[effectiveProviderId]?.model ?? resolved.summary.model]
+          );
+          providerPriority = [{ providerId: effectiveProviderId, models: ordered }];
+          selectedModelSummary = `${effectiveProviderId}: ${ordered.join(" \u2192 ")}`;
+          p3.note("\u8FD9\u7EC4\u6A21\u578B\u540C\u65F6\u7528\u4E8E\u53EA\u8BFB side\u3001\u53EF\u5199 worker \u548C reviewer\uFF1B\u53EF\u5199\u5F00\u5173\u53EA\u63A7\u5236\u6743\u9650\uFF0C\u4E0D\u4F1A\u5207\u6362\u5230\u53E6\u4E00\u5957\u6A21\u578B\u3002", "\u7EDF\u4E00\u5019\u9009\u7EBF\u8DEF");
         }
-        const previous = Object.hasOwn(providerOverrides, effectiveProviderId) ? providerOverrides[effectiveProviderId] : void 0;
-        if (previous?.model && !configuredModels.includes(previous.model)) {
-          configuredModels.push(previous.model);
-        }
-        p3.note([
-          "\u6A21\u578B\u6765\u81EA\u6240\u9009 provider \u7684 cc-switch \u914D\u7F6E\uFF08\u9ED8\u8BA4 model\u3001\u540C provider \u7684 profiles\u3001\u663E\u5F0F\u6A21\u578B\u5217\u8868\uFF09\u3002",
-          "\u8FD9\u91CC\u5217\u51FA\u7684\u662F\u672C\u5730\u914D\u7F6E\uFF0C\u4E0D\u662F\u670D\u52A1\u7AEF\u652F\u6301\u5217\u8868\uFF1B\u6A21\u578B\u548C\u63A8\u7406\u5F3A\u5EA6\u662F\u5426\u652F\u6301\u7531 provider \u51B3\u5B9A\u3002",
-          "\u9009\u62E9\u6309 provider \u4FDD\u5B58\uFF0C\u5E94\u7528\u4E8E /btw\u3001\u666E\u901A subagent \u548C\u81EA\u52A8 reviewer\uFF1B\u4E3B\u4F1A\u8BDD\u4FDD\u6301\u539F\u914D\u7F6E\u3002",
-          "\u8DDF\u968F\u5F53\u524D provider \u65F6\uFF0C\u5207\u6362\u540E\u4F7F\u7528\u65B0 provider \u81EA\u5DF1\u7684\u9009\u62E9\u6216\u9ED8\u8BA4\u914D\u7F6E\u3002"
-        ].join("\n"), "\u5B50\u4EE3\u7406\u6A21\u578B\u4E0E\u63A8\u7406\u5F3A\u5EA6");
-        const modelChoice = await p3.select({
-          message: "\u5B50\u4EE3\u7406\u4F7F\u7528\u54EA\u4E2A\u6A21\u578B\u7248\u672C\uFF1F",
-          initialValue: previous?.model ?? "__provider_default__",
-          options: [
-            { value: "__provider_default__", label: "\u8DDF\u968F provider \u914D\u7F6E\uFF08\u63A8\u8350\uFF09", hint: defaultModel ?? "\u6D3E\u53D1\u65F6\u8BFB\u53D6" },
-            ...configuredModels.map((model2) => ({ value: model2, label: model2 })),
-            { value: "__custom_model__", label: "\u624B\u52A8\u8F93\u5165\u6A21\u578B ID", hint: "\u7528\u4E8E provider \u5DF2\u652F\u6301\u4F46\u672C\u5730\u914D\u7F6E\u672A\u5217\u51FA\u7684\u6A21\u578B" }
-          ]
-        });
-        assertPrompt(modelChoice);
-        let model = modelChoice === "__provider_default__" ? null : modelChoice;
-        if (modelChoice === "__custom_model__") {
-          const custom = await p3.text({
-            message: "\u6A21\u578B ID\uFF08\u4F7F\u7528 provider \u7684\u51C6\u786E\u540D\u79F0\uFF09",
-            initialValue: previous?.model ?? defaultModel ?? "",
-            validate: (value) => validSubagentModel(value?.trim()) ? void 0 : "\u8BF7\u8F93\u5165\u6709\u6548\u7684\u6A21\u578B ID\uFF0C\u4E0D\u80FD\u5305\u542B\u7A7A\u767D\u6216\u5F15\u53F7"
-          });
-          assertPrompt(custom);
-          model = custom.trim();
-        }
-        if (model !== null && !validSubagentModel(model)) throw new Error("\u65E0\u6548\u7684\u5B50\u4EE3\u7406\u6A21\u578B ID");
+        const previous = providerOverrides[effectiveProviderId];
         const effort = await p3.select({
-          message: "\u5B50\u4EE3\u7406\u4F7F\u7528\u54EA\u4E2A\u63A8\u7406\u5F3A\u5EA6\uFF1F",
+          message: "\u7EDF\u4E00\u5019\u9009\u7EBF\u8DEF\u7684\u63A8\u7406\u5F3A\u5EA6",
           initialValue: previous?.reasoningEffort ?? "inherit",
           options: [
             { value: "inherit", label: "\u8DDF\u968F provider \u914D\u7F6E\uFF08\u63A8\u8350\uFF09", hint: defaultEffort ?? "provider \u9ED8\u8BA4" },
@@ -39675,18 +39648,16 @@ async function runSettings(options = {}) {
           ]
         });
         assertPrompt(effort);
-        Object.defineProperty(providerOverrides, effectiveProviderId, {
-          value: { model, reasoningEffort: effort },
-          enumerable: true,
-          configurable: true,
-          writable: true
-        });
-        selectedModelSummary = `${effectiveProviderId}: model=${model ?? "(\u8DDF\u968F provider)"} reasoning=${effort}`;
+        providerOverrides[effectiveProviderId] = { model: null, reasoningEffort: effort };
       }
     }
     routeMode = "follow-cc-switch";
     selectedReadRoute = null;
     readRoute = null;
+    unifiedRouting = true;
+    for (const [providerId, preference] of Object.entries(providerOverrides)) {
+      providerOverrides[providerId] = { ...preference, model: null };
+    }
   }
   const currentCredential = currentMcpCredentials(rawProfile);
   let credentialMode = currentCredential.mode;
@@ -39778,43 +39749,14 @@ async function runSettings(options = {}) {
   }) : "";
   assertPrompt(projectRootText);
   const projectRoot = projectRootText.trim() ? await validatedRsiRoot(projectRootText.trim()) : null;
-  let reviewerRouteMode = currentRsi.reviewerRouteMode;
-  let reviewerRoute = currentRsi.reviewerRoute;
+  const reviewerRouteMode = rsiMode === "auto" ? routeMode : currentRsi.reviewerRouteMode;
+  const reviewerRoute = rsiMode === "auto" ? readRoute : currentRsi.reviewerRoute;
   if (rsiMode === "auto") {
-    const reviewerStrategy = await p3.select({
-      message: "RSI \u8BC1\u636E\u7531\u54EA\u4E2A\u5B50\u4EE3\u7406\u590D\u6838\uFF1F",
-      initialValue: currentRsi.reviewerRouteMode === "manual" ? "manual" : "follow",
-      options: [
-        {
-          value: "follow",
-          label: "\u8DDF\u968F\u5F53\u524D\u5B50\u4EE3\u7406\u7EBF\u8DEF\uFF08\u63A8\u8350\uFF09",
-          hint: "\u4E0E /btw\u3001\u81EA\u52A8\u6D3E\u5DE5\u4F7F\u7528\u540C\u4E00 cc-switch \u6620\u5C04"
-        },
-        {
-          value: "manual",
-          label: "\u56FA\u5B9A\u4E00\u6761\u590D\u6838\u7EBF\u8DEF",
-          hint: "\u9002\u5408\u4E13\u95E8\u4F7F\u7528\u4E00\u4E2A\u5BA1\u9605\u6A21\u578B"
-        }
-      ]
-    });
-    assertPrompt(reviewerStrategy);
-    reviewerRouteMode = reviewerStrategy === "follow" ? "follow-cc-switch" : "manual";
-    reviewerRoute = reviewerStrategy === "follow" ? null : reviewerRoute;
-    if (reviewerStrategy === "manual" && availableReadRoutes.length > 0) {
-      const selected = await p3.select({
-        message: "\u9009\u62E9\u56FA\u5B9A\u590D\u6838\u7EBF\u8DEF",
-        initialValue: reviewerRoute && availableReadRoutes.some((route) => route.id === reviewerRoute) ? reviewerRoute : selectedReadRoute && availableReadRoutes.some((route) => route.id === selectedReadRoute) ? selectedReadRoute : availableReadRoutes[0].id,
-        options: availableReadRoutes.map((route) => ({
-          value: route.id,
-          label: `${route.provider} / ${route.model}`,
-          hint: route.id
-        }))
-      });
-      assertPrompt(selected);
-      reviewerRoute = selected;
-    }
+    p3.note(
+      "RSI reviewer \u81EA\u52A8\u7EE7\u627F\u4E0A\u9762\u914D\u7F6E\u7684 provider/model \u5019\u9009\u987A\u5E8F\uFF1B\u4E0D\u4F1A\u518D\u5355\u72EC\u9009\u62E9 route \u6216\u6A21\u578B\u3002",
+      "\u7EDF\u4E00\u5019\u9009\u7EBF\u8DEF"
+    );
   }
-  let writeRoute = currentSubagents.writeRoute;
   let allowWriteWorkers = currentSubagents.allowWriteWorkers;
   let modelTools = currentSubagents.modelTools;
   let nativeToolPolicy = currentSubagents.nativeToolPolicy;
@@ -39834,6 +39776,10 @@ async function runSettings(options = {}) {
   });
   assertPrompt(advanced);
   if (advanced) {
+    p3.note(
+      "\u53EA\u8BFB /btw\u3001\u53EF\u5199 worker\u3001\u6A21\u578B\u53EF\u89C1\u7684 subagent \u548C RSI reviewer \u5171\u7528\u4E0A\u9762\u540C\u4E00\u7EC4 provider/model \u4F18\u5148\u7EA7\u3002\u4E0B\u9762\u53EA\u8C03\u6574\u6743\u9650\u3001\u5E76\u53D1\u3001\u7B49\u5F85\u3001\u63A8\u7406\u5F3A\u5EA6\u548C\u5DE5\u5177\u884C\u4E3A\uFF1B\u8FD9\u91CC\u4E0D\u4F1A\u518D\u586B\u5199\u6A21\u578B\u6216\u9009\u62E9\u53E6\u4E00\u6761\u5199 route\u3002",
+      "\u7EDF\u4E00\u5019\u9009\u7EBF\u8DEF"
+    );
     const snapshotConfirm = await p3.confirm({
       message: "/btw \u662F\u5426\u9644\u5E26\u5DF2\u8131\u654F\u7684\u4E3B\u4EFB\u52A1\u8FDB\u5EA6\u6458\u8981\uFF1F",
       initialValue: includeProgressSnapshot
@@ -39887,13 +39833,13 @@ async function runSettings(options = {}) {
       boundedNumberInput(sideTimeoutText, 15, 1800, "/btw \u5FEB\u901F\u7B49\u5F85\u63D0\u793A\u79D2\u6570") * 1e3
     );
     const sideEffort = await p3.select({
-      message: "\u672A\u5355\u72EC\u914D\u7F6E provider \u65F6\uFF0C/btw \u7684\u5907\u7528\u63A8\u7406\u5F3A\u5EA6",
+      message: "\u672A\u8BBE\u7F6E provider \u63A8\u7406\u5F3A\u5EA6\u65F6\uFF0C\u53EA\u8BFB side \u7684\u5907\u7528\u5F3A\u5EA6\uFF08\u4E0D\u6539\u53D8\u6A21\u578B\uFF09",
       initialValue: sideReasoningEffort,
       options: [
         {
           value: "low",
           label: "\u4F4E\uFF08\u63A8\u8350\uFF09",
-          hint: "\u4EC5\u5BF9\u6CA1\u6709\u6A21\u578B/\u63A8\u7406\u504F\u597D\u7684 provider \u751F\u6548"
+          hint: "\u4EC5\u5728\u6240\u9009 provider \u6CA1\u6709\u5355\u72EC\u63A8\u7406\u8BBE\u7F6E\u65F6\u751F\u6548"
         },
         { value: "medium", label: "\u4E2D", hint: "\u901F\u5EA6\u4E0E\u8D28\u91CF\u5E73\u8861" },
         { value: "high", label: "\u9AD8", hint: "\u66F4\u6162\uFF0C\u9002\u5408\u590D\u6742\u590D\u6838" },
@@ -39937,23 +39883,10 @@ async function runSettings(options = {}) {
     });
     assertPrompt(writeWorkers);
     allowWriteWorkers = writeWorkers;
-    if (availableWriteRoutes.length > 0) {
-      const noneValue = "__none__";
-      const selected = await p3.select({
-        message: "\u53EF\u5199\u5B50\u4EE3\u7406\u4F7F\u7528\u54EA\u6761\u7EBF\u8DEF\uFF1F",
-        initialValue: writeRoute && availableWriteRoutes.some((route) => route.id === writeRoute) ? writeRoute : noneValue,
-        options: [
-          { value: noneValue, label: "\u4E0D\u914D\u7F6E\u53EF\u5199\u7EBF\u8DEF", hint: "\u53EA\u5141\u8BB8\u53EA\u8BFB\u5B50\u4EE3\u7406" },
-          ...availableWriteRoutes.map((route) => ({
-            value: route.id,
-            label: `${route.provider} / ${route.model}`,
-            hint: `${route.id} \xB7 /btw \u9700\u8981 --write --workspace \u9010\u4EFB\u52A1\u6388\u6743`
-          }))
-        ]
-      });
-      assertPrompt(selected);
-      writeRoute = selected === noneValue ? null : selected;
-    }
+    p3.note(
+      `\u53EF\u5199 worker \u5C06\u7EE7\u627F\uFF1A${selectedModelSummary}\u3002\u5F00\u542F\u53EF\u5199\u6743\u9650\u53EA\u5141\u8BB8\u7ECF\u8FC7\u9010\u4EFB\u52A1 workspace \u6388\u6743\uFF0C\u4E0D\u4F1A\u521B\u5EFA\u72EC\u7ACB\u6A21\u578B\u914D\u7F6E\u3002`,
+      "\u53EF\u5199 worker \u8DEF\u7531"
+    );
     const repairText = await p3.text({
       message: "RSI \u6821\u9A8C\u5931\u8D25\u540E\uFF0C\u6700\u591A\u81EA\u52A8\u4FEE\u590D\u51E0\u8F6E\uFF1F\uFF080-10\uFF09",
       initialValue: String(maxRepairRounds)
@@ -39985,20 +39918,20 @@ async function runSettings(options = {}) {
         ...baseMap.providers,
         [selectedCcProvider]: {
           ...existing,
-          readRoute: selectedReadRoute,
-          ...allowWriteWorkers && writeRoute ? { writeRoute } : {}
+          readRoute: selectedReadRoute
         }
       }
     };
   }
   const modeText = selectedMode === "auto" ? "\u81EA\u52A8\uFF1A\u4F18\u5148 MixAgents\uFF0C\u5931\u8D25\u65F6\u6309\u8BBE\u7F6E\u51B3\u5B9A" : selectedMode === "broker" ? "\u53EA\u5141\u8BB8 MixAgents" : selectedMode === "fork" ? "\u53EA\u7528\u672C\u5730 Codex fork" : "\u5173\u95ED\u5B50\u4EE3\u7406";
-  const routeText = selectedMode === "auto" || selectedMode === "broker" ? routeMode === "follow-cc-switch" ? selectedCcProvider ? `\u56FA\u5B9A provider=${selectedCcProvider}\uFF0Croute \u81EA\u52A8\u751F\u6210` : "\u8DDF\u968F cc-switch \u5F53\u524D provider\uFF0Croute \u81EA\u52A8\u751F\u6210" : `\u56FA\u5B9A\u7EBF\u8DEF ${selectedReadRoute ?? readRoute ?? "(none)"}` : "(\u4E0D\u9002\u7528)";
+  const routeText = selectedMode === "auto" || selectedMode === "broker" ? routeMode === "follow-cc-switch" ? providerPriority.length ? `\u6309\u5DF2\u9009\u7684 ${providerPriority.length} \u4E2A provider \u548C\u6A21\u578B\u4F18\u5148\u7EA7\u81EA\u52A8\u9009\u62E9` : selectedCcProvider ? `\u56FA\u5B9A provider=${selectedCcProvider}\uFF0Croute \u81EA\u52A8\u751F\u6210` : "\u8DDF\u968F cc-switch \u5F53\u524D provider\uFF0Croute \u81EA\u52A8\u751F\u6210" : `\u56FA\u5B9A\u7EBF\u8DEF ${selectedReadRoute ?? readRoute ?? "(none)"}` : "(\u4E0D\u9002\u7528)";
   const credentialText = routeMode === "follow-cc-switch" ? "cc-switch \u81EA\u52A8\u89E3\u6790 provider Key\uFF08\u4E0D\u663E\u793A\u3001\u4E0D\u5199\u5165\u914D\u7F6E\uFF09" : credentialMode === "inherit-env" ? `\u542F\u52A8\u73AF\u5883\u53D8\u91CF ${credentialEnvKeys || "(\u672A\u914D\u7F6E)"}` : "MixAgents managed\uFF08\u5F53\u524D\u7248\u672C\u672A\u9A8C\u8BC1\uFF09";
   p3.note([
     `\u4E3B\u5BF9\u8BDD\uFF1A${diagnostics.ccSwitch.currentProviderName ?? "(unknown)"}\uFF08\u4FDD\u6301\u4E0D\u53D8\uFF09`,
     `\u5B50\u4EE3\u7406\uFF1A${modeText}`,
     `\u5B50\u4EE3\u7406\u7EBF\u8DEF\uFF1A${routeText}`,
     `\u5B50\u4EE3\u7406\u6A21\u578B\uFF1A${selectedModelSummary}`,
+    `\u53EF\u5199\u5B50\u4EE3\u7406\uFF1A${allowWriteWorkers ? "\u5F00\u542F\uFF0C\u4ECD\u9700\u9010\u4EFB\u52A1\u6388\u6743" : "\u5173\u95ED"}\uFF1B\u4E0E side \u4F7F\u7528\u76F8\u540C\u6A21\u578B\u548C\u5907\u7528\u987A\u5E8F`,
     `Key\uFF1A${credentialText}`,
     `\u5B50\u4EE3\u7406 Web Search\uFF1A${webSearch === "auto" ? `\u6309 provider \u80FD\u529B\uFF08\u5F53\u524D ${diagnostics.webSearch.effective}\uFF09` : webSearch === "native" ? "\u5F3A\u5236\u539F\u751F" : "\u5173\u95ED"}`,
     `/btw\uFF1A\u5907\u7528 reasoning=${sideReasoningEffort} fast-notice=${sideTimeoutMs / 1e3}s\uFF1B\u7B49\u5F85\u7A97\u53E3 ${workerTimeoutMs / 6e4} \u5206\u949F\uFF1B\u8D85\u65F6\u8FD4\u56DE\u4ECD\u5728\u8FD0\u884C\uFF0C/btw result \u67E5\u8BE2\uFF0C/btw out \u53D6\u6D88`,
@@ -40085,7 +40018,7 @@ async function runSettings(options = {}) {
         providerOverrides,
         providerPriority,
         readRoute,
-        writeRoute: routeMode === "manual" ? writeRoute : null,
+        writeRoute: unifiedRouting ? null : currentSubagents.writeRoute,
         modelTools,
         nativeToolPolicy,
         maxConcurrentWorkers,
@@ -40233,6 +40166,7 @@ function formatSnapshot(snapshot) {
     `provider switch=${snapshot.mainProvider.pendingSwitch}; safe point=${snapshot.mainProvider.safeSwitchPoint}`,
     `MixAgents mode=${snapshot.subagents.config.mode} routeMode=${snapshot.subagents.config.routeMode} provider=${snapshot.subagents.config.ccSwitchProviderId ?? "(follow-current)"} MCP=${diagnostics.mcp.status} version=${diagnostics.packageVersion ?? "(unknown)"} progress=${diagnostics.progress.mode} vendorBroker=${diagnostics.launchCompatibility.vendor} legacyNpmBroker=${diagnostics.launchCompatibility.legacyNpm} legacyNpmRuntime=${diagnostics.launchCompatibility.legacyNpmRuntime}`,
     `subagent model preferences=${JSON.stringify(snapshot.subagents.config.providerOverrides ?? {})}`,
+    `subagent provider priority=${JSON.stringify(snapshot.subagents.config.providerPriority ?? [])}`,
     `Broker tools=${diagnostics.modelTools.brokerWired ? "wired" : "degraded"} namespace=${diagnostics.modelTools.namespace} native=${diagnostics.modelTools.nativeToolPolicy} maxWorkers=${diagnostics.limits.maxConcurrentWorkers} workerTimeoutMs=${diagnostics.limits.workerTimeoutMs} sideTimeoutMs=${diagnostics.limits.sideTimeoutMs} sideReasoning=${diagnostics.limits.sideReasoningEffort} writeWorkers=${diagnostics.limits.allowWriteWorkers}`,
     `web search mode=${diagnostics.webSearch.mode} providerSupported=${diagnostics.webSearch.providerSupported ?? "unknown"} effective=${diagnostics.webSearch.effective} reason=${diagnostics.webSearch.reason}`,
     `Broker tools degraded=${diagnostics.modelTools.degradedReason ?? "(none)"}`,
@@ -40302,6 +40236,31 @@ function assertPrompt(value) {
   if (p3.isCancel(value)) {
     p3.cancel("\u5DF2\u53D6\u6D88\uFF0C\u672A\u4FEE\u6539 profile\u3002");
     throw new Error("settings cancelled");
+  }
+}
+async function selectProviderModels(providerName, models, previous) {
+  if (!models.length) throw new Error(`${providerName} \u6CA1\u6709\u53EF\u9009\u62E9\u7684\u6A21\u578B`);
+  const initial = previous.filter((model) => models.includes(model));
+  for (; ; ) {
+    const chosen = await p3.multiselect({
+      message: `${providerName} \u4F7F\u7528\u54EA\u4E9B\u6A21\u578B\uFF1F\u9009 1\u20132 \u4E2A\uFF08side\u3001\u53EF\u5199\u5B50\u4EE3\u7406\u548C reviewer \u5171\u7528\uFF09`,
+      options: models.map((value) => ({ value, label: value })),
+      initialValues: initial.length ? initial : [models[0]],
+      required: true
+    });
+    assertPrompt(chosen);
+    if (chosen.length < 1 || chosen.length > 2) {
+      p3.note("\u6BCF\u4E2A provider \u8BF7\u9009\u62E9\u4E00\u5230\u4E24\u4E2A\u6A21\u578B\u3002", "\u8BF7\u91CD\u65B0\u9009\u62E9");
+      continue;
+    }
+    if (chosen.length === 1) return chosen;
+    const primary = await p3.select({
+      message: `${providerName} \u4F18\u5148\u4F7F\u7528\u54EA\u4E2A\u6A21\u578B\uFF1F`,
+      options: chosen.map((value) => ({ value, label: value })),
+      initialValue: initial.find((model) => chosen.includes(model)) ?? chosen[0]
+    });
+    assertPrompt(primary);
+    return [primary, ...chosen.filter((model) => model !== primary)];
   }
 }
 function uniqueRuntimeIdentities(identities) {

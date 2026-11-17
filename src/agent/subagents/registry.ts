@@ -275,12 +275,20 @@ export function selectSubagentRoute(input: {
   }
   const expectedProvider = input.config.ccSwitchProviderId ??
     input.ccSwitch.currentProviderCodex;
-  const automatic = input.routes.find(route =>
+  const priority = input.config.providerPriority ?? [];
+  const automaticRoutes = input.routes.filter(route =>
     route.source === 'cc-switch' &&
-    (!expectedProvider || route.ccSwitchProviderId === expectedProvider) &&
     (access === 'read-only' || route.maxAccess === 'workspace-write')
   );
+  // The generated runtime has already checked model availability and cooldown.
+  // A backup provider is valid even when ccSwitchProviderId names the primary.
+  const automatic = priority.length
+    ? priority.flatMap(target => target.models.map(model => automaticRoutes.find(route =>
+        route.ccSwitchProviderId === target.providerId && route.model === model
+      ))).find(route => route !== undefined)
+    : automaticRoutes.find(route => !expectedProvider || route.ccSwitchProviderId === expectedProvider);
   if (automatic) return { route: automatic };
+  if (priority.length) return { error: '所选 provider/model 优先级中没有可用的自动线路' };
   const mapped = resolveRouteForProvider(
     input.routeMap,
     input.config.ccSwitchProviderId ?? input.ccSwitch.currentProviderCodex,

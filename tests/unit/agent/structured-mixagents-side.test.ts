@@ -914,11 +914,12 @@ describe('structured MixAgents /btw', () => {
     });
     const backend = new FakeBackend(() => routeA);
     const resolver = vi.fn(async () => resolved(routeA, backend));
+    const reviewerPriority = [{ providerId: 'provider-b', models: ['model-b'] }];
     const adapter = new StructuredAdapter({
       kind: 'codex',
       binary: 'not-spawned',
       profileDir,
-      subagents: { ...subagents, enabled: true, mode: 'broker' },
+      subagents: { ...subagents, enabled: true, mode: 'broker', routeMode: 'follow-cc-switch', readRoute: null, providerPriority: reviewerPriority },
       subagentResolver: resolver,
       rsi: {
         mode: 'auto',
@@ -941,6 +942,10 @@ describe('structured MixAgents /btw', () => {
       prompt: 'Modify the project and report completion',
     }));
     expect(submittedPrompts).toHaveLength(2);
+    expect(resolver).toHaveBeenCalledWith(expect.objectContaining({
+      runtimeRole: 'reviewer',
+      subagents: expect.objectContaining({ routeMode: 'follow-cc-switch', readRoute: null, providerPriority: reviewerPriority }),
+    }));
     expect(submittedPrompts[1]).toContain('<validator-findings>');
     expect(events).toContainEqual(expect.objectContaining({
       type: 'done',

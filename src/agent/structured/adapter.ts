@@ -1751,14 +1751,15 @@ export class StructuredAdapter implements AgentAdapter {
     signal: AbortSignal,
     emit: (event: AgentEvent) => void,
   ): Promise<{ ok: true; path?: string } | { ok: false; reason: string }> {
-    const rsi = await this.currentRsiConfig();
     const base = await this.currentSubagentsConfig();
     const reviewerConfig: SubagentConfig = {
       ...base,
       enabled: true,
       mode: 'broker',
-      routeMode: rsi.reviewerRouteMode,
-      readRoute: rsi.reviewerRoute,
+      // Reviewers use the same provider/model candidates as side and worker
+      // tasks. RSI keeps its own enable/disable switch, not a separate model.
+      routeMode: base.routeMode,
+      readRoute: base.readRoute,
       allowForkFallback: false,
     };
     let resolved: ResolvedSubagents;
@@ -1773,6 +1774,7 @@ export class StructuredAdapter implements AgentAdapter {
         ...(this.runtimeIdentity?.ccSwitchProviderId
           ? { parentProviderId: this.runtimeIdentity.ccSwitchProviderId }
           : {}),
+        runtimeRole: 'reviewer',
         signal,
       });
     } catch (error) {

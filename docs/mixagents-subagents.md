@@ -159,6 +159,10 @@ configured in `arg-bridge settings`, in the profile, with
     "mode": "auto",
     "routeMode": "follow-cc-switch",
     "ccSwitchProviderId": null,
+    "providerPriority": [
+      { "providerId": "provider-a", "models": ["model-v2", "model-v1"] },
+      { "providerId": "provider-b", "models": ["model-b1"] }
+    ],
     "readRoute": null,
     "writeRoute": null,
     "modelTools": true,
@@ -278,11 +282,12 @@ follow-cc-switch flow.
 Selection order for each `/btw` or model-visible worker call:
 
 1. explicit `/btw --route <id>`;
-2. manual `subagents.readRoute` (or `writeRoute` for a write worker);
-3. automatically generated route for the selected/current cc-switch provider;
-4. legacy cc-switch provider-ID mapping;
-5. `defaultReadRoute` (or the corresponding write fields);
-6. in `mode=auto` + `follow-cc-switch`, a read-only main-provider Codex
+2. manual `subagents.readRoute` (or `writeRoute` for a write worker) when routeMode is manual;
+3. the saved `providerPriority` list, checking each provider and its one or two models;
+4. automatically generated route for the selected/current cc-switch provider;
+5. legacy cc-switch provider-ID mapping;
+6. `defaultReadRoute` (or the corresponding write fields);
+7. in `mode=auto` + `follow-cc-switch`, a read-only main-provider Codex
    `thread/fork` fallback when `allowForkFallback=true`, with a visible notice.
 
 The fallback is disabled for `mode=broker`, manual route mode and explicit
@@ -308,17 +313,17 @@ logs.
 ### Side concurrency and timeout
 
 `/btw` is a concurrent side operation, not a second main turn. It remains
-native-side marked even if a bridge route omits its `inputMode`. Provider-specific
-model/effort preferences from settings apply to both read-only and writable side
-turns. Without a provider preference, read-only turns use
-`subagents.sideReasoningEffort` (default `low`) and write turns keep the provider's
-normal reasoning effort.
+native-side marked even if a bridge route omits its `inputMode`. The saved `providerPriority` list applies equally to read-only side turns,
+workspace-write workers, model-visible Broker calls and RSI reviewers. A writable
+worker only adds an authorization requirement; it does not get a separate model
+or route. Provider-specific reasoning preferences apply to all three roles.
+Without such a preference, read-only sides use `subagents.sideReasoningEffort`,
+while writable workers and reviewers use the provider's normal reasoning effort.
 `subagents.sideTimeoutMs` (default 90 seconds) is a **soft waiting notice**, not
 a hard cancellation. After it elapses, Bridge says the worker is still running.
 Each `subagents.workerTimeoutMs` wait window automatically rolls into another
 window while the worker remains active and the user has not issued `/btw out`.
-Explicitly authorized write turns use the provider's normal reasoning effort
-and the same continuing wait policy.
+Explicitly authorized write turns use the same continuing wait policy.
 
 The side runtime also limits Codex request/stream retries so a temporarily
 unavailable provider fails quickly instead of appearing to think indefinitely.
@@ -490,32 +495,33 @@ Advanced concurrency, native-tool shadowing, write workers, custom MCP command,
 progress snapshot and RSI repair-round settings are hidden behind an explicit
 `advanced` prompt.
 
-Settings reads models from the selected provider's default `model`, its
-same-provider TOML profiles, and explicit `models` / `availableModels` /
-`available_models` arrays in `settings_config`. These are local declarations,
-not verified API availability. You can enter an exact model ID manually or
-choose to follow the provider's default. Reasoning choices are `inherit`,
-`low`, `medium`, `high`, `xhigh`, and `max`; provider support is required.
+Settings first requests the authenticated `/models` catalogue. If the endpoint is
+not available, it clearly falls back to the provider's configured model, TOML
+profiles and explicit `models` / `availableModels` / `available_models` arrays.
+The fallback is labelled as unverified. The UI never asks for a free-form model
+ID. Reasoning choices are `inherit`, `low`, `medium`, `high`, `xhigh`, and `max`.
 
 Preferences are saved separately for each provider:
 
 ```json
 {
   "ccSwitchProviderId": null,
+  "providerPriority": [
+    { "providerId": "provider-a", "models": ["model-v2", "model-v1"] },
+    { "providerId": "provider-b", "models": ["model-b1"] }
+  ],
   "providerOverrides": {
-    "provider-a": { "model": "model-v2", "reasoningEffort": "high" },
+    "provider-a": { "model": null, "reasoningEffort": "high" },
     "provider-b": { "model": null, "reasoningEffort": "inherit" }
   }
 }
 ```
 
-It does not switch the active main provider. These preferences apply to `/btw`,
-automatic workers and reviewers using generated cc-switch routes. A provider
-entry overrides the legacy `sideReasoningEffort`, even when set to `inherit`.
-Providers without an entry retain the old defaults. Switching A -> B -> A
-restores each provider's own preferences; model/effort changes recreate a
-reusable worker on its next dispatch. Manual routes and local Codex fork keep
-their own model settings.
+It does not switch the active main provider. A failed provider/model is cooled
+for new dispatches only; an existing worker is never replayed onto another
+route. Old `providerOverrides.model` values are cleared when settings is saved;
+reasoning preferences remain provider-scoped. Fixed/manual route configuration
+remains a legacy compatibility path and is not offered by the guided settings UI.
 
 For public MixAgents 0.1.1, Bridge supplies the automatically resolved
 credential object directly to the MCP child. Manual

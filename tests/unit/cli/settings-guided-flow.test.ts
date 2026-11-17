@@ -38,11 +38,10 @@ afterEach(async () => {
 
 describe('guided settings flow', () => {
   it.each([
-    { provider: '__follow_current__', model: 'model-a-v2', effort: 'high', selected: 'provider-a', expected: 'model-a-v2' },
-    { provider: 'provider-b', model: '__custom_model__', effort: 'medium', selected: 'provider-b', expected: 'custom/model-v3' },
-    { provider: '__follow_current__', model: '__provider_default__', effort: 'inherit', selected: 'provider-a', expected: null },
-    { provider: '__priority__', model: '__provider_default__', effort: 'inherit', selected: 'provider-b', expected: null },
-  ])('saves provider-scoped model/effort selections: $provider $model', async ({ provider, model, effort, selected, expected }) => {
+    { provider: '__follow_current__', effort: 'high', selected: 'provider-a', priority: [], advanced: false, writable: true },
+    { provider: 'provider-b', effort: 'medium', selected: 'provider-b', priority: [{ providerId: 'provider-b', models: ['model-b-v2', 'model-b'] }], advanced: false, writable: true },
+    ...[false, true].map(writable => ({ provider: '__priority__', effort: 'inherit', selected: 'provider-b', priority: [{ providerId: 'provider-b', models: ['model-b-v2', 'model-b'] }, { providerId: 'provider-a', models: ['model-a'] }], advanced: true, writable })),
+  ])('saves unified routing: $provider, advanced=$advanced, writable=$writable', async ({ provider, effort, selected, priority, advanced, writable }) => {
     const root = await mkdtemp(join(tmpdir(), 'arg-bridge-guided-settings-'));
     temporary.push(root);
     const ccHome = join(root, 'cc-switch');
@@ -82,6 +81,8 @@ describe('guided settings flow', () => {
       ...DEFAULT_SUBAGENT_CONFIG,
       mode: 'auto',
       providerOverrides: { untouched: { model: 'keep-model', reasoningEffort: 'low' } },
+      providerPriority: [{ providerId: 'provider-b', models: ['model-b-v2', 'model-b'] }],
+      writeRoute: 'old-independent-write-model',
       mixagents: {
         mcpCommand: process.execPath,
         mcpArgs: [fixture],
@@ -102,21 +103,31 @@ describe('guided settings flow', () => {
     if (provider === '__priority__') {
       prompts.select.mockResolvedValueOnce('auto').mockResolvedValueOnce('__priority__')
         .mockResolvedValueOnce('provider-b').mockResolvedValueOnce('model-b-v2')
-        .mockResolvedValueOnce('off').mockResolvedValueOnce('all');
+        .mockResolvedValueOnce('auto');
       prompts.multiselect.mockResolvedValueOnce(['provider-a', 'provider-b'])
         .mockResolvedValueOnce(['model-b', 'model-b-v2']).mockResolvedValueOnce(['model-a']);
+    } else if (provider === 'provider-b') {
+      prompts.select.mockResolvedValueOnce('auto').mockResolvedValueOnce('provider-b')
+        .mockResolvedValueOnce('model-b-v2').mockResolvedValueOnce(effort)
+        .mockResolvedValueOnce('off').mockResolvedValueOnce('all');
+      prompts.multiselect.mockResolvedValueOnce(['model-b', 'model-b-v2']);
     } else prompts.select
       .mockResolvedValueOnce('auto')
       .mockResolvedValueOnce(provider)
-      .mockResolvedValueOnce(model)
       .mockResolvedValueOnce(effort)
       .mockResolvedValueOnce('off')
       .mockResolvedValueOnce('all');
-    if (model === '__custom_model__') prompts.text.mockResolvedValueOnce('custom/model-v3');
-    prompts.confirm
-      .mockResolvedValueOnce(true)
-      .mockResolvedValueOnce(false)
-      .mockResolvedValueOnce(true);
+    prompts.confirm.mockResolvedValueOnce(true).mockResolvedValueOnce(advanced);
+    if (advanced) {
+      // RSI root, concurrency, wait windows, repair budget, MCP command/args.
+      prompts.text.mockResolvedValueOnce('').mockResolvedValueOnce('4')
+        .mockResolvedValueOnce('15').mockResolvedValueOnce('90')
+        .mockResolvedValueOnce('2').mockResolvedValueOnce(process.execPath).mockResolvedValueOnce('');
+      prompts.confirm.mockResolvedValueOnce(true).mockResolvedValueOnce(true).mockResolvedValueOnce(writable);
+      prompts.select.mockResolvedValueOnce('shadow').mockResolvedValueOnce('low')
+        .mockResolvedValueOnce('auto').mockResolvedValueOnce('all');
+    }
+    prompts.confirm.mockResolvedValueOnce(true);
 
     const stdinDescriptor = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
     const stdoutDescriptor = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY');
@@ -137,19 +148,23 @@ describe('guided settings flow', () => {
       routeMode: 'follow-cc-switch',
       ccSwitchProviderId: provider === '__follow_current__' ? null : provider === '__priority__' ? 'provider-b' : provider,
       providerOverrides: {
-        untouched: { model: 'keep-model', reasoningEffort: 'low' },
-        ...(provider === '__priority__' ? {} : { [selected]: { model: expected, reasoningEffort: effort } }),
+        untouched: { model: null, reasoningEffort: 'low' },
+        ...(provider === '__priority__'
+          ? {}
+          : { [selected]: { model: null, reasoningEffort: effort } }),
       },
+      providerPriority: priority,
       readRoute: null,
-      allowWriteWorkers: true,
+      writeRoute: null,
+      allowWriteWorkers: writable,
       mixagents: {
         credentialMode: 'inherit-env',
       },
     });
-    expect(savedProfile!.rsi?.mode).toBe('off');
-    if (provider === '__priority__') expect(savedProfile!.subagents?.providerPriority).toEqual([
-      { providerId: 'provider-b', models: ['model-b-v2', 'model-b'] }, { providerId: 'provider-a', models: ['model-a'] },
-    ]);
+    expect(savedProfile!.rsi).toMatchObject({
+      mode: advanced ? 'auto' : 'off', reviewerRouteMode: 'follow-cc-switch', reviewerRoute: null,
+    });
+    expect(savedProfile!.subagents?.providerPriority).toEqual(priority);
     expect(savedProfile!.codex?.providerRecovery).toMatchObject({ version: 2, enabled: true, continuous: false, providers: [], maxAttempts: 0, retryStallSeconds: 60, budgetSeconds: 3600 });
     await expect(readFile(join(xdg, 'arg-bridge', 'broker-routes.json'), 'utf8'))
       .rejects.toMatchObject({ code: 'ENOENT' });
@@ -162,11 +177,16 @@ describe('guided settings flow', () => {
     ]));
     expect(JSON.stringify(prompts.note.mock.calls)).toContain('provider-a');
     expect(JSON.stringify(prompts.select.mock.calls)).toContain('__follow_current__');
-    const modelPrompt = prompts.select.mock.calls.find(([input]) => input.message === '子代理使用哪个模型版本？')?.[0];
-    if (provider !== '__priority__') {
-    expect(modelPrompt.options).toContainEqual({ value: selected === 'provider-a' ? 'model-a-v2' : 'model-b-v2', label: selected === 'provider-a' ? 'model-a-v2' : 'model-b-v2' });
-    expect(JSON.stringify(modelPrompt)).not.toContain(selected === 'provider-a' ? 'model-b' : 'model-a');
+    expect(prompts.select.mock.calls.find(([input]) => input.message === '子代理使用哪个模型版本？')).toBeUndefined();
+    expect(JSON.stringify(prompts.note.mock.calls)).toContain('子代理模型');
+    expect(prompts.select.mock.calls.some(([input]) => /模型版本|模型 ID|可写子代理使用哪条线路|固定复核线路/.test(input.message))).toBe(false);
+    expect(prompts.text.mock.calls.some(([input]) => /模型|model|route/i.test(input.message))).toBe(false);
+    if (provider !== '__follow_current__') {
+      const modelPrompt = prompts.multiselect.mock.calls.find(([input]) => input.message.startsWith('Provider b 使用哪些模型'))![0];
+      expect(modelPrompt.initialValues).toEqual(['model-b-v2', 'model-b']);
+      expect(prompts.select.mock.calls.find(([input]) => input.message === 'Provider b 优先使用哪个模型？')![0].initialValue).toBe('model-b-v2');
     }
+    if (advanced) expect(JSON.stringify(prompts.note.mock.calls)).toContain('provider-b: model-b-v2 → model-b');
     expect(JSON.stringify(prompts.note.mock.calls)).not.toContain('sk-super-secret-value');
     expect(await readFile(paths.configFile, 'utf8')).not.toContain('sk-super-secret-value');
   });

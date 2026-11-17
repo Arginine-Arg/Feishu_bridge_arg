@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.22.1
+
+- Unifies subagent routing: read-only sides, writable workers, Broker tools and RSI reviewers share one provider/model priority list.
+- Removes independent model entry, fixed write-route choice and “follow /btw model” ambiguity from advanced settings.
+- Automatically discovers provider model catalogues and saves one or two models per provider.
+- Clears legacy manual model pins when settings is saved while preserving reasoning preferences and the main provider.
+- Accepts backup provider selections for read and write workers, and preserves existing model choices when settings is reopened.
+
 ## 1.22.0
 
 - Automatically transfers an idle native thread to the selected provider: real

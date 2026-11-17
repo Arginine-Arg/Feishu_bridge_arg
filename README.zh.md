@@ -275,7 +275,7 @@ codex plugin marketplace add Utopia-V/mixagents
 codex plugin add mixagents-broker@mixagents
 ```
 
-`arg-bridge settings` 现在会用五步向导说明：当前主对话、是否允许降级、子代理跟随当前 provider 还是固定某个 cc-switch provider、模型版本和推理强度、Key 自动由 cc-switch 解析、是否启用项目证据校验。模型选项来自所选 provider 的本地配置，也可手填或跟随默认值；选择按 provider 保存，下一次子代理派发时生效。用户不需要填写 route ID 或 Key；并发、native 工具遮蔽、写权限和自定义 MCP 等参数收在“高级设置”里。默认不创建 `broker-routes.json`，也不会切换主 provider。
+`arg-bridge settings` 现在会用五步向导说明：当前主对话、是否允许降级、provider/model 优先级、Key 自动由 cc-switch 解析、是否启用项目证据校验。设置会通过 provider 的模型目录自动读取可用模型，每个 provider 选择一到两个模型并排序；同一优先级同时用于只读 side、可写 worker、Broker 工具和 reviewer。用户不需要填写 route ID 或 Key；并发、native 工具遮蔽、写权限和自定义 MCP 等参数收在“高级设置”里。默认不创建 `broker-routes.json`，也不会切换主 provider。
 
 显式终端入口现在包括同 thread 的 provider 切换：
 
@@ -357,7 +357,7 @@ Agent 通常会在下一次模型调用或工具边界读取这些输入，行�
 }
 ```
 
-通过 `arg-bridge settings --profile codex` 配置 MCP、read/write route、dynamic-tool 暴露、native shadow 策略、并发 worker 上限、超时、写 worker 授权、RSI 修复轮次和凭据委托。`arg-bridge doctor --json` 会分别报告 Broker 工具接线、native 绕过风险、写路由状态、worker probe 状态，以及直接 TUI 是否仍需要 trusted hook。
+通过 `arg-bridge settings --profile codex` 配置 provider/model 优先级、dynamic-tool 暴露、native shadow 策略、并发 worker 上限、超时、写 worker 授权、RSI 修复轮次和凭据委托；旧 route 文件仍可兼容读取。`arg-bridge doctor --json` 会分别报告 Broker 工具接线、native 绕过风险、写路由状态、worker probe 状态，以及直接 TUI 是否仍需要 trusted hook。
 
 Project RSI 与 MixAgents、历史 Task RSI 是三个不同层次。Bridge 只发现已经初始化的 `.project-rsi/config.json`，不会在 `/`、`$HOME` 或宽泛父目录自动 init。实质性 Bridge turn 必须获得 fresh 上游 validator receipt 和 reviewer evidence。validator failure findings 会回传给同一父 thread，在 `maxRepairRounds` 与超时限制内修复，然后重新运行上游 runner/validator。Bridge 不会伪造 receipt、降低门槛或自动批准 proposal。直接 `codex` 等原生 TUI 不在门禁范围内，除非安装并验证 trusted hook。
 

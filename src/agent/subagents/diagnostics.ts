@@ -319,7 +319,7 @@ export async function collectSubagentDiagnostics(input: {
     };
   } | undefined;
   if (input.config.routeMode === 'follow-cc-switch') {
-    if ('error' in providerResolution) {
+    if ('error' in providerResolution && !input.config.providerPriority?.length) {
       return {
         ...base,
         launchCommand: basename(launch.command),
@@ -358,6 +358,7 @@ export async function collectSubagentDiagnostics(input: {
           webSearch: input.config.webSearch,
           sideReasoningEffort: input.config.sideReasoningEffort,
           providerOverrides: input.config.providerOverrides,
+          providerPriority: input.config.providerPriority,
         },
       });
       brokerRuntime = {
