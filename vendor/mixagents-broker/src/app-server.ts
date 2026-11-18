@@ -7,6 +7,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { buildProcessInvocation, resolveCodexProcess } from "./codex-process.js";
 import { BrokerError, errorMessage } from "./errors.js";
 import { JsonLinePeer, JsonRpcRemoteError } from "./jsonrpc.js";
+import { DshRuntime } from "./dsh-runtime.js";
 import type {
   Access,
   AgentEvent,
@@ -174,6 +175,7 @@ export function runtimeIdFor(route: RouteConfig, access: Access): string {
           envHttpHeaders: route.envHttpHeaders,
           reasoningEffort: route.reasoningEffort ?? null,
           access,
+          ...(route.dsh ? { dsh: route.dsh } : {}),
         }),
       ),
     )
@@ -982,11 +984,13 @@ export class AppServerRuntime extends EventEmitter {
   }
 }
 
+type ManagedRuntime = AppServerRuntime | DshRuntime;
+
 export class RuntimeManager {
   readonly #dataDir: string;
   readonly #process: ProcessSpec;
   readonly #environment: NodeJS.ProcessEnv;
-  readonly #runtimes = new Map<string, AppServerRuntime>();
+  readonly #runtimes = new Map<string, ManagedRuntime>();
 
   constructor(
     dataDir: string,
@@ -999,7 +1003,7 @@ export class RuntimeManager {
     this.#environment = environment;
   }
 
-  async forRoute(route: RouteConfig, access: Access): Promise<AppServerRuntime> {
+  async forRoute(route: RouteConfig, access: Access): Promise<ManagedRuntime> {
     const runtimeId = runtimeIdFor(route, access);
     const existing = this.#runtimes.get(runtimeId);
     if (existing) {
@@ -1013,15 +1017,12 @@ export class RuntimeManager {
       route,
       createdAt: new Date().toISOString(),
     };
-    const runtime = new AppServerRuntime(
-      { metadata, directory, process: this.#process },
-      this.#environment,
-    );
+    const runtime = this.#create(metadata, directory);
     this.#runtimes.set(runtimeId, runtime);
     return runtime;
   }
 
-  async forAgent(agentId: string): Promise<{ runtime: AppServerRuntime; threadId: string }> {
+  async forAgent(agentId: string): Promise<{ runtime: ManagedRuntime; threadId: string }> {
     const { runtimeId, threadId } = parseAgentId(agentId);
     let runtime = this.#runtimes.get(runtimeId);
     if (!runtime) {
@@ -1031,7 +1032,7 @@ export class RuntimeManager {
     return { runtime, threadId };
   }
 
-  async all(): Promise<AppServerRuntime[]> {
+  async all(): Promise<ManagedRuntime[]> {
     const root = path.join(this.#dataDir, "runtimes");
     let entries: string[] = [];
     try {
@@ -1052,7 +1053,7 @@ export class RuntimeManager {
     return [...this.#runtimes.values()];
   }
 
-  async #loadRuntime(runtimeId: string): Promise<AppServerRuntime> {
+  async #loadRuntime(runtimeId: string): Promise<ManagedRuntime> {
     const directory = path.join(this.#dataDir, "runtimes", runtimeId);
     const metadataPath = path.join(directory, RUNTIME_METADATA_FILE);
     let metadata: RuntimeMetadata;
@@ -1073,10 +1074,14 @@ export class RuntimeManager {
     ) {
       throw new BrokerError("invalid_runtime", `Runtime metadata ${runtimeId} is invalid`);
     }
-    return new AppServerRuntime(
-      { metadata, directory, process: this.#process },
-      this.#environment,
-    );
+    return this.#create(metadata, directory);
+  }
+
+  #create(metadata: RuntimeMetadata, directory: string): ManagedRuntime {
+    if (metadata.route.dsh) {
+      return new DshRuntime(metadata, directory, filteredChildEnvironment(metadata.route, directory, this.#environment));
+    }
+    return new AppServerRuntime({ metadata, directory, process: this.#process }, this.#environment);
   }
 
   async close(): Promise<void> {

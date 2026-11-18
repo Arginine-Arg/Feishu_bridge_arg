@@ -1,8 +1,10 @@
 # arg-bridge
 
-A lightweight bot that bridges Feishu / Lark messenger with your local Claude Code or Codex CLI. Run one command, scan a QR code to bind a PersonalAgent app, and talk to your local coding agent from chat.
+A lightweight bot that bridges Feishu / Lark messenger with local Claude Code, Codex CLI, and DeepSeek Harness. Run one command, scan a QR code to bind a PersonalAgent app, and talk to your local coding agent from chat.
 
 [中文 README](./README.zh.md)
+
+[DeepSeek Harness setup and profile migration](./docs/deepseek-harness.md)
 
 Version 1.22.1 makes the subagent settings use one provider/model priority list for read-only side sessions, writable workers, Broker tools, and RSI reviewers. The advanced section no longer asks for a separate model or write route; old manual model pins are cleared when settings is saved.
 

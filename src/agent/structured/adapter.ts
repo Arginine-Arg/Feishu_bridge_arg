@@ -38,6 +38,8 @@ import { materializeCcSwitchBrokerRuntime } from '../../integrations/cc-switch-p
 import {
   DEFAULT_RSI_CONFIG,
   DEFAULT_SUBAGENT_CONFIG,
+  type AgentKind,
+  type DshConfig,
   type RsiConfig,
   type SubagentConfig,
 } from '../../config/profile-schema';
@@ -75,6 +77,8 @@ import {
 } from '../../integrations/project-rsi';
 import { CodexStructuredSession } from './codex';
 import { ClaudeStructuredSession } from './claude';
+import { DshStructuredSession } from '../dsh/session';
+import { dshHome } from '../dsh/model-state';
 import { findLoadedThreadHost } from './native-bridge';
 import type { StructuredSession } from './contracts';
 import { textEvent } from './contracts';
@@ -429,6 +433,7 @@ interface SavedStructuredState {
   view?: TmuxBindingStatus;
   brokerToolsVersion?: number;
   brokerToolNamespace?: string;
+  history?: Array<{ id: string; updatedAt: number }>;
 }
 interface MixAgentsSideState {
   agent: SideAgent;
@@ -447,7 +452,8 @@ interface MixAgentsSideState {
 }
 export interface StructuredAdapterOptions {
   providerRecovery?: Partial<ProviderRecoveryConfig>;
-  kind: 'codex' | 'claude'; binary: string; profileDir: string; codexHome?: string;
+  kind: AgentKind; binary: string; profileDir: string; codexHome?: string;
+  dsh?: DshConfig;
   larkChannel?: LarkChannelEnvContext; nativeView?: boolean; sandbox?: CodexSandboxMode;
   network?: NetworkConfig;
   subagents?: SubagentConfig;
@@ -462,13 +468,14 @@ export interface StructuredAdapterOptions {
 }
 
 export class StructuredAdapter implements AgentAdapter {
-  readonly id: 'codex' | 'claude';
+  readonly id: AgentKind;
   readonly displayName: string;
   readonly tmux: AgentTmuxControl;
   private sessions = new Map<string, ScopeSession>();
   private recoveryObservers = new Map<string, CodexStructuredSession>();
   private recoveryControlWrites: Promise<void> = Promise.resolve();
   private starting = new Map<string, Promise<ScopeSession>>();
+  private selecting = new Map<string, Promise<void>>();
   private bindings = new Map<string, StructuredBinding>();
   private autoDiscoveryDisabled = new Set<string>();
   private readonly bindingsFile: string;
@@ -487,7 +494,8 @@ export class StructuredAdapter implements AgentAdapter {
   private runtimeIdentity?: CodexHostRuntimeIdentity;
   constructor(private readonly options: StructuredAdapterOptions) {
     this.id = options.kind;
-    this.displayName = options.kind === 'codex' ? 'Codex App Server' : 'Claude Agent SDK';
+    this.displayName = options.kind === 'codex' ? 'Codex App Server'
+      : options.kind === 'dsh' ? 'DeepSeek Harness' : 'Claude Agent SDK';
     this.bindingsFile = join(options.profileDir, 'structured', 'tmux-bindings.json');
     this.candidatesFile = join(options.profileDir, 'structured', 'tmux-candidates.json');
     this.sidesFile = join(options.profileDir, 'structured', 'subagent-sides.json');
@@ -918,7 +926,8 @@ export class StructuredAdapter implements AgentAdapter {
         : {}),
       ...(config.ccSwitchProviderId ? { providerId: config.ccSwitchProviderId } : {}),
       cwd,
-      codexBin: this.options.binary,
+      codexBin: this.id === 'dsh' ? (this.options.env ?? process.env).CODEX_BINARY?.trim() || 'codex' : this.options.binary,
+      ...(this.id === 'dsh' ? { dsh: (await this.reloadProfileConfig())?.dsh ?? this.options.dsh ?? { binaryPath: this.options.binary } } : {}),
       stateDir: join(this.options.profileDir, 'structured'),
       runtimePolicy: {
         role,
@@ -2160,6 +2169,7 @@ export class StructuredAdapter implements AgentAdapter {
         sendNativePickerControl(await this.nativePickerResolver(scope, current), input);
         return [textEvent(`↪ 已发送到当前 Codex 终端菜单：${input.trim()}`)];
       }
+      if (this.id === 'dsh') throw new Error('请使用当前 DeepSeek Harness 审批卡片或 /answer。');
     }
     if (!current) throw new Error('当前结构化会话尚未建立');
     const mixagents = this.mixagentsSideForScope(scope);
@@ -2374,7 +2384,7 @@ export class StructuredAdapter implements AgentAdapter {
           const sideWorkspace = btw.access === 'workspace-write'
             ? await authorizedSideWorkspace(options.cwd!, btw.workspace)
             : options.cwd!;
-          const workerEnv = {
+          const workerEnv: NodeJS.ProcessEnv = {
             ...(this.options.env ?? process.env),
             ...buildLarkChannelEnv(this.options.larkChannel),
             ...(options.artifactDelivery
@@ -2390,11 +2400,13 @@ export class StructuredAdapter implements AgentAdapter {
           };
           const resolved = await (this.options.subagentResolver ?? resolveSubagents)({
             subagents,
+            ...(this.id === 'dsh' ? { allowCodexFork: false } : {}),
             env: workerEnv,
             cwd: sideWorkspace,
             access: btw.access,
             stateDir: join(this.options.profileDir, 'structured'),
-            codexBin: this.options.binary,
+            codexBin: this.id === 'dsh' ? workerEnv.CODEX_BINARY?.trim() || 'codex' : this.options.binary,
+            ...(this.id === 'dsh' ? { dsh: (await this.reloadProfileConfig())?.dsh ?? this.options.dsh ?? { binaryPath: this.options.binary } } : {}),
             ...(this.options.codexHome ? { codexHome: this.options.codexHome } : {}),
             ...(this.runtimeIdentity?.ccSwitchProviderId
               ? { parentProviderId: this.runtimeIdentity.ccSwitchProviderId }
@@ -2448,9 +2460,7 @@ export class StructuredAdapter implements AgentAdapter {
             emit(textEvent('子代理已在当前 profile 中关闭；主任务和其他命令不受影响。'));
             return;
           }
-          if (!(current.main instanceof CodexStructuredSession)) {
-            throw new Error('当前配置没有可用的 MixAgents route；Claude 结构化主会话无法使用 Codex fork fallback。请配置 broker route 或关闭 side 功能。');
-          }
+          if (!(current.main instanceof CodexStructuredSession)) throw new Error('当前会话没有可用的 MixAgents 路由。');
           if (!current.side) {
             current.sideOpening ??= openSideWithRetry(this, current, options, emit);
             try { await current.sideOpening; } finally { current.sideOpening = undefined; }
@@ -2470,6 +2480,7 @@ export class StructuredAdapter implements AgentAdapter {
         const payload = {
           ...options,
           prompt,
+          ...(this.id === 'dsh' && writeAuthorization ? { brokerWriteAuthorization: writeAuthorization } : {}),
           ...(side
             ? { liveInputMode: undefined, sandbox: 'read-only' as const }
             : {}),
@@ -2504,10 +2515,7 @@ export class StructuredAdapter implements AgentAdapter {
           activeTarget = target;
           await target.submit(payload, submitEmit, abort.signal);
         }
-        if (!side && target === current.main && !mainFailed) {
-          if (!(current.main instanceof CodexStructuredSession)) {
-            throw new Error('Project RSI repair loop requires a Codex structured main session');
-          }
+        if (!side && target === current.main && !mainFailed && current.main instanceof CodexStructuredSession) {
           await this.enforceRsiWithRepair({
             cwd: options.cwd!,
             prompt: options.prompt,
@@ -2614,6 +2622,39 @@ export class StructuredAdapter implements AgentAdapter {
   private stateFile(scope: string, cwd: string): string {
     return join(this.options.profileDir, 'structured', `${createHash('sha256').update(scope).update('\0').update(cwd).digest('hex')}.json`);
   }
+  async structuredHistory(scope: string, cwd: string) {
+    if (this.id !== 'dsh') return [];
+    const state = await this.saved(scope, cwd);
+    return (state?.history ?? (state?.id ? [{ id: state.id, updatedAt: 0 }] : [])).map(item => ({
+      ...item, current: item.id === state?.id,
+    }));
+  }
+  async selectStructuredSession(scope: string, cwd: string, id?: string): Promise<void> {
+    if (this.id !== 'dsh') throw new Error('此后端不支持在飞书切换结构化会话。');
+    if (this.selecting.has(scope)) throw new Error('正在切换会话，请稍后重试。');
+    const selection = this.switchDshSession(scope, cwd, id);
+    this.selecting.set(scope, selection);
+    try { await selection; } finally { this.selecting.delete(scope); }
+  }
+  private async switchDshSession(scope: string, cwd: string, id?: string): Promise<void> {
+    if (this.starting.has(scope)) throw new Error('会话正在启动，请稍后重试。');
+    if (this.mixagentsSideForScope(scope)) throw new Error('请先用 /btw out 退出 side。');
+    const current = this.sessions.get(scope);
+    if (current?.main.diagnostics().inputState === 'submitted') throw new Error('请先用 /stop 停止当前任务。');
+    const state = await this.saved(scope, cwd);
+    if (!state) {
+      if (id) throw new Error('当前聊天没有这个 DSH 会话。');
+      return;
+    }
+    const history = state.history ?? (state.id ? [{ id: state.id, updatedAt: 0 }] : []);
+    if (id && !history.some(item => item.id === id)) throw new Error('当前聊天没有这个 DSH 会话。');
+    await writeFileAtomic(this.stateFile(scope, cwd), JSON.stringify({ ...state, id: id ?? '', history }), { mode: 0o600 });
+    if (current) {
+      this.sessions.delete(scope);
+      await current.main.close();
+      await current.view.dispose();
+    }
+  }
   private async saved(scope: string, cwd: string): Promise<SavedStructuredState | undefined> {
     try {
       const value = JSON.parse(await readFile(this.stateFile(scope, cwd), 'utf8'));
@@ -2623,6 +2664,8 @@ export class StructuredAdapter implements AgentAdapter {
   private async session(options: AgentRunOptions): Promise<ScopeSession> {
     const scope = options.scopeId ?? options.cwd;
     if (!scope || !options.cwd) throw new Error('Structured session requires scope and cwd');
+    const selection = this.selecting.get(scope);
+    if (selection) await selection;
     let found = this.sessions.get(scope);
     let binding = this.bindings.get(scope);
     if (binding && this.id === 'codex') {
@@ -2713,8 +2756,7 @@ export class StructuredAdapter implements AgentAdapter {
     const cwd = options.cwd!;
     const directory = join(this.options.profileDir, 'structured');
     const stateFile = this.stateFile(scope, cwd);
-    let saved: SavedStructuredState | undefined;
-    try { saved = JSON.parse(await readFile(stateFile, 'utf8')); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    const saved = await this.saved(scope, cwd);
     if (!saved && !bound && options.liveInputMode === 'control') throw new Error('没有可恢复的结构化会话；选择操作未启动新任务');
     let pendingNative: PendingNativeView | undefined;
     const env = withArtifactDeliveryEnv({
@@ -3030,6 +3072,68 @@ export class StructuredAdapter implements AgentAdapter {
             : {}),
         }));
       } catch (error) { await restored?.close(); rpc.close(); throw error; }
+    } else if (this.id === 'dsh') {
+      const config = this.options.dsh ?? { binaryPath: this.options.binary };
+      const modelFile = `${stateFile}.models.json`;
+      const models = new Map<string, string>();
+      try {
+        const stored: unknown = JSON.parse(await readFile(modelFile, 'utf8'));
+        if (stored && typeof stored === 'object' && !Array.isArray(stored)) {
+          for (const [provider, model] of Object.entries(stored)) {
+            if (typeof model === 'string') models.set(provider, model);
+          }
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+      let modelWrites = Promise.resolve();
+      const saveModel = (provider: string, model?: string) => {
+        const written = modelWrites.then(async () => {
+          const next = new Map(models);
+          if (model) next.set(provider, model);
+          else next.delete(provider);
+          await writeFileAtomic(modelFile, JSON.stringify(Object.fromEntries(next)), { mode: 0o600 });
+          if (model) models.set(provider, model);
+          else models.delete(provider);
+        });
+        modelWrites = written.catch(() => {});
+        return written;
+      };
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      let dshBroker: BrokerToolController | undefined;
+      main = new DshStructuredSession({
+        config, cwd,
+        loadConfig: async () => (await this.reloadProfileConfig())?.dsh,
+        home: dshHome(this.options.profileDir, config.home),
+        env: { ...(this.options.env ?? process.env), ...buildLarkChannelEnv(this.options.larkChannel) },
+        network: this.options.network,
+        sandbox: this.options.sandbox,
+        sessionId: options.sessionId ?? (saved?.id || undefined),
+        onSessionId: async id => {
+          const history = saved?.history ?? (saved?.id ? [{ id: saved.id, updatedAt: 0 }] : []);
+          await writeFileAtomic(stateFile, JSON.stringify({
+            id, cwd, scope, kind: this.id, view: view.status(),
+            history: [{ id, updatedAt: Date.now() }, ...history.filter(item => item.id !== id)].slice(0, 20),
+          }), { mode: 0o600 });
+        },
+        loadModel: async provider => models.get(provider),
+        saveModel,
+        closeBroker: async () => { await dshBroker?.close(); },
+        broker: async run => {
+          const config = await this.currentSubagentsConfig();
+          if (!config.enabled || !config.modelTools || (config.mode !== 'auto' && config.mode !== 'broker')) return undefined;
+          return {
+            namespace: config.toolNamespace,
+            controller: async id => {
+              dshBroker ??= this.brokerController(id, scope, cwd, config.toolNamespace);
+              dshBroker.setWriteAuthorization(run.brokerWriteAuthorization);
+              return dshBroker;
+            },
+            release: controller => controller.setWriteAuthorization?.(undefined),
+          };
+        },
+      });
+      await view.start(undefined, cwd);
     } else {
       const id = saved?.id ?? randomUUID();
       const permissionMode = options.permissionMode ?? 'default';

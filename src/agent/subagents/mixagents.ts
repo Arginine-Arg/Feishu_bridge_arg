@@ -110,7 +110,8 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
         isMissingKnownLegacyBrokerLaunch(configuredLaunch)
       ),
     );
-    const launch = replaceConfiguredLaunch ? bundledLaunch : configuredLaunch;
+    const launch = runtime?.route?.backend === 'dsh_acp' ? bundledLaunch
+      : replaceConfiguredLaunch ? bundledLaunch : configuredLaunch;
     if (replaceConfiguredLaunch && isMissingKnownLegacyBrokerLaunch(configuredLaunch!)) {
       this.launchReplacementNotice =
         '配置文件中的旧 MixAgents npm Broker 路径已失效，已自动改用随包 vendored Broker；provider/model/route 均未改变。';

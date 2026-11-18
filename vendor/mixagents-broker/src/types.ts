@@ -3,6 +3,11 @@ export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue
 export type JsonObject = { [key: string]: JsonValue };
 
 export type Access = "read-only" | "workspace-write";
+export type WorkerBackend = "app_server" | "dsh_acp";
+export interface DshRouteSettings {
+  binary: string;
+  api: "openai-responses" | "openai-completions" | "anthropic-messages";
+}
 export type AgentStatus =
   | "starting"
   | "running"
@@ -59,6 +64,7 @@ export interface RouteConfig {
   tags: string[];
   maxAccess: Access;
   reasoningEffort?: ReasoningEffort;
+  dsh?: DshRouteSettings;
 }
 
 export interface BrokerConfig {
@@ -80,7 +86,7 @@ export interface RouteView {
   available: boolean;
   missingEnvironment: string[];
   maxAccess: Access;
-  backend: "app_server";
+  backend: WorkerBackend;
   selectionReason: string;
   nativeAgentType: null;
   default: boolean;
@@ -91,7 +97,7 @@ export interface AgentSnapshot {
   route: string;
   provider: string;
   model: string;
-  backend: "app_server";
+  backend: WorkerBackend;
   status: AgentStatus;
   output?: string;
   error?: string;

@@ -14,7 +14,15 @@ import {
   type PermissionSource,
 } from './permissions';
 
-export type AgentKind = 'claude' | 'codex';
+export type AgentKind = 'claude' | 'codex' | 'dsh';
+
+export interface DshConfig {
+  binaryPath: string;
+  home?: string;
+  /** Omit to track the current provider in cc-switch's Codex catalog. */
+  ccSwitchProviderId?: string;
+  api?: 'openai-responses' | 'openai-completions' | 'anthropic-messages';
+}
 export type SandboxMode = CodexSandboxMode;
 export type { AccessMode, PermissionConfig, PermissionSource };
 
@@ -214,6 +222,7 @@ export interface ProfileConfig {
   subagents?: SubagentConfig;
   rsi?: RsiConfig;
   codex?: CodexConfig;
+  dsh?: DshConfig;
   attachments: AttachmentConfig;
   outbound: OutboundConfig;
   comments: CommentConfig;
@@ -241,6 +250,7 @@ export interface CreateDefaultProfileConfigInput {
   sandbox?: Partial<SandboxConfig>;
   permissions?: Partial<PermissionConfig>;
   codex?: CodexConfig;
+  dsh?: DshConfig;
   secrets?: SecretsConfig;
 }
 
@@ -278,6 +288,7 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     subagents?: unknown;
     rsi?: unknown;
     codex?: CodexConfig & { flags?: unknown };
+    dsh?: Partial<DshConfig>;
     attachments?: Partial<AttachmentConfig>;
     outbound?: {
       allowedFileDirs?: unknown;
@@ -289,8 +300,8 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
   if (raw.schemaVersion !== 2) {
     throw new Error('profile schemaVersion must be 2');
   }
-  if (raw.agentKind !== 'claude' && raw.agentKind !== 'codex') {
-    throw new Error('agentKind must be claude or codex');
+  if (raw.agentKind !== 'claude' && raw.agentKind !== 'codex' && raw.agentKind !== 'dsh') {
+    throw new Error('agentKind must be claude, codex, or dsh');
   }
   const accounts = normalizeAccounts(raw.accounts);
   if (raw.agentKind === 'codex' && !raw.codex) {
@@ -316,7 +327,9 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     agentKind: raw.agentKind,
     accounts,
     ...(raw.secrets ? { secrets: raw.secrets } : {}),
-    preferences,
+    preferences: raw.agentKind === 'dsh'
+      ? { ...preferences, agentTransport: 'structured', agentSessionMode: 'live' }
+      : preferences,
     access,
     workspaces,
     sandbox,
@@ -326,6 +339,7 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     subagents: normalizeSubagents(raw.subagents),
     rsi: normalizeRsi(raw.rsi),
     ...(raw.codex ? { codex: normalizeCodex(raw.codex) } : {}),
+    ...(raw.agentKind === 'dsh' ? { dsh: normalizeDsh(raw.dsh) } : {}),
     attachments: {
       maxCount: numberOr(raw.attachments?.maxCount, 10),
       maxBytes: numberOr(raw.attachments?.maxBytes, 100 * 1024 * 1024),
@@ -339,6 +353,21 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     },
     comments,
     larkCli,
+  };
+}
+
+function normalizeDsh(input?: Partial<DshConfig>): DshConfig {
+  const api = input?.api;
+  if (api !== undefined && api !== 'openai-responses' && api !== 'openai-completions' && api !== 'anthropic-messages') {
+    throw new Error('invalid dsh.api');
+  }
+  const home = typeof input?.home === 'string' ? input.home.trim() : '';
+  const provider = typeof input?.ccSwitchProviderId === 'string' ? input.ccSwitchProviderId.trim() : '';
+  return {
+    binaryPath: (typeof input?.binaryPath === 'string' && input.binaryPath.trim()) || 'dsh',
+    ...(home ? { home } : {}),
+    ...(provider ? { ccSwitchProviderId: provider } : {}),
+    ...(api ? { api } : {}),
   };
 }
 

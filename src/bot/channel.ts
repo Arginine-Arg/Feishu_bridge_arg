@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { createArtifactRelaySourceResolver } from '../agent/artifact-relay';
 import { dirname, join } from 'node:path';
-import { claudeCapability, codexCapability } from '../agent/capability';
+import { profileCapability } from '../agent/capability';
 import { BridgeAgent, createBridgeAgentFromEnvironment } from '../bridge-agent';
 import {
   isCodexModelId,
@@ -1108,8 +1108,11 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   const lifecycleScopes = /^\/stop(?:\s|$)/iu.test(routedMsg.content.trim())
     ? sideConversationScopesForChat(sideConversationByScope, msg.chatId, ['opening', 'closing'])
     : [];
-  const nativeModelCommand = routedMsg.content.trim() === '/model';
-  if (agent.structuredControl && /^\/(?:reset|resume)(?:\s|$)|^\/new(?:\s*$|\s+(?!chat\b))/i.test(routedMsg.content.trim())) {
+  const nativeModelCommand = controls.profileConfig.agentKind === 'dsh'
+    ? /^\/model(?:\s|$)/iu.test(routedMsg.content.trim())
+    : routedMsg.content.trim() === '/model';
+  if (agent.structuredControl && agent.id !== 'dsh' &&
+      /^\/(?:reset|resume)(?:\s|$)|^\/new(?:\s*$|\s+(?!chat\b))/i.test(routedMsg.content.trim())) {
     await channel.send(msg.chatId, { markdown: '结构化预览尚未开放旧会话导入与重置。请使用独立 profile 测试；现有终端会话未改变。' }, {
       replyTo: msg.messageId, ...(threadId ? { replyInThread: true } : {}),
     });
@@ -1540,10 +1543,10 @@ export function commandPreservesPendingMessages(content: string): boolean {
 
 export function rewriteAgentCommandMessage(
   msg: NormalizedMessage,
-  agentKind: 'claude' | 'codex',
+  agentKind: import('../config/profile-schema').AgentKind,
 ): AgentCommandRoute {
   const trimmed = msg.content.trimStart();
-  if (agentKind === 'codex' && /^\/btw(?:\s|$)/iu.test(trimmed)) {
+  if (agentKind !== 'claude' && /^\/btw(?:\s|$)/iu.test(trimmed)) {
     return {
       msg: { ...msg, content: trimmed },
       forceNative: true,
@@ -1557,7 +1560,9 @@ export function rewriteAgentCommandMessage(
   const aliases =
     agentKind === 'claude'
       ? new Set(['claude', 'claude-code', 'claudecode'])
-      : new Set(['codex', 'codex-cli', 'codexcli']);
+      : agentKind === 'dsh'
+        ? new Set(['dsh', 'deepseek', 'deepseek-harness'])
+        : new Set(['codex', 'codex-cli', 'codexcli']);
   if (!target || !aliases.has(target)) return { msg, forceNative: false };
   const normalized = normalizeAgentPrefixedNativeInput(rest.trim() ? rest : '/status');
   return {
@@ -2326,10 +2331,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     actorId: firstMsg.senderId,
     ...(threadId ? { threadId } : {}),
   };
-  const capability =
-    controls.profileConfig.agentKind === 'codex'
-      ? codexCapability(controls.profileConfig)
-      : claudeCapability(controls.profileConfig);
+    const capability = profileCapability(controls.profileConfig);
   // Allocate a token before spawning so it can be injected into the agent
   // process. It is activated with the verified workspace root immediately
   // after run-policy resolution succeeds.
@@ -2472,7 +2474,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       });
     }
   }
-  if (useLiveSession && nativeCommand && opensLivePicker(nativeCommand)) {
+  if (useLiveSession && nativeCommand && agent.id !== 'dsh' && opensLivePicker(nativeCommand)) {
     const wasActive = Boolean(liveInteractionState(sessions, liveInteractionByScope, scope));
     saveLiveInteractionState(sessions, liveInteractionByScope, scope, {
       picker: true,
@@ -3478,7 +3480,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           });
         });
     }
-    if (useLiveSession && nativeCommand) {
+    if (useLiveSession && nativeCommand && agent.id !== 'dsh') {
       const opensPicker = opensLivePicker(nativeCommand);
       const closesPicker = closesLivePicker(nativeCommand);
       if ((opensPicker || closesPicker) && !pickerObservedAfterInput) {

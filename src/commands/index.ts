@@ -3,7 +3,7 @@ import { lstat, readFile, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, relative, sep } from 'node:path';
 import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
-import { claudeCapability, codexCapability } from '../agent/capability';
+import { profileCapability } from '../agent/capability';
 import { DEFAULT_MODEL, normalizeModelSelection, supportedModels } from '../agent/models';
 import type { AgentAdapter } from '../agent/types';
 import type { LiveSessionDiagnostics } from '../agent/types';
@@ -184,7 +184,7 @@ type Handler = (args: string, ctx: CommandContext) => Promise<void>;
 
 interface ResumeCandidate {
   scopeId: string;
-  agentId: 'claude' | 'codex';
+  agentId: SessionCatalogIdentity['agentId'];
   cwdRealpath: string;
   policyFingerprint: string;
   sessionId?: string;
@@ -467,6 +467,13 @@ async function handleNew(args: string, ctx: CommandContext): Promise<void> {
     return handleNewChat(rawName, ctx);
   }
 
+  if (ctx.agent.id === 'dsh' && ctx.agent.selectStructuredSession) {
+    const cwd = ctx.sessionCatalogIdentity?.cwdRealpath;
+    if (!cwd) { await reply(ctx, '请先选择有效的工作目录。'); return; }
+    try { await ctx.agent.selectStructuredSession(ctx.scope, cwd); }
+    catch (error) { await reply(ctx, error instanceof Error ? error.message : String(error)); return; }
+  }
+
   ctx.activeRuns.advanceStopGeneration(ctx.scope);
   const wasRunning = ctx.activeRuns.interrupt(ctx.scope);
   if (ctx.sessionCatalog && ctx.sessionCatalogIdentity) {
@@ -730,6 +737,17 @@ async function handleResume(args: string, ctx: CommandContext): Promise<void> {
     await ctx.channel.send(ctx.msg.chatId, { card }, commandReplyOptions(ctx));
     return;
   }
+  if (ctx.controls.profileConfig.agentKind === 'dsh') {
+    const identity = ctx.sessionCatalogIdentity;
+    const history = identity ? await ctx.agent.structuredHistory?.(ctx.scope, identity.cwdRealpath) ?? [] : [];
+    const entries = identity ? history.slice(0, limit).map(item => ({
+      sessionId: issueResumeCandidate(identity, { sessionId: item.id }),
+      displayId: item.id, preview: 'DeepSeek Harness', current: item.current, detail: '本聊天',
+      relTime: item.updatedAt ? formatRelTime(item.updatedAt) : '',
+    })) : [];
+    await ctx.channel.send(ctx.msg.chatId, { card: resumeCard(cwd, entries) }, commandReplyOptions(ctx));
+    return;
+  }
 
   const sessions = await listClaudeResumeHistory(ctx, cwd, limit);
   const currentSession = ctx.sessions.getRaw(ctx.scope);
@@ -749,6 +767,21 @@ async function handleResume(args: string, ctx: CommandContext): Promise<void> {
 }
 
 async function applyResume(sessionId: string, ctx: CommandContext): Promise<void> {
+  if (ctx.agent.id === 'dsh') {
+    const identity = ctx.sessionCatalogIdentity;
+    const resolved = identity ? consumeResumeCandidate(sessionId, identity) : undefined;
+    if (!identity || !resolved?.sessionId || ctx.chatMode !== 'p2p' || !ctx.agent.selectStructuredSession) {
+      await reply(ctx, '请先在私聊发送 /resume，再选择这个聊天的会话。');
+      return;
+    }
+    try { await ctx.agent.selectStructuredSession(ctx.scope, identity.cwdRealpath, resolved.sessionId); }
+    catch (error) { await reply(ctx, error instanceof Error ? error.message : String(error)); return; }
+    ctx.activeRuns.advanceStopGeneration(ctx.scope);
+    ctx.sessions.set(ctx.scope, resolved.sessionId, identity.cwdRealpath);
+    ctx.sessionCatalog?.upsertActive({ ...identity, sessionId: resolved.sessionId });
+    await reply(ctx, RESUME_APPLIED_REPLY);
+    return;
+  }
   if (ctx.sessionCatalog && ctx.sessionCatalogIdentity) {
     const entry = ctx.sessionCatalog.activeFor(ctx.sessionCatalogIdentity);
     const resolved = consumeResumeCandidate(sessionId, ctx.sessionCatalogIdentity);
@@ -841,7 +874,7 @@ function consumeResumeCandidate(
     candidate.agentId !== identity.agentId ||
     candidate.cwdRealpath !== identity.cwdRealpath ||
     candidate.policyFingerprint !== identity.policyFingerprint ||
-    (identity.agentId === 'claude' && !candidate.sessionId) ||
+    (identity.agentId !== 'codex' && !candidate.sessionId) ||
     (identity.agentId === 'codex' && !candidate.threadId)
   ) {
     return undefined;
@@ -1896,10 +1929,7 @@ async function handleDoctor(args: string, ctx: CommandContext): Promise<void> {
   }
   doctorLastByOperator.set(rateKey, now);
 
-  const capability =
-    ctx.controls.profileConfig.agentKind === 'codex'
-      ? codexCapability(ctx.controls.profileConfig)
-      : claudeCapability(ctx.controls.profileConfig);
+    const capability = profileCapability(ctx.controls.profileConfig);
   const policy = evaluateRunPolicy({
     scope: {
       source: 'im',

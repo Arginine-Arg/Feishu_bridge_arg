@@ -1,8 +1,10 @@
 # arg-bridge
 
-把飞书 / Lark 消息和本地 Claude Code 或 Codex CLI 打通的轻量 bot。用一条命令启动，扫码绑定 PersonalAgent 应用，然后在飞书里和本机编程助手对话，让它读图、处理文件、改代码。
+把飞书 / Lark 消息和本地 Claude Code、Codex CLI、DeepSeek Harness 打通的轻量 bot。用一条命令启动，扫码绑定 PersonalAgent 应用，然后在飞书里和本机编程助手对话。
 
 [English README](./README.md)
+
+[DeepSeek Harness 安装、配置与迁移](./docs/deepseek-harness.md)
 
 `1.22.0` 修复 native 退出后切换 provider 无法恢复、以及恢复时沿用旧模型的问题。活动重连不再追加 continue；自动恢复按同一故障阶段一小时计时。subagent 设置支持多个 provider、自动读取模型列表，并按所选优先级为新任务选择可用线路。
 

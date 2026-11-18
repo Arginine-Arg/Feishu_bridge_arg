@@ -14,6 +14,7 @@ import {
 } from '../agent/codex/credentials';
 import type { SubagentRoute } from '../agent/subagents/types';
 import type {
+  DshConfig,
   SubagentProviderOverride,
   SubagentReasoningEffort,
   SubagentWebSearchMode,
@@ -366,6 +367,7 @@ export async function materializeCcSwitchBrokerRuntime(input: {
   providerId?: string;
   cwd: string;
   codexBin: string;
+  dsh?: DshConfig;
   stateDir: string;
   runtimePolicy?: CcSwitchRuntimePolicy;
 }): Promise<CcSwitchBrokerRuntime> {
@@ -380,7 +382,7 @@ export async function materializeCcSwitchBrokerRuntime(input: {
         const catalog = await discoverProviderModels(provider, { env: input.env, signal });
         for (const model of target.models) {
           if (!catalog.models.includes(model)) { unavailable.push(`${target.providerId}/${model}: 未列入模型目录`); continue; }
-          const key = createHash('sha256').update(`${provider.summary.configFingerprint}:${model}`).digest('hex');
+          const key = createHash('sha256').update(`${provider.summary.configFingerprint}:${model}${input.dsh ? ':dsh' : ''}`).digest('hex');
           const healthFile = join(input.stateDir, 'route-health', `${key}.json`);
           try {
             const health = JSON.parse(await readFile(healthFile, 'utf8'));
@@ -417,10 +419,11 @@ export async function materializeCcSwitchBrokerRuntime(input: {
         (summary.envKey ? `（${summary.envKey}）` : ''),
     );
   }
-  if (summary.wireApi !== 'responses') {
+  const dshApi = input.dsh && resolveDshWireApi(summary, input.dsh.api);
+  if (input.dsh ? !dshApi : summary.wireApi !== 'responses') {
     throw new CcSwitchProviderError(
       'wire-api-unsupported',
-      `MixAgents 0.1.1 只支持 wire_api=responses，当前 provider 为 ${summary.wireApi}`,
+      `所选 worker 后端不支持 ${summary.wireApi}，请检查 cc-switch 的 API 协议。`,
     );
   }
   const runtimePolicy = input.runtimePolicy ?? {
@@ -447,11 +450,12 @@ export async function materializeCcSwitchBrokerRuntime(input: {
     effectiveWebSearch: webSearch.effective,
     model,
     reasoningEffort: reasoningEffort ?? null,
+    ...(input.dsh ? { dsh: { binary: input.dsh.binaryPath, api: dshApi } } : {}),
   })).digest('hex');
   const routeId = ccSwitchRouteId(summary);
   const route: SubagentRoute = {
     id: routeId,
-    description: `${summary.name} current cc-switch Codex provider`,
+    description: `${summary.name} cc-switch provider`,
     provider: summary.codexProviderId,
     model,
     maxAccess: 'workspace-write',
@@ -462,9 +466,9 @@ export async function materializeCcSwitchBrokerRuntime(input: {
       ...(summary.thirdParty ? ['third-party'] : ['official']),
       `web-search:${webSearch.effective}`,
     ],
-    backend: 'mixagents',
+    backend: input.dsh ? 'dsh_acp' : 'mixagents',
     default: true,
-    selectionReason: 'Current cc-switch Codex provider resolved automatically',
+    selectionReason: input.dsh ? 'DeepSeek Harness worker using cc-switch provider' : 'Current cc-switch Codex provider resolved automatically',
     revision: policyFingerprint.slice(0, 16),
     targetFingerprint: policyFingerprint,
     ccSwitchProviderId: summary.id,
@@ -496,7 +500,7 @@ export async function materializeCcSwitchBrokerRuntime(input: {
   );
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
   await chmod(dataDir, 0o700).catch(() => {});
-  const codexBin = await materializeManagedCodexLauncher({
+  const codexBin = input.dsh ? undefined : await materializeManagedCodexLauncher({
     stateDir: input.stateDir,
     codexBin: input.codexBin,
     fingerprint: policyFingerprint,
@@ -513,7 +517,7 @@ export async function materializeCcSwitchBrokerRuntime(input: {
     defaultRoute: route.id,
     workspaceRoots: [workspaceRoot],
     dataDir,
-    codexBin,
+    ...(codexBin ? { codexBin } : {}),
     routes: {
       [route.id]: {
         description: route.description,
@@ -531,6 +535,7 @@ export async function materializeCcSwitchBrokerRuntime(input: {
         maxAccess: 'workspace-write',
         ccSwitchProviderId: summary.id,
         source: 'cc-switch',
+        ...(input.dsh ? { dsh: { binary: input.dsh.binaryPath, api: dshApi } } : {}),
         ...(reasoningEffort ? { reasoningEffort } : {}),
       },
     },
@@ -546,6 +551,18 @@ export async function materializeCcSwitchBrokerRuntime(input: {
     fingerprint: policyFingerprint,
     webSearch,
   };
+}
+
+export function resolveDshWireApi(summary: Pick<CcSwitchProviderSummary, 'baseUrl' | 'wireApi'>, override?: DshConfig['api']): DshConfig['api'] {
+  if (override) return override;
+  if (new URL(summary.baseUrl).origin === 'https://api.deepseek.com') return 'openai-completions';
+  switch (summary.wireApi) {
+    case 'responses': return 'openai-responses';
+    case 'chat':
+    case 'chat-completions': return 'openai-completions';
+    case 'messages': return 'anthropic-messages';
+    default: return undefined;
+  }
 }
 
 async function materializeManagedCodexLauncher(input: {

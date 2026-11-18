@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.23.0
+
+- Adds a structured DeepSeek Harness profile with Feishu replies, approval
+  cards, model switching, session history, and cancellation.
+- Reuses cc-switch provider credentials and model catalogs. Each turn reads
+  the configured provider and resumes the saved Harness session.
+- Runs automatically routed MixAgents workers directly in DeepSeek Harness.
+  Workers keep their session identity and completed results across Broker
+  reconnects.
+- Adds a Codex-to-DSH profile migration command and a Linux CI job using the
+  official Harness. On Linux, Bubblewrap confines worker writes to the
+  authorized workspace and private runtime directories.
+
 ## 1.22.1
 
 - Unifies subagent routing: read-only sides, writable workers, Broker tools and RSI reviewers share one provider/model priority list.

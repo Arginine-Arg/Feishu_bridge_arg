@@ -1,5 +1,6 @@
 import {
   DEFAULT_SUBAGENT_CONFIG,
+  type DshConfig,
   type SubagentAccess,
   type SubagentConfig,
 } from '../../config/profile-schema';
@@ -24,6 +25,7 @@ import {
 } from './types';
 
 export interface ResolveSubagentInput {
+  allowCodexFork?: boolean;
   subagents?: SubagentConfig;
   env?: NodeJS.ProcessEnv;
   cwd: string;
@@ -35,6 +37,7 @@ export interface ResolveSubagentInput {
   stateDir?: string;
   codexHome?: string;
   codexBin?: string;
+  dsh?: DshConfig;
   parentProviderId?: string;
   /** Selects role-specific runtime policy without changing the provider. */
   runtimeRole?: 'side' | 'worker' | 'reviewer';
@@ -71,6 +74,9 @@ export async function resolveSubagents(input: ResolveSubagentInput): Promise<Res
     return { ...base, kind: 'off', routes: [] };
   }
   if (config.mode === 'fork') {
+    if (input.allowCodexFork === false) {
+      throw new SubagentUnavailableError('mixagents-not-configured', '该主会话需使用 MixAgents 路由执行 /btw。');
+    }
     if (input.access === 'workspace-write') {
       throw new SubagentUnavailableError(
         'write-not-authorized',
@@ -95,6 +101,7 @@ export async function resolveSubagents(input: ResolveSubagentInput): Promise<Res
         ...(config.ccSwitchProviderId ? { providerId: config.ccSwitchProviderId } : {}),
         cwd: input.cwd,
         codexBin: input.codexBin ?? env.CODEX_BINARY?.trim() ?? 'codex',
+        dsh: input.dsh,
         stateDir: input.stateDir ?? defaultGeneratedRuntimeDir(env),
         runtimePolicy: {
           role: input.runtimeRole ?? 'worker',
@@ -140,6 +147,7 @@ export async function resolveSubagents(input: ResolveSubagentInput): Promise<Res
     }
     if (config.mode === 'broker') throw unavailable;
     if (
+      input.allowCodexFork === false ||
       !config.allowForkFallback ||
       config.routeMode === 'manual' ||
       input.requestedRoute ||
@@ -179,7 +187,7 @@ export async function resolveSubagents(input: ResolveSubagentInput): Promise<Res
         routes: routes.map(route => ({ id: route.id, available: route.available })),
       });
     }
-    if (!config.allowForkFallback) {
+    if (input.allowCodexFork === false || !config.allowForkFallback) {
       await backend?.closeBackend?.().catch(() => {});
       throw new SubagentUnavailableError('route-unavailable', message);
     }
@@ -212,6 +220,7 @@ function canAutoForkFallback(
   config: SubagentConfig,
 ): boolean {
   return (
+    input.allowCodexFork !== false &&
     (input.access ?? 'read-only') === 'read-only' &&
     config.mode === 'auto' &&
     config.routeMode === 'follow-cc-switch' &&

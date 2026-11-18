@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promi
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { runProfileCreate } from '../../../src/cli/commands/profile';
+import { runDshProfileMigration, runProfileCreate } from '../../../src/cli/commands/profile';
 import { resolveAppPaths } from '../../../src/config/app-paths';
 import {
   createDefaultProfileConfig,
@@ -10,7 +10,7 @@ import {
   type RootConfig,
 } from '../../../src/config/profile-schema';
 import { loadRootConfig } from '../../../src/config/profile-store';
-import { getSecret } from '../../../src/config/keystore';
+import { getSecret, setSecret } from '../../../src/config/keystore';
 import { secretKeyForApp } from '../../../src/config/schema';
 import { writeVersionExecutable } from '../../helpers/fake-executable';
 
@@ -30,6 +30,35 @@ afterEach(async () => {
 });
 
 describe('profile create command', () => {
+  it('migrates Codex settings and local app credentials to a separate DSH profile', async () => {
+    const root = await makeRoot();
+    await writeProfiles(root, 'codex-dev', ['codex-dev']);
+    const sourcePaths = resolveAppPaths({ rootDir: root, profile: 'codex-dev' });
+    const source = JSON.parse(await readFile(sourcePaths.configFile, 'utf8')) as RootConfig;
+    const profile = source.profiles['codex-dev']!;
+    const id = secretKeyForApp(profile.accounts.app.id);
+    profile.accounts.app.secret = { source: 'exec', id, provider: 'bridge' };
+    profile.preferences.model = 'gpt-5.5';
+    profile.preferences.reasoningEffort = 'high';
+    await setSecret(id, 'fixture-app-secret', sourcePaths);
+    await writeJson(sourcePaths.configFile, source);
+
+    await runDshProfileMigration('dsh', { rootDir: root, from: 'codex-dev' });
+    const result = await loadRootConfig(sourcePaths.configFile);
+    expect(result?.activeProfile).toBe('codex-dev');
+    expect(result?.profiles['codex-dev']?.preferences.model).toBe('gpt-5.5');
+    expect(result?.profiles.dsh).toMatchObject({
+      agentKind: 'dsh', dsh: { binaryPath: 'dsh' },
+      preferences: { agentTransport: 'structured', agentSessionMode: 'live' },
+      accounts: profile.accounts,
+    });
+    expect(result?.profiles.dsh?.preferences.model).toBeUndefined();
+    expect(result?.profiles.dsh?.codex).toBeUndefined();
+    const destination = resolveAppPaths({ rootDir: root, profile: 'dsh' });
+    await expect(getSecret(id, destination)).resolves.toBe('fixture-app-secret');
+    expect(await readFile(destination.configFile, 'utf8')).not.toContain('fixture-app-secret');
+  });
+
   it('creates a named profile from existing app credentials in an initialized root', async () => {
     const root = await makeRoot();
     const workspace = join(root, 'workspace');

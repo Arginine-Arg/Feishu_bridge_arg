@@ -57,6 +57,7 @@ export function isCodexModelId(value: string | undefined): value is string {
 
 /** The model picker options for a profile's agent kind. */
 export function supportedModels(agentKind: AgentKind): ModelOption[] {
+  if (agentKind === 'dsh') return [{ value: DEFAULT_MODEL, label: '跟随当前 cc-switch 模型' }];
   return agentKind === 'codex' ? CODEX_MODELS : CLAUDE_MODELS;
 }
 

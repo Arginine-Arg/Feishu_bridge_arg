@@ -15,8 +15,10 @@ import {
   withConfigFileLock,
   writeActiveProfile,
 } from '../../config/profile-store';
-import type { RootConfig } from '../../config/profile-schema';
+import { normalizeProfileConfig, type RootConfig } from '../../config/profile-schema';
 import { resolveAppSecret } from '../../config/secret-resolver';
+import { getSecret, setSecret } from '../../config/keystore';
+import { isSecretRef } from '../../config/schema';
 import { writeFileAtomic } from '../../platform/atomic-write';
 import { acquireProfileRuntimeLock, checkRuntimeLock } from '../../runtime/locks';
 import { readAndPrune } from '../../runtime/registry';
@@ -150,6 +152,44 @@ export async function runProfileUse(
     await writeActiveProfile(rootDir, name);
   });
   console.log(`已切换到 profile: ${name}`);
+}
+
+export async function runDshProfileMigration(
+  name: string,
+  opts: ProfileCommandOptions & { from: string },
+): Promise<void> {
+  const rootDir = opts.rootDir ?? paths.rootDir;
+  const target = resolveAppPaths({ rootDir, profile: name });
+  await withConfigFileLock(target.configFile, async () => {
+    const root = await loadRootConfig(target.configFile);
+    const source = root?.profiles[opts.from];
+    if (!root || !source || source.agentKind !== 'codex') {
+      throw new Error(`源 profile ${opts.from} 必须是现有的 Codex profile。`);
+    }
+    if (Object.hasOwn(root.profiles, name)) throw new Error(`profile already exists: ${name}`);
+    const ref = source.accounts.app.secret;
+    if (isSecretRef(ref) && ref.source === 'exec') {
+      const sourcePaths = resolveAppPaths({ rootDir, profile: opts.from });
+      const localSecret = await getSecret(ref.id, sourcePaths);
+      if (localSecret !== undefined) await setSecret(ref.id, localSecret, target);
+    }
+    const { model, reasoningEffort, ...preferences } = source.preferences;
+    root.profiles[name] = normalizeProfileConfig({
+      ...source,
+      agentKind: 'dsh',
+      preferences,
+      codex: undefined,
+      dsh: { binaryPath: process.env.ARG_BRIDGE_DSH_BIN ?? 'dsh' },
+      subagents: source.subagents ? {
+        ...source.subagents,
+        allowForkFallback: false,
+        ...(source.subagents.mode === 'fork' ? { mode: 'auto' } : {}),
+      } : undefined,
+      larkCli: { identityPreset: source.larkCli.identityPreset },
+    });
+    await saveRootConfig(root, target.configFile);
+  });
+  console.log(`已从 ${opts.from} 创建 DeepSeek Harness profile ${name}。`);
 }
 
 export async function runProfileRemove(

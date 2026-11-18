@@ -811,6 +811,34 @@ describe('markdown stream startup failures', () => {
     expect(h.agent.runOptions).toHaveLength(1);
   });
 
+  it('routes DSH model selection and complete structured replies through Feishu', async () => {
+    const h = await createHarness({ agentKind: 'dsh' });
+    h.agent.structuredControl = vi.fn(async () => []);
+    h.profileConfig.preferences = { ...h.profileConfig.preferences, messageReply: 'markdown', messageReplyMigrated: true };
+    h.controls.cfg.preferences = h.profileConfig.preferences;
+    h.agent.setEvents([
+      [
+        { type: 'text', delta: 'DeepSeek Harness 下一轮将使用 model-a。', source: 'agent' },
+        { type: 'done', terminationReason: 'normal' },
+      ],
+      [
+        { type: 'system', sessionId: 'dsh-session-1' },
+        { type: 'text', delta: '飞书测试正文开头。', source: 'agent' },
+        { type: 'text', delta: '飞书测试正文结尾。', source: 'agent' },
+        { type: 'done', sessionId: 'dsh-session-1', terminationReason: 'normal' },
+      ],
+    ]);
+    await startTestBridge(h);
+    await h.channel.handlers.message?.(message('om_dsh_model', '/model model-a'));
+    await waitFor(() => h.agent.runOptions.length === 1);
+    expect(h.agent.runOptions[0]).toMatchObject({ prompt: '/model model-a', liveInputMode: 'command' });
+    await h.channel.handlers.message?.(message('om_dsh_prompt', 'report DSH progress'));
+    await waitFor(() => JSON.stringify(h.channel.rawClient.im.v1.message.patch.mock.calls).includes('飞书测试正文结尾。'));
+    const rendered = h.channel.rawClient.im.v1.message.patch.mock.calls.at(-1)![0].data.content;
+    expect(rendered).toContain('飞书测试正文开头。飞书测试正文结尾。');
+    expect(h.sessions.getRaw('oc_dm')?.sessionId).toBe('dsh-session-1');
+  });
+
   it.each(['markdown', 'card'] as const)('forwards complete structured prose and hides commands in %s mode', async mode => {
     const h = await createHarness();
     h.agent.structuredControl = vi.fn(async () => []);
@@ -2291,7 +2319,7 @@ async function createHarness(options: {
   reactionCreate?: () => Promise<{ data: { reaction_id: string } }>;
   stream?: StreamFn;
   failCardSendOnce?: boolean;
-  agentKind?: 'claude' | 'codex';
+  agentKind?: ReturnType<typeof createDefaultProfileConfig>['agentKind'];
   agent?: FakeAgentAdapter;
 } = {}): Promise<{
   tmp: TmpProfile;
@@ -2333,7 +2361,7 @@ async function createHarness(options: {
   const workspaces = new WorkspaceStore(join(tmp.profile, 'workspaces.json'));
   const agent = options.agent ?? new FakeAgentAdapter({
     id: agentKind,
-    displayName: agentKind === 'codex' ? 'Codex' : 'Claude Code',
+    displayName: agentKind === 'codex' ? 'Codex' : agentKind === 'dsh' ? 'DeepSeek Harness' : 'Claude Code',
     events: [
       [
         {

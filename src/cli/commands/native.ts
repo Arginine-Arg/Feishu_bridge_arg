@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { resolveAppPaths } from '../../config/app-paths';
+import { runDshNative } from './dsh-native';
 import { normalizeProfileConfig } from '../../config/profile-schema';
 import { connectCodexHost } from '../../agent/structured/host';
 import {
@@ -60,6 +61,15 @@ export async function runNative(
   if (!root.profiles?.[profileName]) throw new Error(`Unknown profile: ${profileName}`);
   const config = normalizeProfileConfig(root.profiles[profileName]);
   const cwd = process.cwd();
+  if (config.agentKind === 'dsh') {
+    if (opts.adopt) throw new Error('DeepSeek Harness 原生会话用 positional session ID 恢复，Codex 历史不能直接作为 DSH 会话加载。');
+    if (opts.yolo || opts.dangerouslyBypassApprovalsAndSandbox || opts.sandbox || opts.askForApproval) {
+      throw new Error('DeepSeek Harness 使用 profile 的权限设置。');
+    }
+    await runDshNative({ profile: config, profileDir: paths.profileDir, cwd,
+      sandbox: config.sandbox.defaultMode, sessionId: thread });
+    return;
+  }
   const permissions = resolveCodexPermissionSettings(config.sandbox.defaultMode, opts);
   const sandbox = permissions.sandbox;
   if (thread && permissions.explicit) {

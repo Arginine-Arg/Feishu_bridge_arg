@@ -10,6 +10,8 @@ import {
 import {
   DEFAULT_RSI_CONFIG,
   DEFAULT_SUBAGENT_CONFIG,
+  type AgentKind,
+  type DshConfig,
   type RsiConfig,
   type SubagentConfig,
   type SubagentMode,
@@ -34,6 +36,7 @@ import {
 import { defaultCodexHome } from '../../agent/codex/credentials';
 import { resolveCurrentCcSwitchCodexProvider } from '../../integrations/cc-switch-provider';
 import { discoverProviderModels } from '../../integrations/provider-models';
+import { resolveDshProvider } from '../../agent/dsh/provider';
 import {
   processAlive,
   readHostRegistry,
@@ -51,9 +54,15 @@ export interface SettingsSnapshot {
   providerRecovery: ProviderRecoveryConfig;
   version: 1;
   profile: string;
-  agentKind: 'codex' | 'claude';
+  agentKind: AgentKind;
   workspace: string;
   ccSwitch: SubagentDiagnostics['ccSwitch'];
+  dsh?: {
+    provider: string | null;
+    model: string | null;
+    pinnedProvider?: string;
+    api?: DshConfig['api'];
+  };
   mainProvider: {
     configuredCcSwitchProviderId: string | null;
     configuredCodexProviderId: string | null;
@@ -113,11 +122,38 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
     : '(cc-switch 未返回可用账号)';
   const availableReadRoutes = diagnostics.readRoutes.filter(route => route.available);
   const unavailableRoutes = diagnostics.readRoutes.filter(route => !route.available);
+  let dsh = rawProfile.dsh;
+  if (dsh) {
+    const providers = new Map(ccProviders.map(provider => [provider.id, provider.name]));
+    if (dsh.ccSwitchProviderId && !providers.has(dsh.ccSwitchProviderId)) {
+      providers.set(dsh.ccSwitchProviderId, dsh.ccSwitchProviderId);
+    }
+    const provider = await p.select<string>({
+      message: 'DeepSeek Harness 主会话账号',
+      initialValue: dsh.ccSwitchProviderId ?? '',
+      options: [
+        { value: '', label: '跟随 cc-switch 当前账号' },
+        ...[...providers].map(([value, label]) => ({ value, label })),
+      ],
+    });
+    assertPrompt(provider);
+    const api = await p.select<DshConfig['api'] | 'auto'>({
+      message: '主会话 API 协议',
+      initialValue: dsh.api ?? 'auto',
+      options: [
+        { value: 'auto', label: '跟随账号配置' },
+        { value: 'openai-responses', label: 'OpenAI Responses' },
+        { value: 'openai-completions', label: 'OpenAI Chat Completions' },
+        { value: 'anthropic-messages', label: 'Anthropic Messages' },
+      ],
+    });
+    assertPrompt(api);
+    dsh = { ...dsh, ccSwitchProviderId: provider || undefined, api: api === 'auto' ? undefined : api };
+  }
 
   p.note([
-    `主对话账号：${diagnostics.ccSwitch.currentProviderName ?? '(unknown)'}` +
-      ` [${diagnostics.ccSwitch.currentProviderCodex ?? '(unknown)'}]`,
-    `Codex 模型：${snapshot.mainProvider.configuredModel ?? '(config default)'}`,
+    `主对话账号：${snapshot.dsh?.provider ?? diagnostics.ccSwitch.currentProviderName ?? '(unknown)'}`,
+    `当前默认模型：${snapshot.dsh?.model ?? snapshot.mainProvider.configuredModel ?? '(config default)'}`,
     '',
     'cc-switch 中的 Codex 账号：',
     providerSummary,
@@ -129,29 +165,29 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
 
   const selectedMode = await p.select<SubagentMode>({
     message: '子代理在 Broker 不可用时怎么办？',
-    initialValue: currentSubagents.mode,
+    initialValue: dsh && currentSubagents.mode === 'fork' ? 'auto' : currentSubagents.mode,
     options: [
       {
         value: 'auto',
         label: '自动（推荐）',
-        hint: '优先使用所选 provider；runtime 自愈后仍不可用，才按下方设置改用主会话 Codex',
+        hint: dsh ? '按所选 provider 与模型顺序派发 /btw' : '优先使用所选 provider；runtime 自愈后仍不可用，才按下方设置改用主会话 Codex',
       },
       {
         value: 'broker',
         label: '只允许 MixAgents',
         hint: '不会静默降级；配置或 Key 不完整时明确报错',
       },
-      {
-        value: 'fork',
+      ...(dsh ? [] : [{
+        value: 'fork' as const,
         label: '只用本地 Codex fork',
         hint: '不跨 provider，沿用当前 Codex 模型',
-      },
+      }]),
       { value: 'off', label: '关闭子代理', hint: '主对话不受影响' },
     ],
   });
   assertPrompt(selectedMode);
-  let allowForkFallback = currentSubagents.allowForkFallback;
-  if (selectedMode === 'auto') {
+  let allowForkFallback = !dsh && currentSubagents.allowForkFallback;
+  if (selectedMode === 'auto' && !dsh) {
     const fallback = await p.confirm({
       message: '所选子代理 provider 自愈后仍不可用时，是否改用主会话 provider 的只读 Codex fork？',
       initialValue: allowForkFallback,
@@ -393,12 +429,12 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
     credentialProvider = '';
   }
 
-  p.note([
+  if (!dsh) p.note([
     'Project RSI 是“项目完成证据校验”：只有项目已经创建 .project-rsi/config.json 时才启用。',
     '普通问答不会触发；产生文件修改或高影响结论时，才要求项目自己的 runner/validator 生成新证据。',
     'Bridge 不会自动初始化项目、伪造 receipt 或降低项目校验标准。',
   ].join('\n'), '步骤 4 / 5 · 项目完成证据校验');
-  const rsiMode = await p.select<RsiConfig['mode']>({
+  const rsiMode = dsh ? 'off' : await p.select<RsiConfig['mode']>({
     message: '产生文件修改时要不要做项目证据校验？',
     initialValue: currentRsi.mode,
     options: [
@@ -453,13 +489,16 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
   let mcpCommand = currentMcp?.mcpCommand ?? '';
   let mcpArgs = currentMcp?.mcpArgs ?? [];
   const advanced = await p.confirm({
-    message: '是否展开高级参数？（并发、写权限、自定义 MCP、修复轮次）',
+    message: dsh ? '是否展开高级参数？（并发、写权限、自定义 MCP）'
+      : '是否展开高级参数？（并发、写权限、自定义 MCP、修复轮次）',
     initialValue: false,
   });
   assertPrompt(advanced);
   if (advanced) {
     p.note(
-      '只读 /btw、可写 worker、模型可见的 subagent 和 RSI reviewer 共用上面同一组 provider/model 优先级。下面只调整权限、并发、等待、推理强度和工具行为；这里不会再填写模型或选择另一条写 route。',
+      dsh
+        ? '只读 /btw、可写子代理和模型调用的 MixAgents 工具共用同一组 provider 和模型优先级。'
+        : '只读 /btw、可写 worker、模型可见的 subagent 和 RSI reviewer 共用上面同一组 provider/model 优先级。下面只调整权限、并发、等待、推理强度和工具行为；这里不会再填写模型或选择另一条写 route。',
       '统一候选线路',
     );
     const snapshotConfirm = await p.confirm({
@@ -469,12 +508,13 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
     assertPrompt(snapshotConfirm);
     includeProgressSnapshot = snapshotConfirm;
     const toolsConfirm = await p.confirm({
-      message: '允许父 Codex 模型自动调用 Broker 子代理工具？',
+      message: dsh ? '允许 DeepSeek Harness 调用 MixAgents 子代理工具？'
+        : '允许父 Codex 模型自动调用 Broker 子代理工具？',
       initialValue: modelTools,
     });
     assertPrompt(toolsConfirm);
     modelTools = toolsConfirm;
-    const nativeChoice = await p.select<SubagentConfig['nativeToolPolicy']>({
+    const nativeChoice = dsh ? 'preserve' : await p.select<SubagentConfig['nativeToolPolicy']>({
       message: 'Codex 自带的子代理工具怎么处理？',
       initialValue: nativeToolPolicy,
       options: [
@@ -569,7 +609,7 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
       `可写 worker 将继承：${selectedModelSummary}。开启可写权限只允许经过逐任务 workspace 授权，不会创建独立模型配置。`,
       '可写 worker 路由',
     );
-    const repairText = await p.text({
+    const repairText = dsh ? '0' : await p.text({
       message: 'RSI 校验失败后，最多自动修复几轮？（0-10）',
       initialValue: String(maxRepairRounds),
     });
@@ -634,7 +674,8 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
       ? `启动环境变量 ${credentialEnvKeys || '(未配置)'}`
       : 'MixAgents managed（当前版本未验证）';
   p.note([
-    `主对话：${diagnostics.ccSwitch.currentProviderName ?? '(unknown)'}（保持不变）`,
+    dsh ? `主对话账号：${dsh.ccSwitchProviderId ?? '跟随 cc-switch 当前账号'}`
+      : `主对话：${diagnostics.ccSwitch.currentProviderName ?? '(unknown)'}（保持不变）`,
     `子代理：${modeText}`,
     `子代理线路：${routeText}`,
     `子代理模型：${selectedModelSummary}`,
@@ -647,7 +688,7 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
         : '关闭'}`,
     `/btw：备用 reasoning=${sideReasoningEffort} fast-notice=${sideTimeoutMs / 1_000}s；` +
     `等待窗口 ${workerTimeoutMs / 60_000} 分钟；超时返回仍在运行，/btw result 查询，/btw out 取消`,
-    `项目证据校验：${rsiMode === 'off' ? '关闭' : '自动（只对已初始化项目）'}`,
+    ...(!dsh ? [`项目证据校验：${rsiMode === 'off' ? '关闭' : '自动（只对已初始化项目）'}`] : []),
     advanced ? '高级参数：已展开编辑' : '高级参数：保持原值',
   ].join('\n'), '步骤 5 / 5 · 保存前确认');
 
@@ -727,6 +768,7 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
     root.profiles[snapshot.profile] = {
       ...profile,
       ...(profile.codex ? { codex: { ...profile.codex, providerRecovery } } : {}),
+      ...(dsh ? { dsh } : {}),
       subagents: {
         ...DEFAULT_SUBAGENT_CONFIG,
         ...profile.subagents,
@@ -764,9 +806,9 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
     };
     await saveRootConfig(root, paths.configFile);
   });
-  p.outro(
-    '已保存。下一条 /btw 会重新解析路由；Broker dynamic tools/native shadow 从新 thread 生效，旧 thread 不会静默绕过。',
-  );
+  p.outro(dsh
+    ? '已保存。下一轮主会话和下一条 /btw 会读取新设置。'
+    : '已保存。下一条 /btw 会重新解析路由；Broker dynamic tools/native shadow 从新 thread 生效，旧 thread 不会静默绕过。');
 }
 
 export async function loadSettingsSnapshot(
@@ -787,9 +829,10 @@ export async function loadSettingsSnapshot(
   const rsiConfig = profile.rsi ?? DEFAULT_RSI_CONFIG;
   const codexHome = profile.codex?.codexHome
     ?? (profile.codex?.inheritCodexHome === false ? `${paths.profileDir}/codex-home` : defaultCodexHome());
-  const [diagnostics, rsiStatus, configuredCodexIdentity, hosts] = await Promise.all([
+  const [diagnostics, rsiStatus, configuredCodexIdentity, hosts, dshProvider] = await Promise.all([
     collectSubagentDiagnostics({
       config: subagentConfig,
+      dsh: profile.dsh,
       cwd,
       env,
       stateDir: join(paths.profileDir, 'structured'),
@@ -803,6 +846,7 @@ export async function loadSettingsSnapshot(
     profile.agentKind === 'codex'
       ? readHostRegistry(paths.profileDir)
       : Promise.resolve([]),
+    profile.dsh ? resolveDshProvider(profile.dsh, env).catch(() => undefined) : undefined,
   ]);
   const running = uniqueRuntimeIdentities(
     hosts
@@ -848,6 +892,12 @@ export async function loadSettingsSnapshot(
     agentKind: profile.agentKind,
     workspace: cwd,
     ccSwitch: diagnostics.ccSwitch,
+    ...(profile.dsh ? { dsh: {
+      provider: dshProvider?.id ?? profile.dsh.ccSwitchProviderId ?? null,
+      model: dshProvider?.model ?? null,
+      ...(profile.dsh.ccSwitchProviderId ? { pinnedProvider: profile.dsh.ccSwitchProviderId } : {}),
+      ...(dshProvider?.api ? { api: dshProvider.api } : {}),
+    } } : {}),
     mainProvider: {
       configuredCcSwitchProviderId,
       configuredCodexProviderId: configuredCodexIdentity?.codexProviderId ?? null,

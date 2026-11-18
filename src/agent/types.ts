@@ -139,6 +139,7 @@ export interface AgentRunOptions {
   images?: readonly string[];
   sandbox?: CodexSandboxMode;
   permissionMode?: ClaudePermissionMode;
+  brokerWriteAuthorization?: import('./subagents/broker-tools').WriteAuthorization;
   /** Run-scoped capability for asking the bridge to deliver a local file. */
   artifactDelivery?: {
     statePath?: string;
@@ -205,6 +206,8 @@ export interface AgentAdapter {
   structuredControl?: (scopeId: string, input: string) => Promise<AgentEvent[]>;
   structuredQuestion?: (scopeId: string) => string | undefined;
   structuredReady?: (scopeId: string) => boolean;
+  structuredHistory?(scopeId: string, cwd: string): Promise<Array<{ id: string; updatedAt: number; current: boolean }>>;
+  selectStructuredSession?(scopeId: string, cwd: string, id?: string): Promise<void>;
   readonly id: string;
   readonly displayName: string;
   isAvailable(): Promise<boolean>;

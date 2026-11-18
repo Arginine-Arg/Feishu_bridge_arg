@@ -131,7 +131,7 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
         cwdRealpath: workspace.cwdRealpath,
         policyFingerprint: policy.policyFingerprint,
       });
-      if (catalogEntry?.agentId === 'claude') {
+      if (catalogEntry?.agentId === 'claude' || catalogEntry?.agentId === 'dsh') {
         sessionId = catalogEntry.sessionId;
         resumeFrom = sessionId;
       } else if (catalogEntry?.agentId === 'codex') {
@@ -170,7 +170,7 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
           ? resolveCodexReasoningEffort(input.profileConfig.preferences.reasoningEffort)
           : undefined,
       images:
-        input.capability.agentId === 'codex'
+        input.capability.agentId !== 'claude'
           ? policy.attachments
               .filter((attachment) => attachment.kind === 'image' && attachment.decision === 'accepted')
               .map((attachment) => attachment.path)
@@ -226,12 +226,12 @@ function resolveCodexReasoningEffort(
 
 export function recordRunSessionEvent(input: RecordRunSessionEventInput): void {
   if (input.event.type !== 'system') return;
-  if (input.capability.agentId === 'claude' && input.event.sessionId) {
+  if (input.capability.agentId !== 'codex' && input.event.sessionId) {
     const cwdRealpath = input.event.cwd ?? input.policy.cwdRealpath;
     input.sessions.set(input.scopeId, input.event.sessionId, cwdRealpath);
     input.sessionCatalog?.upsertActive({
       scopeId: input.scopeId,
-      agentId: 'claude',
+      agentId: input.capability.agentId,
       cwdRealpath,
       policyFingerprint: input.policy.policyFingerprint,
       sessionId: input.event.sessionId,

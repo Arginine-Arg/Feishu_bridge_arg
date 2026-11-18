@@ -4,6 +4,16 @@ import { rewriteAgentCommandMessage } from '../../../src/bot/channel.js';
 
 describe('agent command routing aliases', () => {
   it('forces matching agent-prefixed slash commands to the native live CLI', () => {
+    expect(rewriteAgentCommandMessage(message('/dsh /model model-a'), 'dsh')).toMatchObject({
+      msg: { content: '/model model-a' },
+      forceNative: true,
+      nativeMode: 'command',
+    });
+    expect(rewriteAgentCommandMessage(message('/btw inspect'), 'dsh')).toMatchObject({
+      msg: { content: '/btw inspect' },
+      forceNative: true,
+      nativeMode: 'side',
+    });
     expect(rewriteAgentCommandMessage(message('/codex /resume'), 'codex')).toMatchObject({
       msg: { content: '/resume' },
       forceNative: true,

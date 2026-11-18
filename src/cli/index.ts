@@ -11,6 +11,7 @@ import {
 } from './commands/secrets';
 import {
   runProfileCreate,
+  runDshProfileMigration,
   runProfileExport,
   runProfileList,
   runProfileRemove,
@@ -103,7 +104,7 @@ program
   .description('Run the bridge in the foreground (was `start` in older versions)')
   .option('-c, --config <path>', 'path to config file')
   .option('--profile <name>', 'profile name to run')
-  .option('--agent <kind>', 'agent kind for a new profile (claude or codex)')
+  .option('--agent <kind>', 'agent kind for a new profile (claude, codex, or dsh)')
   .option('--workspace <path>', 'initial working directory for first-run profile bootstrap')
   .option('--app-id <id>', 'use an existing Lark/Feishu app instead of QR app creation')
   .option('--app-secret <secret>', 'App Secret for --app-id; prefer interactive input on shared machines')
@@ -161,7 +162,7 @@ profile
 profile
   .command('create <name>')
   .description('Create a profile from QR registration or existing app credentials')
-  .option('--agent <kind>', 'agent kind (claude or codex)')
+  .option('--agent <kind>', 'agent kind (claude, codex, or dsh)')
   .option('--workspace <path>', 'initial working directory for this profile')
   .option('--app-id <id>', 'use an existing Lark/Feishu app instead of QR app creation')
   .option('--app-secret <secret>', 'App Secret for --app-id; prefer interactive input on shared machines')
@@ -175,6 +176,12 @@ profile
   }) => {
     await runProfileCreate(name, opts);
   });
+
+profile
+  .command('create-dsh <name>')
+  .description('Create a DeepSeek Harness profile from an existing Codex profile')
+  .requiredOption('--from <profile>', 'source Codex profile')
+  .action(async (name: string, opts: { from: string }) => runDshProfileMigration(name, opts));
 
 profile
   .command('use <name>')
@@ -243,7 +250,7 @@ program
   .command('start')
   .description('Install (if needed) and start the bridge as an OS-managed daemon')
   .option('--profile <name>', 'profile name (defaults to active profile)')
-  .option('--agent <kind>', 'agent kind for first-run profile bootstrap (claude or codex)')
+  .option('--agent <kind>', 'agent kind for first-run profile bootstrap (claude, codex, or dsh)')
   .option('--workspace <path>', 'initial working directory for first-run profile bootstrap')
   .option('--app-id <id>', 'use an existing Lark/Feishu app instead of QR app creation')
   .option('--app-secret <secret>', 'App Secret for --app-id; prefer interactive input on shared machines')

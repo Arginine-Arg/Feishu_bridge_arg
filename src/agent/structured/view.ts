@@ -31,7 +31,7 @@ export class StructuredView {
     if (!native) {
       await appendFile(
         this.logPath,
-        '\nOpenAI Codex (structured view; native TUI starts after the first turn)\n',
+        '\nBridge structured event view\n',
         { mode: 0o600 },
       );
     }

@@ -259,6 +259,17 @@ function parseRoute(id: string, value: unknown): RouteConfig {
     tags: tagsValue.map((tag) => tag.trim()).filter(Boolean),
     maxAccess: maxAccessValue as Access,
   };
+  if (value.dsh !== undefined) {
+    if (!isRecord(value.dsh)) throw new BrokerError("invalid_config", `routes.${id}.dsh must be an object`);
+    const api = value.dsh.api;
+    if (api !== "openai-responses" && api !== "openai-completions" && api !== "anthropic-messages") {
+      throw new BrokerError("invalid_config", `routes.${id}.dsh.api is unsupported`);
+    }
+    if (!envKey || parsedUrl.search || parsedUrl.hash) {
+      throw new BrokerError("invalid_config", `routes.${id}.dsh requires envKey and a clean API base URL`);
+    }
+    route.dsh = { binary: stringValue(value.dsh.binary, `routes.${id}.dsh.binary`), api };
+  }
   if (envKey) {
     route.envKey = envKey;
   }
@@ -360,9 +371,10 @@ export function routeView(
     available: missingEnvironment.length === 0,
     missingEnvironment,
     maxAccess: route.maxAccess,
-    backend: "app_server",
-    selectionReason:
-      "Current native Codex children cannot use a provider distinct from the controller; App Server preserves this route.",
+    backend: route.dsh ? "dsh_acp" : "app_server",
+    selectionReason: route.dsh
+      ? "DeepSeek Harness executes this worker via ACP."
+      : "Current native Codex children cannot use a provider distinct from the controller; App Server preserves this route.",
     nativeAgentType: null,
     default: config.defaultRoute === route.id,
   };

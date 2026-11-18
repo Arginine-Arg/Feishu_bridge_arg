@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { DshRuntime } from "./dsh-runtime.js";
 import type { Access, AgentEvent, AgentEventsResult, AgentSnapshot, PendingInteraction, ProcessSpec, RouteConfig, RuntimeMetadata, ThreadRecord } from "./types.js";
 interface RuntimeSpec {
     metadata: RuntimeMetadata;
@@ -50,15 +51,16 @@ export declare class AppServerRuntime extends EventEmitter {
     takeInteraction(threadId: string): PendingInteraction | undefined;
     listThreads(): Promise<ThreadRecord[]>;
 }
+type ManagedRuntime = AppServerRuntime | DshRuntime;
 export declare class RuntimeManager {
     #private;
     constructor(dataDir: string, codexBin: string, environment?: NodeJS.ProcessEnv, processOverride?: ProcessSpec);
-    forRoute(route: RouteConfig, access: Access): Promise<AppServerRuntime>;
+    forRoute(route: RouteConfig, access: Access): Promise<ManagedRuntime>;
     forAgent(agentId: string): Promise<{
-        runtime: AppServerRuntime;
+        runtime: ManagedRuntime;
         threadId: string;
     }>;
-    all(): Promise<AppServerRuntime[]>;
+    all(): Promise<ManagedRuntime[]>;
     close(): Promise<void>;
 }
 export {};

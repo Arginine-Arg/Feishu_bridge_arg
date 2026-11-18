@@ -444,14 +444,16 @@ export function createRuntimeAgent(
             : {}),
         }
       : undefined;
-  if (profileConfig.preferences?.agentTransport === 'structured') {
+  if (profileConfig.preferences?.agentTransport === 'structured' || profileConfig.agentKind === 'dsh') {
     const structured = new StructuredAdapter({
       kind: profileConfig.agentKind,
-      binary: profileConfig.agentKind === 'codex' ? profileConfig.codex?.binaryPath ?? 'codex' : 'claude',
+      binary: profileConfig.agentKind === 'codex' ? profileConfig.codex?.binaryPath ?? 'codex'
+        : profileConfig.agentKind === 'dsh' ? profileConfig.dsh?.binaryPath ?? 'dsh' : 'claude',
       profileDir: appPaths.profileDir,
       codexHome: profileConfig.codex?.codexHome ?? (profileConfig.codex?.inheritCodexHome === true ? undefined : `${appPaths.profileDir}/codex-home`),
       nativeView: profileConfig.preferences.structuredNativeView !== false,
       providerRecovery: profileConfig.codex?.providerRecovery,
+      dsh: profileConfig.dsh,
       sandbox: profileConfig.sandbox.defaultMode,
       network: profileConfig.network,
       subagents: profileConfig.subagents,
@@ -462,6 +464,7 @@ export function createRuntimeAgent(
       ...(appPaths.profile ? { profile: appPaths.profile } : {}),
       larkChannel,
     });
+    if (profileConfig.agentKind === 'dsh') return structured;
     const live = profileConfig.agentKind === 'codex'
       ? new CodexAdapter({ binary: profileConfig.codex?.binaryPath ?? 'codex', profileStateDir: appPaths.profileDir,
         codexHome: profileConfig.codex?.codexHome, inheritCodexHome: profileConfig.codex?.inheritCodexHome,

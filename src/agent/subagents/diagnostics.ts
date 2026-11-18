@@ -1,7 +1,7 @@
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { readFile } from 'node:fs/promises';
-import type { SubagentConfig } from '../../config/profile-schema';
+import type { DshConfig, SubagentConfig } from '../../config/profile-schema';
 import {
   loadBrokerRouteMap,
   type BrokerRouteMap,
@@ -151,6 +151,7 @@ export async function collectSubagentDiagnostics(input: {
   stateDir?: string;
   codexHome?: string;
   codexBin?: string;
+  dsh?: DshConfig;
   parentProviderId?: string;
 }): Promise<SubagentDiagnostics> {
   const env = input.env ?? process.env;
@@ -174,7 +175,7 @@ export async function collectSubagentDiagnostics(input: {
   ]);
   const configuredForNewThreads =
     input.config.modelTools &&
-    input.config.nativeToolPolicy === 'shadow' &&
+    (input.dsh || input.config.nativeToolPolicy === 'shadow') &&
     input.config.enabled &&
     (input.config.mode === 'auto' || input.config.mode === 'broker');
   const marker = structuredRuntime.brokerThreadMarkers.find(item =>
@@ -206,7 +207,9 @@ export async function collectSubagentDiagnostics(input: {
       brokerWired: false,
       ...(!input.config.modelTools
         ? { degradedReason: 'modelTools=false; native collaboration remains visible' }
-        : input.config.nativeToolPolicy !== 'shadow'
+        : input.dsh
+          ? {}
+          : input.config.nativeToolPolicy !== 'shadow'
           ? { degradedReason: 'nativeToolPolicy=preserve; native collaboration may bypass Broker' }
           : !configuredForNewThreads
             ? { degradedReason: `subagents.mode=${input.config.mode}` }
@@ -344,6 +347,7 @@ export async function collectSubagentDiagnostics(input: {
     }
     try {
       const generated = await materializeCcSwitchBrokerRuntime({
+        dsh: input.dsh,
         env,
         ...(input.codexHome ? { codexHome: input.codexHome } : {}),
         ...(input.parentProviderId ? { parentProviderId: input.parentProviderId } : {}),

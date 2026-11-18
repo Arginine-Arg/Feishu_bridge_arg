@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 import { buildProcessInvocation, resolveCodexProcess } from "./codex-process.js";
 import { BrokerError, errorMessage } from "./errors.js";
 import { JsonLinePeer, JsonRpcRemoteError } from "./jsonrpc.js";
+import { DshRuntime } from "./dsh-runtime.js";
 const RUNTIME_METADATA_FILE = "runtime.json";
 const RUNTIME_CONFIG_FILE = "config.toml";
 const AGENT_PREFIX = "broker";
@@ -97,6 +98,7 @@ export function runtimeIdFor(route, access) {
         envHttpHeaders: route.envHttpHeaders,
         reasoningEffort: route.reasoningEffort ?? null,
         access,
+        ...(route.dsh ? { dsh: route.dsh } : {}),
     })))
         .digest("hex")
         .slice(0, 16);
@@ -821,7 +823,7 @@ export class RuntimeManager {
             route,
             createdAt: new Date().toISOString(),
         };
-        const runtime = new AppServerRuntime({ metadata, directory, process: this.#process }, this.#environment);
+        const runtime = this.#create(metadata, directory);
         this.#runtimes.set(runtimeId, runtime);
         return runtime;
     }
@@ -872,6 +874,12 @@ export class RuntimeManager {
             !metadata.route ||
             runtimeIdFor(metadata.route, metadata.access) !== runtimeId) {
             throw new BrokerError("invalid_runtime", `Runtime metadata ${runtimeId} is invalid`);
+        }
+        return this.#create(metadata, directory);
+    }
+    #create(metadata, directory) {
+        if (metadata.route.dsh) {
+            return new DshRuntime(metadata, directory, filteredChildEnvironment(metadata.route, directory, this.#environment));
         }
         return new AppServerRuntime({ metadata, directory, process: this.#process }, this.#environment);
     }

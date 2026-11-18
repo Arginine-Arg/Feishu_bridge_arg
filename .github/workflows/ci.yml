@@ -91,6 +91,23 @@ jobs:
         if: runner.os == 'Linux'
         run: git diff --exit-code -- vendor/mixagents-broker/plugin/mixagents-broker/dist
 
+  deepseek-harness:
+    name: DeepSeek Harness ACP on Linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: npm install -g @deepseek-ai/dsh@0.2.2-rc.1 --no-fund --no-audit
+      - run: pnpm build:broker
+      - run: pnpm exec vitest run tests/process/dsh-structured.test.ts
+        env:
+          ARG_BRIDGE_TEST_DSH: '1'
+
   package-install:
     name: Package install on Node ${{ matrix.node }}
     runs-on: ubuntu-latest
