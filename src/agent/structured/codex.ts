@@ -67,6 +67,9 @@ export class CodexStructuredSession implements StructuredSession {
   private handoffBlocked = false;
   private lifecycleInitialized = false;
   private retryStallTimer?: NodeJS.Timeout;
+  private workingStallTimer?: NodeJS.Timeout;
+  private workingStallNoticeTurn?: string;
+  private manualContinuationTurn?: string;
   private activeTools = new Set<string>();
   private acknowledgements = new Map<string, { resolve(): void; reject(error: Error): void }>();
   private deferredInteractions: AgentEvent[] = [];
@@ -121,6 +124,7 @@ export class CodexStructuredSession implements StructuredSession {
   get failureReason(): string | undefined { return this.rpc.failureReason?.message; }
   private disconnected = (error: Error) => {
     this.cancelRecovery();
+    this.clearWorkingStall();
     for (const waiter of this.acknowledgements.values()) waiter.reject(error);
     this.acknowledgements.clear();
     this.phase = 'failed';
@@ -191,6 +195,7 @@ export class CodexStructuredSession implements StructuredSession {
       this.providerError = undefined;
       this.activeTools.clear();
       this.notifyRecovery('normal');
+      this.armWorkingStall(p.turn.id);
     }
     if (message.method === 'error' && p.turnId === this.turnId) {
       this.providerError = { turnId: p.turnId, error: p.error ?? {} };
@@ -225,6 +230,7 @@ export class CodexStructuredSession implements StructuredSession {
     )) {
       this.lastActivityAt = Date.now();
       this.clearRetryStall();
+      this.armWorkingStall(p.turnId);
       // Activity is observable; task success cannot be inferred from text or
       // periodic tool output. Neither activity nor heartbeats extend a budget.
       if (this.ledger.record.deadline !== undefined && Date.now() >= this.ledger.record.deadline) this.notifyRecovery('recovery_exhausted');
@@ -303,7 +309,9 @@ export class CodexStructuredSession implements StructuredSession {
       this.turnId = undefined; this.phase = 'idle';
       this.providerRetryTurns.delete(p.turn.id);
       this.underlyingTurn = 'terminal';
-      if (p.turn?.status === 'failed') {
+      const manualContinuation = this.manualContinuationTurn === p.turn.id;
+      if (manualContinuation) this.manualContinuationTurn = undefined;
+      if (p.turn?.status === 'failed' && !manualContinuation) {
         const error = p.turn.error ?? (this.providerError?.turnId === p.turn.id ? this.providerError?.error : undefined);
         if (!this.scheduleRecovery(p.turn.id, error)) {
           this.cancelRecovery();
@@ -315,8 +323,8 @@ export class CodexStructuredSession implements StructuredSession {
         this.queueRecoveryEvent(() => p.turn.status === 'completed' ? this.ledger.reset('completed') : this.ledger.invalidate('interrupted'));
         this.notifyRecovery(p.turn.status === 'completed' ? 'normal' : 'stopped', true);
         if (!this.goalActive || p.turn.status === 'interrupted') {
-          if (p.turn.status === 'interrupted') this.emit?.({ type: 'done', terminationReason: 'interrupted' });
-          this.finish();
+          if (p.turn.status === 'interrupted' && !manualContinuation) this.emit?.({ type: 'done', terminationReason: 'interrupted' });
+          if (!manualContinuation) this.finish();
         }
       }
     }
@@ -408,6 +416,91 @@ export class CodexStructuredSession implements StructuredSession {
   private clearRetryStall(): void {
     if (this.retryStallTimer) clearTimeout(this.retryStallTimer);
     this.retryStallTimer = undefined;
+  }
+  private clearWorkingStall(): void {
+    if (this.workingStallTimer) clearTimeout(this.workingStallTimer);
+    this.workingStallTimer = undefined;
+  }
+  private armWorkingStall(turnId: string): void {
+    this.clearWorkingStall();
+    this.workingStallNoticeTurn = undefined;
+    const seconds = this.recovery?.policy.workingStallSeconds;
+    if (!seconds || !this.recoveryAllowed()) return;
+    const epoch = this.recoveryEpoch;
+    const timer = setTimeout(() => {
+      this.workingStallTimer = undefined;
+      void this.checkWorkingStall(turnId, epoch);
+    }, seconds * 1000);
+    this.workingStallTimer = timer;
+    timer.unref?.();
+  }
+  private async checkWorkingStall(turnId: string, epoch: number): Promise<void> {
+    if (epoch !== this.recoveryEpoch || !this.recoveryAllowed() || this.turnId !== turnId ||
+      this.pending.size || this.activeTools.size || this.workingStallNoticeTurn === turnId) return;
+    try {
+      const result = await this.rpc.request('thread/turns/list', { threadId: this.id, limit: 1, sortDirection: 'desc' }, this.recovery!.policy.statusTimeoutSeconds * 1000);
+      if (epoch !== this.recoveryEpoch || this.turnId !== turnId) return;
+      const latest = result.data?.[0];
+      if (latest?.id !== turnId) return;
+      if (latest.status === 'inProgress') {
+        this.workingStallNoticeTurn = turnId;
+        this.notifyRecovery('needs_attention', true);
+        this.emit?.({ type: 'pending', taskId: this.id,
+          message: '当前 turn 长时间没有文本或工具进展，底层仍报告 Working。未自动中断。确认没有副作用操作后，可发送 /recover continue。' });
+      } else if (['failed', 'interrupted', 'completed'].includes(latest.status)) {
+        this.receive({ method: 'turn/completed', params: { threadId: this.id, turn: latest } });
+      }
+    } catch (error) {
+      this.notifyRecovery('status_unknown', true);
+      log.warn('agent', 'working-stall-status-unavailable', { thread: this.id, reason: String(error) });
+    }
+  }
+  private async manualContinue(): Promise<string> {
+    if (this.handoffBlocked) throw new Error('线程正在交接 provider；未发送 continue');
+    if (this.pending.size || this.activeTools.size) {
+      throw new Error('当前有审批或工具正在执行；请先完成它，Bridge 不会强制 continue。');
+    }
+    await this.ledgerReady;
+    let current = this.turnId;
+    if (!current) {
+      const result = await this.rpc.request('thread/turns/list', { threadId: this.id, limit: 1, sortDirection: 'desc' }, this.recovery?.policy.statusTimeoutSeconds ? this.recovery.policy.statusTimeoutSeconds * 1000 : 10_000);
+      const latest = result.data?.[0];
+      if (latest?.status === 'inProgress' && typeof latest.id === 'string') current = latest.id;
+      else if (latest && !['failed', 'interrupted', 'completed'].includes(latest.status)) {
+        throw new Error('无法确认当前 turn 已结束，未发送 continue。');
+      }
+    }
+    if (current) {
+      this.manualContinuationTurn = current;
+      await this.rpc.request('turn/interrupt', { threadId: this.id, turnId: current }, this.recovery?.policy.statusTimeoutSeconds ? this.recovery.policy.statusTimeoutSeconds * 1000 : 10_000);
+      const deadline = Date.now() + (this.recovery?.policy.statusTimeoutSeconds ?? 10) * 1000;
+      for (;;) {
+        const result = await this.rpc.request('thread/turns/list', { threadId: this.id, limit: 1, sortDirection: 'desc' }, Math.max(1, deadline - Date.now()));
+        const latest = result.data?.[0];
+        if (latest?.id === current && latest.status !== 'inProgress') {
+          if (!this.finishedTurns.has(current)) this.receive({ method: 'turn/completed', params: { threadId: this.id, turn: latest } });
+          break;
+        }
+        if (Date.now() >= deadline) {
+          this.manualContinuationTurn = undefined;
+          throw new Error('中断状态确认超时，未发送 continue。');
+        }
+        await new Promise(resolve => setTimeout(resolve, 250));
+      }
+    }
+    const operationId = 'arg-bridge-manual-continue-' + randomUUID();
+    const started = await this.rpc.request('turn/start', {
+      threadId: this.id, clientUserMessageId: operationId, input: [{ type: 'text', text: 'continue' }],
+    }, this.recovery?.policy.statusTimeoutSeconds ? this.recovery.policy.statusTimeoutSeconds * 1000 : 10_000);
+    if (!started.turn?.id) throw new Error('continue 已发送但服务端没有返回新的 turn ID，未自动重发');
+    this.recoveryTurnIds.add(started.turn.id);
+    this.turnId = started.turn.id;
+    this.phase = 'busy';
+    this.underlyingTurn = 'running';
+    this.recoveryBlocked = false;
+    this.stopRequested = false;
+    this.armWorkingStall(started.turn.id);
+    return '已安全中断当前 turn，并在同一会话发送 continue。';
   }
   /** A finite, non-overlapping metadata monitor. Never fetch full history. */
   private watchRetryStall(turnId: string, error: Wire): void {
@@ -689,6 +782,9 @@ export class CodexStructuredSession implements StructuredSession {
     if (name === '/status') return [textEvent(JSON.stringify(await this.rpc.request('thread/read', { threadId: this.id, includeTurns: false }), null, 2))];
     if (name === '/recover') {
       const action = (args[0] ?? 'status').toLowerCase();
+      if (action === 'continue' || action === 'retry') {
+        return [textEvent(await this.manualContinue())];
+      }
       if (action === 'on' || action === 'enable') {
         const version = ++this.recoverySettingVersion;
         await this.recovery?.onEnabledChange?.(true);
@@ -731,7 +827,7 @@ export class CodexStructuredSession implements StructuredSession {
           activeTurnContinueCount: 0,
         }, null, 2))];
       }
-      throw new Error('用法：/recover on、/recover off 或 /recover status');
+      throw new Error('用法：/recover on、/recover off、/recover status 或 /recover continue');
     }
     if (name === '/goal') {
       const action = args[0];
@@ -978,6 +1074,7 @@ export class CodexStructuredSession implements StructuredSession {
       const active = result.data?.find((turn: Wire) => turn.status === 'inProgress');
       if (active) {
         this.turnId = active.id; this.phase = 'busy'; this.underlyingTurn = 'running';
+        this.armWorkingStall(active.id);
         if (this.ledger.record.startedAt !== undefined && !this.ledger.record.blocked && this.recoveryAllowed()) this.armRecoveryDeadline();
       } else {
         this.underlyingTurn = 'terminal';

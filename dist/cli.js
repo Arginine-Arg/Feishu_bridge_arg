@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.23.1",
+  version: "1.23.2",
   description: "Bridge Feishu and Lark with Claude Code, Codex CLI, and DeepSeek Harness",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -377,6 +377,7 @@ var PROVIDER_RECOVERY_DEFAULTS = Object.freeze({
   delaySeconds: 30,
   maxDelaySeconds: 120,
   retryStallSeconds: 60,
+  workingStallSeconds: 300,
   jitterRatio: 0.2,
   maxStatusChecks: 8,
   statusTimeoutSeconds: 10
@@ -395,6 +396,7 @@ function normalizeProviderRecovery(value) {
     delaySeconds: bounded2(current ? value?.delaySeconds : void 0, PROVIDER_RECOVERY_DEFAULTS.delaySeconds, 5, 600),
     maxDelaySeconds: bounded2(value?.maxDelaySeconds, PROVIDER_RECOVERY_DEFAULTS.maxDelaySeconds, 5, 900),
     retryStallSeconds: value?.retryStallSeconds === 0 ? 0 : bounded2(current ? value?.retryStallSeconds : void 0, PROVIDER_RECOVERY_DEFAULTS.retryStallSeconds, 30, 600),
+    workingStallSeconds: bounded2(current ? value?.workingStallSeconds : void 0, PROVIDER_RECOVERY_DEFAULTS.workingStallSeconds, 60, 3600),
     budgetSeconds: bounded2(value?.budgetSeconds, PROVIDER_RECOVERY_DEFAULTS.budgetSeconds, 60, 86400),
     jitterRatio: typeof value?.jitterRatio === "number" && Number.isFinite(value.jitterRatio) ? Math.max(0, Math.min(0.5, value.jitterRatio)) : PROVIDER_RECOVERY_DEFAULTS.jitterRatio,
     maxStatusChecks: bounded2(value?.maxStatusChecks, PROVIDER_RECOVERY_DEFAULTS.maxStatusChecks, 0, 20),
@@ -438,7 +440,7 @@ function isTransientProviderError(error) {
     "responseTooManyFailedAttempts"
   ].includes(kind)) return true;
   if (kind && kind !== "other") return false;
-  return /\b(?:408|429|500|502|503|504)\b|stream disconnected|connection reset|ECONNRESET|ETIMEDOUT|reconnect(?:ion|ing).*\d|temporarily unavailable|server overloaded/i.test(text2);
+  return /\b(?:408|429|500|502|503|504)\b|stream disconnected|connection reset|ECONNRESET|ETIMEDOUT|reconnect(?:ion|ing).*\d|waiting for network|network error|error decoding response body|temporarily unavailable|server overloaded/i.test(text2);
 }
 
 // src/config/permissions.ts
@@ -18205,6 +18207,9 @@ var CodexStructuredSession = class _CodexStructuredSession {
   handoffBlocked = false;
   lifecycleInitialized = false;
   retryStallTimer;
+  workingStallTimer;
+  workingStallNoticeTurn;
+  manualContinuationTurn;
   activeTools = /* @__PURE__ */ new Set();
   acknowledgements = /* @__PURE__ */ new Map();
   deferredInteractions = [];
@@ -18251,6 +18256,7 @@ var CodexStructuredSession = class _CodexStructuredSession {
   }
   disconnected = (error) => {
     this.cancelRecovery();
+    this.clearWorkingStall();
     for (const waiter of this.acknowledgements.values()) waiter.reject(error);
     this.acknowledgements.clear();
     this.phase = "failed";
@@ -18332,6 +18338,7 @@ ${p4.command ?? JSON.stringify(p4.changes ?? {})}`,
       this.providerError = void 0;
       this.activeTools.clear();
       this.notifyRecovery("normal");
+      this.armWorkingStall(p4.turn.id);
     }
     if (message.method === "error" && p4.turnId === this.turnId) {
       this.providerError = { turnId: p4.turnId, error: p4.error ?? {} };
@@ -18361,6 +18368,7 @@ ${p4.command ?? JSON.stringify(p4.changes ?? {})}`,
     if (p4.turnId === this.turnId && ((message.method === "item/agentMessage/delta" || message.method === "item/reasoning/summaryTextDelta" || message.method === "item/commandExecution/outputDelta") && typeof p4.delta === "string" && p4.delta.trim() || (message.method === "item/started" || message.method === "item/completed") && toolItems.has(p4.item?.type))) {
       this.lastActivityAt = Date.now();
       this.clearRetryStall();
+      this.armWorkingStall(p4.turnId);
       if (this.ledger.record.deadline !== void 0 && Date.now() >= this.ledger.record.deadline) this.notifyRecovery("recovery_exhausted");
       else this.notifyRecovery(this.activeTools.size || toolItems.has(p4.item?.type) ? "tool_running" : "normal");
     }
@@ -18446,7 +18454,9 @@ ${p4.command ?? JSON.stringify(p4.changes ?? {})}`,
       this.phase = "idle";
       this.providerRetryTurns.delete(p4.turn.id);
       this.underlyingTurn = "terminal";
-      if (p4.turn?.status === "failed") {
+      const manualContinuation = this.manualContinuationTurn === p4.turn.id;
+      if (manualContinuation) this.manualContinuationTurn = void 0;
+      if (p4.turn?.status === "failed" && !manualContinuation) {
         const error = p4.turn.error ?? (this.providerError?.turnId === p4.turn.id ? this.providerError?.error : void 0);
         if (!this.scheduleRecovery(p4.turn.id, error)) {
           this.cancelRecovery();
@@ -18458,8 +18468,8 @@ ${p4.command ?? JSON.stringify(p4.changes ?? {})}`,
         this.queueRecoveryEvent(() => p4.turn.status === "completed" ? this.ledger.reset("completed") : this.ledger.invalidate("interrupted"));
         this.notifyRecovery(p4.turn.status === "completed" ? "normal" : "stopped", true);
         if (!this.goalActive || p4.turn.status === "interrupted") {
-          if (p4.turn.status === "interrupted") this.emit?.({ type: "done", terminationReason: "interrupted" });
-          this.finish();
+          if (p4.turn.status === "interrupted" && !manualContinuation) this.emit?.({ type: "done", terminationReason: "interrupted" });
+          if (!manualContinuation) this.finish();
         }
       }
     }
@@ -18549,6 +18559,95 @@ ${p4.command ?? JSON.stringify(p4.changes ?? {})}`,
   clearRetryStall() {
     if (this.retryStallTimer) clearTimeout(this.retryStallTimer);
     this.retryStallTimer = void 0;
+  }
+  clearWorkingStall() {
+    if (this.workingStallTimer) clearTimeout(this.workingStallTimer);
+    this.workingStallTimer = void 0;
+  }
+  armWorkingStall(turnId) {
+    this.clearWorkingStall();
+    this.workingStallNoticeTurn = void 0;
+    const seconds = this.recovery?.policy.workingStallSeconds;
+    if (!seconds || !this.recoveryAllowed()) return;
+    const epoch = this.recoveryEpoch;
+    const timer = setTimeout(() => {
+      this.workingStallTimer = void 0;
+      void this.checkWorkingStall(turnId, epoch);
+    }, seconds * 1e3);
+    this.workingStallTimer = timer;
+    timer.unref?.();
+  }
+  async checkWorkingStall(turnId, epoch) {
+    if (epoch !== this.recoveryEpoch || !this.recoveryAllowed() || this.turnId !== turnId || this.pending.size || this.activeTools.size || this.workingStallNoticeTurn === turnId) return;
+    try {
+      const result = await this.rpc.request("thread/turns/list", { threadId: this.id, limit: 1, sortDirection: "desc" }, this.recovery.policy.statusTimeoutSeconds * 1e3);
+      if (epoch !== this.recoveryEpoch || this.turnId !== turnId) return;
+      const latest = result.data?.[0];
+      if (latest?.id !== turnId) return;
+      if (latest.status === "inProgress") {
+        this.workingStallNoticeTurn = turnId;
+        this.notifyRecovery("needs_attention", true);
+        this.emit?.({
+          type: "pending",
+          taskId: this.id,
+          message: "\u5F53\u524D turn \u957F\u65F6\u95F4\u6CA1\u6709\u6587\u672C\u6216\u5DE5\u5177\u8FDB\u5C55\uFF0C\u5E95\u5C42\u4ECD\u62A5\u544A Working\u3002\u672A\u81EA\u52A8\u4E2D\u65AD\u3002\u786E\u8BA4\u6CA1\u6709\u526F\u4F5C\u7528\u64CD\u4F5C\u540E\uFF0C\u53EF\u53D1\u9001 /recover continue\u3002"
+        });
+      } else if (["failed", "interrupted", "completed"].includes(latest.status)) {
+        this.receive({ method: "turn/completed", params: { threadId: this.id, turn: latest } });
+      }
+    } catch (error) {
+      this.notifyRecovery("status_unknown", true);
+      log.warn("agent", "working-stall-status-unavailable", { thread: this.id, reason: String(error) });
+    }
+  }
+  async manualContinue() {
+    if (this.handoffBlocked) throw new Error("\u7EBF\u7A0B\u6B63\u5728\u4EA4\u63A5 provider\uFF1B\u672A\u53D1\u9001 continue");
+    if (this.pending.size || this.activeTools.size) {
+      throw new Error("\u5F53\u524D\u6709\u5BA1\u6279\u6216\u5DE5\u5177\u6B63\u5728\u6267\u884C\uFF1B\u8BF7\u5148\u5B8C\u6210\u5B83\uFF0CBridge \u4E0D\u4F1A\u5F3A\u5236 continue\u3002");
+    }
+    await this.ledgerReady;
+    let current = this.turnId;
+    if (!current) {
+      const result = await this.rpc.request("thread/turns/list", { threadId: this.id, limit: 1, sortDirection: "desc" }, this.recovery?.policy.statusTimeoutSeconds ? this.recovery.policy.statusTimeoutSeconds * 1e3 : 1e4);
+      const latest = result.data?.[0];
+      if (latest?.status === "inProgress" && typeof latest.id === "string") current = latest.id;
+      else if (latest && !["failed", "interrupted", "completed"].includes(latest.status)) {
+        throw new Error("\u65E0\u6CD5\u786E\u8BA4\u5F53\u524D turn \u5DF2\u7ED3\u675F\uFF0C\u672A\u53D1\u9001 continue\u3002");
+      }
+    }
+    if (current) {
+      this.manualContinuationTurn = current;
+      await this.rpc.request("turn/interrupt", { threadId: this.id, turnId: current }, this.recovery?.policy.statusTimeoutSeconds ? this.recovery.policy.statusTimeoutSeconds * 1e3 : 1e4);
+      const deadline = Date.now() + (this.recovery?.policy.statusTimeoutSeconds ?? 10) * 1e3;
+      for (; ; ) {
+        const result = await this.rpc.request("thread/turns/list", { threadId: this.id, limit: 1, sortDirection: "desc" }, Math.max(1, deadline - Date.now()));
+        const latest = result.data?.[0];
+        if (latest?.id === current && latest.status !== "inProgress") {
+          if (!this.finishedTurns.has(current)) this.receive({ method: "turn/completed", params: { threadId: this.id, turn: latest } });
+          break;
+        }
+        if (Date.now() >= deadline) {
+          this.manualContinuationTurn = void 0;
+          throw new Error("\u4E2D\u65AD\u72B6\u6001\u786E\u8BA4\u8D85\u65F6\uFF0C\u672A\u53D1\u9001 continue\u3002");
+        }
+        await new Promise((resolve11) => setTimeout(resolve11, 250));
+      }
+    }
+    const operationId = "arg-bridge-manual-continue-" + randomUUID3();
+    const started = await this.rpc.request("turn/start", {
+      threadId: this.id,
+      clientUserMessageId: operationId,
+      input: [{ type: "text", text: "continue" }]
+    }, this.recovery?.policy.statusTimeoutSeconds ? this.recovery.policy.statusTimeoutSeconds * 1e3 : 1e4);
+    if (!started.turn?.id) throw new Error("continue \u5DF2\u53D1\u9001\u4F46\u670D\u52A1\u7AEF\u6CA1\u6709\u8FD4\u56DE\u65B0\u7684 turn ID\uFF0C\u672A\u81EA\u52A8\u91CD\u53D1");
+    this.recoveryTurnIds.add(started.turn.id);
+    this.turnId = started.turn.id;
+    this.phase = "busy";
+    this.underlyingTurn = "running";
+    this.recoveryBlocked = false;
+    this.stopRequested = false;
+    this.armWorkingStall(started.turn.id);
+    return "\u5DF2\u5B89\u5168\u4E2D\u65AD\u5F53\u524D turn\uFF0C\u5E76\u5728\u540C\u4E00\u4F1A\u8BDD\u53D1\u9001 continue\u3002";
   }
   /** A finite, non-overlapping metadata monitor. Never fetch full history. */
   watchRetryStall(turnId, error) {
@@ -18871,6 +18970,9 @@ ${options.prompt}` : options.prompt }];
     if (name === "/status") return [textEvent(JSON.stringify(await this.rpc.request("thread/read", { threadId: this.id, includeTurns: false }), null, 2))];
     if (name === "/recover") {
       const action = (args[0] ?? "status").toLowerCase();
+      if (action === "continue" || action === "retry") {
+        return [textEvent(await this.manualContinue())];
+      }
       if (action === "on" || action === "enable") {
         const version = ++this.recoverySettingVersion;
         await this.recovery?.onEnabledChange?.(true);
@@ -18913,7 +19015,7 @@ ${options.prompt}` : options.prompt }];
           activeTurnContinueCount: 0
         }, null, 2))];
       }
-      throw new Error("\u7528\u6CD5\uFF1A/recover on\u3001/recover off \u6216 /recover status");
+      throw new Error("\u7528\u6CD5\uFF1A/recover on\u3001/recover off\u3001/recover status \u6216 /recover continue");
     }
     if (name === "/goal") {
       const action = args[0];
@@ -19182,6 +19284,7 @@ ${options.prompt}` : options.prompt }];
         this.turnId = active2.id;
         this.phase = "busy";
         this.underlyingTurn = "running";
+        this.armWorkingStall(active2.id);
         if (this.ledger.record.startedAt !== void 0 && !this.ledger.record.blocked && this.recoveryAllowed()) this.armRecoveryDeadline();
       } else {
         this.underlyingTurn = "terminal";

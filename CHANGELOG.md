@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.23.2
+
+- Recognizes Waiting for network, reconnect timeout, network errors, and response-body decoding failures as transient provider transport states.
+- Adds a bounded no-progress monitor for turns that remain Working. It queries the underlying thread and reports an actionable warning without interrupting the provider or replaying input.
+- Adds /recover continue. After checking that no approval or tool is active, Bridge interrupts the current turn, confirms its terminal state, and sends one private continue on the same thread. Unknown interrupt results are never replayed.
+
 ## 1.23.1
 
 - Stabilizes the release test matrix for the DeepSeek Harness integration by

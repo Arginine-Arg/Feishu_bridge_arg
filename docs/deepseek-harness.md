@@ -39,6 +39,10 @@ Anthropic Messages. ChatGPT OAuth-only accounts require a separate API Key.
   available models. `/model <id>` selects a model for that chat and provider.
 - `/status` reports the current session. `/stop` cancels the active turn.
   Approval cards and `/answer` resolve individual tool requests.
+- For Codex structured sessions, `/recover status` shows the provider state.
+  `/recover continue` is the manual Esc then continue operation. It refuses
+  to act while an approval or tool is active and verifies the interrupted turn
+  before sending the new input.
 - `/new` starts a new session. In a private chat, `/resume` lists the sessions
   previously used by that chat in the current workspace.
 - `/btw`, `/btw result`, and `/btw out` use the existing MixAgents routes and

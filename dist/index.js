@@ -1999,6 +1999,7 @@ var PROVIDER_RECOVERY_DEFAULTS = Object.freeze({
   delaySeconds: 30,
   maxDelaySeconds: 120,
   retryStallSeconds: 60,
+  workingStallSeconds: 300,
   jitterRatio: 0.2,
   maxStatusChecks: 8,
   statusTimeoutSeconds: 10

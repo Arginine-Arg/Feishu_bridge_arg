@@ -10,6 +10,8 @@ export interface ProviderRecoveryConfig {
   maxDelaySeconds: number;
   /** State-check interval after explicit provider retry; never interrupts. 0 disables checks. */
   retryStallSeconds: number;
+  /** No-progress monitor for a visible Working turn. It only reports and never interrupts. */
+  workingStallSeconds: number;
   budgetSeconds: number;
   jitterRatio: number;
   maxStatusChecks: number;
@@ -18,7 +20,7 @@ export interface ProviderRecoveryConfig {
 
 export const PROVIDER_RECOVERY_DEFAULTS = Object.freeze({
   budgetSeconds: 3600, delaySeconds: 30, maxDelaySeconds: 120,
-  retryStallSeconds: 60, jitterRatio: 0.2, maxStatusChecks: 8,
+  retryStallSeconds: 60, workingStallSeconds: 300, jitterRatio: 0.2, maxStatusChecks: 8,
   statusTimeoutSeconds: 10,
 });
 
@@ -37,6 +39,7 @@ export function normalizeProviderRecovery(value?: Partial<ProviderRecoveryConfig
     delaySeconds: bounded(current ? value?.delaySeconds : undefined, PROVIDER_RECOVERY_DEFAULTS.delaySeconds, 5, 600),
     maxDelaySeconds: bounded(value?.maxDelaySeconds, PROVIDER_RECOVERY_DEFAULTS.maxDelaySeconds, 5, 900),
     retryStallSeconds: value?.retryStallSeconds === 0 ? 0 : bounded(current ? value?.retryStallSeconds : undefined, PROVIDER_RECOVERY_DEFAULTS.retryStallSeconds, 30, 600),
+    workingStallSeconds: bounded(current ? value?.workingStallSeconds : undefined, PROVIDER_RECOVERY_DEFAULTS.workingStallSeconds, 60, 3600),
     budgetSeconds: bounded(value?.budgetSeconds, PROVIDER_RECOVERY_DEFAULTS.budgetSeconds, 60, 86400),
     jitterRatio: typeof value?.jitterRatio === 'number' && Number.isFinite(value.jitterRatio) ? Math.max(0, Math.min(0.5, value.jitterRatio)) : PROVIDER_RECOVERY_DEFAULTS.jitterRatio,
     maxStatusChecks: bounded(value?.maxStatusChecks, PROVIDER_RECOVERY_DEFAULTS.maxStatusChecks, 0, 20),
@@ -79,5 +82,5 @@ export function isTransientProviderError(error: { codexErrorInfo?: unknown; mess
   if (kind && ['rateLimitExceeded', 'serverOverloaded', 'internalServerError', 'flexUnavailable',
     'httpConnectionFailed', 'responseStreamConnectionFailed', 'responseStreamDisconnected', 'responseTooManyFailedAttempts'].includes(kind)) return true;
   if (kind && kind !== 'other') return false;
-  return /\b(?:408|429|500|502|503|504)\b|stream disconnected|connection reset|ECONNRESET|ETIMEDOUT|reconnect(?:ion|ing).*\d|temporarily unavailable|server overloaded/i.test(text);
+  return /\b(?:408|429|500|502|503|504)\b|stream disconnected|connection reset|ECONNRESET|ETIMEDOUT|reconnect(?:ion|ing).*\d|waiting for network|network error|error decoding response body|temporarily unavailable|server overloaded/i.test(text);
 }

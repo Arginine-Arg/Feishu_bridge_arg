@@ -17,6 +17,7 @@ function harness(policy: Partial<ProviderRecoveryConfig> = {}) {
   const rpc = new EventEmitter() as EventEmitter & { request: ReturnType<typeof vi.fn> };
   rpc.request = vi.fn(async (method: string) => {
     if (method === 'turn/start') { latest = { id: `t${++count}`, status: 'inProgress' }; return { turn: latest }; }
+    if (method === 'turn/interrupt') { latest = { id: latest.id, status: 'interrupted' }; return {}; }
     if (method === 'thread/turns/list') return { data: [latest] };
     if (method === 'thread/goal/get') return { goal: null };
     return {};
@@ -90,6 +91,28 @@ describe('bounded terminal-only provider recovery', () => {
   it.each(['completed', 'interrupted'])('never auto-runs a %s turn after retry notices', async status => {
     const h = harness(); await tick(); h.retry(); await tick(); h.complete(status);
     await h.done; await tick(7_200_000); expect(h.calls('turn/start')).toHaveLength(1);
+  });
+  it('recognizes waiting-for-network and response-decoding transport failures', () => {
+    expect(isTransientProviderError({ message: 'Waiting for network' })).toBe(true);
+    expect(isTransientProviderError({ message: 'network error: error decoding response body' })).toBe(true);
+  });
+  it('reports a silent Working turn without interrupting it, then supports safe manual continue', async () => {
+    const h = harness({ workingStallSeconds: 60 }); await tick();
+    h.emit('turn/started', { turn: { id: 't1', status: 'inProgress' } });
+    await tick(60_000); await tick();
+    expect(h.calls('turn/interrupt')).toHaveLength(0);
+    expect(h.events).toContainEqual(expect.objectContaining({
+      type: 'pending',
+      message: expect.stringContaining('/recover continue'),
+    }));
+    await h.session.command('/recover continue');
+    expect(h.calls('turn/interrupt')).toHaveLength(1);
+    expect(h.calls('turn/start')).toHaveLength(2);
+    expect(h.calls('turn/start')[1]![1]).toMatchObject({
+      threadId: 'thread',
+      input: [{ type: 'text', text: 'continue' }],
+    });
+    h.complete('completed', undefined, 't2'); await h.done;
   });
   it.each(['unauthorized', 'usageLimitExceeded', 'contextWindowExceeded', 'sandboxError', 'badRequest'])('never retries %s', async code => {
     const h = harness(); await tick(); h.complete('failed', { message: '503', codexErrorInfo: code });
