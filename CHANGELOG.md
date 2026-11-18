@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.23.1
+
+- Stabilizes the release test matrix for the DeepSeek Harness integration by
+  using the same bounded Linux process concurrency as the passing CI gate.
+- Runs the official DeepSeek Harness process regression as part of the
+  release workflow.
+
 ## 1.23.0
 
 - Adds a structured DeepSeek Harness profile with Feishu replies, approval

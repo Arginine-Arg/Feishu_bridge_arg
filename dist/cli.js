@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.23.0",
+  version: "1.23.1",
   description: "Bridge Feishu and Lark with Claude Code, Codex CLI, and DeepSeek Harness",
   type: "module",
   packageManager: "pnpm@10.33.0",

@@ -35,8 +35,20 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Test source
-        run: pnpm test
+      - name: Install DeepSeek Harness test runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          npm install -g @deepseek-ai/dsh@0.2.2-rc.1 --no-fund --no-audit
+
+      - name: Test source (Linux)
+        shell: bash
+        env:
+          ARG_BRIDGE_TEST_DSH: '1'
+        run: |
+          pnpm build:broker
+          pnpm exec vitest run --maxWorkers=2 --minWorkers=1
+          node scripts/run-vendored-broker-tests.mjs
 
       - name: Verify types
         run: pnpm typecheck
