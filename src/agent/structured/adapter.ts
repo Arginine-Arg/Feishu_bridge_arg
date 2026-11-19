@@ -2143,8 +2143,9 @@ export class StructuredAdapter implements AgentAdapter {
   }
   private refreshBindingTarget(binding: StructuredBinding): TmuxPaneTarget | undefined {
     return listStructuredTmuxPanes(binding.target.socketPath).find(item =>
-      item.structured?.threadId === binding.threadId && item.paneCurrentPath === binding.cwd &&
-      (binding.replyAnchor || (item.paneId === binding.target.paneId && item.structured.endpoint === binding.endpoint)));
+      item.structured?.threadId === binding.threadId && (binding.replyAnchor
+        ? item.paneCurrentPath === binding.cwd
+        : item.paneId === binding.target.paneId && item.structured.endpoint === binding.endpoint));
   }
   private async verifyBinding(binding: StructuredBinding): Promise<void> {
     const rpc = await this.connectExisting(binding.endpoint);
