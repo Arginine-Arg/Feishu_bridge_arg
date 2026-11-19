@@ -10,7 +10,8 @@ import type { AgentEvent } from '../../src/agent/types';
 import { initialState, reduce } from '../../src/card/run-state';
 
 const native = process.env.ARG_BRIDGE_RECOVERY_E2E === '1' && process.platform !== 'win32' ? it : it.skip;
-native.each(['native retry', 'terminal continuation', 'recovery disabled', 'lost continuation acknowledgement', 'manual Esc comparison'])('real Codex recovery/control comparison: %s', async mode => {
+native.each(['native retry', 'terminal continuation', 'recovery disabled', 'lost continuation acknowledgement', 'manual Esc comparison', 'manual recovery command'])('real Codex recovery/control comparison: %s', async mode => {
+  const manual = mode === 'manual Esc comparison' || mode === 'manual recovery command';
   const root = await mkdtemp(join(tmpdir(), 'bridge-recovery-e2e-'));
   const home = join(root, 'codex-home');
   const profile = join(root, 'profile');
@@ -19,6 +20,7 @@ native.each(['native retry', 'terminal continuation', 'recovery disabled', 'lost
   let calls = 0;
   let outageStartedAt: number | undefined;
   let manualControl: Promise<boolean> | undefined;
+  let manualRecovery: Promise<AgentEvent[]> | undefined;
   const requests: any[] = [];
   const finalText = 'RECOVERY_OK — 这是完整的正文，必须保留末尾 🧬 END';
   const provider = createServer((req, res) => {
@@ -72,6 +74,11 @@ native.each(['native retry', 'terminal continuation', 'recovery disabled', 'lost
     if (['error', 'turn/started', 'turn/completed'].includes(message.method)) wire.push(message);
     if (message.method === 'turn/completed' && message.params.turn.status === 'failed') healthy = true;
     if (mode === 'manual Esc comparison' && message.method === 'error' && message.params.willRetry === true && !manualControl) manualControl = session!.interrupt();
+    if (mode === 'manual recovery command' && message.method === 'error' && message.params.willRetry === true && !manualRecovery) {
+      healthy = true;
+      manualRecovery = Promise.resolve().then(() => session!.command('/recover continue'));
+      void manualRecovery.catch(() => {});
+    }
     if (mode === 'recovery disabled' && message.method === 'error' && message.params.willRetry === true) {
       void session?.command('/recover off').then(() => { healthy = true; });
     }
@@ -93,23 +100,28 @@ native.each(['native retry', 'terminal continuation', 'recovery disabled', 'lost
         await manualControl;
         await session.submit({ runId: 'manual-continue', prompt: 'continue', cwd: root, sandbox: 'read-only' }, event => events.push(event), stop.signal);
       }
+      if (mode === 'manual recovery command') {
+        expect(await manualRecovery).toEqual([expect.objectContaining({ type: 'text', delta: expect.stringContaining('已在原 Codex 会话') })]);
+      }
     } finally { clearTimeout(timeout); }
     expect(events.filter(e => e.type === 'error')).toEqual([]);
     expect(events.some(e => e.type === 'text' && e.delta.trim() === 'continue')).toBe(false);
     expect(wire.some(m => m.method === 'error' && m.params.willRetry === true)).toBe(true);
     expect(wire.filter(m => m.method === 'turn/completed').map(m => m.params.turn.status)).toEqual(
-      mode === 'manual Esc comparison' ? ['interrupted', 'completed'] : ['terminal continuation', 'lost continuation acknowledgement'].includes(mode) ? ['failed', 'completed'] : ['completed']);
-    expect(outgoing.mock.calls.filter(([method]) => method === 'turn/interrupt')).toHaveLength(mode === 'manual Esc comparison' ? 1 : 0);
+      manual ? ['interrupted', 'completed'] : ['terminal continuation', 'lost continuation acknowledgement'].includes(mode) ? ['failed', 'completed'] : ['completed']);
+    expect(outgoing.mock.calls.filter(([method]) => method === 'turn/interrupt')).toHaveLength(manual ? 1 : 0);
     const text = events.reduce(reduce, initialState).blocks.filter(b => b.kind === 'text').map(b => b.content).join('');
     expect(text).toContain(finalText);
     expect(requests.length).toBeGreaterThan(1);
     const starts = outgoing.mock.calls.filter(([method]) => method === 'turn/start');
-    expect(starts).toHaveLength(['terminal continuation', 'lost continuation acknowledgement', 'manual Esc comparison'].includes(mode) ? 2 : 1);
+    expect(starts).toHaveLength(manual || ['terminal continuation', 'lost continuation acknowledgement'].includes(mode) ? 2 : 1);
     const steers = outgoing.mock.calls.filter(([method]) => method === 'turn/steer');
     expect(steers).toHaveLength(0);
     if (starts.length === 2) {
       expect(starts[1]?.[1].input).toEqual([{ type: 'text', text: 'continue' }]);
-      if (mode !== 'manual Esc comparison') expect(starts[1]?.[1].clientUserMessageId).toMatch(/^arg-bridge-recovery-/);
+      if (mode !== 'manual Esc comparison') expect(starts[1]?.[1].clientUserMessageId).toMatch(
+        mode === 'manual recovery command' ? /^arg-bridge-manual-continue-/ : /^arg-bridge-recovery-/,
+      );
     }
     if (mode === 'lost continuation acknowledgement') expect(lostAcknowledgement).toBe(true);
     if (mode === 'native retry' || mode === 'manual Esc comparison') console.info(JSON.stringify({ comparison: mode, simulatedOutageMs: 1000, elapsedMs: Date.now() - beganAt, starts: starts.length, providerRequests: requests.length }));

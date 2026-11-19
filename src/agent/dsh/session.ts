@@ -112,6 +112,8 @@ export class DshStructuredSession implements StructuredSession {
         ].join('\n'))];
       case '/stop':
         return [textEvent(await this.interrupt() ? '已停止 DeepSeek Harness 任务。' : '当前没有运行中的任务。')];
+      case '/recover':
+        return [textEvent('DeepSeek Harness 请用 /stop 停止任务，确认结束后再发一条消息继续当前会话。')];
       case '/model': {
         const config = await this.settings.loadConfig?.() ?? this.settings.config;
         const provider = await resolveDshProvider(config, this.settings.env, true);

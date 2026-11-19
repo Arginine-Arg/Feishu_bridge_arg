@@ -6,6 +6,8 @@ A lightweight bot that bridges Feishu / Lark messenger with local Claude Code, C
 
 [DeepSeek Harness setup and profile migration](./docs/deepseek-harness.md)
 
+Version 1.23.3 keeps the Feishu reply open when a structured Codex turn stalls. The live card shows the waiting notice and then receives the full reply when Codex resumes. In a structured Codex chat, `/recover continue` checks the current turn and its pending approvals before interrupting it and sending `continue` on the same thread. In a DeepSeek Harness chat, use `/stop`, wait for the run to end, then send a follow-up in that chat.
+
 Version 1.22.1 makes the subagent settings use one provider/model priority list for read-only side sessions, writable workers, Broker tools, and RSI reviewers. The advanced section no longer asks for a separate model or write route; old manual model pins are cleared when settings is saved.
 
 Version 1.6.7 introduced provider-aware Codex resume, and 1.7.0 added idle-boundary rebinding. Version 1.9.1 narrows reattachment semantics: reconnecting to an existing native or structured thread preserves the provider/model recorded by that thread instead of silently following a newly selected cc-switch route.

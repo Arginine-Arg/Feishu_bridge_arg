@@ -839,7 +839,18 @@ describe('markdown stream startup failures', () => {
     expect(h.sessions.getRaw('oc_dm')?.sessionId).toBe('dsh-session-1');
   });
 
-  it.each(['markdown', 'card'] as const)('forwards complete structured prose and hides commands in %s mode', async mode => {
+  it('handles DSH recovery guidance as a Feishu command without starting an agent run', async () => {
+    const h = await createHarness({ agentKind: 'dsh' });
+    const control = vi.fn(async () => []);
+    h.agent.structuredControl = control;
+    await startTestBridge(h);
+    await h.channel.handlers.message?.(message('om_dsh_recover', '/recover continue'));
+    expect(lastMarkdown(h.channel)).toContain('DeepSeek Harness 请用 /stop');
+    expect(h.agent.runOptions).toHaveLength(0);
+    expect(control).not.toHaveBeenCalled();
+  });
+
+  it.each(['markdown', 'card'] as const)('forwards complete structured prose after a waiting notice and hides commands in %s mode', async mode => {
     const h = await createHarness();
     h.agent.structuredControl = vi.fn(async () => []);
     h.profileConfig.preferences = { ...h.profileConfig.preferences, messageReply: mode, messageReplyMigrated: true, showToolCalls: false };
@@ -850,6 +861,8 @@ describe('markdown stream startup failures', () => {
       ...Array.from(text).map(delta => ({ type: 'text' as const, source: 'agent' as const, itemId: 't:a', delta })),
       { type: 'tool_use', id: 'cmd', name: 'commandExecution', input: { command: 'DO_NOT_FORWARD_COMMAND' } },
       { type: 'tool_result', id: 'cmd', output: 'DO_NOT_FORWARD_OUTPUT', isError: false },
+      { type: 'recovery', status: { state: 'working_stalled', attempts: 0, budgetSeconds: 3600,
+        usedSeconds: 0, underlyingTurn: 'running', waitingReason: '如果确认任务卡住，可发送 /recover continue。' } },
       { type: 'text', itemId: 't:b', source: 'agent', delta: '最终' },
       { type: 'text', itemId: 't:b', source: 'agent', replace: true, delta: '最终完整答复 END' },
       { type: 'done', terminationReason: 'normal' },
@@ -861,6 +874,7 @@ describe('markdown stream startup failures', () => {
     expect(last).toContain(text);
     expect(last).toContain('最终完整答复 END');
     expect(last).not.toContain('DO_NOT_FORWARD');
+    expect(last).not.toContain('/recover continue');
     expect(JSON.parse(last).config.streaming_mode).toBe(false);
   });
 

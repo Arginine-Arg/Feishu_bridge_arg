@@ -19,6 +19,7 @@ function harness(policy: Partial<ProviderRecoveryConfig> = {}) {
     if (method === 'turn/start') { latest = { id: `t${++count}`, status: 'inProgress' }; return { turn: latest }; }
     if (method === 'turn/interrupt') { latest = { id: latest.id, status: 'interrupted' }; return {}; }
     if (method === 'thread/turns/list') return { data: [latest] };
+    if (method === 'thread/read') return { thread: { status: { type: 'active', activeFlags: [] } } };
     if (method === 'thread/goal/get') return { goal: null };
     return {};
   });
@@ -102,9 +103,14 @@ describe('bounded terminal-only provider recovery', () => {
     await tick(60_000); await tick();
     expect(h.calls('turn/interrupt')).toHaveLength(0);
     expect(h.events).toContainEqual(expect.objectContaining({
-      type: 'pending',
-      message: expect.stringContaining('/recover continue'),
+      type: 'recovery',
+      status: expect.objectContaining({
+        state: 'working_stalled',
+        underlyingTurn: 'running',
+        waitingReason: expect.stringContaining('/recover continue'),
+      }),
     }));
+    expect(h.events.some(event => event.type === 'pending')).toBe(false);
     await h.session.command('/recover continue');
     expect(h.calls('turn/interrupt')).toHaveLength(1);
     expect(h.calls('turn/start')).toHaveLength(2);
@@ -113,6 +119,56 @@ describe('bounded terminal-only provider recovery', () => {
       input: [{ type: 'text', text: 'continue' }],
     });
     h.complete('completed', undefined, 't2'); await h.done;
+  });
+  it('keeps forwarding the original turn after a Working notice', async () => {
+    const h = harness({ workingStallSeconds: 60 }); await tick();
+    h.emit('turn/started', { turn: { id: 't1', status: 'inProgress' } });
+    await tick(60_000);
+
+    const waiting = h.events.reduce(reduce, initialState);
+    expect(waiting.terminal).toBe('running');
+    expect(waiting.recovery?.state).toBe('working_stalled');
+
+    h.emit('item/agentMessage/delta', { turnId: 't1', itemId: 'reply', delta: '完整回复。' });
+    h.complete('completed'); await h.done;
+    expect(h.events).toContainEqual(expect.objectContaining({ type: 'text', delta: '完整回复。' }));
+    expect(h.calls('turn/start')).toHaveLength(1);
+    expect(h.calls('turn/interrupt')).toHaveLength(0);
+  });
+  it('accepts recovery control even if Feishu lost the run handle, using the existing relay for output', async () => {
+    const h = harness(); await tick();
+    const commandEvents: AgentEvent[] = [];
+    await h.session.submit({ runId: 'control', prompt: '/recover continue', liveInputMode: 'command' },
+      event => commandEvents.push(event), h.abort.signal);
+    expect(commandEvents).toEqual([expect.objectContaining({ type: 'text', delta: expect.stringContaining('已在原 Codex 会话') })]);
+    h.emit('item/agentMessage/delta', { turnId: 't2', itemId: 'reply', delta: '续接后的正文' });
+    h.complete('completed', undefined, 't2'); await h.done;
+    expect(h.events).toContainEqual(expect.objectContaining({ type: 'text', delta: '续接后的正文' }));
+    expect(h.calls('turn/interrupt')).toHaveLength(1);
+    expect(h.calls('turn/start')).toHaveLength(2);
+  });
+  it('preserves a turn that finishes while manual recovery is checking its state', async () => {
+    const h = harness(); await tick();
+    let resolve!: (value: object) => void;
+    const request = h.rpc.request.getMockImplementation()!;
+    h.rpc.request.mockImplementation((method: string, ...args: unknown[]) => method === 'thread/read'
+      ? new Promise(r => { resolve = r; }) : request(method, ...args));
+    const command = expect(h.session.command('/recover continue')).rejects.toThrow('状态已变化');
+    await tick();
+    h.complete('completed');
+    resolve({ thread: { status: { type: 'active', activeFlags: [] } } });
+    await command; await h.done;
+    expect(h.calls('turn/interrupt')).toHaveLength(0);
+    expect(h.calls('turn/start')).toHaveLength(1);
+  });
+  it('leaves approval-blocked work alone even when the approval came from another client', async () => {
+    const h = harness(); await tick();
+    const request = h.rpc.request.getMockImplementation()!;
+    h.rpc.request.mockImplementation((method: string, ...args: unknown[]) => method === 'thread/read'
+      ? Promise.resolve({ thread: { status: { type: 'active', activeFlags: ['waitingOnApproval'] } } }) : request(method, ...args));
+    await expect(h.session.command('/recover continue')).rejects.toThrow('检查审批');
+    expect(h.calls('turn/interrupt')).toHaveLength(0);
+    h.complete('completed'); await h.done;
   });
   it.each(['unauthorized', 'usageLimitExceeded', 'contextWindowExceeded', 'sandboxError', 'badRequest'])('never retries %s', async code => {
     const h = harness(); await tick(); h.complete('failed', { message: '503', codexErrorInfo: code });

@@ -5,7 +5,7 @@ import { withConfigFileLock } from '../../config/profile-store';
 import { writeFileAtomic } from '../../platform/atomic-write';
 import { processAlive } from './host-registry';
 
-export type RecoveryPhase = 'normal' | 'tool_running' | 'provider_retrying' | 'bridge_backoff' |
+export type RecoveryPhase = 'normal' | 'tool_running' | 'working_stalled' | 'provider_retrying' | 'bridge_backoff' |
   'recovery_exhausted' | 'needs_attention' | 'status_unknown' | 'disabled' | 'stopped';
 
 export interface RecoveryOperation {

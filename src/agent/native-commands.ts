@@ -12,3 +12,7 @@ export function isMainScopedNativeCommand(prompt: string): boolean {
   // main-thread-only commands are listed here.
   return /^\/(?:goal|model|stop|compact|recover)(?:\s|$)/iu.test(prompt.trim());
 }
+
+export function isManualRecoveryCommand(prompt: string): boolean {
+  return /^\/recover\s+(?:continue|retry)$/iu.test(prompt.trim());
+}

@@ -103,6 +103,7 @@ import { ArtifactBroker } from './artifact-broker';
 import { InboundMessageLedger } from './inbound-message-ledger';
 import { RunEventGate, SerializedDelivery } from './run-delivery';
 import { acknowledgedStream } from './acknowledged-stream';
+import { isManualRecoveryCommand } from '../agent/native-commands';
 import {
   contentWithoutLeadingMention,
   effectiveLiveInputMode,
@@ -897,6 +898,16 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
   }
 
   const route = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
+  if (/^\/recover(?:\s|$)/iu.test(route.msg.content.trim()) &&
+      (agent.id === 'dsh' || agent.id === 'claude' || !agent.structuredControl)) {
+    const markdown = agent.id === 'dsh'
+      ? 'DeepSeek Harness 请用 /stop 停止任务，确认结束后再发一条消息继续当前会话。'
+      : '/recover 适用于 Codex 结构化会话。';
+    await channel.send(msg.chatId, { markdown }, {
+      replyTo: msg.messageId, ...(threadId ? { replyInThread: true } : {}),
+    });
+    return;
+  }
   const steerRequest = parseSteerCommand(route.msg.content);
   if (steerRequest) {
     const replyOptions = {
@@ -2678,7 +2689,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
   const configuredReplyMode = getMessageReplyMode(controls.cfg);
   const structuredWorkControl = Boolean(agent.structuredControl) && (
     liveInputMode === 'control' || liveInputMode === 'side' ||
-    /^\/goal\s+(?!pause\b|clear\b|edit\b|status\b)/.test(nativeCommand ?? '')
+    /^\/goal\s+(?!pause\b|clear\b|edit\b|status\b)/.test(nativeCommand ?? '') ||
+    isManualRecoveryCommand(nativeCommand ?? '')
   );
   const replyMode = outputModeAtStart === 'final'
     ? 'text'

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.23.3
+
+- Keeps the Feishu reply open during a structured Codex stall and forwards the final answer on the same card.
+- Routes manual Codex recovery through the existing reply stream and checks that the intended turn was interrupted before continuing.
+- Shows DeepSeek Harness stop and follow-up instructions when a user enters `/recover`.
+
 ## 1.23.2
 
 - Recognizes Waiting for network, reconnect timeout, network errors, and response-body decoding failures as transient provider transport states.

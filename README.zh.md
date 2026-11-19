@@ -6,6 +6,8 @@
 
 [DeepSeek Harness 安装、配置与迁移](./docs/deepseek-harness.md)
 
+`1.23.3` 修复了飞书在 Codex 长时间无进展时提前结束转发的问题。等待提示显示在当前卡片上，Codex 恢复输出后，同一张卡片会继续接收完整正文。结构化 Codex 会话中的 `/recover continue` 会先检查当前任务及待处理审批，确认中断后在原线程发送 `continue`。DeepSeek Harness 会话请先用 `/stop`，确认任务结束后再在同一聊天中发送后续消息。
+
 `1.22.0` 修复 native 退出后切换 provider 无法恢复、以及恢复时沿用旧模型的问题。活动重连不再追加 continue；自动恢复按同一故障阶段一小时计时。subagent 设置支持多个 provider、自动读取模型列表，并按所选优先级为新任务选择可用线路。
 
 `1.6.7` 引入 provider-aware Codex resume，`1.7.0` 增加 idle 边界重绑。`1.9.1` 收紧重连语义：附着已有 native 或 structured thread 时，保留该 thread 记录的 provider/model，不会因为 cc-switch 后来切换了 route 而静默改路。

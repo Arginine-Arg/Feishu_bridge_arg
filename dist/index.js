@@ -123,6 +123,7 @@ function recoveryStatusText(status) {
   const label = {
     normal: "\u6B63\u5E38\u6267\u884C",
     tool_running: "\u5DE5\u5177\u8FD0\u884C\u4E2D",
+    working_stalled: "\u957F\u65F6\u95F4\u65E0\u65B0\u8FDB\u5C55",
     provider_retrying: "Provider \u539F\u751F\u91CD\u8BD5\u4E2D",
     bridge_backoff: "Bridge \u9000\u907F\u7B49\u5F85",
     recovery_exhausted: "\u6062\u590D\u9884\u7B97\u5DF2\u8017\u5C3D\uFF0C\u7B49\u5F85\u7528\u6237\u5904\u7406",

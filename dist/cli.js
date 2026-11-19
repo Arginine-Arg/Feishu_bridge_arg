@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.23.2",
+  version: "1.23.3",
   description: "Bridge Feishu and Lark with Claude Code, Codex CLI, and DeepSeek Harness",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -6761,6 +6761,9 @@ function nonEmpty2(value) {
 // src/agent/native-commands.ts
 function isMainScopedNativeCommand(prompt) {
   return /^\/(?:goal|model|stop|compact|recover)(?:\s|$)/iu.test(prompt.trim());
+}
+function isManualRecoveryCommand(prompt) {
+  return /^\/recover\s+(?:continue|retry)$/iu.test(prompt.trim());
 }
 
 // src/agent/terminal-text.ts
@@ -18208,8 +18211,7 @@ var CodexStructuredSession = class _CodexStructuredSession {
   lifecycleInitialized = false;
   retryStallTimer;
   workingStallTimer;
-  workingStallNoticeTurn;
-  manualContinuationTurn;
+  manualRecovery;
   activeTools = /* @__PURE__ */ new Set();
   acknowledgements = /* @__PURE__ */ new Map();
   deferredInteractions = [];
@@ -18227,7 +18229,7 @@ var CodexStructuredSession = class _CodexStructuredSession {
       profile: profile2,
       inspect: async () => {
         canRelease?.();
-        if (this.emit || this.turnId || this.goalActive || this.pending.size || this.activeTools.size || this.recoveryStarting || this.recoveryChecking) throw new Error("Bot/relay \u4ECD\u6709\u4EFB\u52A1\u3001\u76EE\u6807\u6216\u4EA4\u4E92");
+        if (this.emit || this.turnId || this.goalActive || this.pending.size || this.activeTools.size || this.recoveryStarting || this.recoveryChecking || this.manualRecovery) throw new Error("Bot/relay \u4ECD\u6709\u4EFB\u52A1\u3001\u76EE\u6807\u6216\u4EA4\u4E92");
         const result = await this.rpc.request("thread/read", { threadId: this.id, includeTurns: false }, 1e4);
         if (result.thread?.status?.type !== "idle") throw new Error(`\u7EBF\u7A0B\u72B6\u6001\u672A\u786E\u8BA4\u7A7A\u95F2\uFF1A${result.thread?.status?.type ?? "unknown"}`);
       },
@@ -18256,7 +18258,6 @@ var CodexStructuredSession = class _CodexStructuredSession {
   }
   disconnected = (error) => {
     this.cancelRecovery();
-    this.clearWorkingStall();
     for (const waiter of this.acknowledgements.values()) waiter.reject(error);
     this.acknowledgements.clear();
     this.phase = "failed";
@@ -18282,6 +18283,7 @@ var CodexStructuredSession = class _CodexStructuredSession {
     if (p4.threadId !== this.id) return;
     if (message.id !== void 0 && message.method) {
       this.clearRetryStall();
+      this.clearWorkingStall();
       const requestId = String(message.id);
       if (message.method === "item/commandExecution/requestApproval" || message.method === "item/fileChange/requestApproval") {
         const choices = /* @__PURE__ */ new Map();
@@ -18343,6 +18345,7 @@ ${p4.command ?? JSON.stringify(p4.changes ?? {})}`,
     if (message.method === "error" && p4.turnId === this.turnId) {
       this.providerError = { turnId: p4.turnId, error: p4.error ?? {} };
       if (p4.willRetry === true) {
+        this.clearWorkingStall();
         this.internalRetries += 1;
         const first = !this.providerRetryTurns.has(p4.turnId);
         this.providerRetryTurns.add(p4.turnId);
@@ -18440,11 +18443,15 @@ ${p4.command ?? JSON.stringify(p4.changes ?? {})}`,
       this.acknowledgements.get(String(p4.requestId))?.resolve();
       const id = String(p4.requestId);
       for (const key of this.pending.keys()) if (key === id || key.startsWith(`${id}.q`)) this.pending.delete(key);
-      if (!this.pending.size) this.phase = this.turnId ? "busy" : "idle";
+      if (!this.pending.size) {
+        this.phase = this.turnId ? "busy" : "idle";
+        if (this.turnId && !this.providerRetryTurns.has(this.turnId)) this.armWorkingStall(this.turnId);
+      }
     }
     if (message.method === "turn/completed" && (!this.turnId || p4.turn?.id === this.turnId)) {
       if (!p4.turn?.id || this.finishedTurns.has(p4.turn.id)) return;
       this.clearRetryStall();
+      this.clearWorkingStall();
       this.activeTools.clear();
       for (const item of p4.turn.items ?? []) if (item.type === "agentMessage") this.completeMessage(p4.turn.id, item, true);
       for (const key of this.deltas.keys()) if (key.startsWith(`${p4.turn.id}:`)) this.deltas.delete(key);
@@ -18454,9 +18461,12 @@ ${p4.command ?? JSON.stringify(p4.changes ?? {})}`,
       this.phase = "idle";
       this.providerRetryTurns.delete(p4.turn.id);
       this.underlyingTurn = "terminal";
-      const manualContinuation = this.manualContinuationTurn === p4.turn.id;
-      if (manualContinuation) this.manualContinuationTurn = void 0;
-      if (p4.turn?.status === "failed" && !manualContinuation) {
+      const manualRecovery = this.manualRecovery;
+      if (manualRecovery && manualRecovery.turnId === p4.turn.id && p4.turn.status === "interrupted") {
+        manualRecovery.interrupted = true;
+        return;
+      }
+      if (p4.turn.status === "failed") {
         const error = p4.turn.error ?? (this.providerError?.turnId === p4.turn.id ? this.providerError?.error : void 0);
         if (!this.scheduleRecovery(p4.turn.id, error)) {
           this.cancelRecovery();
@@ -18468,8 +18478,8 @@ ${p4.command ?? JSON.stringify(p4.changes ?? {})}`,
         this.queueRecoveryEvent(() => p4.turn.status === "completed" ? this.ledger.reset("completed") : this.ledger.invalidate("interrupted"));
         this.notifyRecovery(p4.turn.status === "completed" ? "normal" : "stopped", true);
         if (!this.goalActive || p4.turn.status === "interrupted") {
-          if (p4.turn.status === "interrupted" && !manualContinuation) this.emit?.({ type: "done", terminationReason: "interrupted" });
-          if (!manualContinuation) this.finish();
+          if (p4.turn.status === "interrupted") this.emit?.({ type: "done", terminationReason: "interrupted" });
+          this.finish();
         }
       }
     }
@@ -18507,7 +18517,7 @@ ${p4.command ?? JSON.stringify(p4.changes ?? {})}`,
       lastActivityAt: this.lastActivityAt,
       lastEventAt: this.lastEventAt,
       lastError: state.lastError ?? this.providerError?.error.message,
-      waitingReason: this.recoveryPhase === "provider_retrying" ? "Codex \u539F\u751F\u91CD\u8BD5\uFF1BBridge \u672A\u6CE8\u5165\u8F93\u5165" : this.recoveryPhase === "bridge_backoff" ? "\u7B49\u5F85\u9000\u907F\u548C\u7EC8\u6001\u590D\u6838" : this.recoveryPhase === "recovery_exhausted" ? "\u6545\u969C\u9884\u7B97\u5DF2\u7528\u5C3D\u6216\u4E0D\u8DB3\u4EE5\u4E0B\u6B21\u9000\u907F\uFF1B\u7B49\u5F85\u4EBA\u5DE5\u5904\u7406\uFF0C\u5E95\u5C42\u4EFB\u52A1\u672A\u88AB\u4E2D\u65AD" : this.recoveryPhase === "status_unknown" ? "\u72B6\u6001\u67E5\u8BE2\u4E0D\u53EF\u7528\u6216\u672C\u6B21\u6709\u754C\u76D1\u89C6\u5DF2\u7ED3\u675F\uFF1B\u5E95\u5C42\u4EFB\u52A1\u672A\u88AB\u4E2D\u65AD" : this.recoveryPhase === "needs_attention" ? state.blocked ?? "\u65E0\u6CD5\u5B89\u5168\u786E\u8BA4\u6062\u590D\u7ED3\u679C" : void 0,
+      waitingReason: this.recoveryPhase === "working_stalled" ? "Codex \u4ECD\u5728\u8FD0\u884C\u3002\u5982\u679C\u786E\u8BA4\u4EFB\u52A1\u5361\u4F4F\uFF0C\u53EF\u53D1\u9001 /recover continue\u3002" : this.recoveryPhase === "provider_retrying" ? "Codex \u539F\u751F\u91CD\u8BD5\uFF1BBridge \u672A\u6CE8\u5165\u8F93\u5165" : this.recoveryPhase === "bridge_backoff" ? "\u7B49\u5F85\u9000\u907F\u548C\u7EC8\u6001\u590D\u6838" : this.recoveryPhase === "recovery_exhausted" ? "\u6545\u969C\u9884\u7B97\u5DF2\u7528\u5C3D\u6216\u4E0D\u8DB3\u4EE5\u4E0B\u6B21\u9000\u907F\uFF1B\u7B49\u5F85\u4EBA\u5DE5\u5904\u7406\uFF0C\u5E95\u5C42\u4EFB\u52A1\u672A\u88AB\u4E2D\u65AD" : this.recoveryPhase === "status_unknown" ? "\u72B6\u6001\u67E5\u8BE2\u4E0D\u53EF\u7528\u6216\u672C\u6B21\u6709\u754C\u76D1\u89C6\u5DF2\u7ED3\u675F\uFF1B\u5E95\u5C42\u4EFB\u52A1\u672A\u88AB\u4E2D\u65AD" : this.recoveryPhase === "needs_attention" ? state.blocked ?? "\u65E0\u6CD5\u5B89\u5168\u786E\u8BA4\u6062\u590D\u7ED3\u679C" : void 0,
       attempts: state.attempts,
       budgetSeconds: this.recovery?.policy.budgetSeconds ?? 3600,
       usedSeconds: state.startedAt === void 0 ? 0 : Math.max(0, Math.floor((Date.now() - state.startedAt) / 1e3)),
@@ -18543,6 +18553,7 @@ ${p4.command ?? JSON.stringify(p4.changes ?? {})}`,
     if (this.deadlineTimer) clearTimeout(this.deadlineTimer);
     this.deadlineTimer = void 0;
     this.clearRetryStall();
+    this.clearWorkingStall();
     this.recoveryEpoch += 1;
     return pending;
   }
@@ -18566,88 +18577,122 @@ ${p4.command ?? JSON.stringify(p4.changes ?? {})}`,
   }
   armWorkingStall(turnId) {
     this.clearWorkingStall();
-    this.workingStallNoticeTurn = void 0;
     const seconds = this.recovery?.policy.workingStallSeconds;
     if (!seconds || !this.recoveryAllowed()) return;
     const epoch = this.recoveryEpoch;
     const timer = setTimeout(() => {
-      this.workingStallTimer = void 0;
-      void this.checkWorkingStall(turnId, epoch);
+      void this.checkWorkingStall(turnId, epoch, timer);
     }, seconds * 1e3);
     this.workingStallTimer = timer;
     timer.unref?.();
   }
-  async checkWorkingStall(turnId, epoch) {
-    if (epoch !== this.recoveryEpoch || !this.recoveryAllowed() || this.turnId !== turnId || this.pending.size || this.activeTools.size || this.workingStallNoticeTurn === turnId) return;
+  async checkWorkingStall(turnId, epoch, timer) {
+    const canReport = () => this.workingStallTimer === timer && epoch === this.recoveryEpoch && this.recoveryAllowed() && this.turnId === turnId && !this.pending.size && !this.activeTools.size;
     try {
+      if (!canReport()) return;
       const result = await this.rpc.request("thread/turns/list", { threadId: this.id, limit: 1, sortDirection: "desc" }, this.recovery.policy.statusTimeoutSeconds * 1e3);
-      if (epoch !== this.recoveryEpoch || this.turnId !== turnId) return;
+      if (!canReport()) return;
       const latest = result.data?.[0];
       if (latest?.id !== turnId) return;
       if (latest.status === "inProgress") {
-        this.workingStallNoticeTurn = turnId;
-        this.notifyRecovery("needs_attention", true);
-        this.emit?.({
-          type: "pending",
-          taskId: this.id,
-          message: "\u5F53\u524D turn \u957F\u65F6\u95F4\u6CA1\u6709\u6587\u672C\u6216\u5DE5\u5177\u8FDB\u5C55\uFF0C\u5E95\u5C42\u4ECD\u62A5\u544A Working\u3002\u672A\u81EA\u52A8\u4E2D\u65AD\u3002\u786E\u8BA4\u6CA1\u6709\u526F\u4F5C\u7528\u64CD\u4F5C\u540E\uFF0C\u53EF\u53D1\u9001 /recover continue\u3002"
-        });
+        this.notifyRecovery("working_stalled", true);
       } else if (["failed", "interrupted", "completed"].includes(latest.status)) {
         this.receive({ method: "turn/completed", params: { threadId: this.id, turn: latest } });
       }
     } catch (error) {
+      if (!canReport()) return;
       this.notifyRecovery("status_unknown", true);
       log.warn("agent", "working-stall-status-unavailable", { thread: this.id, reason: String(error) });
+    } finally {
+      if (this.workingStallTimer === timer) this.workingStallTimer = void 0;
     }
   }
   async manualContinue() {
-    if (this.handoffBlocked) throw new Error("\u7EBF\u7A0B\u6B63\u5728\u4EA4\u63A5 provider\uFF1B\u672A\u53D1\u9001 continue");
-    if (this.pending.size || this.activeTools.size) {
-      throw new Error("\u5F53\u524D\u6709\u5BA1\u6279\u6216\u5DE5\u5177\u6B63\u5728\u6267\u884C\uFF1B\u8BF7\u5148\u5B8C\u6210\u5B83\uFF0CBridge \u4E0D\u4F1A\u5F3A\u5236 continue\u3002");
+    if (this.manualRecovery || this.recoveryStarting || this.recoveryChecking) {
+      throw new Error("\u5DF2\u6709\u6062\u590D\u8BF7\u6C42\u6B63\u5728\u786E\u8BA4\uFF0C\u8BF7\u7A0D\u540E\u67E5\u770B /recover status\u3002");
     }
-    await this.ledgerReady;
-    let current = this.turnId;
-    if (!current) {
-      const result = await this.rpc.request("thread/turns/list", { threadId: this.id, limit: 1, sortDirection: "desc" }, this.recovery?.policy.statusTimeoutSeconds ? this.recovery.policy.statusTimeoutSeconds * 1e3 : 1e4);
-      const latest = result.data?.[0];
-      if (latest?.status === "inProgress" && typeof latest.id === "string") current = latest.id;
-      else if (latest && !["failed", "interrupted", "completed"].includes(latest.status)) {
-        throw new Error("\u65E0\u6CD5\u786E\u8BA4\u5F53\u524D turn \u5DF2\u7ED3\u675F\uFF0C\u672A\u53D1\u9001 continue\u3002");
+    const turnId = this.turnId;
+    if (!turnId || this.stopRequested) throw new Error("\u5F53\u524D\u6CA1\u6709\u53EF\u4E2D\u65AD\u7684 Codex \u4EFB\u52A1\u3002\u9700\u8981\u7EE7\u7EED\u65F6\uFF0C\u8BF7\u76F4\u63A5\u53D1\u9001\u7EE7\u7EED\u5DE5\u4F5C\u7684\u6D88\u606F\u3002");
+    const checkReady = () => {
+      if (this.handoffBlocked || !this.isAlive() || this.stopRequested) throw new Error("\u5F53\u524D\u7EBF\u7A0B\u65E0\u6CD5\u7EE7\u7EED\u3002");
+      if (this.pending.size || this.activeTools.size) throw new Error("\u5F53\u524D\u6709\u5BA1\u6279\u6216\u5DE5\u5177\u6B63\u5728\u6267\u884C\uFF0C\u8BF7\u7B49\u5F85\u5B83\u7ED3\u675F\u3002");
+    };
+    checkReady();
+    this.cancelRecovery();
+    const epoch = this.recoveryEpoch;
+    const recovery = { turnId, interrupted: false };
+    this.manualRecovery = recovery;
+    const timeout = (this.recovery?.policy.statusTimeoutSeconds ?? 10) * 1e3;
+    const latestTurn = async (requestTimeout) => {
+      const result = await this.rpc.request("thread/turns/list", {
+        threadId: this.id,
+        limit: 1,
+        sortDirection: "desc",
+        itemsView: "summary"
+      }, requestTimeout);
+      return result.data?.[0];
+    };
+    let submitted = false;
+    try {
+      const latest = await latestTurn(timeout);
+      const thread = await this.rpc.request("thread/read", { threadId: this.id, includeTurns: false }, timeout);
+      checkReady();
+      if (this.recoveryEpoch !== epoch || this.turnId !== turnId || latest?.id !== turnId || latest.status !== "inProgress") {
+        throw new Error("\u5F53\u524D\u4EFB\u52A1\u72B6\u6001\u5DF2\u53D8\u5316\uFF0C\u672A\u53D1\u9001 continue\u3002");
       }
-    }
-    if (current) {
-      this.manualContinuationTurn = current;
-      await this.rpc.request("turn/interrupt", { threadId: this.id, turnId: current }, this.recovery?.policy.statusTimeoutSeconds ? this.recovery.policy.statusTimeoutSeconds * 1e3 : 1e4);
-      const deadline = Date.now() + (this.recovery?.policy.statusTimeoutSeconds ?? 10) * 1e3;
-      for (; ; ) {
-        const result = await this.rpc.request("thread/turns/list", { threadId: this.id, limit: 1, sortDirection: "desc" }, Math.max(1, deadline - Date.now()));
-        const latest = result.data?.[0];
-        if (latest?.id === current && latest.status !== "inProgress") {
-          if (!this.finishedTurns.has(current)) this.receive({ method: "turn/completed", params: { threadId: this.id, turn: latest } });
+      const status = thread.thread?.status;
+      if (status?.type !== "active" || !Array.isArray(status.activeFlags) || status.activeFlags.length) {
+        throw new Error("\u670D\u52A1\u7AEF\u672A\u786E\u8BA4\u5F53\u524D\u4EFB\u52A1\u53EF\u4EE5\u4E2D\u65AD\uFF0C\u8BF7\u68C0\u67E5\u5BA1\u6279\u6216\u8F93\u5165\u72B6\u6001\u3002");
+      }
+      await this.rpc.request("turn/interrupt", { threadId: this.id, turnId }, timeout);
+      const deadline = Date.now() + timeout;
+      while (Date.now() < deadline) {
+        checkReady();
+        if (epoch !== this.recoveryEpoch || this.turnId && this.turnId !== turnId) {
+          throw new Error("\u6062\u590D\u5DF2\u53D6\u6D88\uFF0C\u672A\u53D1\u9001 continue\u3002");
+        }
+        if (recovery.interrupted) break;
+        const latest2 = await latestTurn(Math.max(1, deadline - Date.now()));
+        if (epoch !== this.recoveryEpoch || this.turnId && this.turnId !== turnId) {
+          throw new Error("\u6062\u590D\u5DF2\u53D6\u6D88\uFF0C\u672A\u53D1\u9001 continue\u3002");
+        }
+        if (latest2?.id !== turnId || !["inProgress", "interrupted"].includes(latest2.status)) {
+          throw new Error("\u5F53\u524D\u4EFB\u52A1\u5DF2\u53D1\u751F\u53D8\u5316\uFF0C\u672A\u53D1\u9001 continue\u3002");
+        }
+        if (latest2.status === "interrupted") {
+          this.receive({ method: "turn/completed", params: { threadId: this.id, turn: latest2 } });
           break;
         }
-        if (Date.now() >= deadline) {
-          this.manualContinuationTurn = void 0;
-          throw new Error("\u4E2D\u65AD\u72B6\u6001\u786E\u8BA4\u8D85\u65F6\uFF0C\u672A\u53D1\u9001 continue\u3002");
-        }
-        await new Promise((resolve11) => setTimeout(resolve11, 250));
+        await new Promise((resolve11) => setTimeout(resolve11, Math.min(250, Math.max(0, deadline - Date.now()))));
+      }
+      checkReady();
+      if (!recovery.interrupted || this.turnId || epoch !== this.recoveryEpoch) {
+        throw new Error("\u672A\u80FD\u786E\u8BA4\u539F\u4EFB\u52A1\u5DF2\u4E2D\u65AD\uFF0C\u672A\u53D1\u9001 continue\u3002");
+      }
+      const started = await this.rpc.request("turn/start", {
+        threadId: this.id,
+        clientUserMessageId: "arg-bridge-manual-continue-" + randomUUID3(),
+        input: [{ type: "text", text: "continue" }]
+      }, timeout);
+      const newTurnId = started.turn?.id;
+      if (typeof newTurnId !== "string" || !newTurnId) throw new Error("continue \u63D0\u4EA4\u7ED3\u679C\u5F85\u786E\u8BA4\uFF0C\u8BF7\u67E5\u770B /recover status\u3002");
+      submitted = true;
+      if (!this.finishedTurns.has(newTurnId) && (!this.turnId || this.turnId === newTurnId)) {
+        this.recoveryTurnIds.add(newTurnId);
+        this.turnId = newTurnId;
+        this.phase = "busy";
+        this.underlyingTurn = "running";
+        if (this.stopRequested) await this.rpc.request("turn/interrupt", { threadId: this.id, turnId: newTurnId }, timeout);
+        else this.armWorkingStall(newTurnId);
+      }
+      return "\u5DF2\u5728\u539F Codex \u4F1A\u8BDD\u53D1\u9001 continue\u3002";
+    } finally {
+      this.manualRecovery = void 0;
+      if (!submitted && recovery.interrupted && !this.turnId) {
+        this.emit?.({ type: "done", terminationReason: "interrupted" });
+        this.finish();
       }
     }
-    const operationId = "arg-bridge-manual-continue-" + randomUUID3();
-    const started = await this.rpc.request("turn/start", {
-      threadId: this.id,
-      clientUserMessageId: operationId,
-      input: [{ type: "text", text: "continue" }]
-    }, this.recovery?.policy.statusTimeoutSeconds ? this.recovery.policy.statusTimeoutSeconds * 1e3 : 1e4);
-    if (!started.turn?.id) throw new Error("continue \u5DF2\u53D1\u9001\u4F46\u670D\u52A1\u7AEF\u6CA1\u6709\u8FD4\u56DE\u65B0\u7684 turn ID\uFF0C\u672A\u81EA\u52A8\u91CD\u53D1");
-    this.recoveryTurnIds.add(started.turn.id);
-    this.turnId = started.turn.id;
-    this.phase = "busy";
-    this.underlyingTurn = "running";
-    this.recoveryBlocked = false;
-    this.stopRequested = false;
-    this.armWorkingStall(started.turn.id);
-    return "\u5DF2\u5B89\u5168\u4E2D\u65AD\u5F53\u524D turn\uFF0C\u5E76\u5728\u540C\u4E00\u4F1A\u8BDD\u53D1\u9001 continue\u3002";
   }
   /** A finite, non-overlapping metadata monitor. Never fetch full history. */
   watchRetryStall(turnId, error) {
@@ -18884,9 +18929,14 @@ ${p4.command ?? JSON.stringify(p4.changes ?? {})}`,
   }
   async submit(options, emit2, signal) {
     if (this.handoffBlocked) throw new Error("\u7EBF\u7A0B\u6B63\u5728\u4EA4\u63A5 provider\uFF1B\u672A\u53D1\u9001\u8F93\u5165");
-    if (this.emit) throw new Error("Structured thread already has an active relay");
-    if (this.recoveryStarting || this.recoveryChecking) throw new Error("\u81EA\u52A8\u6062\u590D\u8BF7\u6C42\u4ECD\u5728\u786E\u8BA4\u7ED3\u679C\uFF0C\u8BF7\u7A0D\u540E\u518D\u53D1\u9001\u65B0\u4EFB\u52A1\u3002");
     if (signal.aborted) return;
+    const manualRecovery = (options.liveInputMode === "command" || options.liveInputMode === "control") && isManualRecoveryCommand(options.prompt);
+    if (this.emit && manualRecovery) {
+      for (const event of await this.command(options.prompt)) emit2(event);
+      return;
+    }
+    if (this.emit) throw new Error("Structured thread already has an active relay");
+    if (this.manualRecovery || this.recoveryStarting || this.recoveryChecking) throw new Error("\u81EA\u52A8\u6062\u590D\u8BF7\u6C42\u4ECD\u5728\u786E\u8BA4\u7ED3\u679C\uFF0C\u8BF7\u7A0D\u540E\u518D\u53D1\u9001\u65B0\u4EFB\u52A1\u3002");
     this.cancelRecovery();
     this.statusChecks = 0;
     if (!options.liveInputMode || /^\/goal\s+(?!pause\b|clear\b|status\b|edit\b)/.test(options.prompt)) {
@@ -18922,7 +18972,7 @@ ${p4.command ?? JSON.stringify(p4.changes ?? {})}`,
         for (const event of [...await this.command(options.prompt), ...this.drainCommands()]) emit2(event);
         const startsGoal = this.goalActive && /^\/goal\s+(?!pause\b|clear\b|status\b|edit\b)/.test(options.prompt);
         const continuesTurn = Boolean(this.turnId || this.goalActive) && (/^\/?answer\s/.test(options.prompt) || /^\d+$/.test(options.prompt));
-        if (!startsGoal && !continuesTurn) return;
+        if (!startsGoal && !continuesTurn && !(manualRecovery && this.turnId)) return;
         if (signal.aborted) await this.interrupt();
       } else {
         if (this.turnId || this.goalActive) {
@@ -18970,7 +19020,7 @@ ${options.prompt}` : options.prompt }];
     if (name === "/status") return [textEvent(JSON.stringify(await this.rpc.request("thread/read", { threadId: this.id, includeTurns: false }), null, 2))];
     if (name === "/recover") {
       const action = (args[0] ?? "status").toLowerCase();
-      if (action === "continue" || action === "retry") {
+      if (isManualRecoveryCommand(input)) {
         return [textEvent(await this.manualContinue())];
       }
       if (action === "on" || action === "enable") {
@@ -19919,6 +19969,8 @@ var DshStructuredSession = class {
         ].join("\n"))];
       case "/stop":
         return [textEvent(await this.interrupt() ? "\u5DF2\u505C\u6B62 DeepSeek Harness \u4EFB\u52A1\u3002" : "\u5F53\u524D\u6CA1\u6709\u8FD0\u884C\u4E2D\u7684\u4EFB\u52A1\u3002")];
+      case "/recover":
+        return [textEvent("DeepSeek Harness \u8BF7\u7528 /stop \u505C\u6B62\u4EFB\u52A1\uFF0C\u786E\u8BA4\u7ED3\u675F\u540E\u518D\u53D1\u4E00\u6761\u6D88\u606F\u7EE7\u7EED\u5F53\u524D\u4F1A\u8BDD\u3002")];
       case "/model": {
         const config = await this.settings.loadConfig?.() ?? this.settings.config;
         const provider = await resolveDshProvider(config, this.settings.env, true);
@@ -21664,6 +21716,7 @@ function recoveryStatusText(status) {
   const label = {
     normal: "\u6B63\u5E38\u6267\u884C",
     tool_running: "\u5DE5\u5177\u8FD0\u884C\u4E2D",
+    working_stalled: "\u957F\u65F6\u95F4\u65E0\u65B0\u8FDB\u5C55",
     provider_retrying: "Provider \u539F\u751F\u91CD\u8BD5\u4E2D",
     bridge_backoff: "Bridge \u9000\u907F\u7B49\u5F85",
     recovery_exhausted: "\u6062\u590D\u9884\u7B97\u5DF2\u8017\u5C3D\uFF0C\u7B49\u5F85\u7528\u6237\u5904\u7406",
@@ -35687,6 +35740,14 @@ async function intakeMessage(deps) {
     return;
   }
   const route = rewriteAgentCommandMessage(emsg, controls.profileConfig.agentKind);
+  if (/^\/recover(?:\s|$)/iu.test(route.msg.content.trim()) && (agent.id === "dsh" || agent.id === "claude" || !agent.structuredControl)) {
+    const markdown2 = agent.id === "dsh" ? "DeepSeek Harness \u8BF7\u7528 /stop \u505C\u6B62\u4EFB\u52A1\uFF0C\u786E\u8BA4\u7ED3\u675F\u540E\u518D\u53D1\u4E00\u6761\u6D88\u606F\u7EE7\u7EED\u5F53\u524D\u4F1A\u8BDD\u3002" : "/recover \u9002\u7528\u4E8E Codex \u7ED3\u6784\u5316\u4F1A\u8BDD\u3002";
+    await channel.send(msg.chatId, { markdown: markdown2 }, {
+      replyTo: msg.messageId,
+      ...threadId ? { replyInThread: true } : {}
+    });
+    return;
+  }
   const steerRequest = parseSteerCommand(route.msg.content);
   if (steerRequest) {
     const replyOptions = {
@@ -36965,7 +37026,7 @@ ${delta}`.slice(-64e3);
     log.info("flush", "progress-heartbeat", { progressHeartbeatMs });
   }
   const configuredReplyMode = getMessageReplyMode(controls.cfg);
-  const structuredWorkControl = Boolean(agent.structuredControl) && (liveInputMode === "control" || liveInputMode === "side" || /^\/goal\s+(?!pause\b|clear\b|edit\b|status\b)/.test(nativeCommand ?? ""));
+  const structuredWorkControl = Boolean(agent.structuredControl) && (liveInputMode === "control" || liveInputMode === "side" || /^\/goal\s+(?!pause\b|clear\b|edit\b|status\b)/.test(nativeCommand ?? "") || isManualRecoveryCommand(nativeCommand ?? ""));
   const replyMode = outputModeAtStart === "final" ? "text" : useLiveSession && bridgeRoute?.presentation === "card" && !structuredWorkControl ? "card" : configuredReplyMode;
   log.info("flush", "reply-mode", {
     mode: replyMode,

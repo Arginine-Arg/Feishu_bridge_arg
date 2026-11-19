@@ -2,7 +2,7 @@ import type { ProviderRecoveryStatus } from '../types';
 
 export function recoveryStatusText(status: ProviderRecoveryStatus): string {
   const label: Record<string, string> = {
-    normal: '正常执行', tool_running: '工具运行中', provider_retrying: 'Provider 原生重试中',
+    normal: '正常执行', tool_running: '工具运行中', working_stalled: '长时间无新进展', provider_retrying: 'Provider 原生重试中',
     bridge_backoff: 'Bridge 退避等待', recovery_exhausted: '恢复预算已耗尽，等待用户处理',
     needs_attention: '等待用户处理', status_unknown: '状态未知', disabled: 'Bridge 自动恢复已关闭', stopped: '已停止自动恢复',
   };
