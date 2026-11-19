@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.23.4
+
+- Forwards completed answers from a bound Codex tmux session to its Feishu destination. Feishu-originated turns are delivered through their existing reply stream.
+- Keeps the native thread sandbox and approval settings when Feishu submits a turn. It checks the Feishu request's permission limit before submitting.
+- Shows the selected Codex model in Feishu and confirms that model changes apply from the next turn.
+- Documents the Linux handoff tested with Magpie, Getrich, Xinlab and the official Gemini API.
+
 ## 1.23.3
 
 - Keeps the Feishu reply open during a structured Codex stall and forwards the final answer on the same card.

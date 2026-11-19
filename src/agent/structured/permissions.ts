@@ -1,3 +1,4 @@
+import { relative, isAbsolute, sep } from 'node:path';
 import type { CodexSandboxMode } from '../../config/permissions';
 import { resolveCodexResumeDefaults } from '../codex/provider';
 import { log } from '../../core/logger';
@@ -86,6 +87,23 @@ export function codexTurnPermissionOverrides(
     case 'read-only':
       return { sandboxPolicy: { type: 'readOnly' }, approvalPolicy };
   }
+}
+
+/** A Feishu turn inherits the live thread policy. The profile can refuse a
+ * submission, since narrowing via turn/start also changes the native TUI. */
+export function assertCodexThreadPermissionCeiling(
+  sandbox: Wire | undefined,
+  ceiling: CodexSandboxMode,
+  cwd: string | undefined,
+): void {
+  if (ceiling === 'danger-full-access' || sandbox?.type === 'readOnly') return;
+  if (ceiling === 'workspace-write' && sandbox?.type === 'workspaceWrite' && cwd &&
+      Array.isArray(sandbox.writableRoots) && sandbox.writableRoots.every((root: unknown) => {
+        if (typeof root !== 'string' || !isAbsolute(root)) return false;
+        const path = relative(cwd, root);
+        return !isAbsolute(path) && path !== '..' && !path.startsWith(`..${sep}`);
+      })) return;
+  throw new Error(`Codex 线程权限 ${sandbox?.type ?? '未知'} 无法在飞书权限上限 ${ceiling} 下执行。`);
 }
 
 /**

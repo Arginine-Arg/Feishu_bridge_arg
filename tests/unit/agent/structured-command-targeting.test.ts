@@ -121,7 +121,7 @@ it('routes a bare numbered choice to the main protocol picker while side is open
   const adapter = scopeWithSide(rpc, main, side);
   await main.command('/model');
   await expect(adapter.structuredControl('scope', '1')).resolves.toEqual(expect.arrayContaining([
-    expect.objectContaining({ type: 'text', delta: '模型已设置为 selected-model' }),
+    expect.objectContaining({ type: 'text', delta: '下一轮使用 selected-model。' }),
   ]));
   expect(rpc.request).toHaveBeenCalledWith('thread/settings/update', { threadId: 'main', model: 'selected-model' });
   expect(rpc.request.mock.calls.some(([name]) => name === 'turn/start')).toBe(false);

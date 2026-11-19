@@ -442,6 +442,16 @@ Project RSI 与 MixAgents、历史 Task RSI 是三个不同层次。Bridge 只�
 
 `/tmux bind` 只把 pane 绑定到当前 chat/topic scope。`/tmux unbind` 解除外部绑定，`/tmux release` 把托管 session 交回手动管理；两者都保留 tmux session 和 agent 进程，所以重新绑定不会打断长任务。协议层细节与限制见 [structured 后端](./docs/structured-backend.md)。
 
+### 在同一个 Codex 会话里更换供应商
+
+1. 在 Magpie 添加各家 API 账号并刷新模型目录。用 `magpie models codex` 查看 Codex 可以选择的模型。启动本机 Magpie 网关，并在 Magpie 中把 Codex 接到该网关。如果中转站的 Claude 只提供 Anthropic Messages 接口，在 Magpie 给相应模型选这个接口。
+2. 在 tmux 运行 `arg-bridge native --profile codex`，或用 `arg-bridge native --bridge <thread-id> --profile codex` 恢复原线程。在要接收回复的飞书聊天或话题内，以管理员身份运行 `/tmux list` 和 `/tmux bind <编号>`。已有绑定再执行一次 `/tmux bind` 即可开启终端发起的回复转发。
+3. 在终端或飞书输入 `/model`，都从同一个 Codex App Server 选模型。运行中选模型会从下一轮生效。飞书 `/status` 可查看连接状态和当前选定的模型。
+
+从终端发起的任务结束后，完整回复会发送到绑定的聊天或话题。Bridge 断开期间可以继续在 tmux 工作。在同一个 tmux 服务里重新打开原 Codex 线程后，Bridge 会重新连接。Bridge 离线期间产生的回复可在终端历史中查看。飞书提交沿用会话原有权限。如果原线程权限超过这次飞书请求允许的权限，Bridge 会拒绝提交，原线程仍可在终端操作。
+
+已在 Linux 用 Codex 和 Magpie 实测 Getrich、Xinlab 和官方 Gemini API。HalfLong 读取模型目录时返回 HTTP 403。DeepSeek Harness、Claude Code 和 OpenCode 各有自己的会话协议，本节的共享线程流程使用 Codex 验证。
+
 ## 长任务与稳定性
 
 长对话 / 长任务不会因为"跑太久"被固定时限掐断,但有两种表现要知道(本 fork 已针对性优化):

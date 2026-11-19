@@ -32,6 +32,7 @@ export class PreferredStructuredAdapter implements AgentAdapter {
       } catch { /* first run */ }
     }
     this.tmux = {
+      relayTerminalReplies: this.structured.tmux?.relayTerminalReplies,
       list: async socket => {
         const protocol = (await this.structured.tmux!.list(socket)).filter(pane => !pane.structured?.persisted && pane.agentKind === this.id);
         const raw = [...listTmuxAgentPanes(socket).filter(pane => pane.agentKind === this.id), ...protocol];
@@ -39,7 +40,7 @@ export class PreferredStructuredAdapter implements AgentAdapter {
         for (const pane of raw) merged.set(`${pane.socketPath}::${pane.paneId}`, protocol.find(item => item.socketPath === pane.socketPath && item.paneId === pane.paneId) ?? pane);
         return [...merged.values()];
       },
-      bind: async (scope, selector) => {
+      bind: async (scope, selector, replyAnchor) => {
         const socket = selector.includes('::') ? selector.slice(0, selector.lastIndexOf('::')) : undefined;
         const panes = await this.tmux.list(socket);
         const pane = /^\d+$/.test(selector) ? panes[Number(selector) - 1] : panes.find(item => item.paneId === selector || `${item.socketPath}::${item.paneId}` === selector);
@@ -52,7 +53,7 @@ export class PreferredStructuredAdapter implements AgentAdapter {
         // Binding never launches a second agent. Record the live target too so
         // a later manual native resume can safely use the same pane.
         await this.live.tmux!.bind(scope, `${pane.socketPath}::${pane.paneId}`);
-        if (pane.structured?.endpoint) await this.structured.tmux!.bind(scope, `${pane.socketPath}::${pane.paneId}`);
+        if (pane.structured?.endpoint) await this.structured.tmux!.bind(scope, `${pane.socketPath}::${pane.paneId}`, replyAnchor);
         this.targets.set(scope, pane);
         await this.save();
         return pane;
@@ -76,7 +77,9 @@ export class PreferredStructuredAdapter implements AgentAdapter {
         const saved = this.targets.get(scope);
         if (!saved) return this.structured.tmux!.status(scope, cwd);
         const current = this.current(scope);
-        return current ? { state: 'external', target: current, message: current.structured?.endpoint ? 'structured' : 'live fallback: native process has no shared endpoint' }
+        return current ? { state: 'external', target: current, message: current.structured?.endpoint
+          ? (await this.structured.tmux!.status(scope, cwd)).message ?? 'structured'
+          : 'live fallback: native process has no shared endpoint' }
           : { state: 'invalid', target: saved, message: 'pane 已退出 agent；绑定保留，等待手动 resume' };
       },
       tail: (scope, lines, cwd) => this.selected(scope).tmux!.tail!(scope, lines, cwd),
@@ -94,6 +97,12 @@ export class PreferredStructuredAdapter implements AgentAdapter {
   private current(scope: string) {
     const target = this.targets.get(scope);
     if (!target) return undefined;
+    if (target.structured?.endpoint && this.id === 'codex') {
+      const resumed = listStructuredTmuxPanes(target.socketPath).find(pane =>
+        pane.structured?.threadId === target.structured?.threadId && pane.paneCurrentPath === target.paneCurrentPath);
+      if (resumed?.structured?.endpoint) return resumed;
+      return undefined;
+    }
     const raw = listTmuxAgentPanes(target.socketPath).find(pane => pane.paneId === target.paneId && pane.sessionName === target.sessionName && pane.agentKind === this.id);
     if (!raw) return undefined;
     return this.id === 'codex' ? listStructuredTmuxPanes(target.socketPath).find(pane => pane.paneId === raw.paneId) ?? raw : raw;

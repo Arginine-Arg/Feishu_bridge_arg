@@ -17,7 +17,7 @@ import type {
 } from '../types';
 import { checkAgentAvailability } from '../preflight';
 import { ensureBundledCodexSkill } from '../bundled-skill';
-import { captureTmuxPaneTail, discoverTmuxSockets, listTmuxAgentPanes, type AgentTmuxControl, type TmuxPaneTarget } from '../tmux-control';
+import { captureTmuxPaneTail, discoverTmuxSockets, listTmuxAgentPanes, type AgentTmuxControl, type TerminalReply, type TmuxPaneTarget } from '../tmux-control';
 import { buildLarkChannelEnv, withArtifactDeliveryEnv, type LarkChannelEnvContext, type ArtifactDeliveryEnv } from '../lark-channel-env';
 import { bindArtifactWorkerState, bindThreadArtifactDelivery } from '../artifact-context';
 import { writeFileAtomic } from '../../platform/atomic-write';
@@ -76,6 +76,8 @@ import {
   writeRsiReviewEvidence,
 } from '../../integrations/project-rsi';
 import { CodexStructuredSession } from './codex';
+import { relayCodexTerminalReplies } from './terminal-relay';
+import { registerThreadHandoffClient } from './thread-handoff';
 import { ClaudeStructuredSession } from './claude';
 import { DshStructuredSession } from '../dsh/session';
 import { dshHome } from '../dsh/model-state';
@@ -414,7 +416,16 @@ function isSafeSocketParent(info: {
 
 const candidateKey = (socketPath: string, sessionName: string, threadId: string): string => `${socketPath}\0${sessionName}\0${threadId}`;
 
-interface StructuredBinding { target: TmuxPaneTarget; endpoint: string; threadId: string; cwd: string; updatedAt: number }
+interface StructuredBinding { target: TmuxPaneTarget; endpoint: string; threadId: string; cwd: string; updatedAt: number; replyAnchor?: string }
+interface TerminalRelay {
+  binding: StructuredBinding;
+  endpoint: string;
+  rpc?: RpcClient;
+  unregister?: () => Promise<void>;
+  busy?: boolean;
+  model?: string;
+  provider?: string;
+}
 interface StructuredCandidate extends StructuredBinding { savedAt: number }
 interface PendingNativeView {
   binary: string;
@@ -477,6 +488,8 @@ export class StructuredAdapter implements AgentAdapter {
   private starting = new Map<string, Promise<ScopeSession>>();
   private selecting = new Map<string, Promise<void>>();
   private bindings = new Map<string, StructuredBinding>();
+  private terminalRelays = new Map<string, TerminalRelay>();
+  private sendTerminalReply?: (reply: TerminalReply) => Promise<void>;
   private autoDiscoveryDisabled = new Set<string>();
   private readonly bindingsFile: string;
   private readonly candidatesFile: string;
@@ -505,10 +518,25 @@ export class StructuredAdapter implements AgentAdapter {
     this.loadMixagentsSides();
     this.loadBrokerThreads();
     this.tmux = {
+      ...(this.id === 'codex' ? { relayTerminalReplies: (send: (reply: TerminalReply) => Promise<void>) => {
+        this.sendTerminalReply = send;
+        const refresh = () => {
+          for (const [scope, binding] of this.bindings) if (binding.replyAnchor) this.refreshTerminalRelay(scope, binding);
+        };
+        const timer = setInterval(refresh, 5000);
+        timer.unref?.();
+        refresh();
+        return () => {
+          clearInterval(timer);
+          this.sendTerminalReply = undefined;
+          for (const scope of this.terminalRelays.keys()) this.closeTerminalRelay(scope);
+        };
+      } } : {}),
       restoreArtifactDelivery: (scope, artifact) => this.restoreArtifactDelivery(scope, artifact),
       list: async (socket?: string) => this.listStructuredPanes(socket),
-      bind: async (scope, selector) => this.bindTmuxPane(scope, selector),
+      bind: async (scope, selector, replyAnchor) => this.bindTmuxPane(scope, selector, replyAnchor),
       unbind: async scope => {
+        this.closeTerminalRelay(scope);
         const observer = this.recoveryObservers.get(scope);
         if (observer) { await observer.close(); observer.disconnect(); this.recoveryObservers.delete(scope); }
         const main = this.sessions.get(scope)?.main;
@@ -523,14 +551,17 @@ export class StructuredAdapter implements AgentAdapter {
         const binding = this.bindings.get(scope) ?? current?.bound;
         if (binding) {
           const pane = this.refreshBindingTarget(binding);
-          return pane ? { state: 'external', target: pane } : { state: 'invalid', target: binding.target, message: '结构化 pane 已关闭或 resume 到其他会话' };
+          const relay = this.terminalRelays.get(scope);
+          const message = relay?.model ? `${relay.busy ? '运行中 · 下一轮模型' : '当前模型'} ${relay.model}${relay.provider ? ` (${relay.provider})` : ''}` : undefined;
+          return pane ? { state: 'external', target: pane, message } : { state: 'invalid', target: binding.target, message: '结构化 pane 已关闭或 resume 到其他会话' };
         }
         return (current?.sideView ?? current?.view)?.status() ?? (cwd ? (await this.saved(scope, cwd))?.view : undefined) ?? { state: 'none' };
       },
       diagnostics: async scope => {
         const current = this.sessions.get(scope);
+        const relay = this.terminalRelays.get(scope);
         return {
-          ...(current?.side ?? current?.main)?.diagnostics() ?? { phase: 'idle', inputState: 'unknown', retryCount: 0 },
+          ...(current?.side ?? current?.main)?.diagnostics() ?? { phase: relay?.busy ? 'busy' : 'idle', inputState: relay?.busy ? 'submitted' : 'unknown', retryCount: 0 },
           sideConversation: Boolean(current?.side || this.mixagentsSideForScope(scope)),
         };
       },
@@ -1962,7 +1993,7 @@ export class StructuredAdapter implements AgentAdapter {
     await mkdir(join(this.options.profileDir, 'structured'), { recursive: true, mode: 0o700 });
     await writeFileAtomic(this.bindingsFile, JSON.stringify({ version: 1, bindings: Object.fromEntries(this.bindings), disabled: [...this.autoDiscoveryDisabled] }, null, 2) + '\n', { mode: 0o600 });
   }
-  private async bindTmuxPane(scope: string, selector: string): Promise<TmuxPaneTarget> {
+  private async bindTmuxPane(scope: string, selector: string, replyAnchor?: string): Promise<TmuxPaneTarget> {
     if (this.id !== 'codex') throw new Error('Claude 结构化会话暂不支持接管任意 tmux resume；请使用 terminal 后端。');
     const explicitSocket = selector.includes('::') ? selector.slice(0, selector.lastIndexOf('::')) : undefined;
     const candidates = await this.listStructuredPanes(explicitSocket);
@@ -1973,11 +2004,18 @@ export class StructuredAdapter implements AgentAdapter {
     if (!target?.structured) throw new Error(`未找到可接管的 Codex pane：${selector}。先运行 /tmux list。`);
     if (!target.structured.endpoint && target.structured.legacy) return this.adoptLegacyPane(scope, target);
     if (!target.structured.endpoint) throw new Error('该 pane 尚未连接 App Server，无法结构化接管');
-    const binding: StructuredBinding = { target, endpoint: target.structured.endpoint, threadId: target.structured.threadId, cwd: target.paneCurrentPath, updatedAt: Date.now() };
+    const previous = this.bindings.get(scope);
+    const anchor = replyAnchor ?? (previous?.threadId === target.structured.threadId ? previous.replyAnchor : undefined);
+    const binding: StructuredBinding = { target, endpoint: target.structured.endpoint, threadId: target.structured.threadId, cwd: target.paneCurrentPath, updatedAt: Date.now(), replyAnchor: anchor };
     await this.verifyBinding(binding);
+    for (const [otherScope, other] of this.bindings) {
+      if (otherScope !== scope && other.threadId === binding.threadId) throw new Error('该线程已绑定到另一处飞书会话');
+    }
+    this.closeTerminalRelay(scope);
     this.autoDiscoveryDisabled.delete(scope);
     this.bindings.set(scope, binding);
     await this.saveBindings();
+    await this.refreshTerminalRelay(scope, binding);
     return target;
   }
   private async adoptLegacyPane(scope: string, target: TmuxPaneTarget & { structured?: { threadId: string; legacy?: boolean; codexHome?: string } }): Promise<TmuxPaneTarget> {
@@ -2104,10 +2142,9 @@ export class StructuredAdapter implements AgentAdapter {
     }
   }
   private refreshBindingTarget(binding: StructuredBinding): TmuxPaneTarget | undefined {
-    const target = listStructuredTmuxPanes(binding.target.socketPath).find(item => item.paneId === binding.target.paneId);
-    if (!target?.structured || target.structured.threadId !== binding.threadId || target.structured.endpoint !== binding.endpoint) return undefined;
-    binding.target = target;
-    return target;
+    return listStructuredTmuxPanes(binding.target.socketPath).find(item =>
+      item.structured?.threadId === binding.threadId && item.paneCurrentPath === binding.cwd &&
+      (binding.replyAnchor || (item.paneId === binding.target.paneId && item.structured.endpoint === binding.endpoint)));
   }
   private async verifyBinding(binding: StructuredBinding): Promise<void> {
     const rpc = await this.connectExisting(binding.endpoint);
@@ -2116,6 +2153,80 @@ export class StructuredAdapter implements AgentAdapter {
       const loaded = await rpc.request('thread/loaded/list', {});
       if (!Array.isArray(loaded.data) || !loaded.data.includes(binding.threadId)) throw new Error('App Server 未加载该 thread，未创建绑定');
     } finally { rpc.close(); }
+  }
+  private closeTerminalRelay(scope: string): void {
+    const relay = this.terminalRelays.get(scope);
+    this.terminalRelays.delete(scope);
+    if (!relay) return;
+    void this.releaseTerminalRelay(relay);
+  }
+  private async releaseTerminalRelay(relay: TerminalRelay): Promise<void> {
+    try {
+      if (relay.rpc && !relay.rpc.closed && relay.unregister) {
+        await relay.rpc.request('thread/unsubscribe', { threadId: relay.binding.threadId }, 5_000);
+      }
+    } catch (error) {
+      log.fail('agent', error, { step: 'terminal-relay-unsubscribe' });
+    } finally {
+      relay.rpc?.close();
+      await relay.unregister?.().catch(error => log.fail('agent', error, { step: 'terminal-relay-release' }));
+    }
+  }
+  private refreshTerminalRelay(scope: string, binding: StructuredBinding): Promise<void> | undefined {
+    const replyAnchor = binding.replyAnchor;
+    if (!this.sendTerminalReply || !replyAnchor) return;
+    const target = this.refreshBindingTarget(binding);
+    const endpoint = target?.structured?.endpoint;
+    const current = this.terminalRelays.get(scope);
+    if (current && current.endpoint === endpoint && current.binding.threadId === binding.threadId && current.binding.replyAnchor === replyAnchor && !current.rpc?.closed) return;
+    this.closeTerminalRelay(scope);
+    if (!endpoint) return;
+    const connection: TerminalRelay = { binding, endpoint };
+    this.terminalRelays.set(scope, connection);
+    return (async () => {
+      const rpc = await this.connectExisting(endpoint);
+      connection.rpc = rpc;
+      if (this.terminalRelays.get(scope) !== connection) { rpc.close(); return; }
+      await rpc.initialize();
+      const loaded = await rpc.request('thread/loaded/list', {});
+      if (!loaded.data?.includes(binding.threadId)) throw new Error('终端线程尚未加载');
+      if (!rpc.codexHome) throw new Error('无法确认 Codex home');
+      const unregister = await registerThreadHandoffClient({
+        codexHome: rpc.codexHome, threadId: binding.threadId, endpoint,
+        profile: this.options.profile ?? 'unknown',
+        inspect: async () => {
+          const state = await rpc.request('thread/read', { threadId: binding.threadId, includeTurns: false }, 5_000);
+          if (state.thread?.status?.type !== 'idle') throw new Error('终端转发仍在观察活动线程');
+        },
+        release: async () => {
+          await rpc.request('thread/unsubscribe', { threadId: binding.threadId }, 5_000);
+          rpc.close();
+          if (this.terminalRelays.get(scope) === connection) this.closeTerminalRelay(scope);
+        },
+      });
+      if (this.terminalRelays.get(scope) !== connection) { await unregister(); return; }
+      connection.unregister = unregister;
+      rpc.on('message', (message: Wire) => {
+        const params = message.params;
+        if (params?.threadId !== binding.threadId) return;
+        if (message.method === 'thread/settings/updated') {
+          connection.model = params.threadSettings?.model;
+          connection.provider = params.threadSettings?.modelProvider;
+        }
+        if (message.method === 'thread/status/changed') connection.busy = params.status?.type === 'active';
+      });
+      relayCodexTerminalReplies(rpc, binding.threadId, async (turnId, text) => {
+        if (this.terminalRelays.get(scope) === connection) await this.sendTerminalReply?.({ scope, replyAnchor, turnId, text });
+      });
+      const state = await resumeCodexThread(rpc, { threadId: binding.threadId, excludeTurns: true }, {}, 10_000, { preserveProviderModel: true });
+      connection.model ??= state.model;
+      connection.provider ??= state.modelProvider;
+      connection.busy ??= state.thread?.status?.type === 'active';
+    })().catch(error => {
+      if (this.terminalRelays.get(scope) !== connection) return;
+      this.closeTerminalRelay(scope);
+      log.warn('agent', 'terminal-relay-attach-failed', { scope, reason: redactDiagnosticText(String(error)) });
+    });
   }
   private async interruptBinding(binding: StructuredBinding): Promise<boolean> {
     if (!this.refreshBindingTarget(binding)) return false;
@@ -2669,9 +2780,10 @@ export class StructuredAdapter implements AgentAdapter {
     let found = this.sessions.get(scope);
     let binding = this.bindings.get(scope);
     if (binding && this.id === 'codex') {
-      const pane = listStructuredTmuxPanes(binding.target.socketPath).find(item =>
+      const pane = binding.replyAnchor ? this.refreshBindingTarget(binding) : listStructuredTmuxPanes(binding.target.socketPath).find(item =>
         item.paneId === binding!.target.paneId && item.sessionName === binding!.target.sessionName);
       if (!pane?.structured?.endpoint) {
+        if (binding.replyAnchor) throw new Error('绑定的终端已退出。恢复原 Codex 线程后即可继续。');
         // The bound pane lost its shared App Server (exit, restart cleanup, or
         // it was replaced). Drop the binding and continue with a managed
         // session so the conversation keeps working instead of failing.
@@ -2684,7 +2796,10 @@ export class StructuredAdapter implements AgentAdapter {
         await this.saveBindings();
         binding = undefined;
       } else {
-        binding = { target: pane, endpoint: pane.structured.endpoint, threadId: pane.structured.threadId, cwd: pane.paneCurrentPath, updatedAt: Date.now() };
+        if (binding.replyAnchor && (pane.structured.threadId !== binding.threadId || pane.paneCurrentPath !== binding.cwd)) {
+          throw new Error('绑定的终端已切换线程或工作目录。请重新绑定要共享的会话。');
+        }
+        binding = { ...binding, target: pane, endpoint: pane.structured.endpoint, threadId: pane.structured.threadId, cwd: pane.paneCurrentPath, updatedAt: Date.now() };
         this.bindings.set(scope, binding);
         await this.saveBindings();
       }
@@ -2862,6 +2977,7 @@ export class StructuredAdapter implements AgentAdapter {
               )
             : undefined;
           const attached = await this.createMainSession(bound.threadId, endpoint, rpc, brokerTools);
+          attached.inheritThreadPermissions(resumed);
           await attached.syncState();
           await writeFileAtomic(stateFile, JSON.stringify({
             id: bound.threadId,
@@ -3043,6 +3159,7 @@ export class StructuredAdapter implements AgentAdapter {
           ? await this.createMainSession(saved.id, endpoint, rpc, brokerTools)
           : undefined;
         main = restored ?? await this.createMainSession(id, endpoint, rpc, brokerTools);
+        if (saved) (main as CodexStructuredSession).inheritThreadPermissions(result);
         await (main as CodexStructuredSession).syncState();
         const nativeSpec = this.options.nativeView !== false ? {
           binary: this.options.binary,
@@ -3215,6 +3332,7 @@ export class StructuredAdapter implements AgentAdapter {
     return work;
   }
   async shutdown(): Promise<void> {
+    for (const scope of this.terminalRelays.keys()) this.closeTerminalRelay(scope);
     for (const observer of this.recoveryObservers.values()) { await observer.close(); observer.disconnect(); }
     this.recoveryObservers.clear();
     const signal = new AbortController().signal;

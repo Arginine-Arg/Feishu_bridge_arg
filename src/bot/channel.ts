@@ -632,6 +632,20 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
   });
 
   await channel.connect();
+  const stopTerminalRelay = agent.tmux?.relayTerminalReplies?.(async ({ scope, replyAnchor, turnId, text }) => {
+    const [chatId, topicId] = scope.split(':');
+    const chunks = splitTextForDelivery(text, LONG_REPLY_CHUNK_BYTES);
+    for (const [index, chunk] of chunks.entries()) {
+      const uuid = createHash('sha256').update(`${replyAnchor}:${turnId}:${index}`).digest('hex').slice(0, 40);
+      const data = { msg_type: 'text', content: JSON.stringify({ text: chunk }), uuid };
+      await sendWithRetry(async () => {
+        const result = topicId
+          ? await channel.rawClient.im.v1.message.reply({ path: { message_id: replyAnchor }, data: { ...data, reply_in_thread: true } })
+          : await channel.rawClient.im.v1.message.create({ params: { receive_id_type: 'chat_id' }, data: { ...data, receive_id: chatId! } });
+        if (result.code !== 0) throw new Error(`Feishu message delivery failed (${result.code}): ${result.msg ?? ''}`);
+      }, { scope, chunk: index + 1, total: chunks.length });
+    }
+  });
   const ownerRefresh = createOwnerRefreshController({
     controls,
     source: channel,
@@ -676,6 +690,7 @@ export async function startChannel(deps: StartChannelDeps): Promise<BridgeChanne
     channel,
     disconnect: async () => {
       activeRuns.pauseNewRuns('bridge-disconnect');
+      stopTerminalRelay?.();
       ownerRefresh.stop();
       knownChatsRefresh.stop();
       keepalive.stop();

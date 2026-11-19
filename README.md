@@ -453,6 +453,16 @@ A pane without a shared endpoint still works: `/tmux bind` uses live transport, 
 
 `/tmux bind` claims the pane for the current chat/topic scope only. `/tmux unbind` releases an external binding, and `/tmux release` returns a bridge-managed session to manual control; both leave the tmux session and the agent process alive, so a long task is never interrupted by re-binding. See [structured backend](./docs/structured-backend.md) for the protocol-level details and limitations.
 
+### Switch providers within a shared Codex session
+
+1. Add each API account to Magpie and refresh its model catalog. Run `magpie models codex` to check the models available to Codex. Start the local Magpie gateway and configure Codex to use it. For an Anthropic-only endpoint, select the Anthropic Messages API for the relevant models in Magpie.
+2. In tmux, start `arg-bridge native --profile codex` or resume a Bridge Codex thread with `arg-bridge native --bridge <thread-id> --profile codex`. In the Feishu destination, run `/tmux list` and `/tmux bind <number>` as an administrator. Running `/tmux bind` again enables terminal reply forwarding for an older binding.
+3. Use `/model` in the terminal or Feishu to choose a model from the same App Server. A selection made during a turn applies to the next turn. In Feishu, `/status` shows the connection and selected model when the relay is attached.
+
+Terminal replies go to the bound chat or topic after Codex finishes the turn. You can keep working in tmux while Bridge is disconnected. Reopen the same Codex thread in the same tmux server to let Bridge reattach its relay. Replies generated while Bridge is offline remain in the terminal history. Feishu submissions inherit the thread permissions. If those permissions exceed the Feishu request's allowed access, the submission is declined and the native thread policy stays intact.
+
+The live test used Codex and Magpie on Linux with Getrich, Xinlab and the official Gemini API. HalfLong returned HTTP 403 during catalog discovery in that test. DeepSeek Harness, Claude Code and OpenCode have separate session protocols. The shared Codex thread workflow described here was verified with Codex.
+
 ## Long-running tasks and stability
 
 Long conversations / tasks are not cut off by a fixed time limit, but two behaviors are worth knowing (optimized in this fork):

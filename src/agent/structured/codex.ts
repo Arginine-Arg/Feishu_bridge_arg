@@ -11,7 +11,7 @@ import type {
 import { interactionEvent, textEvent, type StructuredSession } from './contracts';
 import { RpcClient, type Wire } from './rpc';
 import { SIDE_BOUNDARY_PROMPT, SIDE_DEVELOPER_INSTRUCTIONS } from './side-boundary';
-import { codexTurnPermissionOverrides } from './permissions';
+import { assertCodexThreadPermissionCeiling, codexTurnPermissionOverrides } from './permissions';
 import type { BrokerToolHost, WriteAuthorization } from '../subagents/broker-tools';
 import type { ArtifactDeliveryEnv } from '../lark-channel-env';
 import { isTransientProviderError, providerRecoveryDelayMs, type ProviderRecoveryConfig } from '../../config/provider-recovery';
@@ -21,6 +21,7 @@ import { registerThreadHandoffClient } from './thread-handoff';
 import { isManualRecoveryCommand } from '../native-commands';
 
 const toolItems = new Set(['commandExecution', 'fileChange', 'mcpToolCall', 'collabAgentToolCall', 'webSearch', 'imageGeneration', 'dynamicToolCall']);
+export const BRIDGE_CODEX_INPUT_PREFIX = 'arg-bridge-';
 
 export class CodexStructuredSession implements StructuredSession {
   private emit?: (event: AgentEvent) => void;
@@ -76,6 +77,8 @@ export class CodexStructuredSession implements StructuredSession {
   private usageTotal?: { inputTokens: number; outputTokens: number; cachedInputTokens: number };
   private readonly toolAbort = new AbortController();
   private readonly listener: (message: Wire) => void;
+  private threadPermissions?: { sandbox?: Wire; cwd?: string };
+  private waitingForPriorTurn = false;
   constructor(
     readonly id: string,
     readonly endpoint: string,
@@ -91,6 +94,16 @@ export class CodexStructuredSession implements StructuredSession {
     this.listener = message => this.receive(message);
     rpc.on('message', this.listener);
     rpc.on('disconnected', this.disconnected);
+  }
+  inheritThreadPermissions(response: Wire): void {
+    this.threadPermissions = { sandbox: response.sandbox, cwd: response.cwd ?? response.thread?.cwd };
+  }
+  private async checkThreadPermissions(options: AgentRunOptions): Promise<void> {
+    if (!this.threadPermissions || !options.sandbox) return;
+    if (options.sandbox !== 'danger-full-access' && this.threadPermissions.sandbox) {
+      this.inheritThreadPermissions(await this.rpc.request('thread/resume', { threadId: this.id, excludeTurns: true }));
+    }
+    assertCodexThreadPermissionCeiling(this.threadPermissions.sandbox, options.sandbox, options.cwd ?? this.threadPermissions.cwd);
   }
   async initializeLifecycle(codexHome: string, profile: string, generation = this.endpoint, canRelease?: () => void): Promise<void> {
     this.lifecycleInitialized = true;
@@ -755,6 +768,8 @@ export class CodexStructuredSession implements StructuredSession {
     if (signal.aborted) return;
     const manualRecovery = (options.liveInputMode === 'command' || options.liveInputMode === 'control') &&
       isManualRecoveryCommand(options.prompt);
+    const startsGoal = /^\/goal\s+(?!pause\b|clear\b|status\b|edit\b)/u.test(options.prompt);
+    if (this.threadPermissions && options.sandbox && (manualRecovery || startsGoal)) await this.checkThreadPermissions(options);
     if (this.emit && manualRecovery) {
       // The existing relay owns the next reply even if IM dropped its run handle.
       for (const event of await this.command(options.prompt)) emit(event);
@@ -769,7 +784,10 @@ export class CodexStructuredSession implements StructuredSession {
     this.providerRetryTurns.clear();
     this.lastUserText = options.prompt.slice(0, 800);
     this.lastCwd = options.cwd;
-    this.emit = emit;
+    this.waitingForPriorTurn = Boolean(this.threadPermissions && !options.liveInputMode && (this.turnId || this.goalActive));
+    this.emit = (event) => {
+      if (!this.waitingForPriorTurn || event.type === 'recovery' || event.type === 'pending' || event.type === 'interactive') emit(event);
+    };
     try {
       if (this.recovery || this.lifecycleInitialized) {
         await this.ledgerReady;
@@ -777,6 +795,7 @@ export class CodexStructuredSession implements StructuredSession {
       }
     } catch (error) {
       this.emit = undefined;
+      this.waitingForPriorTurn = false;
       throw error;
     }
     emit({ type: 'system', threadId: this.id, cwd: options.cwd });
@@ -799,8 +818,13 @@ export class CodexStructuredSession implements StructuredSession {
         // this new user message once.
         if (this.turnId || this.goalActive) {
           await completion;
+          this.waitingForPriorTurn = false;
           if (signal.aborted) return;
           completion = new Promise<void>(resolve => { this.complete = resolve; });
+        }
+        if (this.threadPermissions) {
+          await this.checkThreadPermissions(options);
+          if (this.turnId || signal.aborted) throw new Error('Codex 已开始另一轮任务，当前消息尚未提交。');
         }
         this.phase = 'submitted';
         const input: Wire[] = [{ type: 'text', text: this.selectedSkill ? `$${this.selectedSkill.name}\n${options.prompt}` : options.prompt }];
@@ -809,7 +833,9 @@ export class CodexStructuredSession implements StructuredSession {
         const result = await this.rpc.request('turn/start', {
           threadId: this.id,
           input,
-          ...codexTurnPermissionOverrides(options.sandbox, options.cwd),
+          ...(this.threadPermissions
+            ? { clientUserMessageId: BRIDGE_CODEX_INPUT_PREFIX + randomUUID() }
+            : codexTurnPermissionOverrides(options.sandbox, options.cwd)),
         });
         if (!this.finishedTurns.has(result.turn?.id)) {
           this.turnId = result.turn?.id ?? this.turnId;
@@ -818,7 +844,7 @@ export class CodexStructuredSession implements StructuredSession {
         if (signal.aborted) await this.interrupt();
       }
       await completion;
-    } finally { signal.removeEventListener('abort', abort); this.emit = undefined; this.complete = undefined; }
+    } finally { signal.removeEventListener('abort', abort); this.emit = undefined; this.complete = undefined; this.waitingForPriorTurn = false; }
   }
   setBrokerWriteAuthorization(authorization: WriteAuthorization | undefined): void {
     this.brokerTools?.setWriteAuthorization?.(authorization);
@@ -916,11 +942,11 @@ export class CodexStructuredSession implements StructuredSession {
         const efforts: Wire[] = model.supportedReasoningEfforts ?? [];
         if (!efforts.length) {
           await this.rpc.request('thread/settings/update', { threadId: this.id, model: model.id });
-          return [textEvent(`模型已设置为 ${model.id}`)];
+          return [textEvent(`下一轮使用 ${model.id}。`)];
         }
         return [this.menu(`选择 ${model.id} 的推理强度`, efforts.map(effort => ({ label: effort.reasoningEffort, apply: async () => {
           await this.rpc.request('thread/settings/update', { threadId: this.id, model: model.id, effort: effort.reasoningEffort });
-          return [textEvent(`模型已设置为 ${model.id} / ${effort.reasoningEffort}`)];
+          return [textEvent(`下一轮使用 ${model.id} / ${effort.reasoningEffort}。`)];
         } })))];
       } })))];
     }
@@ -1034,6 +1060,9 @@ export class CodexStructuredSession implements StructuredSession {
     if (!this.turnId) {
       return { available: false, kind: 'run', reason: 'no active Codex turn to steer' };
     }
+    if (this.waitingForPriorTurn) {
+      return { available: false, kind: 'run', reason: 'Feishu input is waiting for the native turn to finish' };
+    }
     if (this.phase === 'picker' || this.pending.size > 0 || this.menus.size > 0) {
       return {
         available: false,
@@ -1047,6 +1076,7 @@ export class CodexStructuredSession implements StructuredSession {
     const text = request.text.trim();
     if (!text) return { status: 'unavailable', reason: 'empty input' };
     const expectedTurnId = this.turnId;
+    if (this.waitingForPriorTurn) return { status: 'unavailable', reason: 'Feishu input is waiting for the native turn to finish' };
     if (this.handoffBlocked) return { status: 'unavailable', reason: 'provider handoff in progress' };
     this.cancelRecovery();
     await this.ledgerReady;

@@ -209,6 +209,37 @@ describe('structured transport contracts', () => {
     await done;
     await session.close();
   });
+  it('waits for a native turn and inherits the attached thread permissions', async () => {
+    const rpc = new EventEmitter() as EventEmitter & { request: ReturnType<typeof vi.fn> };
+    rpc.request = vi.fn(async () => ({ turn: { id: 'from-feishu' } }));
+    const session = new CodexStructuredSession('main', '', rpc as unknown as RpcClient);
+    session.inheritThreadPermissions({ sandbox: { type: 'readOnly' } });
+    const emitTurn = (method: string, turn: object) => rpc.emit('message', { method, params: { threadId: 'main', turn } });
+    emitTurn('turn/started', { id: 'from-terminal' });
+    const events: AgentEvent[] = [];
+    const done = session.submit({ runId: 'feishu', prompt: 'next', sandbox: 'danger-full-access' }, event => events.push(event), new AbortController().signal);
+    expect(rpc.request).not.toHaveBeenCalled();
+    expect(session.steerCapability().available).toBe(false);
+    emitTurn('turn/completed', { id: 'from-terminal', status: 'completed', items: [{ type: 'agentMessage', id: 'native', text: 'native answer' }] });
+    await vi.waitFor(() => expect(rpc.request).toHaveBeenCalledWith('turn/start', {
+      threadId: 'main', clientUserMessageId: expect.stringMatching(/^arg-bridge-/), input: [{ type: 'text', text: 'next' }],
+    }));
+    emitTurn('turn/completed', { id: 'from-feishu', status: 'completed', items: [{ type: 'agentMessage', id: 'feishu', text: 'Feishu answer' }] });
+    await done;
+    expect(rpc.request).toHaveBeenCalledTimes(1);
+    expect(events.filter(event => event.type === 'text').map(event => event.delta)).toEqual(['Feishu answer']);
+    await session.close();
+  });
+  it('declines remote input when the native thread exceeds the Feishu policy', async () => {
+    const rpc = new EventEmitter() as EventEmitter & { request: ReturnType<typeof vi.fn> };
+    rpc.request = vi.fn(async () => ({ sandbox: { type: 'dangerFullAccess' } }));
+    const session = new CodexStructuredSession('main', '', rpc as unknown as RpcClient);
+    session.inheritThreadPermissions({ sandbox: { type: 'readOnly' } });
+    await expect(session.submit({ runId: 'feishu', prompt: 'next', sandbox: 'read-only' }, () => {}, new AbortController().signal)).rejects.toThrow('飞书权限上限 read-only');
+    expect(rpc.request).toHaveBeenCalledWith('thread/resume', { threadId: 'main', excludeTurns: true });
+    expect(rpc.request).toHaveBeenCalledTimes(1);
+    await session.close();
+  });
   it('matches approvals by request ID and never turns a choice into a prompt', async () => {
     const rpc = new EventEmitter() as EventEmitter & { request: ReturnType<typeof vi.fn>; respond: ReturnType<typeof vi.fn> };
     rpc.request = vi.fn(async () => ({ turn: { id: 't' } }));

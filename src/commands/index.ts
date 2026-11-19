@@ -1341,7 +1341,7 @@ async function handleTmux(args: string, ctx: CommandContext): Promise<void> {
         await reply(ctx, '当前 scope 有运行中的任务，请先 `/stop`，等待任务结束后再绑定。');
         return;
       }
-      const target = await tmux.bind(ctx.scope, value);
+      const target = await tmux.bind(ctx.scope, value, ctx.msg.messageId);
       ctx.workspaces.setCwd(ctx.scope, target.paneCurrentPath);
       ctx.sessions.clear(ctx.scope);
       const structured = target.structured;

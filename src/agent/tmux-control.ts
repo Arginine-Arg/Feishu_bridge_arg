@@ -67,7 +67,8 @@ export interface TmuxBindingStatus {
 
 export interface AgentTmuxControl {
   list(socket?: string): Promise<TmuxPaneTarget[]>;
-  bind(scopeId: string, selector: string): Promise<TmuxPaneTarget>;
+  bind(scopeId: string, selector: string, replyAnchor?: string): Promise<TmuxPaneTarget>;
+  relayTerminalReplies?(send: (reply: TerminalReply) => Promise<void>): () => void;
   unbind(scopeId: string): Promise<boolean>;
   /** Release a Bridge-managed tmux session without killing its pane/process. */
   releaseManaged?(scopeId: string, cwd?: string): Promise<boolean>;
@@ -95,6 +96,13 @@ export interface AgentTmuxControl {
   interrupt?(scopeId: string, cwd?: string, options?: TmuxInterruptOptions): Promise<boolean>;
   /** Restores a persistent artifact grant to one bridge-managed tmux session. */
   restoreArtifactDelivery?(scopeId: string, artifact: ArtifactDeliveryEnv): Promise<boolean>;
+}
+
+export interface TerminalReply {
+  scope: string;
+  replyAnchor: string;
+  turnId: string;
+  text: string;
 }
 
 interface TmuxBindingsFile {
