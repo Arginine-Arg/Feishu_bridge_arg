@@ -1616,8 +1616,8 @@ import { join as join16 } from "path";
 async function processStart(pid) {
   if (process.platform !== "linux") return void 0;
   try {
-    const stat11 = await readFile11(`/proc/${pid}/stat`, "utf8");
-    return stat11.slice(stat11.lastIndexOf(")") + 2).split(/\s+/u)[19];
+    const stat12 = await readFile11(`/proc/${pid}/stat`, "utf8");
+    return stat12.slice(stat12.lastIndexOf(")") + 2).split(/\s+/u)[19];
   } catch {
     return void 0;
   }
@@ -1985,8 +1985,8 @@ function fingerprintCredentialEnv(env) {
 }
 function fileStamp(path) {
   try {
-    const stat11 = statSync(path);
-    return `${stat11.mtimeMs}:${stat11.size}`;
+    const stat12 = statSync(path);
+    return `${stat12.mtimeMs}:${stat12.size}`;
   } catch {
     return void 0;
   }
@@ -2237,7 +2237,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.24.1",
+  version: "1.24.2",
   description: "Bridge Feishu and Lark with Claude Code, Codex CLI, and DeepSeek Harness",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -13814,7 +13814,7 @@ function artifactDeliveryEnv(artifact) {
 
 // src/agent/structured/adapter.ts
 import { createHash as createHash15, randomUUID as randomUUID6 } from "crypto";
-import { readFile as readFile27, readdir as readdir9, mkdir as mkdir27, lstat as lstat7, realpath as realpath13, stat as stat8 } from "fs/promises";
+import { readFile as readFile27, readdir as readdir9, mkdir as mkdir27, lstat as lstat7, realpath as realpath13, stat as stat9 } from "fs/promises";
 import { readFileSync as readFileSync10 } from "fs";
 import { tmpdir as tmpdir5 } from "os";
 import { isAbsolute as isAbsolute10, join as join41, relative as relative5, resolve as resolve8, sep as sep3 } from "path";
@@ -14088,8 +14088,8 @@ async function connectCodexHostInternal(options, attempt) {
     { env: options.env }
   );
   await mkdir17(directory, { recursive: true, mode: 448 });
-  const stat11 = await lstat2(directory);
-  if (stat11.isSymbolicLink() || !stat11.isDirectory() || process.getuid && stat11.uid !== process.getuid()) throw new Error("Unsafe structured runtime directory");
+  const stat12 = await lstat2(directory);
+  if (stat12.isSymbolicLink() || !stat12.isDirectory() || process.getuid && stat12.uid !== process.getuid()) throw new Error("Unsafe structured runtime directory");
   await chmod6(directory, 448);
   const path = join27(directory, "server.sock");
   const endpoint = `unix://${path}`;
@@ -18505,8 +18505,8 @@ import { join as join34, dirname as dirname20 } from "path";
 async function startTime(pid) {
   if (process.platform !== "linux") return void 0;
   try {
-    const stat11 = await readFile22(`/proc/${pid}/stat`, "utf8");
-    return stat11.slice(stat11.lastIndexOf(")") + 2).split(/\s+/u)[19];
+    const stat12 = await readFile22(`/proc/${pid}/stat`, "utf8");
+    return stat12.slice(stat12.lastIndexOf(")") + 2).split(/\s+/u)[19];
   } catch {
     return void 0;
   }
@@ -20882,7 +20882,7 @@ async function bounded(operation, ms) {
 init_profile_store();
 import { createHash as createHash13 } from "crypto";
 import { createReadStream } from "fs";
-import { mkdir as mkdir25, open as open4, readFile as readFile26, readdir as readdir8, realpath as realpath12 } from "fs/promises";
+import { mkdir as mkdir25, open as open4, readFile as readFile26, readdir as readdir8, realpath as realpath12, stat as stat8 } from "fs/promises";
 import { basename as basename7, dirname as dirname22, join as join39 } from "path";
 import { createInterface as createInterface6 } from "readline";
 init_atomic_write();
@@ -21110,10 +21110,10 @@ function readProcessParents() {
     const pid = Number(name);
     if (!processOwnedByCurrentUser(pid)) continue;
     try {
-      const stat11 = readFileSync8(`/proc/${pid}/stat`, "utf8");
-      const commandEnd = stat11.lastIndexOf(")");
+      const stat12 = readFileSync8(`/proc/${pid}/stat`, "utf8");
+      const commandEnd = stat12.lastIndexOf(")");
       if (commandEnd < 0) continue;
-      const parent = Number(stat11.slice(commandEnd + 2).split(/\s+/u)[1]);
+      const parent = Number(stat12.slice(commandEnd + 2).split(/\s+/u)[1]);
       if (Number.isSafeInteger(parent)) result.set(pid, parent);
     } catch {
     }
@@ -21313,7 +21313,25 @@ async function createNativeBridgeSessionInternal(input) {
     { env }
   );
   let sourceHost = providerSelection && adoptionSourceThread && !adoptedMarker ? await findLoadedThreadHost(input.profileDir, adoptionSourceThread, env) : void 0;
-  const loadedThreadHost = existingThread ? await findLoadedThreadHost(input.profileDir, existingThread, env) : void 0;
+  let loadedThreadHost = existingThread ? await findLoadedThreadHost(input.profileDir, existingThread, env) : void 0;
+  const staleHost = loadedThreadHost;
+  if (staleHost && existingThread && await hostCatalogIsStale(input.profileDir, staleHost, env)) {
+    try {
+      await reclaimIdleThreadHost(input.profileDir, staleHost, existingThread);
+      if (sourceHost?.directory === staleHost.directory) sourceHost = void 0;
+      loadedThreadHost = void 0;
+    } catch {
+      try {
+        const reconnected = await reconnectCodexRpc(
+          staleHost.endpoint,
+          env.CODEX_HOME ?? defaultCodexHome(env)
+        );
+        loadedThreadHost = { ...staleHost, rpc: reconnected };
+      } catch {
+        loadedThreadHost = void 0;
+      }
+    }
+  }
   if (providerGenerationChanged && loadedThreadHost && loadedThreadHost.directory !== nativeHostDirectory) {
     await reclaimIdleThreadHost(
       input.profileDir,
@@ -22072,6 +22090,25 @@ async function findThreadRolloutFile(codexHome, threadId) {
     }
   }
   return void 0;
+}
+async function hostCatalogIsStale(profileDir, host, env) {
+  const codexHome = env.CODEX_HOME ?? defaultCodexHome(env);
+  if (!codexHome) return false;
+  let catalogPath;
+  try {
+    const text2 = await readFile26(join39(codexHome, "config.toml"), "utf8");
+    catalogPath = /^model_catalog_json\s*=\s*"([^"]+)"/mu.exec(text2)?.[1];
+  } catch {
+    return false;
+  }
+  if (!catalogPath) return false;
+  const startedAt = (await readHostRegistry(profileDir)).find((item) => item.directory === host.directory)?.startedAt;
+  if (!startedAt) return false;
+  try {
+    return (await stat8(catalogPath)).mtimeMs > startedAt;
+  } catch {
+    return false;
+  }
 }
 async function reclaimIdleThreadHost(profileDir, host, threadId) {
   const codexHome = host.rpc.codexHome;
@@ -22926,7 +22963,7 @@ async function resolveAppServerSocketPath2(candidate) {
     const requestedParent = await realpath13(join41(requested, ".."));
     await assertOwnedParents2(requestedParent);
   }
-  const info = await stat8(resolvedPath);
+  const info = await stat9(resolvedPath);
   if (!info.isSocket()) throw new Error("App Server socket \u4E0D\u5B89\u5168");
   if (process.getuid && info.uid !== process.getuid()) {
     throw new Error("App Server socket \u4E0D\u5B89\u5168");
@@ -28624,7 +28661,7 @@ function finalizeIfRunning(state) {
 
 // src/session/history.ts
 import { createReadStream as createReadStream2 } from "fs";
-import { readdir as readdir11, stat as stat9 } from "fs/promises";
+import { readdir as readdir11, stat as stat10 } from "fs/promises";
 import { homedir as homedir16 } from "os";
 import { join as join44 } from "path";
 import { createInterface as createInterface7 } from "readline";
@@ -28681,7 +28718,7 @@ async function listRecentSessions(cwd, limit = 5) {
     jsonls.map(async (f) => {
       const path = join44(dir, f);
       try {
-        const st = await stat9(path);
+        const st = await stat10(path);
         return { file: f, path, mtime: st.mtimeMs };
       } catch {
         return null;
@@ -32848,7 +32885,7 @@ init_logger();
 // src/media/cache.ts
 import { createHash as createHash18 } from "crypto";
 import { createReadStream as createReadStream3 } from "fs";
-import { mkdir as mkdir30, readdir as readdir12, rename as rename4, rm as rm16, stat as stat10 } from "fs/promises";
+import { mkdir as mkdir30, readdir as readdir12, rename as rename4, rm as rm16, stat as stat11 } from "fs/promises";
 import { join as join46 } from "path";
 init_logger();
 
@@ -32996,13 +33033,13 @@ var MediaCache = class {
       r.type === "image" ? "image" : "file",
       tmpPath
     );
-    const tmpStat = await stat10(tmpPath);
+    const tmpStat = await stat11(tmpPath);
     const hash = await hashFile(tmpPath);
     const mime = contentType ?? defaultMime(kind);
     const ext = safeExtensionForMime(mime);
     const absPath = join46(this.rootDir, `${hash}.${ext}`);
     try {
-      await stat10(absPath);
+      await stat11(absPath);
       await rm16(tmpPath, { force: true });
       log.info("media", "cache-hit", { path: absPath });
     } catch {
@@ -33028,7 +33065,7 @@ var MediaCache = class {
 };
 async function gcMediaCache(maxAgeMs, root = paths.mediaDir) {
   try {
-    await stat10(root);
+    await stat11(root);
   } catch {
     return;
   }
@@ -33037,7 +33074,7 @@ async function gcMediaCache(maxAgeMs, root = paths.mediaDir) {
   const files = await listFiles(root);
   for (const p4 of files) {
     try {
-      const st = await stat10(p4);
+      const st = await stat11(p4);
       if (st.isFile() && st.mtimeMs < cutoff) {
         await rm16(p4);
         removed++;
@@ -33083,7 +33120,7 @@ async function enforceCacheMaxBytes(root, maxBytes, protectedPaths) {
   if (!Number.isFinite(maxBytes) || maxBytes <= 0) return;
   const files = await Promise.all(
     (await listFiles(root)).map(async (path) => {
-      const fileStat = await stat10(path);
+      const fileStat = await stat11(path);
       return { path, size: fileStat.size, mtimeMs: fileStat.mtimeMs };
     })
   );

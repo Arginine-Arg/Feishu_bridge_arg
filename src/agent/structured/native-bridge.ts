@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { mkdir, open, readFile, readdir, realpath } from 'node:fs/promises';
+import { mkdir, open, readFile, readdir, realpath, stat } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { ProfileConfig, SubagentConfig } from '../../config/profile-schema';
@@ -356,9 +356,36 @@ async function createNativeBridgeSessionInternal(
   let sourceHost = providerSelection && adoptionSourceThread && !adoptedMarker
     ? await findLoadedThreadHost(input.profileDir, adoptionSourceThread, env)
     : undefined;
-  const loadedThreadHost = existingThread
+  let loadedThreadHost = existingThread
     ? await findLoadedThreadHost(input.profileDir, existingThread, env)
     : undefined;
+  // Codex reads `model_catalog_json` once at App Server start. A TUI that is
+  // re-opened after Magpie rewrote the catalog would otherwise keep the old
+  // list forever. Reclaim an idle host whose catalog predates the file.
+  const staleHost = loadedThreadHost;
+  if (
+    staleHost &&
+    existingThread &&
+    await hostCatalogIsStale(input.profileDir, staleHost, env)
+  ) {
+    try {
+      await reclaimIdleThreadHost(input.profileDir, staleHost, existingThread);
+      if (sourceHost?.directory === staleHost.directory) sourceHost = undefined;
+      loadedThreadHost = undefined;
+    } catch {
+      // reclaimIdleThreadHost closes its probe connection. Reconnect so the
+      // stale host stays usable instead of handing a closed RPC to resume.
+      try {
+        const reconnected = await reconnectCodexRpc(
+          staleHost.endpoint,
+          env.CODEX_HOME ?? defaultCodexHome(env),
+        );
+        loadedThreadHost = { ...staleHost, rpc: reconnected };
+      } catch {
+        loadedThreadHost = undefined;
+      }
+    }
+  }
   if (
     providerGenerationChanged &&
     loadedThreadHost &&
@@ -1379,6 +1406,36 @@ export interface LoadedThreadHost {
   directory: string;
   /** Direct writer-lock holders discovered from `/proc/locks` on Linux. */
   ownerPids?: number[];
+}
+
+/**
+ * True when the configured model catalog was rewritten after this App Server
+ * started. Codex caches the catalog at startup, so reusing the host would show
+ * a stale model list.
+ */
+export async function hostCatalogIsStale(
+  profileDir: string,
+  host: LoadedThreadHost,
+  env: NodeJS.ProcessEnv,
+): Promise<boolean> {
+  const codexHome = env.CODEX_HOME ?? defaultCodexHome(env);
+  if (!codexHome) return false;
+  let catalogPath: string | undefined;
+  try {
+    const text = await readFile(join(codexHome, 'config.toml'), 'utf8');
+    catalogPath = /^model_catalog_json\s*=\s*"([^"]+)"/mu.exec(text)?.[1];
+  } catch {
+    return false;
+  }
+  if (!catalogPath) return false;
+  const startedAt = (await readHostRegistry(profileDir))
+    .find(item => item.directory === host.directory)?.startedAt;
+  if (!startedAt) return false;
+  try {
+    return (await stat(catalogPath)).mtimeMs > startedAt;
+  } catch {
+    return false;
+  }
 }
 
 /**

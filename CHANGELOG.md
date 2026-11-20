@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.24.3
+
+- `arg-bridge native` now detects a model catalog rewritten after the target App Server started. If the thread is idle, it reclaims the stale server and starts a fresh one, so re-opening a TUI after Magpie changes the catalog shows the current list without a manual kill.
+- Falls back to the old server when the idle handoff cannot complete.
+
 ## 1.24.2
 
 - `arg-bridge restart` now probes an attached App Server before skipping it. A server whose loaded or bound threads are all idle is reclaimed, so a cached model catalog is refreshed even when a native TUI is still attached.
