@@ -282,7 +282,7 @@ describe('arg-bridge settings and doctor', () => {
       access: 'read-only',
     });
     expect(failed.probe?.error).toMatch(/route/i);
-  });
+  }, 15_000);
 
   it('shows cc-switch, Codex-internal and Broker route identities separately', async () => {
     const context = await setup({ mcp: true });

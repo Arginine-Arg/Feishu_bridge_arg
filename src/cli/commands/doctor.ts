@@ -162,7 +162,7 @@ export async function loadDoctorReport(options: DoctorOptionsWithProbe = {}): Pr
           : explicitBroker
             ? 'fail'
             : 'warn'
-      : snapshot.subagents.config.routeMode === 'follow-cc-switch'
+      : (snapshot.subagents.config.routeMode === 'follow-cc-switch' || snapshot.subagents.config.routeMode === 'follow-magpie')
         ? brokerToolsDisabled ? 'pass' : 'fail'
         : diagnostics.mcp.status === 'available'
           ? 'pass'
@@ -253,7 +253,7 @@ export async function loadDoctorReport(options: DoctorOptionsWithProbe = {}): Pr
         ? 'warn'
         : diagnostics.credentials.mode === 'mixagents-managed'
           ? 'fail'
-          : snapshot.subagents.config.routeMode === 'follow-cc-switch'
+          : (snapshot.subagents.config.routeMode === 'follow-cc-switch' || snapshot.subagents.config.routeMode === 'follow-magpie')
             ? 'fail'
             : 'warn',
     message: diagnostics.credentials.mode === 'mixagents-managed'
@@ -263,6 +263,9 @@ export async function loadDoctorReport(options: DoctorOptionsWithProbe = {}): Pr
           ` source=${diagnostics.credentials.sourcePath ?? '(unknown)'}` +
           ` fingerprint=${diagnostics.credentials.fingerprint ?? '(none)'}` +
           ` missing=${diagnostics.credentials.missingEnvironment.join(',') || 'none'}`
+        : diagnostics.credentials.mode === 'magpie-auto'
+          ? `magpie auto；provider=${diagnostics.credentials.providerReference ?? '(unknown)'}` +
+            ` gateway=${diagnostics.magpie.gateway ?? '(unknown)'}`
         : `inherit-env；present/missing only: ${
             diagnostics.credentials.missingEnvironment.join(',') || 'none missing'
           }`,
@@ -331,13 +334,15 @@ export async function loadDoctorReport(options: DoctorOptionsWithProbe = {}): Pr
     checks.push({
       id: 'broker-routes',
       status: diagnostics.routeMap.loaded ||
-        snapshot.subagents.config.routeMode === 'follow-cc-switch'
+        snapshot.subagents.config.routeMode === 'follow-cc-switch' ||
+        snapshot.subagents.config.routeMode === 'follow-magpie'
         ? 'pass'
         : 'warn',
       message: diagnostics.routeMap.loaded
         ? `route map loaded: ${diagnostics.routeMap.path}`
-        : snapshot.subagents.config.routeMode === 'follow-cc-switch'
-          ? 'auto 模式使用 cc-switch 自动生成 route；broker-routes.json 不需要手工创建'
+        : snapshot.subagents.config.routeMode === 'follow-cc-switch' ||
+            snapshot.subagents.config.routeMode === 'follow-magpie'
+          ? 'auto 模式使用所选来源自动生成 route；broker-routes.json 不需要手工创建'
           : `route map 尚未创建：${diagnostics.routeMap.path}`,
     });
   }
@@ -349,7 +354,8 @@ export async function loadDoctorReport(options: DoctorOptionsWithProbe = {}): Pr
         ? 'pass'
       : explicitBroker ||
           snapshot.subagents.config.routeMode === 'manual' ||
-          snapshot.subagents.config.routeMode === 'follow-cc-switch'
+          snapshot.subagents.config.routeMode === 'follow-cc-switch' ||
+          snapshot.subagents.config.routeMode === 'follow-magpie'
         ? 'fail'
         : 'warn',
     message: diagnostics.selectedRoute.id

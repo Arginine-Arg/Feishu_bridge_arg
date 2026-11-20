@@ -35,6 +35,11 @@ provider lets the two profiles use different accounts. For endpoints with
 multiple protocols, settings can select Responses, Chat Completions, or
 Anthropic Messages. ChatGPT OAuth-only accounts require a separate API Key.
 
+When a local Magpie gateway is running, settings also lists its providers and
+routing groups. A Magpie account keeps the API Key in Magpie and points DSH at
+the local gateway. A routing group (`group/<name>`) lets Magpie switch among
+its members by its own rules. The same list is available to subagents.
+
 - `/model` fetches the selected provider's model catalog and lists the
   available models. `/model <id>` selects a model for that chat and provider.
 - `/status` reports the current session. `/stop` cancels the active turn.

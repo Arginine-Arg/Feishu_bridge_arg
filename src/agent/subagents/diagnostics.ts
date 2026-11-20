@@ -13,6 +13,11 @@ import {
   resolveCurrentCcSwitchCodexProvider,
   type CcSwitchProviderSummary,
 } from '../../integrations/cc-switch-provider';
+import {
+  readMagpieProviderCatalog,
+  resolveMagpieProvider,
+  type MagpieCatalog,
+} from '../../integrations/magpie-provider';
 import { processAlive, readHostRegistry } from '../structured/host-registry';
 import { redactSecrets } from './mcp-client';
 import {
@@ -70,7 +75,7 @@ export interface SubagentDiagnostics {
   toolContract: 'compatible' | 'incompatible' | 'unknown';
   mcpStart: 'not-configured' | 'started' | 'failed';
   credentials: {
-    mode: 'inherit-env' | 'mixagents-managed' | 'cc-switch-auto';
+    mode: 'inherit-env' | 'mixagents-managed' | 'cc-switch-auto' | 'magpie-auto';
     status: 'present' | 'missing' | 'oauth-only' | 'delegated-unverified' | 'not-declared';
     providerReference: string | null;
     missingEnvironment: string[];
@@ -88,6 +93,12 @@ export interface SubagentDiagnostics {
     providers: Array<{ id: string; name: string; current: boolean }>;
     provider?: CcSwitchProviderSummary;
     settingsPath: string;
+    error?: string;
+  };
+  magpie: {
+    available: boolean;
+    gateway: string | null;
+    providers: Array<{ id: string; name: string; current: boolean; models: string[] }>;
     error?: string;
   };
   routeMap: {
@@ -156,23 +167,33 @@ export async function collectSubagentDiagnostics(input: {
 }): Promise<SubagentDiagnostics> {
   const env = input.env ?? process.env;
   const signal = input.signal ?? new AbortController().signal;
-  const [ccSwitch, routeMapState, catalog, providerResolution, structuredRuntime] = await Promise.all([
+  const magpieMode = input.config.routeMode === 'follow-magpie';
+  const [ccSwitch, routeMapState, catalog, magpieCatalog, providerResolution, structuredRuntime] = await Promise.all([
     readCcSwitchState(env),
     loadBrokerRouteMap(env),
     readCcSwitchProviderCatalog(env)
       .catch(() => undefined),
-    resolveCurrentCcSwitchCodexProvider({
-      env,
-      ...(input.codexHome ? { codexHome: input.codexHome } : {}),
-      ...(input.parentProviderId ? { parentProviderId: input.parentProviderId } : {}),
-      ...(input.config.ccSwitchProviderId
-        ? { providerId: input.config.ccSwitchProviderId }
-        : {}),
-    })
+    readMagpieProviderCatalog(env).catch(error => ({ error } as const)),
+    (magpieMode
+      ? resolveMagpieProvider({
+          env,
+          ...(input.config.magpieProviderId ? { providerId: input.config.magpieProviderId } : {}),
+        })
+      : resolveCurrentCcSwitchCodexProvider({
+          env,
+          ...(input.codexHome ? { codexHome: input.codexHome } : {}),
+          ...(input.parentProviderId ? { parentProviderId: input.parentProviderId } : {}),
+          ...(input.config.ccSwitchProviderId
+            ? { providerId: input.config.ccSwitchProviderId }
+            : {}),
+        }))
       .then(result => ({ result }))
       .catch(error => ({ error })),
     inspectStructuredRuntime(input.stateDir, input.config.toolNamespace),
   ]);
+  const magpie = 'providers' in magpieCatalog
+    ? magpieCatalog as MagpieCatalog
+    : undefined;
   const configuredForNewThreads =
     input.config.modelTools &&
     (input.dsh || input.config.nativeToolPolicy === 'shadow') &&
@@ -217,9 +238,9 @@ export async function collectSubagentDiagnostics(input: {
               ? { degradedReason: 'configured for new threads, but no broker-thread marker exists in this profile' }
               : structuredRuntime.liveIdentifiedAppServerHosts === 0
                 ? { degradedReason: 'broker-thread marker exists, but no live identified App Server host is bound to this profile' }
-                : input.config.routeMode === 'follow-cc-switch' &&
+                : (input.config.routeMode === 'follow-cc-switch' || input.config.routeMode === 'follow-magpie') &&
                     !('result' in providerResolution)
-                  ? { degradedReason: 'cc-switch provider/runtime preflight failed; Broker tools are not bound' }
+                  ? { degradedReason: `${input.config.routeMode === 'follow-magpie' ? 'magpie' : 'cc-switch'} provider/runtime preflight failed; Broker tools are not bound` }
           : {}),
     },
     limits: {
@@ -269,6 +290,21 @@ export async function collectSubagentDiagnostics(input: {
         : {}),
       settingsPath: ccSwitch.settingsPath,
       ...(ccSwitch.error ? { error: redactSecrets(ccSwitch.error) } : {}),
+    },
+    magpie: {
+      available: Boolean(magpie),
+      gateway: magpie?.gateway.baseUrl ?? null,
+      providers: (magpie?.providers ?? []).map(provider => ({
+        id: provider.id,
+        name: provider.name,
+        current: provider.current,
+        models: provider.models,
+      })),
+      ...(magpie?.error
+        ? { error: redactSecrets(magpie.error) }
+        : !magpie && 'error' in magpieCatalog
+          ? { error: redactSecrets(errorMessage(magpieCatalog.error)) }
+          : {}),
     },
     routeMap: {
       path: routeMapState.path,
@@ -321,7 +357,8 @@ export async function collectSubagentDiagnostics(input: {
       reason: string;
     };
   } | undefined;
-  if (input.config.routeMode === 'follow-cc-switch') {
+  if (input.config.routeMode === 'follow-cc-switch' || input.config.routeMode === 'follow-magpie') {
+    const source = input.config.routeMode === 'follow-magpie' ? 'magpie' : 'cc-switch';
     if ('error' in providerResolution && !input.config.providerPriority?.length) {
       return {
         ...base,
@@ -351,9 +388,10 @@ export async function collectSubagentDiagnostics(input: {
         env,
         ...(input.codexHome ? { codexHome: input.codexHome } : {}),
         ...(input.parentProviderId ? { parentProviderId: input.parentProviderId } : {}),
-        ...(input.config.ccSwitchProviderId
-          ? { providerId: input.config.ccSwitchProviderId }
-          : {}),
+        ...(source === 'magpie'
+          ? (input.config.magpieProviderId ? { providerId: input.config.magpieProviderId } : {})
+          : (input.config.ccSwitchProviderId ? { providerId: input.config.ccSwitchProviderId } : {})),
+        source,
         cwd: input.cwd,
         codexBin: input.codexBin ?? env.CODEX_BINARY?.trim() ?? 'codex',
         stateDir: input.stateDir,
@@ -363,6 +401,7 @@ export async function collectSubagentDiagnostics(input: {
           sideReasoningEffort: input.config.sideReasoningEffort,
           providerOverrides: input.config.providerOverrides,
           providerPriority: input.config.providerPriority,
+          source,
         },
       });
       brokerRuntime = {
@@ -507,9 +546,9 @@ function describeCredentialState(
   env: NodeJS.ProcessEnv,
   provider?: CcSwitchProviderSummary,
 ): SubagentDiagnostics['credentials'] {
-  if (config.routeMode === 'follow-cc-switch' && provider) {
+  if ((config.routeMode === 'follow-cc-switch' || config.routeMode === 'follow-magpie') && provider) {
     return {
-      mode: 'cc-switch-auto',
+      mode: config.routeMode === 'follow-magpie' ? 'magpie-auto' : 'cc-switch-auto',
       status: provider.credential.status,
       providerReference: provider.id,
       missingEnvironment: provider.credential.status === 'present'

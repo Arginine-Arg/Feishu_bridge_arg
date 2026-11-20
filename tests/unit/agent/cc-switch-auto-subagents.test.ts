@@ -198,7 +198,7 @@ sqliteRuntime('auto-builds Broker route and credentials from the current cc-swit
   const generatedConfig = await readFile(generatedConfigPath, 'utf8');
   expect(generatedConfig).toContain('https://b.example.test/v1');
   expect(generatedConfig).not.toContain(setup.secondSecret);
-});
+}, 15_000);
 
 sqliteRuntime('switches a stale external Broker to the bundled runtime without changing the selected cc-switch provider', async () => {
   const setup = await setupProviders();

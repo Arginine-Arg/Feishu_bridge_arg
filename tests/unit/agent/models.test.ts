@@ -45,6 +45,12 @@ describe('agent model catalog', () => {
     expect(resolveModelArg('codex', 'claude-opus-4-8')).toBeUndefined();
   });
 
+  it('accepts Magpie provider and router slugs for Codex', () => {
+    expect(resolveModelArg('codex', 'relay-a/gpt-6')).toBe('relay-a/gpt-6');
+    expect(resolveModelArg('codex', 'group/best-gpt')).toBe('group/best-gpt');
+    expect(normalizeModelSelection('codex', 'group/best-gpt')).toBe('group/best-gpt');
+  });
+
   it('labels a stored value using the picker option text', () => {
     expect(modelLabel('claude', 'claude-opus-4-8')).toBe('Opus 4.8（最新）');
     expect(modelLabel('codex', 'gpt-5.6-luna')).toBe('gpt-5.6-luna');

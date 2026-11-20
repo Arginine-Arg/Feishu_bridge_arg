@@ -101,17 +101,18 @@ describe('guided settings flow', () => {
     await saveRootConfig(createRootConfig('codex', profile), paths.configFile);
 
     if (provider === '__priority__') {
-      prompts.select.mockResolvedValueOnce('auto').mockResolvedValueOnce('__priority__')
+      prompts.select.mockResolvedValueOnce('default').mockResolvedValueOnce('auto').mockResolvedValueOnce('__priority__')
         .mockResolvedValueOnce('provider-b').mockResolvedValueOnce('model-b-v2')
         .mockResolvedValueOnce('auto');
       prompts.multiselect.mockResolvedValueOnce(['provider-a', 'provider-b'])
         .mockResolvedValueOnce(['model-b', 'model-b-v2']).mockResolvedValueOnce(['model-a']);
     } else if (provider === 'provider-b') {
-      prompts.select.mockResolvedValueOnce('auto').mockResolvedValueOnce('provider-b')
+      prompts.select.mockResolvedValueOnce('default').mockResolvedValueOnce('auto').mockResolvedValueOnce('provider-b')
         .mockResolvedValueOnce('model-b-v2').mockResolvedValueOnce(effort)
         .mockResolvedValueOnce('off').mockResolvedValueOnce('all');
       prompts.multiselect.mockResolvedValueOnce(['model-b', 'model-b-v2']);
     } else prompts.select
+      .mockResolvedValueOnce('default')
       .mockResolvedValueOnce('auto')
       .mockResolvedValueOnce(provider)
       .mockResolvedValueOnce(effort)

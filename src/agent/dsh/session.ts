@@ -120,9 +120,9 @@ export class DshStructuredSession implements StructuredSession {
         const active = await this.settings.loadModel(provider.id) ?? provider.model;
         if (!parts.length) {
           return [textEvent([
-            `cc-switch ${provider.name} · 下一轮模型 ${active}`,
+            `${provider.name} · 下一轮模型 ${active}`,
             ...provider.models.map(model => `- \`${model}\``),
-            '使用 /model <模型名>，或 /model default 恢复 cc-switch 默认。',
+            '使用 /model <模型名>，或 /model default 恢复账号默认。',
           ].join('\n'))];
         }
         if (parts.length !== 1 || (parts[0] !== 'default' && !provider.models.includes(parts[0]!))) {

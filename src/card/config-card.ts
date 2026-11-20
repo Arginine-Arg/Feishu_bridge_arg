@@ -8,6 +8,8 @@ export interface ConfigFormOpts {
   agentKind: AgentKind;
   /** Current model selection (a value from {@link supportedModels}). */
   model: string;
+  /** Dynamic catalog; falls back to the static list when omitted. */
+  modelOptions?: Array<{ value: string; label: string }>;
   messageReply: MessageReplyMode;
   showToolCalls: boolean;
   cotMessages: CotMessagesMode;
@@ -28,6 +30,10 @@ export interface ModelFormOpts {
   agentKind: AgentKind;
   model: string;
   reasoningEffort?: CodexReasoningEffort;
+  /** Dynamic catalog; falls back to the static list when omitted. */
+  options?: Array<{ value: string; label: string }>;
+  /** Non-fatal catalog problems shown above the picker. */
+  notice?: string;
 }
 
 const CODEX_REASONING_OPTIONS: Array<{
@@ -43,8 +49,12 @@ const CODEX_REASONING_OPTIONS: Array<{
   { value: 'ultra', label: 'Ultra' },
 ];
 
-function modelsWithCurrentSelection(agentKind: AgentKind, model: string) {
-  const models = supportedModels(agentKind);
+function modelsWithCurrentSelection(
+  agentKind: AgentKind,
+  model: string,
+  options?: Array<{ value: string; label: string }>,
+) {
+  const models = options ?? supportedModels(agentKind);
   if (models.some((item) => item.value === model)) return models;
   return [{ value: model, label: model }, ...models];
 }
@@ -156,7 +166,7 @@ export function configFormCard(opts: ConfigFormOpts): object {
                     tag: 'select_static',
                     name: 'model',
                     initial_option: opts.model,
-                    options: modelsWithCurrentSelection(opts.agentKind, opts.model).map((m) => ({
+                    options: modelsWithCurrentSelection(opts.agentKind, opts.model, opts.modelOptions).map((m) => ({
                       text: { tag: 'plain_text', content: m.label },
                       value: m.value,
                     })),
@@ -326,7 +336,9 @@ export function modelFormCard(opts: ModelFormOpts): object {
       tag: 'markdown',
       content:
         '⚙️ **模型设置**\n\n' +
-        '选择当前 profile 后续运行使用的模型。保存后从下一条消息开始生效。',
+        '选择当前 profile 后续运行使用的模型。保存后从下一条消息开始生效。' +
+        '\n\n来源：cc-switch 账号、Magpie 模型、Magpie 路由组。路由组会按 Magpie 的规则自动切换成员。' +
+        (opts.notice ? `\n\n⚠️ ${opts.notice}` : ''),
     },
     { tag: 'hr' },
     {
@@ -341,7 +353,7 @@ export function modelFormCard(opts: ModelFormOpts): object {
           tag: 'select_static',
           name: 'model',
           initial_option: opts.model,
-          options: modelsWithCurrentSelection(opts.agentKind, opts.model).map((m) => ({
+          options: modelsWithCurrentSelection(opts.agentKind, opts.model, opts.options).map((m) => ({
             text: { tag: 'plain_text', content: m.label },
             value: m.value,
           })),

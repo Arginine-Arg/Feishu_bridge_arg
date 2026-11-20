@@ -61,6 +61,7 @@ describe('profile schema', () => {
       mode: 'auto',
       routeMode: 'follow-cc-switch',
       ccSwitchProviderId: null,
+      magpieProviderId: null,
       providerOverrides: {},
       providerPriority: [],
       readRoute: null,

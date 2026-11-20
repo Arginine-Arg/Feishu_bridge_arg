@@ -22,6 +22,7 @@ import type {
 import { validSubagentModel } from '../config/profile-schema';
 import { spawnProcess } from '../platform/spawn';
 import { writeFileAtomic } from '../platform/atomic-write';
+import { discoverMagpieModels, resolveMagpieProvider } from './magpie-provider';
 import { discoverProviderModels } from './provider-models';
 
 const DEFAULT_CODEX_ENV_KEY = 'OPENAI_API_KEY';
@@ -58,7 +59,7 @@ export interface CcSwitchProviderRecord extends CcSwitchProviderMetadata {
 export interface CcSwitchProviderSummary {
   id: string;
   name: string;
-  source: CcSwitchProviderSource;
+  source: CcSwitchProviderSource | 'magpie';
   codexProviderId: string;
   model: string;
   /** Locally declared models only; not a claim of API availability. */
@@ -112,6 +113,8 @@ export interface CcSwitchRuntimePolicy {
   webSearch: SubagentWebSearchMode;
   sideReasoningEffort?: SubagentReasoningEffort;
   providerOverrides?: Record<string, SubagentProviderOverride>;
+  /** Where provider ids and credentials come from. Defaults to cc-switch. */
+  source?: 'cc-switch' | 'magpie';
 }
 
 export class CcSwitchProviderError extends Error {
@@ -129,7 +132,8 @@ export class CcSwitchProviderError extends Error {
       | 'credential-missing'
       | 'oauth-broker-unsupported'
       | 'endpoint-invalid'
-      | 'workspace-invalid',
+      | 'workspace-invalid'
+      | 'magpie-unavailable',
     message: string,
     readonly details?: Record<string, unknown>,
   ) {
@@ -359,18 +363,35 @@ export async function resolveCurrentCcSwitchCodexProvider(input: {
   };
 }
 
-export async function materializeCcSwitchBrokerRuntime(input: {
+export interface ProviderBrokerRuntimeInput {
   env?: NodeJS.ProcessEnv;
   codexHome?: string;
   parentProviderId?: string;
   /** Optional fixed provider selected for subagents. */
   providerId?: string;
+  /** Provider manager that owns the selected provider. Defaults to cc-switch. */
+  source?: 'cc-switch' | 'magpie';
+  /** Test seam for the Magpie gateway. */
+  fetch?: typeof fetch;
   cwd: string;
   codexBin: string;
   dsh?: DshConfig;
   stateDir: string;
   runtimePolicy?: CcSwitchRuntimePolicy;
-}): Promise<CcSwitchBrokerRuntime> {
+}
+
+export async function materializeCcSwitchBrokerRuntime(input: ProviderBrokerRuntimeInput): Promise<CcSwitchBrokerRuntime> {
+  const source = input.source ?? input.runtimePolicy?.source ?? 'cc-switch';
+  const resolveProvider = (providerId?: string) => source === 'magpie'
+    ? resolveMagpieProvider({
+        ...(input.env ? { env: input.env } : {}),
+        ...(providerId ? { providerId } : {}),
+        ...(input.fetch ? { fetch: input.fetch } : {}),
+      })
+    : resolveCurrentCcSwitchCodexProvider({ ...input, ...(providerId ? { providerId } : {}) });
+  const discoverModels = async (provider: ResolvedCcSwitchProvider) => source === 'magpie'
+    ? { models: await discoverMagpieModels(provider.summary.id, input.env, { ...(input.fetch ? { fetch: input.fetch } : {}) }) }
+    : discoverProviderModels(provider, { env: input.env });
   const priority = input.runtimePolicy?.providerPriority;
   if (priority?.length) {
     const signal = AbortSignal.timeout(30_000);
@@ -378,8 +399,8 @@ export async function materializeCcSwitchBrokerRuntime(input: {
     for (const target of priority) {
       if (signal.aborted) break;
       try {
-        const provider = await resolveCurrentCcSwitchCodexProvider({ ...input, providerId: target.providerId });
-        const catalog = await discoverProviderModels(provider, { env: input.env, signal });
+        const provider = await resolveProvider(target.providerId);
+        const catalog = await discoverModels(provider);
         for (const model of target.models) {
           if (!catalog.models.includes(model)) { unavailable.push(`${target.providerId}/${model}: 未列入模型目录`); continue; }
           const key = createHash('sha256').update(`${provider.summary.configFingerprint}:${model}${input.dsh ? ':dsh' : ''}`).digest('hex');
@@ -389,6 +410,7 @@ export async function materializeCcSwitchBrokerRuntime(input: {
             if (typeof health.retryAt === 'number' && health.retryAt > Date.now()) { unavailable.push(`${target.providerId}/${model}: 冷却中`); continue; }
           } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
           const generated = await materializeCcSwitchBrokerRuntime({ ...input, providerId: target.providerId,
+            source,
             runtimePolicy: { ...input.runtimePolicy!, providerPriority: [], providerOverrides: {
               ...input.runtimePolicy?.providerOverrides,
               [target.providerId]: { model, reasoningEffort: input.runtimePolicy?.providerOverrides?.[target.providerId]?.reasoningEffort ?? 'inherit' },
@@ -403,8 +425,17 @@ export async function materializeCcSwitchBrokerRuntime(input: {
     }
     throw new CcSwitchProviderError('config-invalid', `所选 subagent provider/model 均不可用：${unavailable.join('；') || '探测超时'}`);
   }
-  const resolved = await resolveCurrentCcSwitchCodexProvider(input);
+  const resolved = await resolveProvider(input.providerId);
+  return materializeResolvedBrokerRuntime(input, resolved);
+}
+
+/** Write only routing metadata. The credential map stays in the child environment. */
+export async function materializeResolvedBrokerRuntime(
+  input: ProviderBrokerRuntimeInput,
+  resolved: Pick<ResolvedCcSwitchProvider, 'summary' | 'credentials'>,
+): Promise<CcSwitchBrokerRuntime> {
   const summary = resolved.summary;
+  const origin = summary.source === 'magpie' ? 'magpie' : 'cc-switch';
   if (summary.credential.status === 'oauth-only') {
     throw new CcSwitchProviderError(
       'oauth-broker-unsupported',
@@ -452,27 +483,29 @@ export async function materializeCcSwitchBrokerRuntime(input: {
     reasoningEffort: reasoningEffort ?? null,
     ...(input.dsh ? { dsh: { binary: input.dsh.binaryPath, api: dshApi } } : {}),
   })).digest('hex');
-  const routeId = ccSwitchRouteId(summary);
+  const routeId = origin === 'magpie'
+    ? `magpie-${policyFingerprint.slice(0, 24)}`
+    : ccSwitchRouteId(summary);
   const route: SubagentRoute = {
     id: routeId,
-    description: `${summary.name} cc-switch provider`,
+    description: `${summary.name} ${origin} provider`,
     provider: summary.codexProviderId,
     model,
     maxAccess: 'workspace-write',
     available: true,
     missingEnvironment: [],
     tags: [
-      'cc-switch',
+      origin,
       ...(summary.thirdParty ? ['third-party'] : ['official']),
       `web-search:${webSearch.effective}`,
     ],
     backend: input.dsh ? 'dsh_acp' : 'mixagents',
     default: true,
-    selectionReason: input.dsh ? 'DeepSeek Harness worker using cc-switch provider' : 'Current cc-switch Codex provider resolved automatically',
+    selectionReason: `Worker provider resolved from ${origin}`,
     revision: policyFingerprint.slice(0, 16),
     targetFingerprint: policyFingerprint,
     ccSwitchProviderId: summary.id,
-    source: 'cc-switch',
+    source: origin,
   };
   const workspaceRoot = await realpath(input.cwd).catch(() => resolve(input.cwd));
   if (
@@ -487,14 +520,14 @@ export async function materializeCcSwitchBrokerRuntime(input: {
   }
   const configPath = join(
     input.stateDir,
-    'cc-switch',
+    origin,
     `broker-${policyFingerprint.slice(0, 16)}-${runtimePolicy.role}.json`,
   );
-  await mkdir(resolve(input.stateDir, 'cc-switch'), { recursive: true, mode: 0o700 });
-  await chmod(resolve(input.stateDir, 'cc-switch'), 0o700).catch(() => {});
+  await mkdir(resolve(input.stateDir, origin), { recursive: true, mode: 0o700 });
+  await chmod(resolve(input.stateDir, origin), 0o700).catch(() => {});
   const dataDir = join(
     input.stateDir,
-    'cc-switch',
+    origin,
     'mixagents-data',
     policyFingerprint.slice(0, 16),
   );
@@ -509,6 +542,7 @@ export async function materializeCcSwitchBrokerRuntime(input: {
     providerConfigurable: !['openai', 'codex'].includes(
       summary.codexProviderId.toLowerCase(),
     ),
+    origin,
     webSearch: webSearch.effective,
     reasoningEffort,
   });
@@ -534,7 +568,7 @@ export async function materializeCcSwitchBrokerRuntime(input: {
         tags: route.tags,
         maxAccess: 'workspace-write',
         ccSwitchProviderId: summary.id,
-        source: 'cc-switch',
+        source: origin,
         ...(input.dsh ? { dsh: { binary: input.dsh.binaryPath, api: dshApi } } : {}),
         ...(reasoningEffort ? { reasoningEffort } : {}),
       },
@@ -572,10 +606,11 @@ async function materializeManagedCodexLauncher(input: {
   role: CcSwitchRuntimePolicy['role'];
   provider: string;
   providerConfigurable: boolean;
+  origin: 'cc-switch' | 'magpie';
   webSearch: 'enabled' | 'disabled';
   reasoningEffort?: string;
 }): Promise<string> {
-  const wrapperDir = join(input.stateDir, 'cc-switch', 'codex-wrapper');
+  const wrapperDir = join(input.stateDir, input.origin, 'codex-wrapper');
   await mkdir(wrapperDir, { recursive: true, mode: 0o700 });
   await chmod(wrapperDir, 0o700).catch(() => {});
   const overrides = [

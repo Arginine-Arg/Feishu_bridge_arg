@@ -37,6 +37,8 @@ import { defaultCodexHome } from '../../agent/codex/credentials';
 import { resolveCurrentCcSwitchCodexProvider } from '../../integrations/cc-switch-provider';
 import { discoverProviderModels } from '../../integrations/provider-models';
 import { resolveDshProvider } from '../../agent/dsh/provider';
+import { buildModelCatalog } from '../../agent/model-catalog';
+import { DEFAULT_MODEL, normalizeModelSelection } from '../../agent/models';
 import {
   processAlive,
   readHostRegistry,
@@ -124,15 +126,33 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
   const unavailableRoutes = diagnostics.readRoutes.filter(route => !route.available);
   let dsh = rawProfile.dsh;
   if (dsh) {
-    const providers = new Map(ccProviders.map(provider => [provider.id, provider.name]));
-    if (dsh.ccSwitchProviderId && !providers.has(dsh.ccSwitchProviderId)) {
-      providers.set(dsh.ccSwitchProviderId, dsh.ccSwitchProviderId);
+    const magpieAvailable = diagnostics.magpie.available && diagnostics.magpie.providers.length > 0;
+    let providerSource: 'cc-switch' | 'magpie' = magpieAvailable && dsh.providerSource === 'magpie'
+      ? 'magpie'
+      : 'cc-switch';
+    if (magpieAvailable && ccProviders.length > 0) {
+      const chosen = await p.select<'cc-switch' | 'magpie'>({
+        message: 'DeepSeek Harness 主会话账号从哪里读取？',
+        initialValue: providerSource,
+        options: [
+          { value: 'cc-switch', label: 'cc-switch', hint: '沿用现有 Codex 账号' },
+          { value: 'magpie', label: 'Magpie', hint: 'Key 留在 Magpie；可选模型或路由组' },
+        ],
+      });
+      assertPrompt(chosen);
+      providerSource = chosen;
     }
+    const providers = new Map(
+      (providerSource === 'magpie' ? diagnostics.magpie.providers : ccProviders)
+        .map(provider => [provider.id, provider.name]),
+    );
+    const fixed = providerSource === 'magpie' ? dsh.magpieProviderId : dsh.ccSwitchProviderId;
+    if (fixed && !providers.has(fixed)) providers.set(fixed, fixed);
     const provider = await p.select<string>({
-      message: 'DeepSeek Harness 主会话账号',
-      initialValue: dsh.ccSwitchProviderId ?? '',
+      message: `DeepSeek Harness 主会话账号（${providerSource === 'magpie' ? 'Magpie' : 'cc-switch'}）`,
+      initialValue: fixed ?? '',
       options: [
-        { value: '', label: '跟随 cc-switch 当前账号' },
+        { value: '', label: `跟随 ${providerSource === 'magpie' ? 'Magpie 当前模型' : 'cc-switch 当前账号'}` },
         ...[...providers].map(([value, label]) => ({ value, label })),
       ],
     });
@@ -148,7 +168,51 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
       ],
     });
     assertPrompt(api);
-    dsh = { ...dsh, ccSwitchProviderId: provider || undefined, api: api === 'auto' ? undefined : api };
+    dsh = {
+      ...dsh,
+      ...(providerSource === 'magpie'
+        ? { providerSource: 'magpie' as const, magpieProviderId: provider || undefined }
+        : { providerSource: undefined, ccSwitchProviderId: provider || undefined }),
+      api: api === 'auto' ? undefined : api,
+    };
+  }
+  let mainModel = normalizeModelSelection(
+    snapshot.agentKind,
+    rawProfile.preferences?.model,
+  );
+  if (snapshot.agentKind === 'codex') {
+    const catalog = await buildModelCatalog('codex', settingsEnv).catch(() => undefined);
+    if (catalog) {
+      const choice = await p.select<string>({
+        message: '主会话模型或 Magpie 路由组',
+        initialValue: catalog.options.some(option => option.value === mainModel)
+          ? mainModel
+          : DEFAULT_MODEL,
+        options: catalog.options.map(option => ({
+          value: option.value,
+          label: option.label,
+        })),
+      });
+      assertPrompt(choice);
+      mainModel = choice;
+      if (catalog.notices.length) p.note(catalog.notices.join('\n'), '模型目录提醒');
+      const magpieChoice = catalog.options.find(option => option.value === choice);
+      if (magpieChoice?.source === 'magpie' || magpieChoice?.source === 'magpie-router') {
+        const active = await resolveCodexActiveConfigIdentity(defaultCodexHome(settingsEnv));
+        if (active?.codexProviderId !== 'magpie') {
+          p.note(
+            `当前 Codex 的 model_provider=${active?.codexProviderId ?? '(unknown)'}，不是 magpie。` +
+              '请在 Magpie 里把 Codex 接到本机网关，否则这个模型会被发给当前 provider。',
+            'Magpie 未连接',
+          );
+        }
+      }
+      p.note(
+        '主会话和子代理可以选不同线路。Magpie 路由组由 Magpie 按自身规则切换成员；' +
+          'cc-switch 模型使用当前账号。保存后从下一条消息生效。',
+        '主会话模型',
+      );
+    }
   }
 
   p.note([
@@ -158,9 +222,13 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
     'cc-switch 中的 Codex 账号：',
     providerSummary,
     '',
+    diagnostics.magpie.available
+      ? `Magpie 网关：${diagnostics.magpie.gateway}，${diagnostics.magpie.providers.length} 个 provider 可用。`
+      : `Magpie：${diagnostics.magpie.error ?? '未检测到运行中的网关'}。`,
+    '',
     '这里只显示账号 ID、名称和运行状态；API Key 不会显示或写入配置。' +
-      '子代理派发时由 cc-switch resolver 在内存中读取，并只传给 MixAgents 子进程。' +
-      '主对话 provider 仍由 cc-switch 决定。',
+      '子代理派发时由所选来源在内存中读取，并只传给 MixAgents 子进程。' +
+      '主对话 provider 仍由 cc-switch 或 Magpie 决定。',
   ].join('\n'), '步骤 1 / 5 · 自动读取主对话配置');
 
   const selectedMode = await p.select<SubagentMode>({
@@ -198,6 +266,7 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
   let routeMode: SubagentRouteMode = currentSubagents.routeMode;
   let readRoute = currentSubagents.readRoute;
   let selectedCcProvider = currentSubagents.ccSwitchProviderId;
+  let selectedMagpieProvider = currentSubagents.magpieProviderId ?? null;
   const providerOverrides = { ...currentSubagents.providerOverrides };
   const previousPriority = currentSubagents.providerPriority ?? [];
   let unifiedRouting = false;
@@ -207,10 +276,151 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
   const routeMapState = await loadBrokerRouteMap(settingsEnv);
   if (routeMapState.error) throw new Error(routeMapState.error);
 
+  const magpieProviders = diagnostics.magpie.available ? diagnostics.magpie.providers : [];
+  const providerSources: Array<'cc-switch' | 'magpie'> = [
+    ...(ccProviders.length > 0 ? ['cc-switch' as const] : []),
+    ...(magpieProviders.length > 0 ? ['magpie' as const] : []),
+  ];
   if (
     (selectedMode === 'auto' || selectedMode === 'broker') &&
-    ccProviders.length > 0
+    providerSources.length > 0
   ) {
+    let providerSource: 'cc-switch' | 'magpie' =
+      currentSubagents.routeMode === 'follow-magpie' && magpieProviders.length > 0
+        ? 'magpie'
+        : 'cc-switch';
+    if (providerSources.length > 1) {
+      const chosen = await p.select<'cc-switch' | 'magpie'>({
+        message: '子代理账号从哪里读取？',
+        initialValue: providerSource,
+        options: [
+          {
+            value: 'cc-switch',
+            label: 'cc-switch（推荐）',
+            hint: '沿用现有 Codex 账号；切换 provider 后下一条子代理自动跟随',
+          },
+          {
+            value: 'magpie',
+            label: 'Magpie',
+            hint: `使用本机 Magpie 网关 ${diagnostics.magpie.gateway ?? ''}；Key 留在 Magpie，可跨供应商选模型`,
+          },
+        ],
+      });
+      assertPrompt(chosen);
+      providerSource = chosen;
+    }
+    if (providerSource === 'magpie') {
+      p.note([
+        'Bridge 只读取 Magpie 已开放的 provider 和模型，通过本机网关派发子代理；API Key 留在 Magpie。',
+        'Magpie 网关必须保持运行。模型目录可用不等于推理请求一定成功。',
+        '只读 /btw、可写 worker 和 reviewer 共用这里的顺序；可写开关只控制权限。',
+      ].join('\n'), '步骤 2 / 5 · 选择 Magpie 子代理线路');
+      const followCurrent = '__follow_current__';
+      const providerChoice = await p.select<string>({
+        message: '子代理用哪个 Magpie provider？',
+        initialValue: providerPriority.length && currentSubagents.routeMode === 'follow-magpie'
+          ? '__priority__'
+          : selectedMagpieProvider && magpieProviders.some(provider => provider.id === selectedMagpieProvider)
+            ? selectedMagpieProvider
+            : followCurrent,
+        options: [
+          { value: '__priority__', label: '多个 provider，按优先级备用', hint: '每个 provider 选择 1–2 个已开放模型' },
+          {
+            value: followCurrent,
+            label: '跟随当前 Magpie 模型（推荐）',
+            hint: '使用 Codex 当前选中的 Magpie 模型；以后在 Magpie 切换后自动更新',
+          },
+          ...magpieProviders.map(provider => ({
+            value: provider.id,
+            label: `${provider.name} (${provider.id})`,
+            hint: `${provider.models.length} 个已开放模型${provider.current ? '；当前' : ''}`,
+          })),
+        ],
+      });
+      assertPrompt(providerChoice);
+      if (providerChoice === '__priority__') {
+        const selected = await p.multiselect<string>({
+          message: '选择子代理可用的 Magpie provider',
+          options: magpieProviders.map(provider => ({ value: provider.id, label: provider.name })),
+          initialValues: providerPriority.map(target => target.providerId)
+            .filter(id => magpieProviders.some(provider => provider.id === id)),
+          required: true,
+        });
+        assertPrompt(selected);
+        if (selected.length > 16) throw new Error('最多选择 16 个 provider');
+        const remaining = [...selected];
+        const ordered: string[] = [];
+        while (remaining.length) {
+          const id = remaining.length === 1 ? remaining[0]! : await p.select<string>({
+            message: `第 ${ordered.length + 1} 优先使用哪个 provider？`,
+            options: remaining.map(value => ({
+              value,
+              label: magpieProviders.find(provider => provider.id === value)?.name ?? value,
+            })),
+          });
+          assertPrompt(id);
+          ordered.push(id);
+          remaining.splice(remaining.indexOf(id), 1);
+        }
+        providerPriority = [];
+        for (const providerId of ordered) {
+          const provider = magpieProviders.find(item => item.id === providerId)!;
+          const models = await selectProviderModels(
+            provider.name,
+            provider.models,
+            previousPriority.find(target => target.providerId === providerId)?.models
+              ?? [provider.models[0]!],
+          );
+          providerPriority.push({ providerId, models });
+        }
+        selectedMagpieProvider = providerPriority[0]?.providerId ?? null;
+        selectedModelSummary = providerPriority
+          .map((target, i) => `${i + 1}. ${target.providerId}: ${target.models.join(' → ')}`)
+          .join('\n');
+        p.note('新任务按顺序选择可用模型；明确失败的线路冷却两分钟。已有 worker 不自动复制任务到备用线路。', '优先级路由');
+      } else {
+        providerPriority = [];
+        selectedMagpieProvider = providerChoice === followCurrent ? null : providerChoice;
+        const effective = selectedMagpieProvider
+          ? magpieProviders.find(provider => provider.id === selectedMagpieProvider)
+          : magpieProviders.find(provider => provider.current) ?? magpieProviders[0];
+        if (providerChoice === followCurrent) {
+          selectedModelSummary = '跟随当前 Magpie 模型：每个新任务读取 Codex 当前选中的模型';
+        } else if (effective) {
+          const ordered = await selectProviderModels(
+            effective.name,
+            effective.models,
+            previousPriority.find(target => target.providerId === effective.id)?.models
+              ?? [effective.models[0]!],
+          );
+          providerPriority = [{ providerId: effective.id, models: ordered }];
+          selectedModelSummary = `${effective.id}: ${ordered.join(' → ')}`;
+        }
+        const effort = await p.select<SubagentConfig['sideReasoningEffort']>({
+          message: '统一候选线路的推理强度',
+          initialValue: providerOverrides[effective?.id ?? '']?.reasoningEffort ?? 'inherit',
+          options: [
+            { value: 'inherit', label: '跟随模型默认（推荐）' },
+            { value: 'low', label: 'low · 低' },
+            { value: 'medium', label: 'medium · 中' },
+            { value: 'high', label: 'high · 高' },
+            { value: 'xhigh', label: 'xhigh · 很高' },
+            { value: 'max', label: 'max · 最高（需模型支持）' },
+          ],
+        });
+        assertPrompt(effort);
+        if (effective) providerOverrides[effective.id] = { model: null, reasoningEffort: effort };
+      }
+      routeMode = 'follow-magpie';
+      selectedCcProvider = null;
+      selectedReadRoute = null;
+      readRoute = null;
+      unifiedRouting = true;
+      for (const [providerId, preference] of Object.entries(providerOverrides)) {
+        providerOverrides[providerId] = { ...preference, model: null };
+      }
+    } else {
+      selectedMagpieProvider = null;
     p.note([
       'Bridge 会自动读取这里选中的 cc-switch Codex provider，并生成 Broker route、模型和凭据。',
       '默认“跟随当前 provider”：以后在 cc-switch 切换 provider 后，下一条子代理任务自动使用新 provider，无需改 Key 或手写 route。',
@@ -353,6 +563,7 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
     for (const [providerId, preference] of Object.entries(providerOverrides)) {
       providerOverrides[providerId] = { ...preference, model: null };
     }
+    }
   }
 
   const currentCredential = currentMcpCredentials(rawProfile);
@@ -421,7 +632,9 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
       : '';
   } else if (selectedMode === 'auto' || selectedMode === 'broker') {
     p.note([
-      'Bridge 会从当前 cc-switch provider 自动读取模型、Base URL 和 Key 字段，并仅把它们传给 MixAgents 子进程。',
+      routeMode === 'follow-magpie'
+        ? 'Bridge 只把本机 Magpie 网关地址和模型 ID 传给 MixAgents 子进程；API Key 留在 Magpie。'
+        : 'Bridge 会从当前 cc-switch provider 自动读取模型、Base URL 和 Key 字段，并仅把它们传给 MixAgents 子进程。',
       'Key 不会写入 profile、broker-routes.json、worker mapping、日志或 doctor JSON；你不需要手工设置 MIXAGENTS_BROKER_CREDENTIALS_JSON。',
     ].join('\n'), '步骤 3 / 5 · 自动凭据');
     credentialMode = 'inherit-env';
@@ -660,16 +873,22 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
         ? '只用本地 Codex fork'
         : '关闭子代理';
   const routeText = selectedMode === 'auto' || selectedMode === 'broker'
-    ? routeMode === 'follow-cc-switch'
+    ? routeMode === 'follow-cc-switch' || routeMode === 'follow-magpie'
       ? providerPriority.length
         ? `按已选的 ${providerPriority.length} 个 provider 和模型优先级自动选择`
-        : selectedCcProvider
-        ? `固定 provider=${selectedCcProvider}，route 自动生成`
-        : '跟随 cc-switch 当前 provider，route 自动生成'
+        : routeMode === 'follow-magpie'
+          ? selectedMagpieProvider
+            ? `固定 Magpie provider=${selectedMagpieProvider}，route 自动生成`
+            : '跟随当前 Magpie 模型，route 自动生成'
+          : selectedCcProvider
+            ? `固定 provider=${selectedCcProvider}，route 自动生成`
+            : '跟随 cc-switch 当前 provider，route 自动生成'
       : `固定线路 ${selectedReadRoute ?? readRoute ?? '(none)'}`
     : '(不适用)';
-  const credentialText = routeMode === 'follow-cc-switch'
-    ? 'cc-switch 自动解析 provider Key（不显示、不写入配置）'
+  const credentialText = routeMode === 'follow-cc-switch' || routeMode === 'follow-magpie'
+    ? routeMode === 'follow-magpie'
+      ? 'Magpie 网关持有 Key（不显示、不写入配置）'
+      : 'cc-switch 自动解析 provider Key（不显示、不写入配置）'
     : credentialMode === 'inherit-env'
       ? `启动环境变量 ${credentialEnvKeys || '(未配置)'}`
       : 'MixAgents managed（当前版本未验证）';
@@ -767,6 +986,9 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
       : undefined;
     root.profiles[snapshot.profile] = {
       ...profile,
+      ...(snapshot.agentKind === 'codex'
+        ? { preferences: { ...profile.preferences, model: mainModel } }
+        : {}),
       ...(profile.codex ? { codex: { ...profile.codex, providerRecovery } } : {}),
       ...(dsh ? { dsh } : {}),
       subagents: {
@@ -778,6 +1000,9 @@ export async function runSettings(options: SettingsOptions = {}): Promise<void> 
         ccSwitchProviderId: routeMode === 'follow-cc-switch'
           ? selectedCcProvider
           : currentSubagents.ccSwitchProviderId ?? null,
+        magpieProviderId: routeMode === 'follow-magpie'
+          ? selectedMagpieProvider
+          : currentSubagents.magpieProviderId ?? null,
         providerOverrides,
         providerPriority,
         readRoute,

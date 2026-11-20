@@ -1,5 +1,6 @@
 import type { DshConfig } from '../../config/profile-schema';
 import { resolveCurrentCcSwitchCodexProvider, resolveDshWireApi } from '../../integrations/cc-switch-provider';
+import { discoverMagpieModels, resolveMagpieProvider } from '../../integrations/magpie-provider';
 import { discoverProviderModels } from '../../integrations/provider-models';
 
 const ROUTE = 'arg-bridge-cc-switch';
@@ -10,18 +11,23 @@ export async function resolveDshProvider(
   env: NodeJS.ProcessEnv,
   refreshModels = false,
 ) {
-  const provider = await resolveCurrentCcSwitchCodexProvider({
-    env,
-    providerId: config.ccSwitchProviderId,
-  });
+  const provider = config.providerSource === 'magpie'
+    ? await resolveMagpieProvider({
+        env,
+        ...(config.magpieProviderId ? { providerId: config.magpieProviderId } : {}),
+      })
+    : await resolveCurrentCcSwitchCodexProvider({
+        env,
+        providerId: config.ccSwitchProviderId,
+      });
   const { summary, credentials } = provider;
   const key = summary.envKey ? credentials[summary.envKey] : undefined;
   if (!key || summary.credential.status !== 'present') {
-    throw new Error(`cc-switch provider ${summary.id} 需要为 DeepSeek Harness 配置 API Key。`);
+    throw new Error(`provider ${summary.id} 需要为 DeepSeek Harness 配置 API Key。`);
   }
   const endpoint = new URL(summary.baseUrl);
   if (!['http:', 'https:'].includes(endpoint.protocol) || endpoint.username || endpoint.password || endpoint.search || endpoint.hash) {
-    throw new Error('cc-switch provider 的 API 地址格式无效');
+    throw new Error('provider 的 API 地址格式无效');
   }
   const api = resolveDshWireApi(summary, config.api);
   if (!api) throw new Error(`未知的 API 协议 ${summary.wireApi}，请为 dsh.api 指定协议。`);
@@ -29,12 +35,16 @@ export async function resolveDshProvider(
   const headerRefs: Record<string, string> = {};
   for (const [name, variable] of Object.entries(summary.envHttpHeaders)) {
     const value = credentials[variable] ?? env[variable];
-    if (!value) throw new Error(`cc-switch provider ${summary.id} 缺少请求头 ${name} 的配置。`);
+    if (!value) throw new Error(`provider ${summary.id} 缺少请求头 ${name} 的配置。`);
     const ref = `ARG_BRIDGE_DSH_HEADER_${Object.keys(headerRefs).length}`;
     headerRefs[name] = ref;
     headerEnv[ref] = value;
   }
-  const catalogue = refreshModels ? await discoverProviderModels(provider, { env }).catch(() => undefined) : undefined;
+  const catalogue = refreshModels
+    ? config.providerSource === 'magpie'
+      ? { models: await discoverMagpieModels(summary.id, env).catch(() => []) }
+      : await discoverProviderModels(provider, { env }).catch(() => undefined)
+    : undefined;
   return {
     id: summary.id,
     name: summary.name,

@@ -946,16 +946,20 @@ export class StructuredAdapter implements AgentAdapter {
   ): Promise<MixAgentsRuntimeOverrides | undefined> {
     if (
       !config.enabled ||
-      config.routeMode !== 'follow-cc-switch' ||
+      (config.routeMode !== 'follow-cc-switch' && config.routeMode !== 'follow-magpie') ||
       (config.mode !== 'auto' && config.mode !== 'broker')
     ) return undefined;
+    const source = config.routeMode === 'follow-magpie' ? 'magpie' : 'cc-switch';
     const generated = await materializeCcSwitchBrokerRuntime({
       env: this.options.env ?? process.env,
       ...(this.options.codexHome ? { codexHome: this.options.codexHome } : {}),
       ...(this.runtimeIdentity?.ccSwitchProviderId
         ? { parentProviderId: this.runtimeIdentity.ccSwitchProviderId }
         : {}),
-      ...(config.ccSwitchProviderId ? { providerId: config.ccSwitchProviderId } : {}),
+      ...(source === 'magpie'
+        ? (config.magpieProviderId ? { providerId: config.magpieProviderId } : {})
+        : (config.ccSwitchProviderId ? { providerId: config.ccSwitchProviderId } : {})),
+      source,
       cwd,
       codexBin: this.id === 'dsh' ? (this.options.env ?? process.env).CODEX_BINARY?.trim() || 'codex' : this.options.binary,
       ...(this.id === 'dsh' ? { dsh: (await this.reloadProfileConfig())?.dsh ?? this.options.dsh ?? { binaryPath: this.options.binary } } : {}),
@@ -966,6 +970,7 @@ export class StructuredAdapter implements AgentAdapter {
         sideReasoningEffort: config.sideReasoningEffort,
         providerOverrides: config.providerOverrides,
         providerPriority: config.providerPriority,
+        source,
       },
     });
     return {

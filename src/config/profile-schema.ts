@@ -19,8 +19,12 @@ export type AgentKind = 'claude' | 'codex' | 'dsh';
 export interface DshConfig {
   binaryPath: string;
   home?: string;
-  /** Omit to track the current provider in cc-switch's Codex catalog. */
+  /** Provider manager for the main session. Defaults to cc-switch. */
+  providerSource?: 'cc-switch' | 'magpie';
+  /** Omit to track the current provider in the selected provider manager. */
   ccSwitchProviderId?: string;
+  /** Fixed Magpie provider id when providerSource=magpie. */
+  magpieProviderId?: string;
   api?: 'openai-responses' | 'openai-completions' | 'anthropic-messages';
 }
 export type SandboxMode = CodexSandboxMode;
@@ -82,7 +86,7 @@ export interface NetworkConfig {
 }
 
 export type SubagentMode = 'off' | 'auto' | 'broker' | 'fork';
-export type SubagentRouteMode = 'follow-cc-switch' | 'manual';
+export type SubagentRouteMode = 'follow-cc-switch' | 'follow-magpie' | 'manual';
 export type SubagentAccess = 'read-only' | 'workspace-write';
 export type SubagentWebSearchMode = 'auto' | 'native' | 'disabled';
 export type SubagentReasoningEffort =
@@ -124,17 +128,16 @@ export interface SubagentMixAgentsConfig {
 }
 
 export interface SubagentConfig {
-  /** Ordered provider/model candidates for new workers. Credentials stay in cc-switch. */
+  /** Ordered provider/model candidates for new workers. Credentials stay in the selected provider manager. */
   providerPriority?: Array<{ providerId: string; models: string[] }>;
   enabled: boolean;
   mode: SubagentMode;
   routeMode: SubagentRouteMode;
-  /**
-   * Optional fixed cc-switch provider ID for subagents. `null` follows the
-   * current cc-switch provider on every dispatch.
-   */
+  /** Optional fixed cc-switch provider ID for cc-switch routing. */
   ccSwitchProviderId?: string | null;
-  /** Model/effort preferences keyed by cc-switch provider ID, never shared across providers. */
+  /** Optional fixed Magpie provider ID for magpie routing. */
+  magpieProviderId?: string | null;
+  /** Model/effort preferences keyed by source/provider ID, never shared across providers. */
   providerOverrides?: Record<string, SubagentProviderOverride>;
   readRoute: string | null;
   writeRoute: string | null;
@@ -363,10 +366,14 @@ function normalizeDsh(input?: Partial<DshConfig>): DshConfig {
   }
   const home = typeof input?.home === 'string' ? input.home.trim() : '';
   const provider = typeof input?.ccSwitchProviderId === 'string' ? input.ccSwitchProviderId.trim() : '';
+  const magpieProvider = typeof input?.magpieProviderId === 'string' ? input.magpieProviderId.trim() : '';
+  const providerSource = input?.providerSource === 'magpie' ? 'magpie' : 'cc-switch';
   return {
     binaryPath: (typeof input?.binaryPath === 'string' && input.binaryPath.trim()) || 'dsh',
     ...(home ? { home } : {}),
+    ...(providerSource === 'magpie' ? { providerSource } : {}),
     ...(provider ? { ccSwitchProviderId: provider } : {}),
+    ...(magpieProvider ? { magpieProviderId: magpieProvider } : {}),
     ...(api ? { api } : {}),
   };
 }
@@ -484,6 +491,7 @@ export const DEFAULT_SUBAGENT_CONFIG: SubagentConfig = {
   mode: 'auto',
   routeMode: 'follow-cc-switch',
   ccSwitchProviderId: null,
+  magpieProviderId: null,
   providerOverrides: {},
   providerPriority: [],
   readRoute: null,
@@ -527,7 +535,9 @@ function normalizeSubagents(input: unknown): SubagentConfig {
       ? raw.mode
       : 'auto';
   const routeMode: SubagentRouteMode =
-    raw.routeMode === 'manual' ? 'manual' : 'follow-cc-switch';
+    raw.routeMode === 'manual' || raw.routeMode === 'follow-magpie'
+      ? raw.routeMode
+      : 'follow-cc-switch';
   const mixagents = mixagentsRaw
     ? {
         ...(nonEmptyString(mixagentsRaw.mcpCommand)
@@ -561,6 +571,7 @@ function normalizeSubagents(input: unknown): SubagentConfig {
     mode,
     routeMode,
     ccSwitchProviderId: ccSwitchProviderId(raw.ccSwitchProviderId),
+    magpieProviderId: ccSwitchProviderId(raw.magpieProviderId),
     providerOverrides: normalizeProviderOverrides(raw.providerOverrides),
     providerPriority: normalizeProviderPriority(raw.providerPriority),
     readRoute: nonEmptyString(raw.readRoute) ?? null,
@@ -650,7 +661,9 @@ function normalizeRsi(input: unknown): RsiConfig {
   return {
     mode: raw.mode === 'off' ? 'off' : 'auto',
     projectRoot: nonEmptyString(raw.projectRoot) ?? null,
-    reviewerRouteMode: raw.reviewerRouteMode === 'manual' ? 'manual' : 'follow-cc-switch',
+    reviewerRouteMode: raw.reviewerRouteMode === 'manual' || raw.reviewerRouteMode === 'follow-magpie'
+      ? raw.reviewerRouteMode
+      : 'follow-cc-switch',
     reviewerRoute: nonEmptyString(raw.reviewerRoute) ?? null,
     maxRepairRounds: boundedInteger(raw.maxRepairRounds, 0, 10, 2),
     repairTimeoutMs: boundedInteger(raw.repairTimeoutMs, 30_000, 60 * 60_000, 10 * 60_000),

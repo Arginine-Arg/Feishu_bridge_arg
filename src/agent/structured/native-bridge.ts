@@ -489,33 +489,23 @@ async function createNativeBridgeSessionInternal(
 
     if (!markerThreadId && adoptThread) {
       const sourceThreadId = adoptionSourceThread ?? adoptThread;
-      if (sourceThreadId !== adoptThread && !sourceHost) {
-        throw new Error(
-          `最新 provider lineage head ${sourceThreadId} 的 owner App Server 当前不可用；` +
-            '为避免丢失最近上下文，已拒绝复用更早的 provider branch。请先恢复该 thread 的 owner 后重试。',
-        );
-      }
-      const old = await readIdleThread(
-        sourceHost?.rpc ?? rpc,
+      const codexHome = env.CODEX_HOME ?? defaultCodexHome(env);
+      const { old, snapshot: sourceSnapshot } = await readAdoptionSourceHistory({
+        profileDir: input.profileDir,
+        codexHome,
         sourceThreadId,
-        {
-          codexHome: env.CODEX_HOME ?? defaultCodexHome(env),
-          ...(!sourceHost ? {
-            reconnect: async (): Promise<RpcClient> => {
-              const reconnected = await reconnectCodexRpc(
-                endpoint,
-                env.CODEX_HOME ?? defaultCodexHome(env),
-              );
-              rpc = reconnected;
-              host.rpc = reconnected;
-              return reconnected;
-            },
-          } : {}),
+        ...(sourceHost ? { sourceHost } : {}),
+        rpc,
+        reconnect: async (): Promise<RpcClient> => {
+          const reconnected = await reconnectCodexRpc(endpoint, codexHome);
+          rpc = reconnected;
+          host.rpc = reconnected;
+          return reconnected;
         },
-      );
+        lineageHead: sourceThreadId !== adoptThread,
+      });
       sourceHost?.rpc.close();
       sourceHost = undefined;
-      const sourceSnapshot = await readThreadHistorySnapshot(input.profileDir, sourceThreadId);
       const extracted = extractAssistantHistory(old, {
         excludeTurnIds: new Set(sourceSnapshot?.turnIds ?? []),
       });
@@ -578,20 +568,24 @@ async function createNativeBridgeSessionInternal(
       const current = await getConfig();
       if (
         !current.enabled ||
-        current.routeMode !== 'follow-cc-switch' ||
+        (current.routeMode !== 'follow-cc-switch' && current.routeMode !== 'follow-magpie') ||
         (current.mode !== 'auto' && current.mode !== 'broker')
       ) return undefined;
+      const source = current.routeMode === 'follow-magpie' ? 'magpie' : 'cc-switch';
       const generated = await materializeCcSwitchBrokerRuntime({
         env,
         ...(input.codexHome ? { codexHome: input.codexHome } : {}),
         ...(prepared.runtimeIdentity?.ccSwitchProviderId
           ? { parentProviderId: prepared.runtimeIdentity.ccSwitchProviderId }
           : {}),
-        ...(current.ccSwitchProviderId ? { providerId: current.ccSwitchProviderId } : {}),
+        ...(source === 'magpie'
+          ? (current.magpieProviderId ? { providerId: current.magpieProviderId } : {})
+          : (current.ccSwitchProviderId ? { providerId: current.ccSwitchProviderId } : {})),
+        source,
         cwd: sessionCwd,
         codexBin: input.binary,
         stateDir: join(input.profileDir, 'structured'),
-        runtimePolicy: { role: 'worker', webSearch: current.webSearch, sideReasoningEffort: current.sideReasoningEffort, providerOverrides: current.providerOverrides, providerPriority: current.providerPriority },
+        runtimePolicy: { role: 'worker', webSearch: current.webSearch, sideReasoningEffort: current.sideReasoningEffort, providerOverrides: current.providerOverrides, providerPriority: current.providerPriority, source },
       });
       return {
         brokerConfigPath: generated.brokerConfigPath,
@@ -684,7 +678,7 @@ export interface HandoffHistory {
   sourceChars: number;
 }
 
-interface ThreadHistorySnapshot {
+export interface ThreadHistorySnapshot {
   version: 1;
   threadId: string;
   updatedAt: number;
@@ -1145,6 +1139,61 @@ export async function readThreadHistoryFromRollout(
       turns: [...grouped.entries()].map(([id, items]) => ({ id, items })),
     },
   };
+}
+
+export interface AdoptionSourceHistory {
+  old: Wire;
+  snapshot?: ThreadHistorySnapshot;
+}
+
+/**
+ * Read the history that a new provider generation inherits.
+ *
+ * A live owner is preferred because it can answer `thread/read` with real turn
+ * ids. When the owner is already gone, the local rollout is the authoritative
+ * record: it is complete, already contains the inherited history, and does not
+ * depend on a process that may have exited. Only when neither is available do
+ * we fall back to the new host and refuse rather than silently rewinding to an
+ * older provider branch.
+ */
+export async function readAdoptionSourceHistory(input: {
+  profileDir: string;
+  codexHome?: string;
+  sourceThreadId: string;
+  sourceHost?: Pick<LoadedThreadHost, 'rpc'>;
+  rpc: RpcClient;
+  reconnect: () => Promise<RpcClient>;
+  lineageHead: boolean;
+}): Promise<AdoptionSourceHistory> {
+  if (input.sourceHost) {
+    return {
+      old: await readIdleThread(input.sourceHost.rpc, input.sourceThreadId, {
+        codexHome: input.codexHome,
+      }),
+      snapshot: await readThreadHistorySnapshot(input.profileDir, input.sourceThreadId),
+    };
+  }
+  const local = input.codexHome
+    ? await readThreadHistoryFromRollout(input.codexHome, input.sourceThreadId)
+    : undefined;
+  if (local) return { old: local };
+  try {
+    return {
+      old: await readIdleThread(input.rpc, input.sourceThreadId, {
+        codexHome: input.codexHome,
+        reconnect: input.reconnect,
+      }),
+      snapshot: await readThreadHistorySnapshot(input.profileDir, input.sourceThreadId),
+    };
+  } catch (error) {
+    if (!input.lineageHead) throw error;
+    throw new Error(
+      `最新 provider lineage head ${input.sourceThreadId} 的 owner App Server 当前不可用，` +
+        '且本地 rollout 不可读；为避免丢失最近上下文，已拒绝复用更早的 provider branch。' +
+        '请先恢复该 thread 的 owner 后重试。' +
+        `（${error instanceof Error ? error.message : String(error)}）`,
+    );
+  }
 }
 
 async function reconnectCodexRpc(

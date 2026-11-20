@@ -44,7 +44,8 @@ const CODEX_MODELS: ModelOption[] = [
   { value: 'o3', label: 'o3' },
 ];
 
-const CODEX_MODEL_ID = /^[a-z0-9][a-z0-9._-]{0,127}$/iu;
+/** Plain ids and `provider/model` / `group/<router>` slugs from Magpie. */
+const CODEX_MODEL_ID = /^[a-z0-9][a-z0-9._-]{0,127}(?:\/[a-z0-9][a-z0-9._-]{0,127})?$/iu;
 
 export function isCodexModelId(value: string | undefined): value is string {
   return Boolean(

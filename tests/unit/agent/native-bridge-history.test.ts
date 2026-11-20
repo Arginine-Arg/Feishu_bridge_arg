@@ -6,6 +6,7 @@ import {
   extractAssistantHistory,
   findAdoptedThreadMarker,
   findLatestAdoptedThreadMarker,
+  readAdoptionSourceHistory,
   readIdleThread,
   readThreadHistoryFromRollout,
   resolveFollowCurrentProviderSelection,
@@ -167,6 +168,81 @@ describe('Bridge managed native history migration', () => {
     expect(serialized).not.toContain('TOOL_OUTPUT_MUST_NOT_BE_COPIED');
     expect(serialized).not.toContain('DEVELOPER_MESSAGE_MUST_NOT_BE_COPIED');
   }, 20_000);
+
+  it('prefers the complete rollout when the lineage head owner is already gone', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'native-adopt-head-rollout-'));
+    temporary.push(root);
+    const threadId = '01a1f9ad-b17c-7fc3-a491-2cb9ce037c09';
+    const directory = join(root, 'sessions', '2026', '11', '20');
+    await mkdir(directory, { recursive: true });
+    await writeFile(
+      join(directory, `rollout-2026-11-20T23-57-52-${threadId}.jsonl`),
+      [
+        {
+          type: 'response_item',
+          ordinal: 1,
+          payload: {
+            type: 'message',
+            id: 'inherited-user',
+            role: 'user',
+            content: [{ type: 'input_text', text: 'older inherited context' }],
+            internal_chat_message_metadata_passthrough: { turn_id: 'turn-1' },
+          },
+        },
+        {
+          type: 'response_item',
+          ordinal: 2,
+          payload: {
+            type: 'message',
+            id: 'newest-assistant',
+            role: 'assistant',
+            content: [{ type: 'output_text', text: 'newest answer before the abort' }],
+            internal_chat_message_metadata_passthrough: { turn_id: 'turn-2' },
+          },
+        },
+      ].map(record => JSON.stringify(record)).join('\n') + '\n',
+      'utf8',
+    );
+
+    const request = vi.fn(async () => {
+      throw new Error('RPC should not be used when the rollout is readable');
+    });
+    const rpc = { request } as unknown as RpcClient;
+    const result = await readAdoptionSourceHistory({
+      profileDir: join(root, 'profile'),
+      codexHome: root,
+      sourceThreadId: threadId,
+      rpc,
+      reconnect: async () => rpc,
+      lineageHead: true,
+    });
+    const serialized = JSON.stringify(extractAssistantHistory(result.old));
+
+    expect(serialized).toContain('older inherited context');
+    expect(serialized).toContain('newest answer before the abort');
+    expect(result.snapshot).toBeUndefined();
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it('refuses a lineage head when neither its owner nor its rollout is available', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'native-adopt-head-missing-'));
+    temporary.push(root);
+    const threadId = '01a1f9ad-b17c-7fc3-a491-2cb9ce037c09';
+    const rpc = {
+      request: vi.fn(async () => {
+        throw new Error('provider mismatch');
+      }),
+    } as unknown as RpcClient;
+
+    await expect(readAdoptionSourceHistory({
+      profileDir: join(root, 'profile'),
+      codexHome: root,
+      sourceThreadId: threadId,
+      rpc,
+      reconnect: async () => rpc,
+      lineageHead: true,
+    })).rejects.toThrow(/owner App Server 当前不可用.*provider mismatch/s);
+  });
 
   it('migrates bounded user and assistant text without tool or encrypted items', () => {
     const history = extractAssistantHistory({

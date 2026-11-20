@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.24.0
+
+- Adds Magpie as a subagent provider source. Settings can choose cc-switch or Magpie, and Magpie keys stay in Magpie.
+- Lists cc-switch models, Magpie models and Magpie routing groups together in `/model`, `/config` and `arg-bridge settings`.
+- Lets the main session and subagents select a Magpie routing group (`group/<name>`); Magpie switches among its members by its own rules.
+- Adds a main-session model picker to settings and warns when a Magpie model is chosen while Codex is not connected to the Magpie gateway.
+- Keeps read-only `/btw`, writable workers and the reviewer on the same selected provider/model order.
+- Adds Magpie diagnostics to `settings --json` and `doctor`, including gateway and provider state.
+
 ## 1.23.4
 
 - Forwards completed answers from a bound Codex tmux session to its Feishu destination. Feishu-originated turns are delivered through their existing reply stream.

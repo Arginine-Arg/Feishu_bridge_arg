@@ -4,7 +4,8 @@ import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, relative, sep } from 'node:path';
 import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
 import { profileCapability } from '../agent/capability';
-import { DEFAULT_MODEL, normalizeModelSelection, supportedModels } from '../agent/models';
+import { DEFAULT_MODEL, isCodexModelId, normalizeModelSelection, supportedModels } from '../agent/models';
+import { buildModelCatalog } from '../agent/model-catalog';
 import type { AgentAdapter } from '../agent/types';
 import type { LiveSessionDiagnostics } from '../agent/types';
 import { tmuxTargetKey, type TmuxBindingStatus, type TmuxPaneTarget } from '../agent/tmux-control';
@@ -1561,6 +1562,9 @@ async function handleModel(args: string, ctx: CommandContext): Promise<void> {
 
 async function showModelForm(ctx: CommandContext): Promise<void> {
   const agentKind = ctx.controls.profileConfig.agentKind;
+  const catalog = agentKind === 'codex'
+    ? await buildModelCatalog(agentKind, process.env).catch(() => undefined)
+    : undefined;
   const card = modelFormCard({
     agentKind,
     model: normalizeModelSelection(agentKind, ctx.controls.cfg.preferences?.model),
@@ -1568,6 +1572,8 @@ async function showModelForm(ctx: CommandContext): Promise<void> {
       agentKind === 'codex'
         ? normalizeCodexReasoningEffort(ctx.controls.cfg.preferences?.reasoningEffort)
         : undefined,
+    ...(catalog ? { options: catalog.options } : {}),
+    ...(catalog?.notices.length ? { notice: catalog.notices.join('\n') } : {}),
   });
   if (ctx.fromCardAction) await recallMessage(ctx, ctx.msg.messageId);
   await sendManagedCard(ctx.channel, ctx.msg.chatId, card, commandReplyOptions(ctx));
@@ -1587,7 +1593,9 @@ async function submitModel(ctx: CommandContext): Promise<void> {
   const fv = ctx.formValue ?? {};
   const agentKind = ctx.controls.profileConfig.agentKind;
   const rawModel = String(fv.model ?? '').trim();
-  const modelValid = rawModel !== '' && supportedModels(agentKind).some((m) => m.value === rawModel);
+  const modelValid = rawModel !== '' && (agentKind === 'codex'
+    ? isCodexModelId(rawModel)
+    : supportedModels(agentKind).some((m) => m.value === rawModel));
   const modelSelection = modelValid
     ? rawModel
     : normalizeModelSelection(agentKind, ctx.controls.cfg.preferences?.model);
@@ -2571,12 +2579,16 @@ async function showConfigForm(ctx: CommandContext): Promise<void> {
 
   const ms = getRunIdleTimeoutMs(ctx.controls.cfg);
   const access = ctx.controls.profileConfig.access;
+  const catalog = ctx.controls.profileConfig.agentKind === 'codex'
+    ? await buildModelCatalog('codex', process.env).catch(() => undefined)
+    : undefined;
   const card = configFormCard({
     agentKind: ctx.controls.profileConfig.agentKind,
     model: normalizeModelSelection(
       ctx.controls.profileConfig.agentKind,
       ctx.controls.cfg.preferences?.model,
     ),
+    ...(catalog ? { modelOptions: catalog.options } : {}),
     messageReply: getMessageReplyMode(ctx.controls.cfg),
     showToolCalls: getShowToolCalls(ctx.controls.cfg),
     cotMessages: getCotMessages(ctx.controls.cfg),
@@ -2635,7 +2647,9 @@ async function submitConfig(ctx: CommandContext): Promise<void> {
   // tidy (resolveModelArg treats both the same way).
   const agentKind = ctx.controls.profileConfig.agentKind;
   const rawModel = String(fv.model ?? '').trim();
-  const modelValid = rawModel !== '' && supportedModels(agentKind).some((m) => m.value === rawModel);
+  const modelValid = rawModel !== '' && (agentKind === 'codex'
+    ? isCodexModelId(rawModel)
+    : supportedModels(agentKind).some((m) => m.value === rawModel));
   const modelSelection = modelValid
     ? rawModel
     : normalizeModelSelection(agentKind, ctx.controls.cfg.preferences?.model);

@@ -91,14 +91,15 @@ export async function resolveSubagents(input: ResolveSubagentInput): Promise<Res
   let runtime: MixAgentsRuntimeOverrides | undefined;
   try {
     if (
-      config.routeMode === 'follow-cc-switch' &&
-      (input.stateDir || input.parentProviderId || config.ccSwitchProviderId)
+      isAutomaticRouteMode(config.routeMode) &&
+      (input.stateDir || input.parentProviderId || fixedProviderId(config))
     ) {
       const generated = await materializeCcSwitchBrokerRuntime({
         env,
         ...(input.codexHome ? { codexHome: input.codexHome } : {}),
         ...(input.parentProviderId ? { parentProviderId: input.parentProviderId } : {}),
-        ...(config.ccSwitchProviderId ? { providerId: config.ccSwitchProviderId } : {}),
+        ...(fixedProviderId(config) ? { providerId: fixedProviderId(config)! } : {}),
+        source: config.routeMode === 'follow-magpie' ? 'magpie' : 'cc-switch',
         cwd: input.cwd,
         codexBin: input.codexBin ?? env.CODEX_BINARY?.trim() ?? 'codex',
         dsh: input.dsh,
@@ -109,6 +110,7 @@ export async function resolveSubagents(input: ResolveSubagentInput): Promise<Res
           sideReasoningEffort: config.sideReasoningEffort,
           providerOverrides: config.providerOverrides,
           providerPriority: config.providerPriority,
+          source: config.routeMode === 'follow-magpie' ? 'magpie' : 'cc-switch',
         },
       });
       runtime = {
@@ -135,8 +137,8 @@ export async function resolveSubagents(input: ResolveSubagentInput): Promise<Res
       return forkFallback(base, [], message);
     }
     if (
-      config.routeMode === 'follow-cc-switch' &&
-      (input.stateDir || input.parentProviderId || config.ccSwitchProviderId)
+      isAutomaticRouteMode(config.routeMode) &&
+      (input.stateDir || input.parentProviderId || fixedProviderId(config))
     ) {
       await backend?.closeBackend?.().catch(() => {});
       throw new SubagentUnavailableError(
@@ -179,8 +181,8 @@ export async function resolveSubagents(input: ResolveSubagentInput): Promise<Res
       config.mode === 'broker' ||
       config.routeMode === 'manual' ||
       input.requestedRoute ||
-      (config.routeMode === 'follow-cc-switch' &&
-        (input.stateDir || input.parentProviderId || config.ccSwitchProviderId))
+      (isAutomaticRouteMode(config.routeMode) &&
+        (input.stateDir || input.parentProviderId || fixedProviderId(config)))
     ) {
       await backend?.closeBackend?.().catch(() => {});
       throw new SubagentUnavailableError('route-unavailable', message, {
@@ -223,10 +225,20 @@ function canAutoForkFallback(
     input.allowCodexFork !== false &&
     (input.access ?? 'read-only') === 'read-only' &&
     config.mode === 'auto' &&
-    config.routeMode === 'follow-cc-switch' &&
+    isAutomaticRouteMode(config.routeMode) &&
     config.allowForkFallback &&
     !input.requestedRoute
   );
+}
+
+function isAutomaticRouteMode(mode: SubagentConfig['routeMode']): boolean {
+  return mode === 'follow-cc-switch' || mode === 'follow-magpie';
+}
+
+function fixedProviderId(config: SubagentConfig): string | null {
+  return config.routeMode === 'follow-magpie'
+    ? config.magpieProviderId ?? null
+    : config.ccSwitchProviderId ?? null;
 }
 
 function forkFallback(
@@ -282,11 +294,13 @@ export function selectSubagentRoute(input: {
       ? { route }
       : { error: `手动配置的 MixAgents ${access} route 不存在或不支持该权限：${configured}` };
   }
-  const expectedProvider = input.config.ccSwitchProviderId ??
-    input.ccSwitch.currentProviderCodex;
+  const source = input.config.routeMode === 'follow-magpie' ? 'magpie' : 'cc-switch';
+  const expectedProvider = source === 'magpie'
+    ? input.config.magpieProviderId ?? null
+    : input.config.ccSwitchProviderId ?? input.ccSwitch.currentProviderCodex;
   const priority = input.config.providerPriority ?? [];
   const automaticRoutes = input.routes.filter(route =>
-    route.source === 'cc-switch' &&
+    route.source === source &&
     (access === 'read-only' || route.maxAccess === 'workspace-write')
   );
   // The generated runtime has already checked model availability and cooldown.
@@ -300,7 +314,7 @@ export function selectSubagentRoute(input: {
   if (priority.length) return { error: '所选 provider/model 优先级中没有可用的自动线路' };
   const mapped = resolveRouteForProvider(
     input.routeMap,
-    input.config.ccSwitchProviderId ?? input.ccSwitch.currentProviderCodex,
+    expectedProvider ?? undefined,
     access,
   );
   if (!mapped.routeId) {

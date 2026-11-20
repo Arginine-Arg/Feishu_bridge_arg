@@ -201,7 +201,7 @@ export class MixAgentsBrokerBackend implements SubagentBackend {
         ...(stringValue(entry.ccSwitchProviderId)
           ? { ccSwitchProviderId: stringValue(entry.ccSwitchProviderId) }
           : {}),
-        ...(entry.source === 'cc-switch' || entry.source === 'broker-config'
+        ...(entry.source === 'cc-switch' || entry.source === 'magpie' || entry.source === 'broker-config'
           ? { source: entry.source }
           : {}),
       }];

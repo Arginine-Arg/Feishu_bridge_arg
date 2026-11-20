@@ -446,7 +446,9 @@ Project RSI 与 MixAgents、历史 Task RSI 是三个不同层次。Bridge 只�
 
 1. 在 Magpie 添加各家 API 账号并刷新模型目录。用 `magpie models codex` 查看 Codex 可以选择的模型。启动本机 Magpie 网关，并在 Magpie 中把 Codex 接到该网关。如果中转站的 Claude 只提供 Anthropic Messages 接口，在 Magpie 给相应模型选这个接口。
 2. 在 tmux 运行 `arg-bridge native --profile codex`，或用 `arg-bridge native --bridge <thread-id> --profile codex` 恢复原线程。在要接收回复的飞书聊天或话题内，以管理员身份运行 `/tmux list` 和 `/tmux bind <编号>`。已有绑定再执行一次 `/tmux bind` 即可开启终端发起的回复转发。
-3. 在终端或飞书输入 `/model`，都从同一个 Codex App Server 选模型。运行中选模型会从下一轮生效。飞书 `/status` 可查看连接状态和当前选定的模型。
+3. 在终端或飞书输入 `/model`，都从同一个 Codex App Server 选模型。列表会同时给出三类来源：本机 cc-switch 账号自动发现的模型、Magpie 已开放的模型，以及 Magpie 路由组（`group/<名称>`）。路由组由 Magpie 按自身规则在成员之间切换，适合“主模型失败时自动换备用”。运行中选模型会从下一轮生效。飞书 `/status` 可查看连接状态和当前选定的模型。
+
+`arg-bridge settings --profile codex` 的主会话模型和子代理线路使用同一份目录，可以分别选择普通模型或路由组。子代理的只读 `/btw`、可写 worker 和 reviewer 共用所选顺序。选择 Magpie 条目时，Codex 必须已经接到 Magpie 网关；settings 会检查并提示。
 
 从终端发起的任务结束后，完整回复会发送到绑定的聊天或话题。Bridge 断开期间可以继续在 tmux 工作。在同一个 tmux 服务里重新打开原 Codex 线程后，Bridge 会重新连接。Bridge 离线期间产生的回复可在终端历史中查看。飞书提交沿用会话原有权限。如果原线程权限超过这次飞书请求允许的权限，Bridge 会拒绝提交，原线程仍可在终端操作。
 

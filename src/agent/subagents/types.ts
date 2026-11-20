@@ -31,7 +31,7 @@ export interface SubagentRoute {
   /** cc-switch provider ID that produced this automatically generated route. */
   ccSwitchProviderId?: string;
   /** Route origin used for deterministic runtime selection. */
-  source?: 'cc-switch' | 'broker-config';
+  source?: 'cc-switch' | 'magpie' | 'broker-config';
 }
 
 export interface SideAgent {
