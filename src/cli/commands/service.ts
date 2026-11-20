@@ -1,5 +1,7 @@
 import { isComplete } from '../../config/schema';
 import { createInterface } from 'node:readline';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { paths } from '../../config/paths';
 import { loadRootConfig, readActiveProfile } from '../../config/profile-store';
 import { daemonStderrPath, daemonStdoutPath } from '../../daemon/paths';
@@ -383,15 +385,33 @@ export async function runServiceRestart(opts: ServiceProfileOptions = {}): Promi
   // A restarted bridge must not inherit Codex App Servers that still hold the
   // provider, credentials, or proxy resolved by the previous run. This is the
   // `cc-switch` acceptance path: switch provider, restart, keep working.
-  const released = await terminateProfileHosts(resolveAppPaths({ profile }).profileDir)
+  const profileDir = resolveAppPaths({ profile }).profileDir;
+  const released = await terminateProfileHosts(profileDir, {
+    reclaimIdleClients: true,
+    candidateThreadIds: await knownThreadIds(profileDir),
+  })
     .catch(() => ({ terminated: 0, inUse: 0 }));
   if (released.terminated > 0) {
     console.log(`✓ 已回收 ${released.terminated} 个旧 Codex App Server（下次运行会按当前配置重新拉起）`);
   }
   if (released.inUse > 0) {
-    console.log(`ℹ️ 有 ${released.inUse} 个 App Server 仍被终端连接使用，已跳过回收（避免打断正在运行的会话）`);
+    console.log(`ℹ️ 有 ${released.inUse} 个 App Server 仍有运行中的任务，已跳过回收（避免打断正在运行的会话）`);
   }
   await reportConnectAfter(wasRunning ? 'restarted' : 'started', profile, adapter.start);
+}
+
+/** Thread ids the profile has bound, used when `thread/loaded/list` is empty. */
+async function knownThreadIds(profileDir: string): Promise<string[]> {
+  try {
+    const parsed = JSON.parse(await readFile(join(profileDir, 'preferred-panes.json'), 'utf8'));
+    const targets = parsed && typeof parsed === 'object' ? parsed.targets : undefined;
+    if (!targets || typeof targets !== 'object') return [];
+    return [...new Set(Object.values(targets as Record<string, any>)
+      .map(target => target?.structured?.threadId)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0))];
+  } catch {
+    return [];
+  }
 }
 
 /** `bridge status` — report whether the daemon is running, with pid + log paths. */

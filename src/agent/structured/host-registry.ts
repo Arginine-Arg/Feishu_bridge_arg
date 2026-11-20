@@ -4,6 +4,7 @@ import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { writeFileAtomic } from '../../platform/atomic-write';
+import type { Wire } from './rpc';
 
 /**
  * Lifecycle bookkeeping for bridge-spawned Codex App Servers.
@@ -391,7 +392,7 @@ export interface HostReclaimResult {
 
 export async function terminateProfileHosts(
   profileDir: string,
-  options: { force?: boolean } = {},
+  options: { force?: boolean; reclaimIdleClients?: boolean; candidateThreadIds?: string[] } = {},
 ): Promise<HostReclaimResult> {
   const hosts = await readHostRegistry(profileDir);
   let terminated = 0;
@@ -402,8 +403,12 @@ export async function terminateProfileHosts(
     // server under it breaks that pane ("Connection lost ... could not be
     // restored"), so an in-use server is only reclaimed when forced.
     if (!options.force && !(await waitForIdleSocket(host.directory, 750))) {
-      inUse += 1;
-      continue;
+      // An attached TUI can still be idle. Reclaiming it is what refreshes a
+      // cached model catalog; a running turn must keep the server.
+      if (!options.reclaimIdleClients || !(await hostIsIdle(host, options.candidateThreadIds))) {
+        inUse += 1;
+        continue;
+      }
     }
     terminateHost(host.pid);
     await waitForExit(host.pid);
@@ -411,6 +416,40 @@ export async function terminateProfileHosts(
   }
   await writeHostRegistry(profileDir, hosts.filter((host) => processAlive(host.pid)));
   return { terminated, inUse };
+}
+
+/**
+ * True when every thread loaded by this App Server is idle. A failed probe is
+ * treated as busy so a restart never kills a server it cannot inspect.
+ */
+export async function hostIsIdle(
+  host: Pick<CodexHostRegistration, 'directory'>,
+  candidateThreadIds: string[] = [],
+): Promise<boolean> {
+  const endpoint = join(host.directory, 'server.sock');
+  let rpc: import('./rpc').RpcClient | undefined;
+  try {
+    const { RpcClient } = await import('./rpc');
+    rpc = await RpcClient.connect(`ws+unix://${endpoint}:/`);
+    await rpc.initialize();
+    const loaded = await rpc.request('thread/loaded/list', {}, 5_000);
+    const loadedIds = (Array.isArray(loaded.data) ? loaded.data : [])
+      .map((item: Wire) => item?.id ?? item?.threadId)
+      .filter((id: unknown): id is string => typeof id === 'string' && id.length > 0);
+    // `thread/loaded/list` is empty on some daemon builds even while a thread
+    // is active, so also probe the threads the profile knows about.
+    const ids = [...new Set([...loadedIds, ...candidateThreadIds])];
+    for (const threadId of ids) {
+      const result = await rpc.request('thread/read', { threadId, includeTurns: false }, 10_000);
+      const thread = result.thread ?? result;
+      if (thread?.status?.type === 'active') return false;
+    }
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rpc?.close();
+  }
 }
 
 function isRegistration(value: unknown): value is CodexHostRegistration {

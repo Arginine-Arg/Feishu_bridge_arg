@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.24.2
+
+- `arg-bridge restart` now probes an attached App Server before skipping it. A server whose loaded or bound threads are all idle is reclaimed, so a cached model catalog is refreshed even when a native TUI is still attached.
+- A server with an active turn is still skipped and reported.
+- Falls back to the profile's bound thread ids when `thread/loaded/list` is empty on a daemon build.
+
 ## 1.24.1
 
 - `arg-bridge restart` now stops the bot before reclaiming App Servers. The bot's own structured connection no longer makes every shared server look "in use", so a stale provider/model catalog is actually recycled.
