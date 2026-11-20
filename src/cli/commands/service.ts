@@ -375,6 +375,11 @@ export async function runServiceRestart(opts: ServiceProfileOptions = {}): Promi
     console.error('bot 还没在后台运行过。请先运行 `start` 启动。');
     process.exit(1);
   }
+  // Stop the bot first. Its own structured connection otherwise counts as an
+  // active client and makes every shared App Server look "in use", so the
+  // stale provider/model catalog is never recycled.
+  const wasRunning = adapter.isRunning();
+  if (wasRunning) await adapter.stop();
   // A restarted bridge must not inherit Codex App Servers that still hold the
   // provider, credentials, or proxy resolved by the previous run. This is the
   // `cc-switch` acceptance path: switch provider, restart, keep working.
@@ -386,11 +391,7 @@ export async function runServiceRestart(opts: ServiceProfileOptions = {}): Promi
   if (released.inUse > 0) {
     console.log(`ℹ️ 有 ${released.inUse} 个 App Server 仍被终端连接使用，已跳过回收（避免打断正在运行的会话）`);
   }
-  if (adapter.isRunning()) {
-    await reportConnectAfter('restarted', profile, adapter.restart);
-    return;
-  }
-  await reportConnectAfter('started', profile, adapter.start);
+  await reportConnectAfter(wasRunning ? 'restarted' : 'started', profile, adapter.start);
 }
 
 /** `bridge status` — report whether the daemon is running, with pid + log paths. */

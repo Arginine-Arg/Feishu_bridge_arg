@@ -4,7 +4,7 @@ import { Command } from "commander";
 // package.json
 var package_default = {
   name: "arg-bridge",
-  version: "1.24.0",
+  version: "1.24.1",
   description: "Bridge Feishu and Lark with Claude Code, Codex CLI, and DeepSeek Harness",
   type: "module",
   packageManager: "pnpm@10.33.0",
@@ -6264,6 +6264,8 @@ async function runServiceRestart(opts = {}) {
     console.error("bot \u8FD8\u6CA1\u5728\u540E\u53F0\u8FD0\u884C\u8FC7\u3002\u8BF7\u5148\u8FD0\u884C `start` \u542F\u52A8\u3002");
     process.exit(1);
   }
+  const wasRunning = adapter.isRunning();
+  if (wasRunning) await adapter.stop();
   const released = await terminateProfileHosts(resolveAppPaths({ profile: profile2 }).profileDir).catch(() => ({ terminated: 0, inUse: 0 }));
   if (released.terminated > 0) {
     console.log(`\u2713 \u5DF2\u56DE\u6536 ${released.terminated} \u4E2A\u65E7 Codex App Server\uFF08\u4E0B\u6B21\u8FD0\u884C\u4F1A\u6309\u5F53\u524D\u914D\u7F6E\u91CD\u65B0\u62C9\u8D77\uFF09`);
@@ -6271,11 +6273,7 @@ async function runServiceRestart(opts = {}) {
   if (released.inUse > 0) {
     console.log(`\u2139\uFE0F \u6709 ${released.inUse} \u4E2A App Server \u4ECD\u88AB\u7EC8\u7AEF\u8FDE\u63A5\u4F7F\u7528\uFF0C\u5DF2\u8DF3\u8FC7\u56DE\u6536\uFF08\u907F\u514D\u6253\u65AD\u6B63\u5728\u8FD0\u884C\u7684\u4F1A\u8BDD\uFF09`);
   }
-  if (adapter.isRunning()) {
-    await reportConnectAfter("restarted", profile2, adapter.restart);
-    return;
-  }
-  await reportConnectAfter("started", profile2, adapter.start);
+  await reportConnectAfter(wasRunning ? "restarted" : "started", profile2, adapter.start);
 }
 async function runServiceStatus(opts = {}) {
   const profile2 = await resolveServiceProfile(opts.profile);

@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.24.1
+
+- `arg-bridge restart` now stops the bot before reclaiming App Servers. The bot's own structured connection no longer makes every shared server look "in use", so a stale provider/model catalog is actually recycled.
+- Keeps the existing safety rule: a server still attached to a native TUI is skipped and reported.
+
 ## 1.24.0
 
 - Adds Magpie as a subagent provider source. Settings can choose cc-switch or Magpie, and Magpie keys stay in Magpie.

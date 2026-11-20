@@ -1,0 +1,13 @@
+import WebSocket from 'ws';
+const url = 'ws+unix:///tmp/codex-daemon-2103/61cc33e1a89ad2185cecc0af7146501b91df019c3be20134db3e34eb91cd7f8f:/';
+const ws = new WebSocket(url, { perMessageDeflate: false });
+let id = 1; const pending = new Map();
+ws.on('message', d => { const m = JSON.parse(d.toString()); if (m.id && pending.has(m.id)) { pending.get(m.id)(m); pending.delete(m.id); } });
+const req = (method, params) => new Promise(r => { const i = id++; pending.set(i, r); ws.send(JSON.stringify({ id: i, method, params })); });
+await new Promise((res, rej) => { ws.once('open', res); ws.once('error', rej); });
+await req('initialize', { clientInfo: { name: 'probe', version: '1' }, capabilities: { experimentalApi: true } });
+ws.send(JSON.stringify({ method: 'initialized', params: {} }));
+const r = await req('model/list', { limit: 200 });
+const ids = (r.result?.data ?? []).map(m => m.id);
+console.log('count', ids.length, 'groups', ids.filter(x => x.startsWith('group/')).length);
+ws.close();
